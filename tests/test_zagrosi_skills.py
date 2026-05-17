@@ -474,6 +474,15 @@ def test_interview_gate_blocks_missing_and_fake_interviews(tmp_path: Path) -> No
     skipped = run_cmd("lint-interview", "--phase", "project", "--planning-dir", str(project), "--strict")
     assert skipped["success"] is True
 
+    (project / "zagrosi_project_interview.md").write_text(
+        "user_interviewed: true\n\n"
+        "# Project Interview\n\n"
+        "Q: What guardrail is this validating?\n"
+        "A: It validates that skipped or fake interviews are blocked without treating this answer as fake.\n"
+    )
+    real_project = run_cmd("lint-interview", "--phase", "project", "--planning-dir", str(project), "--strict")
+    assert real_project["success"] is True
+
     planning = write_quality_plan_fixture(tmp_path / "planning")
     (planning / "codex-interview.md").write_text(
         "user_interviewed: true\n\n"

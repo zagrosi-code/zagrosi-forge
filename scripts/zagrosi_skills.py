@@ -1310,7 +1310,7 @@ INTERVIEW_FILES = {
     "plan": ["codex-interview.md", "claude-interview.md"],
 }
 INTERVIEW_PLACEHOLDER_RE = re.compile(
-    r"\b(TBD|TODO|placeholder|synthetic|fake)\b|generated without|not interviewed|no user interview|assumed answers?",
+    r"\b(TBD|TODO|placeholder)\b|synthetic interview|generated without|not interviewed|no user interview|assumed answers?",
     re.I,
 )
 
