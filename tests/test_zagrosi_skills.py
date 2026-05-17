@@ -179,6 +179,14 @@ def write_quality_plan_fixture(tmp_path: Path) -> Path:
         + "Additional context for the implementer: OAuth callback behavior must be deterministic, observable, "
         "security reviewed, and compatible with existing auth routes. " * 34
     )
+    (tmp_path / "codex-interview.md").write_text(
+        "user_interviewed: true\n\n"
+        "# Planning Interview\n\n"
+        "Q: Should OAuth callback work create sessions directly in the route handler?\n"
+        "A: No. Session creation should remain in `src/auth/session.py` so existing cookie policy is preserved.\n\n"
+        "Q: Which failure cases must be planned before implementation?\n"
+        "A: Invalid state, provider denial, duplicate accounts, missing config, and token leakage must be covered.\n"
+    )
     (tmp_path / "codex-plan.md").write_text(
         "<!-- FORGE_META\n"
         "{\n"
@@ -423,6 +431,67 @@ def test_doctor_and_requirement_extraction(tmp_path: Path) -> None:
     assert extracted["updated"] is True
     assert "REQ-001" in req_file.read_text()
     assert extracted["requirements"][1]["id"] == "REQ-002"
+
+
+def test_interview_gate_blocks_missing_and_fake_interviews(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "project-manifest.md").write_text(
+        "<!-- SPLIT_MANIFEST\n"
+        "01-auth\n"
+        "END_MANIFEST -->\n\n"
+        "# Project Manifest\n\n"
+        "## Execution Order\nRun `01-auth` first.\n\n"
+        "## Dependencies\n`01-auth` depends on no earlier split and blocks later work.\n\n"
+        "## Parallelization\nNo parallel work is needed for this fixture.\n\n"
+        "## Shared Concerns\nTesting and docs are shared concerns.\n\n"
+        "## Commands\nUse `$zagrosi-plan` on `01-auth/spec.md`.\n"
+    )
+    split = project / "01-auth"
+    split.mkdir()
+    (split / "spec.md").write_text(
+        "# Auth Spec\n\n"
+        "## In Scope\nREQ-001: Implement auth.\n\n"
+        "## Out Of Scope\nBilling is out of scope.\n\n"
+        "## Acceptance Criteria\nDone when auth tests pass.\n\n"
+        "## Testing\nRun pytest.\n\n"
+        "## Open Questions\nUnknown provider details remain.\n"
+    )
+
+    missing = run_raw("lint-project-manifest", "--planning-dir", str(project), "--strict")
+    assert missing.returncode != 0
+    missing_codes = {item["code"] for item in json.loads(missing.stdout)["findings"]}
+    assert "missing-interview" in missing_codes
+
+    postflight = run_raw("postflight", "--phase", "project", "--planning-dir", str(project), "--flight", "strict")
+    assert postflight.returncode != 0
+    assert "lint-interview" in json.loads(postflight.stdout)["blocking_gates"]
+
+    (project / "zagrosi_project_interview.md").write_text(
+        "interview_mode: skipped_with_reason\n"
+        "skip_reason: User explicitly asked to proceed from a complete written brief.\n"
+    )
+    skipped = run_cmd("lint-interview", "--phase", "project", "--planning-dir", str(project), "--strict")
+    assert skipped["success"] is True
+
+    planning = write_quality_plan_fixture(tmp_path / "planning")
+    (planning / "codex-interview.md").write_text(
+        "user_interviewed: true\n\n"
+        "# Planning Interview\n\n"
+        "Q: TBD\n"
+        "A: TBD\n"
+    )
+    fake = run_raw("lint-interview", "--phase", "plan", "--planning-dir", str(planning), "--strict")
+    assert fake.returncode != 0
+    fake_codes = {item["code"] for item in json.loads(fake.stdout)["findings"]}
+    assert "placeholder-interview" in fake_codes
+
+    (planning / "codex-interview.md").write_text(
+        "interview_mode: skipped_with_reason\n"
+        "skip_reason: User supplied a complete approved spec and asked to skip questions for this fixture.\n"
+    )
+    skipped_plan = run_cmd("lint-interview", "--phase", "plan", "--planning-dir", str(planning), "--strict")
+    assert skipped_plan["success"] is True
 
 
 def test_install_codex_updates_config(tmp_path: Path) -> None:

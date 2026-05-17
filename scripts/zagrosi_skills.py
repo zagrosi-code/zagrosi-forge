@@ -1000,6 +1000,7 @@ def project_postflight_report(planning_dir: Path, args: argparse.Namespace) -> d
     if mode == "off":
         return flight_payload(phase="project", stage="postflight", mode=mode, gates=[])
     gates = [
+        run_internal_gate("lint-interview", append_strict(["lint-interview", "--phase", "project", "--planning-dir", str(planning_dir)], mode)),
         run_internal_gate("lint-project-manifest", append_strict(["lint-project-manifest", "--planning-dir", str(planning_dir)], mode)),
         run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False),
     ]
@@ -1039,6 +1040,7 @@ def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict
     depth = getattr(args, "depth", "standard") or "standard"
     profile = getattr(args, "profile", "solo")
     gates = [
+        run_internal_gate("lint-interview", append_strict(["lint-interview", "--phase", "plan", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
         run_internal_gate("lint-plan", append_strict(["lint-plan", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
         run_internal_gate("lint-evidence", append_strict(["lint-evidence", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
         run_internal_gate("lint-artifact-schema", append_strict(["lint-artifact-schema", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
@@ -1237,6 +1239,9 @@ def deep_project_setup(args: argparse.Namespace) -> int:
         resume_step = 1
         resume_label = "interview"
 
+    if resume_step > 1 or interview_artifact(planning_dir, "project"):
+        warnings.extend(interview_warning_messages(planning_dir, "project"))
+
     payload = {
         "success": True,
         "mode": mode,
@@ -1298,6 +1303,122 @@ def first_existing(planning_dir: Path, names: list[str]) -> Path | None:
         if path.exists():
             return path
     return None
+
+
+INTERVIEW_FILES = {
+    "project": ["zagrosi_project_interview.md", "deep_project_interview.md"],
+    "plan": ["codex-interview.md", "claude-interview.md"],
+}
+INTERVIEW_PLACEHOLDER_RE = re.compile(
+    r"\b(TBD|TODO|placeholder|synthetic|fake)\b|generated without|not interviewed|no user interview|assumed answers?",
+    re.I,
+)
+
+
+def interview_artifact(planning_dir: Path, phase: str) -> Path | None:
+    return first_existing(planning_dir, INTERVIEW_FILES[phase])
+
+
+def has_interview_exchange(text: str) -> bool:
+    has_question = re.search(r"(?im)^\s*(?:[-*]\s*)?(?:q|question)\s*[:|-]\s*\S", text) is not None
+    has_answer = re.search(r"(?im)^\s*(?:[-*]\s*)?(?:a|answer)\s*[:|-]\s*\S", text) is not None
+    has_table = bool(re.search(r"(?im)^\s*\|\s*(?:question|q)\s*\|\s*(?:answer|a|decision)", text))
+    return (has_question and has_answer) or has_table
+
+
+def interview_findings(planning_dir: Path, phase: str) -> tuple[list[Finding], dict[str, Any]]:
+    names = INTERVIEW_FILES[phase]
+    path = interview_artifact(planning_dir, phase)
+    expected_path = planning_dir / names[0]
+    findings: list[Finding] = []
+    if not path:
+        findings.append(
+            finding(
+                "medium",
+                "missing-interview",
+                f"{phase} interview artifact is missing.",
+                expected_path,
+                f"Interview the user and write {names[0]}, or set interview_mode: skipped_with_reason with skip_reason.",
+            )
+        )
+        return findings, {
+            "planning_dir": str(planning_dir),
+            "phase": phase,
+            "interview": None,
+            "user_interviewed": False,
+            "interview_mode": None,
+        }
+
+    text = read_text(path)
+    user_interviewed = re.search(r"(?im)^\s*user_interviewed\s*:\s*true\s*$", text) is not None
+    skipped = re.search(r"(?im)^\s*interview_mode\s*:\s*skipped_with_reason\s*$", text) is not None
+    reason_match = re.search(r"(?im)^\s*(?:skip_reason|reason)\s*:\s*(.+?)\s*$", text)
+    skip_reason = reason_match.group(1).strip() if reason_match else ""
+
+    if not text.strip():
+        findings.append(finding("high", "empty-interview", "Interview artifact is empty.", path))
+    if INTERVIEW_PLACEHOLDER_RE.search(text):
+        findings.append(
+            finding(
+                "high",
+                "placeholder-interview",
+                "Interview artifact appears to be placeholder, fake, or synthetic.",
+                path,
+                "Replace it with actual user questions and answers, or explicitly skip with a concrete reason.",
+            )
+        )
+    if user_interviewed and skipped:
+        findings.append(
+            finding(
+                "medium",
+                "conflicting-interview-mode",
+                "Interview artifact says the user was interviewed and also says the interview was skipped.",
+                path,
+            )
+        )
+    if not user_interviewed and not skipped:
+        findings.append(
+            finding(
+                "medium",
+                "missing-interview-confirmation",
+                "Interview artifact must include user_interviewed: true or interview_mode: skipped_with_reason.",
+                path,
+            )
+        )
+    if user_interviewed and not has_interview_exchange(text):
+        findings.append(
+            finding(
+                "medium",
+                "missing-interview-exchange",
+                "Interview artifact marks user_interviewed: true but has no clear question/answer exchange.",
+                path,
+                "Record at least one Q:/A: pair or a Question/Answer table.",
+            )
+        )
+    if skipped and (not skip_reason or INTERVIEW_PLACEHOLDER_RE.search(skip_reason)):
+        findings.append(
+            finding(
+                "high",
+                "missing-skip-reason",
+                "Skipped interviews must include a concrete skip_reason.",
+                path,
+            )
+        )
+
+    return findings, {
+        "planning_dir": str(planning_dir),
+        "phase": phase,
+        "interview": str(path),
+        "user_interviewed": user_interviewed,
+        "interview_mode": "skipped_with_reason" if skipped else ("completed" if user_interviewed else None),
+        "skip_reason": skip_reason or None,
+        "word_count": word_count(text),
+    }
+
+
+def interview_warning_messages(planning_dir: Path, phase: str) -> list[str]:
+    findings, _ = interview_findings(planning_dir, phase)
+    return [f"Interview gate: {item.code} - {item.message}" for item in findings if item.severity in {"critical", "high", "medium"}]
 
 
 def check_section_progress(planning_dir: Path) -> dict[str, Any]:
@@ -1491,6 +1612,10 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
         resume_step = 6
         resume_label = "research_decision"
 
+    warnings: list[str] = []
+    if (resume_step is None or resume_step > 10) or files["interview"]:
+        warnings.extend(interview_warning_messages(planning_dir, "plan"))
+
     payload = {
         "success": True,
         "mode": mode,
@@ -1504,6 +1629,7 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
         "files_found": {k: str(v) for k, v in files.items() if v},
         "reviews": reviews,
         "section_progress": section_progress,
+        "warnings": warnings,
     }
     if effective_flight_mode(args) != "off":
         payload["preflight"] = plan_preflight_report(spec_file, args)
@@ -1663,6 +1789,12 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
     return print_json(payload)
 
 
+def lint_interview(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    findings, extras = interview_findings(planning_dir, args.phase)
+    return emit_quality("interview", findings, args, extras)
+
+
 def lint_project_manifest(args: argparse.Namespace) -> int:
     planning_dir = resolve_path(args.planning_dir)
     manifest_path = planning_dir / "project-manifest.md"
@@ -1672,6 +1804,9 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
     if not manifest_path.exists():
         findings.append(finding("critical", "missing-manifest", "project-manifest.md is missing.", manifest_path))
         return emit_quality("project-manifest", findings, args)
+
+    interview_gate_findings, interview_extras = interview_findings(planning_dir, "project")
+    findings.extend(interview_gate_findings)
 
     text = read_text(manifest_path)
     meta, meta_errors = parse_forge_meta(text)
@@ -1732,7 +1867,7 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
         "project-manifest",
         findings,
         args,
-        {"planning_dir": str(planning_dir), "manifest": str(manifest_path), "splits": splits},
+        {"planning_dir": str(planning_dir), "manifest": str(manifest_path), "splits": splits, "interview": interview_extras},
     )
     return emit_payload(payload, args)
 
@@ -1750,6 +1885,9 @@ def lint_plan(args: argparse.Namespace) -> int:
     if not plan_path:
         findings.append(finding("critical", "missing-plan", "Implementation plan is missing.", planning_dir / "codex-plan.md"))
         return emit_quality("plan", findings, args)
+
+    interview_gate_findings, interview_extras = interview_findings(planning_dir, "plan")
+    findings.extend(interview_gate_findings)
 
     plan_text = read_text(plan_path)
     meta, meta_errors = parse_forge_meta(plan_text)
@@ -1876,6 +2014,7 @@ def lint_plan(args: argparse.Namespace) -> int:
             "plan": str(plan_path),
             "requirement_ids": spec_ids,
             "depth_mode": depth,
+            "interview": interview_extras,
             "depth_targets": targets,
             "word_counts": {
                 "spec": spec_words,
@@ -3961,6 +4100,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plugin-root")
     add_quality_args(p)
     p.set_defaults(func=doctor)
+
+    p = sub.add_parser("lint-interview")
+    p.add_argument("--phase", choices=["project", "plan"], required=True)
+    p.add_argument("--planning-dir", required=True)
+    add_quality_args(p)
+    p.set_defaults(func=lint_interview)
 
     p = sub.add_parser("install-codex", aliases=["install", "install-plugin"])
     p.add_argument("--plugin-root", default=".")

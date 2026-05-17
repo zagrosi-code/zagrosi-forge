@@ -3,6 +3,7 @@
 Run gates before moving between phases:
 
 ```bash
+python3 {plugin_root}/scripts/zagrosi_skills.py lint-interview --phase plan --planning-dir "{planning_dir}" --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-plan --planning-dir "{planning_dir}" --depth standard --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-sections --planning-dir "{planning_dir}" --depth standard --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py traceability --planning-dir "{planning_dir}" --strict

@@ -47,6 +47,22 @@ Capture the transcript and decisions in:
 {planning_dir}/zagrosi_project_interview.md
 ```
 
+The file must include either:
+
+```yaml
+user_interviewed: true
+```
+
+with clear `Q:` / `A:` entries, or:
+
+```yaml
+interview_mode: skipped_with_reason
+skip_reason: <why it was safe to skip user questions>
+```
+
+Do not synthesize an interview. If the user is unavailable, use the explicit
+skipped mode and explain the reason.
+
 Use `references/interview.md` for question strategy.
 
 ### 2. Split Analysis
@@ -104,6 +120,7 @@ requiring the original project brief or interview transcript.
 Run:
 
 ```bash
+python3 {plugin_root}/scripts/zagrosi_skills.py lint-interview --phase project --planning-dir "{planning_dir}" --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-project-manifest --planning-dir "{planning_dir}"
 python3 {plugin_root}/scripts/zagrosi_skills.py postflight --phase project --planning-dir "{planning_dir}"
 python3 {plugin_root}/scripts/zagrosi_skills.py status --path "{planning_dir}"

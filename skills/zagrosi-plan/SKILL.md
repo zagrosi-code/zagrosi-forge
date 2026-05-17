@@ -98,6 +98,22 @@ Write:
 {planning_dir}/codex-interview.md
 ```
 
+The file must include either:
+
+```yaml
+user_interviewed: true
+```
+
+with clear `Q:` / `A:` entries, or:
+
+```yaml
+interview_mode: skipped_with_reason
+skip_reason: <why it was safe to skip user questions>
+```
+
+Do not synthesize an interview. If a complete approved spec makes questions
+unnecessary, record skipped mode with the reason.
+
 ### 4. Working Spec
 
 Write:
@@ -166,6 +182,7 @@ and update `codex-plan.md` with accepted changes.
 Run the strict plan gate before sectioning:
 
 ```bash
+python3 {plugin_root}/scripts/zagrosi_skills.py lint-interview --phase plan --planning-dir "{planning_dir}" --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-plan --planning-dir "{planning_dir}" --depth standard --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-evidence --planning-dir "{planning_dir}" --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-artifact-schema --planning-dir "{planning_dir}" --strict

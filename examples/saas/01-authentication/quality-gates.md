@@ -3,6 +3,7 @@
 Run these commands before implementation starts:
 
 ```text
+python3 scripts/zagrosi_skills.py lint-interview --phase plan --planning-dir examples/saas/01-authentication --strict
 python3 scripts/zagrosi_skills.py lint-plan --planning-dir examples/saas/01-authentication --depth standard --strict
 python3 scripts/zagrosi_skills.py lint-sections --planning-dir examples/saas/01-authentication --depth standard --strict
 python3 scripts/zagrosi_skills.py traceability --planning-dir examples/saas/01-authentication --strict

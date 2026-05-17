@@ -3,6 +3,7 @@
 Run these Forge gates before treating the example as implementation-ready:
 
 ```text
+python3 scripts/zagrosi_skills.py lint-interview --phase plan --planning-dir examples/typescript-app/01-auth --strict
 python3 scripts/zagrosi_skills.py lint-plan --planning-dir examples/typescript-app/01-auth --depth standard --strict
 python3 scripts/zagrosi_skills.py lint-sections --planning-dir examples/typescript-app/01-auth --depth standard --strict
 python3 scripts/zagrosi_skills.py traceability --planning-dir examples/typescript-app/01-auth --strict

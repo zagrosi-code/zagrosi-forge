@@ -124,6 +124,7 @@ prints JSON, and exits non-zero when a gate blocks progress.
 python3 scripts/zagrosi_skills.py doctor
 python3 scripts/zagrosi_skills.py install --dry-run --pretty
 python3 scripts/zagrosi_skills.py status --path planning/01-auth
+python3 scripts/zagrosi_skills.py lint-interview --phase plan --planning-dir planning/01-auth --strict
 python3 scripts/zagrosi_skills.py preflight --phase plan --file planning/01-auth/spec.md
 python3 scripts/zagrosi_skills.py postflight --phase plan --planning-dir planning/01-auth --depth standard
 python3 scripts/zagrosi_skills.py plan --file planning/01-auth/spec.md --plugin-root . --pretty
@@ -150,6 +151,7 @@ Control the automation with `--flight`:
 python3 scripts/zagrosi_skills.py project-setup --file planning/requirements.md
 python3 scripts/zagrosi_skills.py project --file planning/requirements.md
 python3 scripts/zagrosi_skills.py project-create-dirs --planning-dir planning
+python3 scripts/zagrosi_skills.py lint-interview --phase project --planning-dir planning --strict
 python3 scripts/zagrosi_skills.py lint-project-manifest --planning-dir planning
 ```
 
@@ -160,6 +162,7 @@ python3 scripts/zagrosi_skills.py plan-setup --file planning/01-auth/spec.md --p
 python3 scripts/zagrosi_skills.py plan --file planning/01-auth/spec.md --plugin-root .
 python3 scripts/zagrosi_skills.py plan-check-sections --planning-dir planning/01-auth
 python3 scripts/zagrosi_skills.py plan-generate-section-prompts --planning-dir planning/01-auth
+python3 scripts/zagrosi_skills.py lint-interview --phase plan --planning-dir planning/01-auth --strict
 python3 scripts/zagrosi_skills.py lint-plan --planning-dir planning/01-auth
 python3 scripts/zagrosi_skills.py lint-evidence --planning-dir planning/01-auth
 python3 scripts/zagrosi_skills.py lint-artifact-schema --planning-dir planning/01-auth
