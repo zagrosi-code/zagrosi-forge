@@ -1,0 +1,36 @@
+name: Validate Zagrosi Forge
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate JSON
+        run: |
+          python -m json.tool .codex-plugin/plugin.json >/dev/null
+          python -m json.tool .agents/plugins/marketplace.json >/dev/null
+      - name: Run tests
+        run: uv run --with pytest python -m pytest
+      - name: Run strict example gates
+        run: |
+          python scripts/zagrosi_skills.py lint-project-manifest --planning-dir examples/saas --strict
+          python scripts/zagrosi_skills.py lint-project-manifest --planning-dir examples/typescript-app --strict
+          python scripts/zagrosi_skills.py lint-plan --planning-dir examples/saas/01-authentication --depth standard --strict
+          python scripts/zagrosi_skills.py lint-sections --planning-dir examples/saas/01-authentication --depth standard --strict
+          python scripts/zagrosi_skills.py traceability --planning-dir examples/saas/01-authentication --strict
+          python scripts/zagrosi_skills.py forge-score --planning-dir examples/saas/01-authentication --depth standard --strict
+          python scripts/zagrosi_skills.py lint-plan --planning-dir examples/typescript-app/01-auth --depth standard --strict
+          python scripts/zagrosi_skills.py lint-sections --planning-dir examples/typescript-app/01-auth --depth standard --strict
+          python scripts/zagrosi_skills.py traceability --planning-dir examples/typescript-app/01-auth --strict
+          python scripts/zagrosi_skills.py forge-score --planning-dir examples/typescript-app/01-auth --depth standard --strict
+      - name: Run eval suite
+        run: python scripts/zagrosi_skills.py eval-suite --examples-dir examples --output examples/evals/latest.json

@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+*.pyc
+uv.lock
+.zagrosi-project/
+.deep-project/
+zagrosi_plan_config.json
+deep_plan_config.json
+implementation/zagrosi_implement_config.json
+implementation/zagrosi_implement_state.json
+implementation/deep_implement_config.json
+implementation/deep_implement_state.json

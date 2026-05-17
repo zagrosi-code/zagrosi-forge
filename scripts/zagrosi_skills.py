@@ -1,0 +1,4174 @@
+#!/usr/bin/env python3
+"""Codex-native helpers for the Zagrosi Project/Plan/Implement skills.
+
+The helpers do deterministic validation and state detection. They intentionally
+avoid Claude-specific hooks, task directories, and session environment values.
+Each command prints JSON so Codex can decide the next workflow step.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import html
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+SPLIT_RE = re.compile(r"^\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
+SECTION_RE = re.compile(r"^section-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
+CONFIG_RE = re.compile(r"^[a-z][a-z0-9_]*:\s*.+$")
+REQ_ID_RE = re.compile(r"\bREQ-[A-Z0-9][A-Z0-9-]*\b")
+FILE_PATH_RE = re.compile(r"`?[\w./-]+\.(?:py|js|jsx|ts|tsx|go|rs|java|rb|php|md|json|ya?ml|toml|sql|sh)`?")
+FORGE_META_START = "FORGE_META"
+LEGACY_META_START = "DEEP_META"
+REVIEW_BOARD_PASSES = [
+    "architecture",
+    "test-strategy",
+    "security-privacy",
+    "migration-data",
+    "product-ambiguity",
+    "implementation-feasibility",
+]
+DEPTH_MODES = {"fast", "standard", "deep"}
+DEPTH_WORD_TARGETS = {
+    "fast": {
+        "spec": 700,
+        "research": 700,
+        "plan": 900,
+        "tdd": 450,
+        "review": 500,
+        "integration_notes": 500,
+        "section_index": 350,
+        "section": 250,
+    },
+    "standard": {
+        "spec": 1200,
+        "research": 1500,
+        "plan": 2500,
+        "tdd": 1200,
+        "review": 1000,
+        "integration_notes": 900,
+        "section_index": 700,
+        "section": 1000,
+    },
+    "deep": {
+        "spec": 1800,
+        "research": 2500,
+        "plan": 5000,
+        "tdd": 2000,
+        "review": 1800,
+        "integration_notes": 1500,
+        "section_index": 900,
+        "section": 1500,
+    },
+}
+PLAN_DETAIL_TERMS = {
+    "reader-orientation": ["reader note", "self-contained", "fresh implementer", "no prior context"],
+    "current-state-evidence": ["current state", "existing", "verified", "grep", "found in"],
+    "architecture-rationale": ["why", "rationale", "tradeoff", "decision", "alternative"],
+    "contracts": ["contract", "schema", "interface", "api", "payload", "shape"],
+    "file-tree": ["file tree", "directory layout", "file-by-file", "files"],
+    "phase-plan": ["phase", "batch", "execution order", "sequenced", "dependency"],
+    "test-matrix": ["test matrix", "unit", "integration", "e2e", "fixture"],
+    "review-integration": ["review-integrated", "review", "iteration", "integration notes"],
+}
+SECTION_DETAIL_TERMS = {
+    "goal": ["goal", "purpose"],
+    "dependencies": ["dependencies", "depends on"],
+    "background-context": ["background context", "why", "rationale", "architectural"],
+    "file-tree": ["file tree", "files", "paths"],
+    "tests-first": ["tests first", "expected failure", "test cases", "red"],
+    "implementation-details": ["implementation details", "public api", "signature", "contract", "schema"],
+    "acceptance": ["acceptance", "done when", "verification"],
+    "risks": ["risk", "edge case", "failure mode", "security"],
+}
+QUALITY_PROFILES = {
+    "solo": {
+        "security": 1.0,
+        "traceability": 0.8,
+        "testing": 1.0,
+        "scope": 1.0,
+        "migration": 0.8,
+        "readiness": 1.0,
+        "general": 1.0,
+    },
+    "startup": {
+        "security": 1.0,
+        "traceability": 0.7,
+        "testing": 0.9,
+        "scope": 1.2,
+        "migration": 0.8,
+        "readiness": 1.1,
+        "general": 1.0,
+    },
+    "enterprise": {
+        "security": 1.3,
+        "traceability": 1.2,
+        "testing": 1.2,
+        "scope": 1.0,
+        "migration": 1.2,
+        "readiness": 1.1,
+        "general": 1.0,
+    },
+    "regulated": {
+        "security": 1.6,
+        "traceability": 1.6,
+        "testing": 1.3,
+        "scope": 1.0,
+        "migration": 1.4,
+        "readiness": 1.2,
+        "general": 1.0,
+    },
+    "oss-maintainer": {
+        "security": 1.1,
+        "traceability": 1.0,
+        "testing": 1.3,
+        "scope": 1.2,
+        "migration": 1.0,
+        "readiness": 1.2,
+        "general": 1.0,
+    },
+    "oss": {
+        "security": 1.1,
+        "traceability": 1.0,
+        "testing": 1.3,
+        "scope": 1.2,
+        "migration": 1.0,
+        "readiness": 1.2,
+        "general": 1.0,
+    },
+    "incident-response": {
+        "security": 1.5,
+        "traceability": 1.1,
+        "testing": 1.1,
+        "scope": 1.4,
+        "migration": 1.3,
+        "readiness": 1.5,
+        "general": 1.0,
+    },
+}
+VAGUE_SECTION_NAMES = {"misc", "cleanup", "utils", "frontend", "backend", "api", "stuff", "polish"}
+PROMPT_TYPES = {
+    "codebase-researcher": "Research the existing codebase for relevant files, patterns, tests, risks, and commands. Return concise findings only.",
+    "spec-reviewer": "Review the normalized spec for missing requirements, ambiguous acceptance criteria, scope drift, and unverified assumptions.",
+    "security-reviewer": "Review the plan or implementation for auth, privacy, data exposure, injection, secrets, and abuse cases. Return severity-ranked findings.",
+    "test-strategist": "Review test strategy. Identify missing tests, brittle fixtures, untestable design, and the smallest useful red/green path.",
+    "section-writer": "Write one self-contained, reference-grade implementation section from the plan and TDD plan. Target 1,000+ words in standard mode, copy essential context, include tests first, file paths, dependencies, APIs/contracts, risks, rollback, and acceptance criteria.",
+    "release-reviewer": "Review final readiness for rollout, rollback, docs, observability, migration safety, and residual risks.",
+    "implementation-reviewer": "Review changed code against the section file. Prioritize correctness, security, scope drift, and missing tests.",
+}
+EVIDENCE_TERMS = {
+    "file-evidence": ["current state", "existing", "verified", "found in", "file tree", "rg --files", "grep"],
+    "command-evidence": ["rg ", "rg --files", "pytest", "npm test", "uv run", "cargo test", "go test", "pnpm", "yarn"],
+    "test-discovery": ["existing test", "tests discovered", "test command", "test matrix", "fixtures"],
+    "runtime-detection": ["package.json", "pyproject.toml", "go.mod", "cargo.toml", "runtime", "framework"],
+    "assumption-ledger": ["assumption", "unknown", "open question", "stop-line", "stop line"],
+}
+READINESS_TERMS = {
+    "tdd": ["tests first", "expected failure", "red", "fixture"],
+    "contract": ["contract", "interface", "schema", "result", "shape", "public api"],
+    "commands": ["test command", "verification", "npm test", "pytest", "cargo test", "go test"],
+    "rollback": ["rollback", "disable", "revert", "back out"],
+    "ownership": ["owns", "ownership", "file tree", "modify", "create"],
+}
+FORGE_COMPONENT_WEIGHTS = {
+    "solo": {
+        "plan_depth": 1.0,
+        "section_readiness": 1.0,
+        "traceability": 1.0,
+        "evidence_quality": 1.0,
+        "implementation_readiness": 1.0,
+    },
+    "startup": {
+        "plan_depth": 0.9,
+        "section_readiness": 1.2,
+        "traceability": 0.9,
+        "evidence_quality": 1.0,
+        "implementation_readiness": 1.2,
+    },
+    "enterprise": {
+        "plan_depth": 1.1,
+        "section_readiness": 1.1,
+        "traceability": 1.3,
+        "evidence_quality": 1.2,
+        "implementation_readiness": 1.2,
+    },
+    "regulated": {
+        "plan_depth": 1.2,
+        "section_readiness": 1.1,
+        "traceability": 1.6,
+        "evidence_quality": 1.4,
+        "implementation_readiness": 1.3,
+    },
+    "oss-maintainer": {
+        "plan_depth": 1.0,
+        "section_readiness": 1.2,
+        "traceability": 1.1,
+        "evidence_quality": 1.0,
+        "implementation_readiness": 1.3,
+    },
+    "oss": {
+        "plan_depth": 1.0,
+        "section_readiness": 1.2,
+        "traceability": 1.1,
+        "evidence_quality": 1.0,
+        "implementation_readiness": 1.3,
+    },
+    "incident-response": {
+        "plan_depth": 0.9,
+        "section_readiness": 1.2,
+        "traceability": 1.0,
+        "evidence_quality": 1.2,
+        "implementation_readiness": 1.6,
+    },
+}
+PRETTY_OUTPUT = False
+
+
+@dataclass(frozen=True, slots=True)
+class Finding:
+    severity: str
+    code: str
+    message: str
+    path: str | None = None
+    recommendation: str | None = None
+    category: str = "general"
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = {
+            "severity": self.severity,
+            "code": self.code,
+            "message": self.message,
+            "category": self.category,
+        }
+        if self.path:
+            payload["path"] = self.path
+        if self.recommendation:
+            payload["recommendation"] = self.recommendation
+        return payload
+
+
+def finding(
+    severity: str,
+    code: str,
+    message: str,
+    path: Path | str | None = None,
+    recommendation: str | None = None,
+    category: str | None = None,
+) -> Finding:
+    return Finding(
+        severity=severity,
+        code=code,
+        message=message,
+        path=str(path) if path else None,
+        recommendation=recommendation,
+        category=category or category_for_code(code),
+    )
+
+
+def category_for_code(code: str) -> str:
+    if any(term in code for term in ("security", "privacy", "auth", "permission")):
+        return "security"
+    if any(term in code for term in ("traceability", "requirement", "orphan")):
+        return "traceability"
+    if any(term in code for term in ("test", "tdd")):
+        return "testing"
+    if any(term in code for term in ("scope", "section-too", "vague", "file-path")):
+        return "scope"
+    if any(term in code for term in ("migration", "rollout", "rollback")):
+        return "migration"
+    if any(term in code for term in ("readiness", "state", "missing")):
+        return "readiness"
+    return "general"
+
+
+def quality_score(findings: list[Finding], profile: str = "solo") -> int:
+    penalties = {"critical": 35, "high": 20, "medium": 10, "low": 4}
+    profile_weights = QUALITY_PROFILES.get(profile, QUALITY_PROFILES["solo"])
+    total_penalty = 0
+    for item in findings:
+        weight = profile_weights.get(item.category, profile_weights["general"])
+        total_penalty += round(penalties.get(item.severity, 0) * weight)
+    score = 100 - total_penalty
+    return max(0, min(100, score))
+
+
+def quality_payload(
+    name: str,
+    findings: list[Finding],
+    extras: dict[str, Any] | None = None,
+    profile: str = "solo",
+    strict: bool = False,
+) -> dict[str, Any]:
+    score = quality_score(findings, profile)
+    blocking_severities = {"critical", "high"}
+    if strict:
+        blocking_severities.add("medium")
+    blocking = [item for item in findings if item.severity in blocking_severities]
+    payload: dict[str, Any] = {
+        "success": not blocking,
+        "gate": name,
+        "profile": profile,
+        "strict": strict,
+        "score": score,
+        "finding_count": len(findings),
+        "findings": [item.to_dict() for item in findings],
+    }
+    if extras:
+        payload.update(extras)
+    return payload
+
+
+def write_findings_export(payload: dict[str, Any], output_path: Path, export_format: str) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    findings = payload.get("findings", [])
+    if export_format == "jsonl":
+        output_path.write_text(
+            "\n".join(json.dumps(item, sort_keys=True) for item in findings) + ("\n" if findings else ""),
+            encoding="utf-8",
+        )
+        return
+    if export_format == "sarif":
+        sarif = {
+            "version": "2.1.0",
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "runs": [
+                {
+                    "tool": {
+                        "driver": {
+                            "name": "Zagrosi Forge",
+                            "informationUri": "https://github.com/zagrosi-code/zagrosi-forge",
+                        }
+                    },
+                    "results": [
+                        {
+                            "ruleId": item["code"],
+                            "level": {
+                                "critical": "error",
+                                "high": "error",
+                                "medium": "warning",
+                                "low": "note",
+                            }.get(item["severity"], "warning"),
+                            "message": {"text": item["message"]},
+                            "locations": [
+                                {
+                                    "physicalLocation": {
+                                        "artifactLocation": {"uri": item.get("path", "")}
+                                    }
+                                }
+                            ],
+                        }
+                        for item in findings
+                    ],
+                }
+            ],
+        }
+        output_path.write_text(json.dumps(sarif, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return
+    raise ValueError(f"Unsupported export format: {export_format}")
+
+
+def emit_payload(payload: dict[str, Any], args: argparse.Namespace, exit_code: int | None = None) -> int:
+    export_path = getattr(args, "export", None)
+    if export_path:
+        write_findings_export(payload, resolve_path(export_path), getattr(args, "export_format", "jsonl"))
+    if exit_code is None:
+        exit_code = 0 if payload.get("success", False) else 1
+    return print_json(payload, exit_code)
+
+
+def quality_from_args(
+    name: str,
+    findings: list[Finding],
+    args: argparse.Namespace,
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return quality_payload(
+        name,
+        findings,
+        extras,
+        profile=getattr(args, "profile", "solo"),
+        strict=getattr(args, "strict", False),
+    )
+
+
+def emit_quality(
+    name: str,
+    findings: list[Finding],
+    args: argparse.Namespace,
+    extras: dict[str, Any] | None = None,
+    exit_code: int | None = None,
+) -> int:
+    return emit_payload(quality_from_args(name, findings, args, extras), args, exit_code)
+
+
+def word_count(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", text))
+
+
+def word_targets(depth: str) -> dict[str, int]:
+    return DEPTH_WORD_TARGETS.get(depth, DEPTH_WORD_TARGETS["standard"])
+
+
+def add_depth_finding(
+    findings: list[Finding],
+    actual_words: int,
+    target_words: int,
+    artifact_label: str,
+    code: str,
+    path: Path,
+    hard_floor: int,
+) -> None:
+    if actual_words < hard_floor:
+        findings.append(
+            finding(
+                "high",
+                code,
+                f"{artifact_label} has {actual_words} words; hard floor is {hard_floor}.",
+                path,
+                "Expand this into a self-contained artifact with concrete context, contracts, tests, risks, and verification details.",
+            )
+        )
+    elif actual_words < target_words:
+        findings.append(
+            finding(
+                "medium",
+                code,
+                f"{artifact_label} has {actual_words} words; target for this depth is {target_words}.",
+                path,
+                "Match the Forge depth standard before treating this as implementation-ready.",
+            )
+        )
+
+
+def contains_any(text: str, terms: list[str]) -> bool:
+    haystack = text.lower()
+    return any(term.lower() in haystack for term in terms)
+
+
+def requirement_ids(text: str) -> list[str]:
+    return sorted(set(REQ_ID_RE.findall(text)))
+
+
+def parse_forge_meta(text: str) -> tuple[dict[str, Any] | None, list[str]]:
+    raw = extract_block(text, FORGE_META_START, "END_FORGE_META")
+    if raw is None:
+        raw = extract_block(text, LEGACY_META_START, "END_DEEP_META")
+    if raw is None:
+        return None, ["Missing FORGE_META block"]
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, [f"Invalid FORGE_META JSON: {exc}"]
+    if not isinstance(payload, dict):
+        return None, ["FORGE_META must contain a JSON object"]
+    return payload, []
+
+
+def parse_deep_meta(text: str) -> tuple[dict[str, Any] | None, list[str]]:
+    return parse_forge_meta(text)
+
+
+def require_terms(
+    findings: list[Finding],
+    text: str,
+    groups: dict[str, list[str]],
+    path: Path,
+    severity: str = "medium",
+) -> None:
+    for label, terms in groups.items():
+        if not contains_any(text, terms):
+            findings.append(
+                finding(
+                    severity,
+                    f"missing-{label}",
+                    f"Missing coverage for {label.replace('-', ' ')}.",
+                    path,
+                    f"Add a concrete {label.replace('-', ' ')} section or equivalent prose.",
+                )
+            )
+
+
+def artifact(path: Path, names: list[str]) -> Path | None:
+    for name in names:
+        candidate = path / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def default_governance_files(planning_dir: Path, depth: str = "standard") -> dict[str, Path]:
+    return {
+        "decisions": planning_dir / "decisions.md",
+        "risks": planning_dir / "risk-register.md",
+        "traceability": planning_dir / "traceability.md",
+        "quality": planning_dir / "quality-gates.md",
+    }
+
+
+def write_if_missing(path: Path, content: str) -> bool:
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return True
+
+
+def governance_templates(depth: str) -> dict[str, str]:
+    return {
+        "decisions": (
+            "# Decision Log\n\n"
+            f"Depth mode: {depth}\n\n"
+            "| ID | Date | Decision | Alternatives | Rationale | Impact |\n"
+            "|----|------|----------|--------------|-----------|--------|\n"
+            "| DEC-001 | TBD | TBD | TBD | TBD | TBD |\n"
+        ),
+        "risks": (
+            "# Risk Register\n\n"
+            "| ID | Risk | Severity | Likelihood | Mitigation | Section | Verification |\n"
+            "|----|------|----------|------------|------------|---------|--------------|\n"
+            "| RISK-001 | TBD | TBD | TBD | TBD | TBD | TBD |\n"
+        ),
+        "traceability": (
+            "# Traceability Matrix\n\n"
+            "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Status |\n"
+            "|-------------|---------------|------------------|---------------|--------|\n"
+            "| REQ-001 | TBD | TBD | TBD | TBD |\n"
+        ),
+        "quality": (
+            "# Quality Gates\n\n"
+            "Run these before moving stages:\n\n"
+            "- `lint-project-manifest`\n"
+            "- `lint-plan`\n"
+            "- `lint-sections`\n"
+            "- `lint-implementation-state`\n"
+            "- `traceability`\n"
+        ),
+    }
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def plain_status(success: Any) -> str:
+    return "PASS" if bool(success) else "FAIL"
+
+
+def pretty_path(payload: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def summarize_gate(gate: dict[str, Any]) -> str:
+    payload = gate.get("payload", {}) if isinstance(gate.get("payload"), dict) else {}
+    details: list[str] = []
+    if "score" in payload:
+        details.append(f"score {payload['score']}")
+    if "forge_score" in payload:
+        details.append(f"forge {payload['forge_score']}")
+    if payload.get("finding_count"):
+        details.append(f"{payload['finding_count']} finding(s)")
+    if gate.get("required") is False:
+        details.append("advisory")
+    detail_text = f" ({', '.join(details)})" if details else ""
+    return f"  [{plain_status(gate.get('success'))}] {gate.get('name', 'gate')}{detail_text}"
+
+
+def pretty_findings(findings: list[dict[str, Any]], limit: int = 8) -> list[str]:
+    lines: list[str] = []
+    for item in findings[:limit]:
+        location = f" - {item['path']}" if item.get("path") else ""
+        lines.append(f"  - {item.get('severity', 'unknown')}: {item.get('code', 'finding')}: {item.get('message', '')}{location}")
+    if len(findings) > limit:
+        lines.append(f"  - ... {len(findings) - limit} more finding(s)")
+    return lines
+
+
+def format_flight(payload: dict[str, Any], indent: str = "") -> list[str]:
+    title = f"ZAGROSI FORGE {payload.get('stage', 'flight').upper()}: {str(payload.get('phase', 'workflow')).upper()}"
+    lines = [
+        f"{indent}{title}",
+        f"{indent}Status: {plain_status(payload.get('success'))}   Mode: {payload.get('mode', 'auto')}",
+    ]
+    for label, key in (
+        ("Planning dir", "planning_dir"),
+        ("Target dir", "target_dir"),
+        ("Plugin root", "plugin_root"),
+    ):
+        value = payload.get(key)
+        if value:
+            lines.append(f"{indent}{label}: {value}")
+    warnings = payload.get("warnings") or []
+    if warnings:
+        lines.append(f"{indent}Warnings:")
+        lines.extend(f"{indent}  - {warning}" for warning in warnings)
+    gates = payload.get("gates") or []
+    if gates:
+        lines.append(f"{indent}Gates:")
+        lines.extend(f"{indent}{summarize_gate(gate)}" for gate in gates)
+    blocking = payload.get("blocking_gates") or []
+    if blocking:
+        lines.append(f"{indent}Blocking: {', '.join(blocking)}")
+    return lines
+
+
+def format_quality(payload: dict[str, Any]) -> list[str]:
+    lines = [
+        f"ZAGROSI FORGE GATE: {str(payload.get('gate', 'quality')).upper()}",
+        f"Status: {plain_status(payload.get('success'))}   Score: {payload.get('score', 'n/a')}   Strict: {payload.get('strict', False)}",
+    ]
+    path = pretty_path(payload, "planning_dir", "plugin_root", "path")
+    if path:
+        lines.append(f"Path: {path}")
+    findings = payload.get("findings") or []
+    if findings:
+        lines.append("Findings:")
+        lines.extend(pretty_findings(findings))
+    else:
+        lines.append("Findings: none")
+    return lines
+
+
+def format_setup(payload: dict[str, Any]) -> list[str]:
+    phase = "workflow"
+    if "split_directories" in payload or "specs_complete" in payload:
+        phase = "project"
+    elif "review_mode" in payload or "section_progress" in payload and "files_found" in payload:
+        phase = "plan"
+    elif "sections_dir" in payload and "target_dir" in payload:
+        phase = "implement"
+    lines = [
+        f"ZAGROSI FORGE: {phase.upper()}",
+        f"Status: {plain_status(payload.get('success'))}   Mode: {payload.get('mode', 'n/a')}",
+    ]
+    for label, key in (
+        ("Planning dir", "planning_dir"),
+        ("Sections dir", "sections_dir"),
+        ("Target dir", "target_dir"),
+        ("State dir", "state_dir"),
+        ("Config", "config_path"),
+    ):
+        value = payload.get(key)
+        if value:
+            lines.append(f"{label}: {value}")
+    if "resume_label" in payload:
+        resume_step = payload.get("resume_step")
+        suffix = f" (step {resume_step})" if resume_step is not None else ""
+        lines.append(f"Resume: {payload.get('resume_label')}{suffix}")
+    if "next_section" in payload:
+        lines.append(f"Next section: {payload.get('next_section') or 'none'}")
+    warnings = payload.get("warnings") or []
+    if warnings:
+        lines.append("Warnings:")
+        lines.extend(f"  - {warning}" for warning in warnings)
+    if isinstance(payload.get("preflight"), dict):
+        lines.append("")
+        lines.extend(format_flight(payload["preflight"]))
+    if isinstance(payload.get("postflight"), dict):
+        lines.append("")
+        lines.extend(format_flight(payload["postflight"]))
+    return lines
+
+
+def format_pretty(payload: dict[str, Any]) -> str:
+    if {"phase", "stage", "gates"}.issubset(payload):
+        lines = format_flight(payload)
+    elif payload.get("operation") == "install-codex":
+        lines = [
+            "ZAGROSI FORGE INSTALL",
+            f"Status: {plain_status(payload.get('success'))}   Changed: {payload.get('changed', False)}",
+            f"Config: {payload.get('config_path')}",
+            f"Plugin root: {payload.get('plugin_root')}",
+            f"Plugin: {payload.get('plugin')}",
+        ]
+        if payload.get("backup_path"):
+            lines.append(f"Backup: {payload.get('backup_path')}")
+        if payload.get("dry_run"):
+            lines.append("Mode: dry run")
+        next_steps = payload.get("next_steps") or []
+        if next_steps:
+            lines.append("Next:")
+            lines.extend(f"  - {step}" for step in next_steps)
+    elif "forge_score" in payload:
+        lines = [
+            "ZAGROSI FORGE SCORE",
+            f"Status: {plain_status(payload.get('success'))}   Score: {payload.get('forge_score')}   Grade: {payload.get('grade', 'n/a')}",
+            f"Planning dir: {payload.get('planning_dir')}",
+        ]
+        components = payload.get("components") or {}
+        if components:
+            lines.append("Components:")
+            lines.extend(f"  - {key}: {value}" for key, value in components.items())
+    elif "gate" in payload:
+        lines = format_quality(payload)
+    elif "results" in payload and "plugin_root" in payload:
+        lines = [
+            "ZAGROSI FORGE RELEASE CHECK",
+            f"Status: {plain_status(payload.get('success'))}",
+            f"Plugin root: {payload.get('plugin_root')}",
+            "Commands:",
+        ]
+        for result in payload.get("results", []):
+            lines.append(f"  [{plain_status(result.get('returncode') == 0)}] {result.get('command')}")
+    elif any(key in payload for key in ("preflight", "postflight", "resume_label", "next_section")):
+        lines = format_setup(payload)
+    elif "next_action" in payload:
+        lines = [
+            "ZAGROSI FORGE STATUS",
+            f"Status: {plain_status(payload.get('success'))}",
+            f"Planning dir: {payload.get('planning_dir')}",
+            f"Next action: {payload.get('next_action')}",
+        ]
+        progress = payload.get("section_progress", {})
+        if progress:
+            lines.append(f"Sections: {progress.get('progress', 'n/a')} ({progress.get('state', 'unknown')})")
+    else:
+        lines = ["ZAGROSI FORGE", f"Status: {plain_status(payload.get('success', True))}"]
+        for key in ("planning_dir", "output", "state_path", "path", "error"):
+            if payload.get(key):
+                lines.append(f"{key.replace('_', ' ').title()}: {payload[key]}")
+    return "\n".join(lines)
+
+
+def print_json(payload: dict[str, Any], exit_code: int = 0) -> int:
+    if PRETTY_OUTPUT:
+        print(format_pretty(payload))
+    else:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    return exit_code
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    return json.loads(read_text(path))
+
+
+def ensure_markdown_file(path: Path, label: str) -> tuple[bool, str]:
+    if not path.exists():
+        return False, f"{label} not found: {path}"
+    if not path.is_file():
+        return False, f"Expected {label} file, got directory: {path}"
+    if path.suffix.lower() != ".md":
+        return False, f"Expected {label} to end with .md: {path}"
+    if not read_text(path).strip():
+        return False, f"{label} is empty: {path}"
+    return True, ""
+
+
+def extract_block(text: str, start: str, end: str) -> str | None:
+    pattern = re.compile(rf"<!--\s*{re.escape(start)}\s*\n(.*?)\n{re.escape(end)}\s*-->", re.S)
+    match = pattern.search(text)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def parse_numbered_manifest(text: str, block: str, item_re: re.Pattern[str], prefix: str = "") -> tuple[list[str], list[str]]:
+    raw = extract_block(text, block, "END_MANIFEST")
+    if raw is None:
+        return [], [f"Missing {block} block"]
+
+    items: list[str] = []
+    errors: list[str] = []
+    for line_no, raw_line in enumerate(raw.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not item_re.match(line):
+            errors.append(f"Line {line_no}: invalid item {line!r}")
+            continue
+        items.append(line)
+
+    expected = 1
+    for item in items:
+        number_part = item.removeprefix(prefix).split("-", 1)[0]
+        actual = int(number_part)
+        if actual != expected:
+            errors.append(f"Expected {expected:02d}, got {actual:02d} in {item}")
+        expected += 1
+
+    if not items and not errors:
+        errors.append(f"{block} block is empty")
+    return items, errors
+
+
+def parse_project_config(text: str) -> tuple[dict[str, str], list[str]]:
+    raw = extract_block(text, "PROJECT_CONFIG", "END_PROJECT_CONFIG")
+    if raw is None:
+        return {}, ["Missing PROJECT_CONFIG block"]
+
+    config: dict[str, str] = {}
+    errors: list[str] = []
+    for line_no, raw_line in enumerate(raw.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not CONFIG_RE.match(line):
+            errors.append(f"Line {line_no}: invalid config entry {line!r}")
+            continue
+        key, value = line.split(":", 1)
+        config[key.strip()] = value.strip()
+
+    for key in ("runtime", "test_command"):
+        if key not in config:
+            errors.append(f"PROJECT_CONFIG missing required field: {key}")
+    return config, errors
+
+
+def resolve_path(raw: str) -> Path:
+    return Path(raw).expanduser().resolve()
+
+
+def git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+
+
+def git_info(target_dir: Path) -> dict[str, Any]:
+    root_result = git(["rev-parse", "--show-toplevel"], target_dir)
+    if root_result.returncode != 0:
+        return {"available": False, "root": None}
+
+    root = Path(root_result.stdout.strip())
+    branch_result = git(["branch", "--show-current"], root)
+    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
+    status_result = git(["status", "--porcelain"], root)
+    dirty = [line for line in status_result.stdout.splitlines() if line.strip()] if status_result.returncode == 0 else []
+    protected = branch in {"main", "master"} or branch.startswith(("release/", "release-", "hotfix/", "hotfix-"))
+
+    return {
+        "available": True,
+        "root": str(root),
+        "branch": branch or None,
+        "is_protected_branch": protected,
+        "working_tree_clean": not dirty,
+        "dirty_files": dirty,
+    }
+
+
+def current_plugin_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def sanitize_gate_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(payload)
+    for key in ("content", "stdout_tail", "stderr_tail"):
+        if key in cleaned and isinstance(cleaned[key], str) and len(cleaned[key]) > 500:
+            cleaned[key] = cleaned[key][:500] + "...[truncated]"
+    if "findings" in cleaned and isinstance(cleaned["findings"], list) and len(cleaned["findings"]) > 12:
+        cleaned["findings"] = cleaned["findings"][:12]
+        cleaned["findings_truncated"] = True
+    return cleaned
+
+
+def run_internal_gate(
+    name: str,
+    command: list[str],
+    *,
+    required: bool = True,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), *command],
+        cwd=cwd or current_plugin_root(),
+        capture_output=True,
+        text=True,
+    )
+    payload: dict[str, Any]
+    try:
+        payload = json.loads(result.stdout) if result.stdout.strip() else {}
+    except json.JSONDecodeError:
+        payload = {"stdout": result.stdout[-1000:]}
+    command_success = result.returncode == 0 and payload.get("success", True) is not False
+    return {
+        "name": name,
+        "required": required,
+        "success": command_success,
+        "returncode": result.returncode,
+        "command": " ".join(command),
+        "payload": sanitize_gate_payload(payload),
+        "stderr_tail": result.stderr[-1000:],
+    }
+
+
+def direct_gate(name: str, success: bool, payload: dict[str, Any], *, required: bool = True) -> dict[str, Any]:
+    return {
+        "name": name,
+        "required": required,
+        "success": success,
+        "returncode": 0 if success else 1,
+        "command": "internal",
+        "payload": sanitize_gate_payload(payload),
+        "stderr_tail": "",
+    }
+
+
+def effective_flight_mode(args: argparse.Namespace) -> str:
+    mode = getattr(args, "flight_mode", None) or getattr(args, "flight", None) or "auto"
+    if mode == "strict" or getattr(args, "strict", False):
+        return "strict"
+    return mode
+
+
+def append_strict(command: list[str], mode: str) -> list[str]:
+    if mode == "strict" and "--strict" not in command:
+        return [*command, "--strict"]
+    return command
+
+
+def flight_payload(
+    *,
+    phase: str,
+    stage: str,
+    mode: str,
+    gates: list[dict[str, Any]],
+    extras: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if mode == "off":
+        return {
+            "success": True,
+            "phase": phase,
+            "stage": stage,
+            "mode": mode,
+            "gates": [],
+            "blocking_gates": [],
+        }
+    blocking = [
+        gate["name"]
+        for gate in gates
+        if gate.get("required", True) and not gate.get("success", False) and mode != "advisory"
+    ]
+    payload: dict[str, Any] = {
+        "success": not blocking,
+        "phase": phase,
+        "stage": stage,
+        "mode": mode,
+        "gates": gates,
+        "blocking_gates": blocking,
+    }
+    if extras:
+        payload.update(extras)
+    return payload
+
+
+def project_preflight_report(input_file: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = effective_flight_mode(args)
+    if mode == "off":
+        return flight_payload(phase="project", stage="preflight", mode=mode, gates=[])
+    plugin_root = resolve_path(getattr(args, "plugin_root", None)) if getattr(args, "plugin_root", None) else current_plugin_root()
+    ok, error = ensure_markdown_file(input_file, "requirements file")
+    gates = [
+        direct_gate(
+            "requirements-file",
+            ok,
+            {"path": str(input_file), "error": error if error else None},
+        ),
+        run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
+        run_internal_gate("status", ["status", "--path", str(input_file.parent)], required=False),
+    ]
+    return flight_payload(
+        phase="project",
+        stage="preflight",
+        mode=mode,
+        gates=gates,
+        extras={"planning_dir": str(input_file.parent), "plugin_root": str(plugin_root)},
+    )
+
+
+def project_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = effective_flight_mode(args)
+    if mode == "off":
+        return flight_payload(phase="project", stage="postflight", mode=mode, gates=[])
+    gates = [
+        run_internal_gate("lint-project-manifest", append_strict(["lint-project-manifest", "--planning-dir", str(planning_dir)], mode)),
+        run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False),
+    ]
+    return flight_payload(phase="project", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir)})
+
+
+def plan_preflight_report(spec_file: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = effective_flight_mode(args)
+    if mode == "off":
+        return flight_payload(phase="plan", stage="preflight", mode=mode, gates=[])
+    plugin_root = resolve_path(getattr(args, "plugin_root", None)) if getattr(args, "plugin_root", None) else current_plugin_root()
+    planning_dir = spec_file.parent
+    target_dir = resolve_path(getattr(args, "target_dir", None)) if getattr(args, "target_dir", None) else Path.cwd()
+    ok, error = ensure_markdown_file(spec_file, "spec file")
+    evidence_command = ["codebase-evidence", "--target-dir", str(target_dir), "--planning-dir", str(planning_dir)]
+    if getattr(args, "write_evidence", False):
+        evidence_command.append("--write")
+    gates = [
+        direct_gate("spec-file", ok, {"path": str(spec_file), "error": error if error else None}),
+        run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
+        run_internal_gate("codebase-evidence", evidence_command, required=False),
+        run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False),
+    ]
+    return flight_payload(
+        phase="plan",
+        stage="preflight",
+        mode=mode,
+        gates=gates,
+        extras={"planning_dir": str(planning_dir), "plugin_root": str(plugin_root), "target_dir": str(target_dir)},
+    )
+
+
+def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = effective_flight_mode(args)
+    if mode == "off":
+        return flight_payload(phase="plan", stage="postflight", mode=mode, gates=[])
+    depth = getattr(args, "depth", "standard") or "standard"
+    profile = getattr(args, "profile", "solo")
+    gates = [
+        run_internal_gate("lint-plan", append_strict(["lint-plan", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
+        run_internal_gate("lint-evidence", append_strict(["lint-evidence", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
+        run_internal_gate("lint-artifact-schema", append_strict(["lint-artifact-schema", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
+    ]
+    if (planning_dir / "reviews").exists() or (planning_dir / "codex-integration-notes.md").exists() or (planning_dir / "claude-integration-notes.md").exists():
+        gates.append(run_internal_gate("lint-review-integration", append_strict(["lint-review-integration", "--planning-dir", str(planning_dir), "--profile", profile], mode)))
+    if (planning_dir / "sections" / "index.md").exists():
+        gates.extend(
+            [
+                run_internal_gate("lint-sections", append_strict(["lint-sections", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
+                run_internal_gate("traceability", append_strict(["traceability", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
+                run_internal_gate("lint-implementation-readiness", append_strict(["lint-implementation-readiness", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
+                run_internal_gate("forge-score", append_strict(["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
+            ]
+        )
+        if getattr(args, "write_report", False):
+            gates.append(run_internal_gate("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], required=False))
+    gates.append(run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False))
+    return flight_payload(phase="plan", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir)})
+
+
+def implement_preflight_report(sections_dir: Path, target_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = effective_flight_mode(args)
+    if mode == "off":
+        return flight_payload(phase="implement", stage="preflight", mode=mode, gates=[])
+    plugin_root = resolve_path(getattr(args, "plugin_root", None)) if getattr(args, "plugin_root", None) else current_plugin_root()
+    planning_dir = sections_dir.parent
+    depth = getattr(args, "depth", "standard") or "standard"
+    profile = getattr(args, "profile", "solo")
+    repo = git_info(target_dir) if target_dir.exists() else {"available": False, "root": None}
+    gates = [
+        direct_gate("sections-directory", sections_dir.exists() and sections_dir.is_dir(), {"sections_dir": str(sections_dir)}),
+        direct_gate("target-directory", target_dir.exists() and target_dir.is_dir(), {"target_dir": str(target_dir)}),
+        run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
+        run_internal_gate("lint-sections", append_strict(["lint-sections", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
+        run_internal_gate("traceability", append_strict(["traceability", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
+        run_internal_gate("lint-implementation-readiness", append_strict(["lint-implementation-readiness", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
+        run_internal_gate("next-section", ["next-section", "--planning-dir", str(planning_dir)], required=False),
+        run_internal_gate("suggest-section-splits", ["suggest-section-splits", "--planning-dir", str(planning_dir)], required=False),
+    ]
+    warnings: list[str] = []
+    if repo.get("is_protected_branch"):
+        warnings.append(f"Current branch is protected-looking: {repo.get('branch')}")
+    if repo.get("available") and not repo.get("working_tree_clean"):
+        warnings.append(f"Working tree has {len(repo.get('dirty_files', []))} uncommitted change(s)")
+    return flight_payload(
+        phase="implement",
+        stage="preflight",
+        mode=mode,
+        gates=gates,
+        extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir), "git": repo, "warnings": warnings},
+    )
+
+
+def implement_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = effective_flight_mode(args)
+    if mode == "off":
+        return flight_payload(phase="implement", stage="postflight", mode=mode, gates=[])
+    depth = getattr(args, "depth", "standard") or "standard"
+    profile = getattr(args, "profile", "solo")
+    sections_dir = resolve_path(getattr(args, "sections_dir", None)) if getattr(args, "sections_dir", None) else planning_dir / "sections"
+    target_dir = resolve_path(getattr(args, "target_dir", None)) if getattr(args, "target_dir", None) else Path.cwd()
+    gates: list[dict[str, Any]] = []
+    if getattr(args, "diff_file", None) or getattr(args, "staged", False):
+        command = ["implementation-drift", "--planning-dir", str(planning_dir), "--repo", str(target_dir), "--profile", profile]
+        if getattr(args, "diff_file", None):
+            command.extend(["--diff-file", str(resolve_path(args.diff_file))])
+        if getattr(args, "staged", False):
+            command.append("--staged")
+        gates.append(run_internal_gate("implementation-drift", append_strict(command, mode)))
+    if getattr(args, "section_file", None):
+        command = ["patch-scope", "--section-file", str(resolve_path(args.section_file)), "--repo", str(target_dir), "--profile", profile]
+        if getattr(args, "diff_file", None):
+            command.extend(["--diff-file", str(resolve_path(args.diff_file))])
+        if getattr(args, "staged", False):
+            command.append("--staged")
+        gates.append(run_internal_gate("patch-scope", append_strict(command, mode)))
+    gates.extend(
+        [
+            run_internal_gate("lint-implementation-state", append_strict(["lint-implementation-state", "--sections-dir", str(sections_dir), "--profile", profile], mode)),
+            run_internal_gate("forge-score", append_strict(["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile, "--write-history"], mode)),
+        ]
+    )
+    if getattr(args, "write_report", False):
+        gates.append(run_internal_gate("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], required=False))
+    gates.append(run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False))
+    return flight_payload(phase="implement", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir)})
+
+
+def release_preflight_report(plugin_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = effective_flight_mode(args)
+    if mode == "off":
+        return flight_payload(phase="release", stage="preflight", mode=mode, gates=[])
+    gates = [
+        run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
+        run_internal_gate("eval-suite", ["eval-suite", "--examples-dir", str(plugin_root / "examples")], required=False),
+    ]
+    return flight_payload(phase="release", stage="preflight", mode=mode, gates=gates, extras={"plugin_root": str(plugin_root)})
+
+
+def release_postflight_report(plugin_root: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = effective_flight_mode(args)
+    if mode == "off":
+        return flight_payload(phase="release", stage="postflight", mode=mode, gates=[])
+    command = ["release-check", "--plugin-root", str(plugin_root)]
+    if getattr(args, "run_tests", False):
+        command.append("--run-tests")
+    gates = [run_internal_gate("release-check", command)]
+    return flight_payload(phase="release", stage="postflight", mode=mode, gates=gates, extras={"plugin_root": str(plugin_root)})
+
+
+def preflight(args: argparse.Namespace) -> int:
+    if args.phase == "project":
+        if not args.file:
+            return print_json({"success": False, "error": "--file is required for project preflight"}, 1)
+        payload = project_preflight_report(resolve_path(args.file), args)
+    elif args.phase == "plan":
+        if not args.file:
+            return print_json({"success": False, "error": "--file is required for plan preflight"}, 1)
+        payload = plan_preflight_report(resolve_path(args.file), args)
+    elif args.phase == "implement":
+        if not args.sections_dir:
+            return print_json({"success": False, "error": "--sections-dir is required for implement preflight"}, 1)
+        payload = implement_preflight_report(resolve_path(args.sections_dir), resolve_path(args.target_dir or os.getcwd()), args)
+    else:
+        payload = release_preflight_report(resolve_path(args.plugin_root or current_plugin_root()), args)
+    return print_json(payload, 0 if payload["success"] else 1)
+
+
+def postflight(args: argparse.Namespace) -> int:
+    if args.phase == "project":
+        if not args.planning_dir:
+            return print_json({"success": False, "error": "--planning-dir is required for project postflight"}, 1)
+        payload = project_postflight_report(resolve_path(args.planning_dir), args)
+    elif args.phase == "plan":
+        if not args.planning_dir:
+            return print_json({"success": False, "error": "--planning-dir is required for plan postflight"}, 1)
+        payload = plan_postflight_report(resolve_path(args.planning_dir), args)
+    elif args.phase == "implement":
+        planning_dir = resolve_path(args.planning_dir) if args.planning_dir else (resolve_path(args.sections_dir).parent if args.sections_dir else None)
+        if planning_dir is None:
+            return print_json({"success": False, "error": "--planning-dir or --sections-dir is required for implement postflight"}, 1)
+        payload = implement_postflight_report(planning_dir, args)
+    else:
+        payload = release_postflight_report(resolve_path(args.plugin_root or current_plugin_root()), args)
+    return print_json(payload, 0 if payload["success"] else 1)
+
+
+def deep_project_setup(args: argparse.Namespace) -> int:
+    input_file = resolve_path(args.file)
+    ok, error = ensure_markdown_file(input_file, "requirements file")
+    if not ok:
+        return print_json({"success": False, "error": error}, 1)
+
+    planning_dir = input_file.parent
+    state_dir = planning_dir / ".zagrosi-project"
+    state_path = state_dir / "session.json"
+    legacy_state_path = planning_dir / ".deep-project" / "session.json"
+    if not state_path.exists() and legacy_state_path.exists():
+        state_path = legacy_state_path
+        state_dir = legacy_state_path.parent
+    mode = "resume" if state_path.exists() else "new"
+
+    if state_path.exists():
+        state = load_json(state_path)
+    else:
+        state = {
+            "initial_file": str(input_file),
+            "created_at": now_iso(),
+            "depth_mode": args.depth,
+            "workflow": "zagrosi-project",
+        }
+        write_json(state_path, state)
+
+    warnings: list[str] = []
+    if state.get("initial_file") != str(input_file):
+        warnings.append(f"Session was created for {state.get('initial_file')}, now using {input_file}")
+
+    manifest_path = planning_dir / "project-manifest.md"
+    split_dirs = [p for p in planning_dir.iterdir() if p.is_dir() and SPLIT_RE.match(p.name)]
+    specs = [p for p in split_dirs if (p / "spec.md").exists() and read_text(p / "spec.md").strip()]
+
+    if split_dirs and len(specs) == len(split_dirs):
+        resume_step = 7
+        resume_label = "complete"
+    elif split_dirs:
+        resume_step = 6
+        resume_label = "spec_generation"
+    elif manifest_path.exists():
+        resume_step = 4
+        resume_label = "confirmation_or_directory_creation"
+    elif (planning_dir / "zagrosi_project_interview.md").exists() or (planning_dir / "deep_project_interview.md").exists():
+        resume_step = 2
+        resume_label = "split_analysis"
+    else:
+        resume_step = 1
+        resume_label = "interview"
+
+    payload = {
+        "success": True,
+        "mode": mode,
+        "planning_dir": str(planning_dir),
+        "state_dir": str(state_dir),
+        "initial_file": str(input_file),
+        "depth_mode": state.get("depth_mode", args.depth),
+        "resume_step": resume_step,
+        "resume_label": resume_label,
+        "split_directories": [str(p) for p in sorted(split_dirs)],
+        "specs_complete": [str(p / "spec.md") for p in sorted(specs)],
+        "warnings": warnings,
+    }
+    if effective_flight_mode(args) != "off":
+        payload["preflight"] = project_preflight_report(input_file, args)
+    return print_json(payload)
+
+
+def deep_project_create_dirs(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    manifest_path = planning_dir / "project-manifest.md"
+    if not manifest_path.exists():
+        return print_json({"success": False, "error": f"Missing manifest: {manifest_path}"}, 1)
+
+    splits, errors = parse_numbered_manifest(read_text(manifest_path), "SPLIT_MANIFEST", SPLIT_RE)
+    if errors:
+        return print_json({"success": False, "errors": errors}, 1)
+
+    created: list[str] = []
+    existing: list[str] = []
+    missing_specs: list[str] = []
+    for split in splits:
+        directory = planning_dir / split
+        if directory.exists():
+            existing.append(str(directory))
+        else:
+            directory.mkdir(parents=True)
+            created.append(str(directory))
+        spec_path = directory / "spec.md"
+        if not spec_path.exists() or not read_text(spec_path).strip():
+            missing_specs.append(str(spec_path))
+
+    payload = {
+        "success": True,
+        "planning_dir": str(planning_dir),
+        "splits": splits,
+        "created": created,
+        "existing": existing,
+        "missing_specs": missing_specs,
+    }
+    if effective_flight_mode(args) != "off":
+        payload["postflight"] = project_postflight_report(planning_dir, args)
+    return print_json(payload)
+
+
+def first_existing(planning_dir: Path, names: list[str]) -> Path | None:
+    for name in names:
+        path = planning_dir / name
+        if path.exists():
+            return path
+    return None
+
+
+def check_section_progress(planning_dir: Path) -> dict[str, Any]:
+    sections_dir = planning_dir / "sections"
+    index_path = sections_dir / "index.md"
+    if not index_path.exists():
+        return {"state": "no_index", "sections_dir": str(sections_dir)}
+
+    text = read_text(index_path)
+    config, config_errors = parse_project_config(text)
+    sections, manifest_errors = parse_numbered_manifest(text, "SECTION_MANIFEST", SECTION_RE, prefix="section-")
+    errors = config_errors + manifest_errors
+    if errors:
+        return {"state": "invalid_index", "sections_dir": str(sections_dir), "errors": errors}
+
+    missing: list[str] = []
+    empty: list[str] = []
+    complete: list[str] = []
+    for section in sections:
+        path = sections_dir / f"{section}.md"
+        if not path.exists():
+            missing.append(section)
+        elif not read_text(path).strip():
+            empty.append(section)
+        else:
+            complete.append(section)
+
+    if not sections:
+        state = "invalid_index"
+    elif len(complete) == len(sections):
+        state = "complete"
+    elif complete or empty:
+        state = "partial"
+    else:
+        state = "has_index"
+
+    return {
+        "state": state,
+        "sections_dir": str(sections_dir),
+        "project_config": config,
+        "sections": sections,
+        "complete": complete,
+        "missing": missing,
+        "empty": empty,
+        "progress": f"{len(complete)}/{len(sections)}",
+        "next_section": (missing + empty)[0] if (missing + empty) else None,
+    }
+
+
+def extract_file_paths(text: str) -> list[str]:
+    paths = {match.group(0).strip("`").removeprefix("./") for match in FILE_PATH_RE.finditer(text)}
+    return sorted(paths)
+
+
+def parse_section_dependencies(index_text: str, sections: list[str]) -> dict[str, list[str]]:
+    known = set(sections)
+    dependencies = {section: [] for section in sections}
+    for line in index_text.splitlines():
+        if "|" not in line:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if not cells or cells[0] not in known:
+            continue
+        depends_cell = cells[1] if len(cells) > 1 else ""
+        dependencies[cells[0]] = SECTION_RE.findall(depends_cell)
+    return dependencies
+
+
+def dependency_graph(planning_dir: Path, progress: dict[str, Any] | None = None) -> dict[str, list[str]]:
+    progress = progress or check_section_progress(planning_dir)
+    if progress.get("state") in {"invalid_index", "no_index"}:
+        return {}
+    index_path = planning_dir / "sections" / "index.md"
+    return parse_section_dependencies(read_text(index_path), progress.get("sections", []))
+
+
+def completed_sections(planning_dir: Path) -> set[str]:
+    state_path = planning_dir / "implementation" / "zagrosi_implement_state.json"
+    legacy_state_path = planning_dir / "implementation" / "deep_implement_state.json"
+    if not state_path.exists() and legacy_state_path.exists():
+        state_path = legacy_state_path
+    if not state_path.exists():
+        return set()
+    state = load_json(state_path)
+    completed = state.get("completed_sections", {})
+    return set(completed) if isinstance(completed, dict) else set()
+
+
+def section_metrics(section: str, path: Path, dependencies: dict[str, list[str]]) -> dict[str, Any]:
+    text = read_text(path) if path.exists() else ""
+    files = extract_file_paths(text)
+    words = word_count(text)
+    dep_count = len(dependencies.get(section, []))
+    risk_terms = ["security", "privacy", "auth", "permission", "migration", "data", "payment", "token", "secret"]
+    risk_points = dep_count + (2 if contains_any(text, risk_terms) else 0) + (1 if len(files) > 5 else 0)
+    effort_score = words + len(files) * 120 + dep_count * 180
+    effort = "large" if effort_score >= 1800 else "medium" if effort_score >= 750 else "small"
+    risk = "high" if risk_points >= 4 else "medium" if risk_points >= 2 else "low"
+    return {
+        "section": section,
+        "path": str(path),
+        "word_count": words,
+        "file_count": len(files),
+        "files": files,
+        "dependency_count": dep_count,
+        "dependencies": dependencies.get(section, []),
+        "effort": effort,
+        "risk": risk,
+    }
+
+
+def ready_sections(progress: dict[str, Any], dependencies: dict[str, list[str]], completed: set[str]) -> list[str]:
+    sections = progress.get("sections", [])
+    ready: list[str] = []
+    for section in sections:
+        if section in completed:
+            continue
+        if all(dep in completed for dep in dependencies.get(section, [])):
+            ready.append(section)
+    return ready
+
+
+def deep_plan_setup(args: argparse.Namespace) -> int:
+    spec_file = resolve_path(args.file)
+    ok, error = ensure_markdown_file(spec_file, "spec file")
+    if not ok:
+        return print_json({"success": False, "error": error}, 1)
+
+    planning_dir = spec_file.parent
+    config_path = planning_dir / "zagrosi_plan_config.json"
+    legacy_config_path = planning_dir / "deep_plan_config.json"
+    if not config_path.exists() and legacy_config_path.exists():
+        config_path = legacy_config_path
+    mode = "resume" if config_path.exists() else "new"
+    if config_path.exists():
+        config = load_json(config_path)
+    else:
+        config = {
+            "initial_file": str(spec_file),
+            "planning_dir": str(planning_dir),
+            "plugin_root": str(resolve_path(args.plugin_root)) if args.plugin_root else None,
+            "review_mode": args.review_mode,
+            "depth_mode": args.depth,
+            "workflow": "zagrosi-plan",
+            "created_at": now_iso(),
+        }
+        write_json(config_path, config)
+        for name, path in default_governance_files(planning_dir, args.depth).items():
+            write_if_missing(path, governance_templates(args.depth)[name])
+
+    files = {
+        "research": first_existing(planning_dir, ["codex-research.md", "claude-research.md"]),
+        "interview": first_existing(planning_dir, ["codex-interview.md", "claude-interview.md"]),
+        "spec": first_existing(planning_dir, ["codex-spec.md", "claude-spec.md"]),
+        "plan": first_existing(planning_dir, ["codex-plan.md", "claude-plan.md"]),
+        "integration_notes": first_existing(planning_dir, ["codex-integration-notes.md", "claude-integration-notes.md"]),
+        "plan_tdd": first_existing(planning_dir, ["codex-plan-tdd.md", "claude-plan-tdd.md"]),
+    }
+    reviews_dir = planning_dir / "reviews"
+    reviews = sorted(str(p) for p in reviews_dir.glob("*.md")) if reviews_dir.exists() else []
+    section_progress = check_section_progress(planning_dir)
+
+    if section_progress["state"] == "complete":
+        resume_step = None
+        resume_label = "complete"
+    elif section_progress["state"] in {"has_index", "partial"}:
+        resume_step = 19
+        resume_label = "write_sections"
+    elif files["plan_tdd"]:
+        resume_step = 18
+        resume_label = "create_section_index"
+    elif files["integration_notes"]:
+        resume_step = 16
+        resume_label = "write_tdd_plan"
+    elif reviews:
+        resume_step = 14
+        resume_label = "integrate_review"
+    elif files["plan"]:
+        resume_step = 13
+        resume_label = "review_plan"
+    elif files["spec"]:
+        resume_step = 11
+        resume_label = "write_plan"
+    elif files["interview"]:
+        resume_step = 10
+        resume_label = "write_spec"
+    elif files["research"]:
+        resume_step = 8
+        resume_label = "interview"
+    else:
+        resume_step = 6
+        resume_label = "research_decision"
+
+    payload = {
+        "success": True,
+        "mode": mode,
+        "planning_dir": str(planning_dir),
+        "config_path": str(config_path),
+        "initial_file": str(spec_file),
+        "review_mode": config.get("review_mode", args.review_mode),
+        "depth_mode": config.get("depth_mode", args.depth),
+        "resume_step": resume_step,
+        "resume_label": resume_label,
+        "files_found": {k: str(v) for k, v in files.items() if v},
+        "reviews": reviews,
+        "section_progress": section_progress,
+    }
+    if effective_flight_mode(args) != "off":
+        payload["preflight"] = plan_preflight_report(spec_file, args)
+    return print_json(payload)
+
+
+def deep_plan_check_sections(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    result = check_section_progress(planning_dir)
+    result["success"] = result["state"] != "invalid_index"
+    return print_json(result, 0 if result["success"] else 1)
+
+
+SECTION_PROMPT = """Generate the implementation section `{section}`.
+
+Read these planning files from `{planning_dir}`:
+- `codex-plan.md` (or `claude-plan.md` if this is a migrated plan)
+- `codex-plan-tdd.md` (or `claude-plan-tdd.md` if this is a migrated plan)
+- `sections/index.md`
+
+Write ONLY raw markdown for `{section}.md`.
+
+Requirements:
+- Make the section self-contained for a fresh implementer with no prior context.
+- Target 1,000-3,500 words in standard mode, 1,500-4,500 words in deep mode.
+- Start with the goal, explicit dependencies, and non-goals for this section.
+- Include a Background Context section that copies the relevant architecture,
+  contracts, data shapes, and rationale from the plan.
+- Put Tests FIRST with concrete test files, test names or descriptions,
+  fixtures, expected failures, and verification commands.
+- Include exact file paths to create or modify, preferably as a file tree.
+- Include implementation details, public APIs, function/class signatures,
+  schema/migration snippets, and error shapes where those remove ambiguity.
+- Include risks, edge cases, rollback notes, acceptance criteria, and final
+  verification commands.
+- Include dependencies on earlier sections, but do not duplicate their content.
+- Do not include full production implementations unless absolutely necessary.
+- Do not reference other planning files for essential context; copy the needed
+  facts into this section.
+"""
+
+
+def deep_plan_generate_section_prompts(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    progress = check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"}:
+        return print_json({"success": False, "section_progress": progress}, 1)
+
+    pending = progress["missing"] + progress["empty"]
+    if args.all:
+        pending = progress["sections"]
+    batch = pending[: args.batch_size]
+    prompts_dir = planning_dir / "sections" / ".prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+
+    prompts: list[str] = []
+    for section in batch:
+        prompt_path = prompts_dir / f"{section}-prompt.md"
+        prompt_path.write_text(SECTION_PROMPT.format(section=section, planning_dir=planning_dir), encoding="utf-8")
+        prompts.append(str(prompt_path))
+
+    return print_json(
+        {
+            "success": True,
+            "planning_dir": str(planning_dir),
+            "prompts_dir": str(prompts_dir),
+            "batch_size": args.batch_size,
+            "remaining": pending[args.batch_size :],
+            "prompt_files": prompts,
+        }
+    )
+
+
+def deep_implement_setup(args: argparse.Namespace) -> int:
+    sections_dir = resolve_path(args.sections_dir)
+    target_dir = resolve_path(args.target_dir or os.getcwd())
+    if not sections_dir.exists() or not sections_dir.is_dir():
+        return print_json({"success": False, "error": f"Sections directory not found: {sections_dir}"}, 1)
+    if not target_dir.exists() or not target_dir.is_dir():
+        return print_json({"success": False, "error": f"Target directory not found: {target_dir}"}, 1)
+
+    planning_dir = sections_dir.parent
+    progress = check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"}:
+        return print_json({"success": False, "section_progress": progress}, 1)
+
+    state_dir = planning_dir / "implementation"
+    config_path = state_dir / "zagrosi_implement_config.json"
+    state_path = state_dir / "zagrosi_implement_state.json"
+    legacy_config_path = state_dir / "deep_implement_config.json"
+    legacy_state_path = state_dir / "deep_implement_state.json"
+    if not config_path.exists() and legacy_config_path.exists():
+        config_path = legacy_config_path
+    if not state_path.exists() and legacy_state_path.exists():
+        state_path = legacy_state_path
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    if state_path.exists():
+        state = load_json(state_path)
+    else:
+        state = {"completed_sections": {}, "created_at": now_iso()}
+        write_json(state_path, state)
+
+    config = {
+        "sections_dir": str(sections_dir),
+        "target_dir": str(target_dir),
+        "planning_dir": str(planning_dir),
+        "test_command": progress.get("project_config", {}).get("test_command"),
+        "runtime": progress.get("project_config", {}).get("runtime"),
+    }
+    write_json(config_path, config)
+
+    completed = sorted(state.get("completed_sections", {}).keys())
+    next_section = next((section for section in progress["sections"] if section not in completed), None)
+    repo = git_info(target_dir)
+    warnings: list[str] = []
+    if repo.get("is_protected_branch"):
+        warnings.append(f"Current git branch is protected-looking: {repo.get('branch')}")
+    if repo.get("available") and not repo.get("working_tree_clean"):
+        warnings.append(f"Working tree has {len(repo.get('dirty_files', []))} uncommitted change(s)")
+
+    payload = {
+        "success": True,
+        "sections_dir": str(sections_dir),
+        "target_dir": str(target_dir),
+        "state_dir": str(state_dir),
+        "config_path": str(config_path),
+        "state_path": str(state_path),
+        "section_progress": progress,
+        "completed_sections": completed,
+        "next_section": next_section,
+        "git": repo,
+        "warnings": warnings,
+    }
+    if effective_flight_mode(args) != "off":
+        payload["preflight"] = implement_preflight_report(sections_dir, target_dir, args)
+    return print_json(payload)
+
+
+def deep_implement_record_section(args: argparse.Namespace) -> int:
+    sections_dir = resolve_path(args.sections_dir)
+    state_path = sections_dir.parent / "implementation" / "zagrosi_implement_state.json"
+    legacy_state_path = sections_dir.parent / "implementation" / "deep_implement_state.json"
+    if not state_path.exists() and legacy_state_path.exists():
+        state_path = legacy_state_path
+    state = load_json(state_path) if state_path.exists() else {"completed_sections": {}, "created_at": now_iso()}
+    section_record = {
+        "completed_at": now_iso(),
+        "commit": args.commit,
+        "notes": args.notes,
+    }
+    state.setdefault("completed_sections", {})[args.section] = section_record
+    write_json(state_path, state)
+    payload = {"success": True, "state_path": str(state_path), "section": args.section, "record": section_record}
+    if effective_flight_mode(args) != "off":
+        payload["postflight"] = implement_postflight_report(sections_dir.parent, args)
+    return print_json(payload)
+
+
+def lint_project_manifest(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    manifest_path = planning_dir / "project-manifest.md"
+    findings: list[Finding] = []
+    splits: list[str] = []
+
+    if not manifest_path.exists():
+        findings.append(finding("critical", "missing-manifest", "project-manifest.md is missing.", manifest_path))
+        return emit_quality("project-manifest", findings, args)
+
+    text = read_text(manifest_path)
+    meta, meta_errors = parse_forge_meta(text)
+    for error in meta_errors:
+        findings.append(
+            finding(
+                "low",
+                "metadata",
+                error,
+                manifest_path,
+                "Add a FORGE_META JSON block with artifact_type, depth_mode, and source fields.",
+            )
+        )
+    if meta and meta.get("artifact_type") != "project_manifest":
+        findings.append(finding("medium", "metadata-type", "FORGE_META artifact_type should be project_manifest.", manifest_path))
+
+    splits, manifest_errors = parse_numbered_manifest(text, "SPLIT_MANIFEST", SPLIT_RE)
+    for error in manifest_errors:
+        findings.append(finding("critical", "manifest-format", error, manifest_path))
+
+    require_terms(
+        findings,
+        text,
+        {
+            "dependencies": ["dependency", "depends on", "blocks"],
+            "execution-order": ["execution order", "run order", "sequence"],
+            "parallelization": ["parallel", "concurrent"],
+            "zagrosi-plan-commands": ["$zagrosi-plan", "zagrosi-plan", "$deep-plan", "deep-plan"],
+            "cross-cutting-concerns": ["cross-cutting", "shared", "common"],
+        },
+        manifest_path,
+    )
+
+    for split in splits:
+        split_dir = planning_dir / split
+        spec_path = split_dir / "spec.md"
+        if not split_dir.exists():
+            findings.append(finding("medium", "missing-split-dir", f"Split directory is missing: {split}", split_dir))
+            continue
+        if not spec_path.exists() or not read_text(spec_path).strip():
+            findings.append(finding("medium", "missing-split-spec", f"Split spec is missing or empty: {split}/spec.md", spec_path))
+            continue
+        spec_text = read_text(spec_path)
+        require_terms(
+            findings,
+            spec_text,
+            {
+                "acceptance-criteria": ["acceptance criteria", "done when", "success criteria"],
+                "scope": ["in scope", "out of scope", "non-goals"],
+                "testing": ["test", "tests", "verification"],
+                "open-questions": ["open question", "unknown", "assumption"],
+            },
+            spec_path,
+            "low",
+        )
+
+    payload = quality_from_args(
+        "project-manifest",
+        findings,
+        args,
+        {"planning_dir": str(planning_dir), "manifest": str(manifest_path), "splits": splits},
+    )
+    return emit_payload(payload, args)
+
+
+def lint_plan(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    depth = args.depth or "standard"
+    targets = word_targets(depth)
+    findings: list[Finding] = []
+
+    spec_path = artifact(planning_dir, ["codex-spec.md", "claude-spec.md"])
+    plan_path = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
+    tdd_path = artifact(planning_dir, ["codex-plan-tdd.md", "claude-plan-tdd.md"])
+
+    if not plan_path:
+        findings.append(finding("critical", "missing-plan", "Implementation plan is missing.", planning_dir / "codex-plan.md"))
+        return emit_quality("plan", findings, args)
+
+    plan_text = read_text(plan_path)
+    meta, meta_errors = parse_forge_meta(plan_text)
+    for error in meta_errors:
+        findings.append(finding("low", "metadata", error, plan_path))
+    if meta and meta.get("artifact_type") != "implementation_plan":
+        findings.append(finding("medium", "metadata-type", "FORGE_META artifact_type should be implementation_plan.", plan_path))
+
+    plan_words = word_count(plan_text)
+    add_depth_finding(findings, plan_words, targets["plan"], "Implementation plan", "plan-too-thin", plan_path, 500)
+
+    require_terms(
+        findings,
+        plan_text,
+        {
+            "goals": ["goal", "non-goal", "out of scope"],
+            "architecture": ["architecture", "design", "approach"],
+            "file-plan": ["file", "path", "module"],
+            "testing": ["test", "tdd", "verification"],
+            "security-privacy": ["security", "privacy", "permission", "auth"],
+            "risk": ["risk", "edge case", "failure"],
+            "migration": ["migration", "schema", "data migration", "backward", "compatibility"],
+            "rollout": ["rollout", "release", "deploy", "ship", "feature flag"],
+            "rollback": ["rollback", "revert", "disable", "back out"],
+            "acceptance": ["acceptance", "done when", "success criteria"],
+        },
+        plan_path,
+    )
+    require_terms(findings, plan_text, PLAN_DETAIL_TERMS, plan_path, "medium")
+    if not FILE_PATH_RE.search(plan_text):
+        findings.append(finding("high", "no-file-paths", "Plan does not name concrete files or paths.", plan_path))
+
+    if not spec_path:
+        findings.append(finding("high", "missing-normalized-spec", "codex-spec.md is missing.", planning_dir / "codex-spec.md"))
+        spec_ids: list[str] = []
+        spec_words = 0
+    else:
+        spec_text = read_text(spec_path)
+        spec_words = word_count(spec_text)
+        add_depth_finding(findings, spec_words, targets["spec"], "Normalized spec", "spec-too-thin", spec_path, 250)
+        spec_ids = requirement_ids(spec_text)
+        if not spec_ids:
+            findings.append(finding("medium", "no-requirement-ids", "Spec has no REQ-* identifiers.", spec_path))
+        missing_in_plan = [req_id for req_id in spec_ids if req_id not in plan_text]
+        if missing_in_plan:
+            findings.append(
+                finding(
+                    "high",
+                    "traceability-gap",
+                    f"Requirement IDs missing from plan: {', '.join(missing_in_plan)}",
+                    plan_path,
+                )
+            )
+
+    if not tdd_path:
+        findings.append(finding("high", "missing-tdd-plan", "codex-plan-tdd.md is missing.", planning_dir / "codex-plan-tdd.md"))
+        tdd_words = 0
+    else:
+        tdd_text = read_text(tdd_path)
+        tdd_words = word_count(tdd_text)
+        add_depth_finding(findings, tdd_words, targets["tdd"], "TDD plan", "tdd-plan-too-thin", tdd_path, 200)
+        if not contains_any(tdd_text, ["test_", "it(", "describe(", "pytest", "cargo test", "go test", "expected failure"]):
+            findings.append(finding("medium", "thin-tdd-plan", "TDD plan does not include concrete test names or commands.", tdd_path))
+        missing_in_tdd = [req_id for req_id in spec_ids if req_id not in tdd_text]
+        if missing_in_tdd:
+            findings.append(finding("medium", "tdd-traceability-gap", f"Requirement IDs missing from TDD plan: {', '.join(missing_in_tdd)}", tdd_path))
+
+    research_path = artifact(planning_dir, ["codex-research.md", "claude-research.md"])
+    research_words = None
+    if research_path:
+        research_words = word_count(read_text(research_path))
+        add_depth_finding(findings, research_words, targets["research"], "Research artifact", "research-too-thin", research_path, 250)
+    interview_path = artifact(planning_dir, ["codex-interview.md", "claude-interview.md"])
+    integration_path = artifact(planning_dir, ["codex-integration-notes.md", "claude-integration-notes.md"])
+    integration_words = None
+    if integration_path:
+        integration_words = word_count(read_text(integration_path))
+        add_depth_finding(
+            findings,
+            integration_words,
+            targets["integration_notes"],
+            "Integration notes",
+            "integration-notes-too-thin",
+            integration_path,
+            250,
+        )
+
+    review_files = sorted((planning_dir / "reviews").glob("*.md")) if (planning_dir / "reviews").exists() else []
+    review_word_counts = {path.name: word_count(read_text(path)) for path in review_files}
+    for review_path in review_files:
+        add_depth_finding(
+            findings,
+            review_word_counts[review_path.name],
+            targets["review"],
+            f"Review file {review_path.name}",
+            "review-too-thin",
+            review_path,
+            250,
+        )
+
+    for name, path in default_governance_files(planning_dir, depth).items():
+        if not path.exists():
+            findings.append(finding("medium", f"missing-{name}", f"{path.name} is missing.", path))
+
+    if depth == "deep":
+        review_file_stems = {path.stem for path in review_files}
+        missing_reviews = [item for item in REVIEW_BOARD_PASSES if item not in review_file_stems]
+        if missing_reviews:
+            findings.append(
+                finding(
+                    "medium",
+                    "missing-review-board-passes",
+                    f"Deep mode review files missing: {', '.join(missing_reviews)}",
+                    planning_dir / "reviews",
+                )
+            )
+
+    payload = quality_from_args(
+        "plan",
+        findings,
+        args,
+        {
+            "planning_dir": str(planning_dir),
+            "plan": str(plan_path),
+            "requirement_ids": spec_ids,
+            "depth_mode": depth,
+            "depth_targets": targets,
+            "word_counts": {
+                "spec": spec_words,
+                "research": research_words,
+                "interview": word_count(read_text(interview_path)) if interview_path else None,
+                "plan": plan_words,
+                "tdd": tdd_words,
+                "integration_notes": integration_words,
+                "reviews": review_word_counts,
+            },
+        },
+    )
+    return emit_payload(payload, args)
+
+
+def lint_sections(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    depth = args.depth or "standard"
+    targets = word_targets(depth)
+    findings: list[Finding] = []
+    progress = check_section_progress(planning_dir)
+    if progress["state"] == "invalid_index":
+        for error in progress.get("errors", []):
+            findings.append(finding("critical", "invalid-section-index", error, planning_dir / "sections" / "index.md"))
+        return emit_quality("sections", findings, args, {"section_progress": progress})
+    if progress["state"] == "no_index":
+        findings.append(finding("critical", "missing-section-index", "sections/index.md is missing.", planning_dir / "sections" / "index.md"))
+        return emit_quality("sections", findings, args, {"section_progress": progress})
+
+    index_path = planning_dir / "sections" / "index.md"
+    index_text = read_text(index_path)
+    index_words = word_count(index_text)
+    add_depth_finding(
+        findings,
+        index_words,
+        targets["section_index"],
+        "Section index",
+        "section-index-too-thin",
+        index_path,
+        150,
+    )
+    dependencies = parse_section_dependencies(index_text, progress["sections"])
+    require_terms(
+        findings,
+        index_text,
+        {
+            "dependencies": ["dependency", "depends on", "blocks"],
+            "execution-order": ["execution order", "sequence", "run order"],
+            "parallelization": ["parallel", "concurrent"],
+        },
+        index_path,
+    )
+
+    spec_path = artifact(planning_dir, ["codex-spec.md", "claude-spec.md"])
+    spec_ids = requirement_ids(read_text(spec_path)) if spec_path else []
+    all_section_text = ""
+    estimates: list[dict[str, Any]] = []
+
+    for section, deps in dependencies.items():
+        unknown = [dep for dep in deps if dep not in progress["sections"]]
+        if unknown:
+            findings.append(
+                finding(
+                    "high",
+                    "unknown-section-dependency",
+                    f"{section} depends on unknown section(s): {', '.join(unknown)}",
+                    index_path,
+                )
+            )
+
+    for section in progress["sections"]:
+        section_path = planning_dir / "sections" / f"{section}.md"
+        slug = section.split("-", 2)[2] if len(section.split("-", 2)) == 3 else section
+        slug_tokens = set(slug.split("-"))
+        if slug in VAGUE_SECTION_NAMES or slug_tokens.intersection(VAGUE_SECTION_NAMES):
+            findings.append(
+                finding(
+                    "medium",
+                    "vague-section-name",
+                    f"{section} is too vague to be a strong implementation boundary.",
+                    section_path,
+                    "Rename the section around a capability, data model, integration, or risk boundary.",
+                )
+            )
+        if not section_path.exists():
+            findings.append(finding("critical", "missing-section-file", f"Section file missing: {section}.md", section_path))
+            continue
+        text = read_text(section_path)
+        metrics = section_metrics(section, section_path, dependencies)
+        estimates.append(metrics)
+        all_section_text += "\n" + text
+        add_depth_finding(
+            findings,
+            metrics["word_count"],
+            targets["section"],
+            section,
+            "section-too-thin",
+            section_path,
+            150,
+        )
+        if metrics["word_count"] > 5000:
+            findings.append(finding("low", "section-too-large", f"{section} may be too large for focused implementation.", section_path))
+        if metrics["file_count"] > 12:
+            findings.append(
+                finding(
+                    "high",
+                    "section-too-many-files",
+                    f"{section} names {metrics['file_count']} files; split or narrow the section.",
+                    section_path,
+                )
+            )
+        elif metrics["file_count"] > 7:
+            findings.append(
+                finding(
+                    "medium",
+                    "section-many-files",
+                    f"{section} names {metrics['file_count']} files; verify this stays implementable in one pass.",
+                    section_path,
+                )
+            )
+        if metrics["dependency_count"] > 4:
+            findings.append(
+                finding(
+                    "medium",
+                    "section-many-dependencies",
+                    f"{section} has {metrics['dependency_count']} dependencies.",
+                    section_path,
+                )
+            )
+        require_terms(
+            findings,
+            text,
+            {
+                "tests-first": ["test", "tests first", "expected failure", "red"],
+                "implementation": ["implementation", "create", "modify", "file"],
+                "acceptance": ["acceptance", "done when", "verification"],
+            },
+            section_path,
+        )
+        require_terms(findings, text, SECTION_DETAIL_TERMS, section_path, "medium")
+        if not FILE_PATH_RE.search(text):
+            findings.append(finding("medium", "section-no-file-paths", f"{section} does not name concrete files.", section_path))
+
+    missing_requirements = [req_id for req_id in spec_ids if req_id not in all_section_text]
+    if missing_requirements:
+        findings.append(
+            finding(
+                "high",
+                "section-traceability-gap",
+                f"Requirement IDs missing from all sections: {', '.join(missing_requirements)}",
+                planning_dir / "sections",
+            )
+        )
+
+    payload = quality_from_args(
+        "sections",
+        findings,
+        args,
+        {
+            "planning_dir": str(planning_dir),
+            "depth_mode": depth,
+            "depth_targets": targets,
+            "section_progress": progress,
+            "requirement_ids": spec_ids,
+            "section_index_word_count": index_words,
+            "section_estimates": estimates,
+        },
+    )
+    return emit_payload(payload, args)
+
+
+def lint_implementation_state(args: argparse.Namespace) -> int:
+    sections_dir = resolve_path(args.sections_dir)
+    planning_dir = sections_dir.parent
+    findings: list[Finding] = []
+    progress = check_section_progress(planning_dir)
+    state_path = planning_dir / "implementation" / "zagrosi_implement_state.json"
+    legacy_state_path = planning_dir / "implementation" / "deep_implement_state.json"
+    if not state_path.exists() and legacy_state_path.exists():
+        state_path = legacy_state_path
+    code_review_dir = planning_dir / "implementation" / "code_review"
+    usage_path = planning_dir / "implementation" / "usage.md"
+
+    if progress["state"] in {"invalid_index", "no_index"}:
+        findings.append(finding("critical", "invalid-sections", "Cannot validate implementation without valid sections/index.md.", sections_dir / "index.md"))
+        return emit_quality("implementation-state", findings, args)
+
+    if not state_path.exists():
+        findings.append(finding("high", "missing-state", "zagrosi_implement_state.json is missing.", state_path))
+        completed: dict[str, Any] = {}
+    else:
+        state = load_json(state_path)
+        completed = state.get("completed_sections", {})
+        if not isinstance(completed, dict):
+            findings.append(finding("critical", "invalid-state", "completed_sections must be an object.", state_path))
+            completed = {}
+
+    for section in progress["sections"]:
+        if section not in completed:
+            findings.append(finding("medium", "section-not-recorded", f"{section} is not recorded complete.", state_path))
+            continue
+        record = completed[section]
+        if not record.get("completed_at"):
+            findings.append(finding("low", "missing-completed-at", f"{section} has no completed_at timestamp.", state_path))
+        if not record.get("commit"):
+            findings.append(finding("low", "missing-commit", f"{section} has no commit recorded.", state_path))
+        review_path = code_review_dir / f"{section}-review.md"
+        diff_path = code_review_dir / f"{section}-diff.md"
+        if not review_path.exists():
+            findings.append(finding("medium", "missing-review", f"Review file missing for {section}.", review_path))
+        if not diff_path.exists():
+            findings.append(finding("low", "missing-diff", f"Diff file missing for {section}.", diff_path))
+
+    if not usage_path.exists():
+        findings.append(finding("medium", "missing-usage", "implementation/usage.md is missing.", usage_path))
+
+    payload = quality_from_args(
+        "implementation-state",
+        findings,
+        args,
+        {
+            "sections_dir": str(sections_dir),
+            "state_path": str(state_path),
+            "completed_sections": sorted(completed.keys()),
+        },
+    )
+    return emit_payload(payload, args)
+
+
+def status(args: argparse.Namespace) -> int:
+    path = resolve_path(args.path)
+    if path.is_file():
+        planning_dir = path.parent
+    elif path.name == "sections":
+        planning_dir = path.parent
+    else:
+        planning_dir = path
+
+    project_state = planning_dir / ".zagrosi-project" / "session.json"
+    legacy_project_state = planning_dir / ".deep-project" / "session.json"
+    if not project_state.exists() and legacy_project_state.exists():
+        project_state = legacy_project_state
+    plan_config = planning_dir / "zagrosi_plan_config.json"
+    legacy_plan_config = planning_dir / "deep_plan_config.json"
+    if not plan_config.exists() and legacy_plan_config.exists():
+        plan_config = legacy_plan_config
+    section_progress = check_section_progress(planning_dir)
+    implementation_state = planning_dir / "implementation" / "zagrosi_implement_state.json"
+    legacy_implementation_state = planning_dir / "implementation" / "deep_implement_state.json"
+    if not implementation_state.exists() and legacy_implementation_state.exists():
+        implementation_state = legacy_implementation_state
+    files = {
+        "project_manifest": str(planning_dir / "project-manifest.md") if (planning_dir / "project-manifest.md").exists() else None,
+        "zagrosi_project_state": str(project_state) if project_state.exists() else None,
+        "zagrosi_plan_config": str(plan_config) if plan_config.exists() else None,
+        "implementation_state": str(implementation_state) if implementation_state.exists() else None,
+    }
+    files = {key: value for key, value in files.items() if value}
+    next_action = "start zagrosi-project or zagrosi-plan"
+    if section_progress["state"] == "complete" and not implementation_state.exists():
+        next_action = "run zagrosi-implement"
+    elif implementation_state.exists():
+        state = load_json(implementation_state)
+        completed = set(state.get("completed_sections", {}))
+        remaining = [section for section in section_progress.get("sections", []) if section not in completed]
+        next_action = f"implement {remaining[0]}" if remaining else "final verification and summary"
+    elif plan_config.exists():
+        if section_progress["state"] == "no_index":
+            next_action = "finish codex-plan-tdd.md and create sections/index.md"
+        elif section_progress["state"] in {"has_index", "partial"}:
+            next_action = "write missing section files"
+        else:
+            next_action = "run zagrosi-plan quality gates"
+    elif project_state.exists():
+        next_action = "finish project manifest/spec generation"
+
+    return print_json(
+        {
+            "success": True,
+            "path": str(path),
+            "planning_dir": str(planning_dir),
+            "files": files,
+            "section_progress": section_progress,
+            "next_action": next_action,
+        }
+    )
+
+
+def traceability_analysis(planning_dir: Path) -> tuple[list[Finding], dict[str, Any]]:
+    spec_path = artifact(planning_dir, ["codex-spec.md", "claude-spec.md"])
+    plan_path = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
+    tdd_path = artifact(planning_dir, ["codex-plan-tdd.md", "claude-plan-tdd.md"])
+    sections_dir = planning_dir / "sections"
+
+    spec_text = read_text(spec_path) if spec_path else ""
+    plan_text = read_text(plan_path) if plan_path else ""
+    tdd_text = read_text(tdd_path) if tdd_path else ""
+    section_files = sorted(sections_dir.glob("section-*.md")) if sections_dir.exists() else []
+    section_text_by_file = {path.name: read_text(path) for path in section_files}
+    req_ids = requirement_ids(spec_text)
+
+    coverage: dict[str, Any] = {}
+    for req_id in req_ids:
+        sections = [name for name, text in section_text_by_file.items() if req_id in text]
+        coverage[req_id] = {
+            "in_plan": req_id in plan_text,
+            "in_tdd": req_id in tdd_text,
+            "sections": sections,
+            "covered": bool(req_id in plan_text and req_id in tdd_text and sections),
+        }
+
+    uncovered = [req_id for req_id, item in coverage.items() if not item["covered"]]
+    findings = [
+        finding("high", "traceability-gap", f"{req_id} is not fully covered.", spec_path or planning_dir)
+        for req_id in uncovered
+    ]
+    if not req_ids:
+        findings.append(finding("medium", "no-requirement-ids", "No REQ-* IDs found in normalized spec.", spec_path or planning_dir))
+
+    section_orphans = [
+        name
+        for name, text in section_text_by_file.items()
+        if not set(requirement_ids(text)).intersection(req_ids)
+    ]
+    if section_orphans:
+        findings.append(
+            finding(
+                "medium",
+                "orphan-sections",
+                f"Section files do not reference known requirements: {', '.join(section_orphans)}",
+                sections_dir,
+            )
+        )
+
+    tdd_req_ids = requirement_ids(tdd_text)
+    test_orphans = []
+    if tdd_text and contains_any(tdd_text, ["test_", "it(", "describe(", "pytest"]) and not tdd_req_ids:
+        test_orphans.append(tdd_path.name if tdd_path else "codex-plan-tdd.md")
+        findings.append(
+            finding(
+                "medium",
+                "orphan-tests",
+                "TDD plan names tests but does not tie them to REQ-* IDs.",
+                tdd_path or planning_dir,
+            )
+        )
+
+    extras = {
+        "planning_dir": str(planning_dir),
+        "requirement_ids": req_ids,
+        "coverage": coverage,
+        "orphans": {
+            "sections": section_orphans,
+            "tests": test_orphans,
+        },
+    }
+    return findings, extras
+
+
+def traceability(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    findings, extras = traceability_analysis(planning_dir)
+    payload = quality_from_args(
+        "traceability",
+        findings,
+        args,
+        extras,
+    )
+    return emit_payload(payload, args)
+
+
+def write_governance_stubs(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    depth = args.depth
+    created: list[str] = []
+    skipped: list[str] = []
+    templates = governance_templates(depth)
+    for name, path in default_governance_files(planning_dir, depth).items():
+        if write_if_missing(path, templates[name]):
+            created.append(str(path))
+        else:
+            skipped.append(str(path))
+    return print_json({"success": True, "planning_dir": str(planning_dir), "depth_mode": depth, "created": created, "skipped": skipped})
+
+
+def review_board_prompts(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    prompts_dir = planning_dir / "reviews" / ".prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    prompts: list[str] = []
+    for review_pass in REVIEW_BOARD_PASSES:
+        path = prompts_dir / f"{review_pass}.md"
+        path.write_text(
+            (
+                f"# {review_pass.replace('-', ' ').title()} Review\n\n"
+                f"Review `{planning_dir}/codex-plan.md` from the perspective of {review_pass.replace('-', ' ')}.\n\n"
+                "Return severity-ranked findings with evidence, file references, contract gaps, "
+                "test gaps, migration/rollback concerns, and specific plan edits. Target 1,000+ "
+                "words when the review surface is non-trivial. Do not rewrite the plan; identify "
+                "what must change and why.\n"
+            ),
+            encoding="utf-8",
+        )
+        prompts.append(str(path))
+    return print_json({"success": True, "planning_dir": str(planning_dir), "prompt_files": prompts})
+
+
+def migrate(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    pairs = [
+        ("claude-research.md", "codex-research.md"),
+        ("claude-interview.md", "codex-interview.md"),
+        ("claude-spec.md", "codex-spec.md"),
+        ("claude-plan.md", "codex-plan.md"),
+        ("claude-integration-notes.md", "codex-integration-notes.md"),
+        ("claude-plan-tdd.md", "codex-plan-tdd.md"),
+    ]
+    migrated: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    for old_name, new_name in pairs:
+        old_path = planning_dir / old_name
+        new_path = planning_dir / new_name
+        if not old_path.exists():
+            skipped.append({"source": str(old_path), "reason": "source_missing"})
+            continue
+        if new_path.exists() and not args.force:
+            skipped.append({"source": str(old_path), "target": str(new_path), "reason": "target_exists"})
+            continue
+        new_path.write_text(read_text(old_path), encoding="utf-8")
+        migrated.append({"source": str(old_path), "target": str(new_path)})
+
+    if (planning_dir / "claude-plan.md").exists():
+        templates = governance_templates(args.depth)
+        for name, path in default_governance_files(planning_dir, args.depth).items():
+            write_if_missing(path, templates[name])
+
+    return print_json({"success": True, "planning_dir": str(planning_dir), "migrated": migrated, "skipped": skipped})
+
+
+def doctor(args: argparse.Namespace) -> int:
+    plugin_root = resolve_path(args.plugin_root) if args.plugin_root else Path(__file__).resolve().parents[1]
+    findings: list[Finding] = []
+    expected = [
+        plugin_root / ".codex-plugin" / "plugin.json",
+        plugin_root / ".agents" / "plugins" / "marketplace.json",
+        plugin_root / "pyproject.toml",
+        plugin_root / "scripts" / "zagrosi_skills.py",
+        plugin_root / "scripts" / "deep_skills.py",
+    ]
+    for path in expected:
+        if not path.exists():
+            findings.append(finding("critical", "missing-package-file", f"Missing package file: {path}", path))
+
+    manifest_path = plugin_root / ".codex-plugin" / "plugin.json"
+    manifest: dict[str, Any] = {}
+    if manifest_path.exists():
+        try:
+            manifest = load_json(manifest_path)
+        except json.JSONDecodeError as exc:
+            findings.append(finding("critical", "invalid-plugin-json", f"plugin.json is invalid JSON: {exc}", manifest_path))
+    if manifest and manifest.get("name") != "zagrosi-forge":
+        findings.append(finding("medium", "plugin-name", "Plugin package name should be zagrosi-forge.", manifest_path))
+
+    marketplace_path = plugin_root / ".agents" / "plugins" / "marketplace.json"
+    marketplace: dict[str, Any] = {}
+    marketplace_entry: dict[str, Any] = {}
+    if marketplace_path.exists():
+        try:
+            marketplace = load_json(marketplace_path)
+        except json.JSONDecodeError as exc:
+            findings.append(
+                finding("critical", "invalid-marketplace-json", f"marketplace.json is invalid JSON: {exc}", marketplace_path)
+            )
+    if marketplace:
+        if marketplace.get("name") != "zagrosi":
+            findings.append(finding("medium", "marketplace-name", "Marketplace name should be zagrosi.", marketplace_path))
+        plugins = marketplace.get("plugins")
+        if not isinstance(plugins, list):
+            findings.append(finding("high", "marketplace-plugins", "marketplace.json must contain a plugins array.", marketplace_path))
+        else:
+            for item in plugins:
+                if isinstance(item, dict) and item.get("name") == "zagrosi-forge":
+                    marketplace_entry = item
+                    break
+            if not marketplace_entry:
+                findings.append(
+                    finding("high", "marketplace-plugin-entry", "Marketplace must include zagrosi-forge.", marketplace_path)
+                )
+    if marketplace_entry:
+        source = marketplace_entry.get("source")
+        if not isinstance(source, dict) or source.get("source") != "local" or source.get("path") not in {".", "./"}:
+            findings.append(
+                finding(
+                    "medium",
+                    "marketplace-plugin-source",
+                    "zagrosi-forge marketplace source should be local with path '.'.",
+                    marketplace_path,
+                )
+            )
+        policy = marketplace_entry.get("policy")
+        if not isinstance(policy, dict):
+            findings.append(finding("high", "marketplace-plugin-policy", "Marketplace entry must include policy.", marketplace_path))
+        else:
+            if policy.get("installation") not in {"NOT_AVAILABLE", "AVAILABLE", "INSTALLED_BY_DEFAULT"}:
+                findings.append(
+                    finding("high", "marketplace-installation-policy", "Invalid marketplace installation policy.", marketplace_path)
+                )
+            if policy.get("authentication") not in {"ON_INSTALL", "ON_USE"}:
+                findings.append(
+                    finding("high", "marketplace-authentication-policy", "Invalid marketplace authentication policy.", marketplace_path)
+                )
+        if not marketplace_entry.get("category"):
+            findings.append(finding("low", "marketplace-category", "Marketplace entry should include a category.", marketplace_path))
+
+    for skill_name in ("zagrosi-project", "zagrosi-plan", "zagrosi-implement"):
+        skill_path = plugin_root / "skills" / skill_name / "SKILL.md"
+        if not skill_path.exists():
+            findings.append(finding("critical", "missing-skill", f"Missing skill: {skill_name}", skill_path))
+            continue
+        text = read_text(skill_path)
+        if f"name: {skill_name}" not in text[:300]:
+            findings.append(finding("high", "skill-frontmatter", f"{skill_name} frontmatter name is missing or stale.", skill_path))
+        if "scripts/zagrosi_skills.py" not in text:
+            findings.append(finding("medium", "skill-helper-reference", f"{skill_name} does not reference the Zagrosi helper script.", skill_path))
+
+    if sys.version_info < (3, 11):
+        findings.append(finding("critical", "python-version", "Python 3.11 or newer is required."))
+
+    extras = {
+        "plugin_root": str(plugin_root),
+        "python": sys.version.split()[0],
+        "marketplace": {
+            "name": marketplace.get("name"),
+            "plugin": "zagrosi-forge@zagrosi" if marketplace_entry else None,
+            "path": str(marketplace_path),
+        },
+        "skills": ["zagrosi-project", "zagrosi-plan", "zagrosi-implement"],
+    }
+    return emit_quality("doctor", findings, args, extras)
+
+
+def section_estimates(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    progress = check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"}:
+        return print_json({"success": False, "section_progress": progress}, 1)
+    deps = dependency_graph(planning_dir, progress)
+    estimates = [
+        section_metrics(section, planning_dir / "sections" / f"{section}.md", deps)
+        for section in progress["sections"]
+        if (planning_dir / "sections" / f"{section}.md").exists()
+    ]
+    return print_json(
+        {
+            "success": True,
+            "planning_dir": str(planning_dir),
+            "section_progress": progress,
+            "estimates": estimates,
+        }
+    )
+
+
+def next_section(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    progress = check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"}:
+        return print_json({"success": False, "section_progress": progress}, 1)
+    deps = dependency_graph(planning_dir, progress)
+    completed = completed_sections(planning_dir)
+    ready = ready_sections(progress, deps, completed)
+    remaining = [section for section in progress["sections"] if section not in completed]
+    blocked = {
+        section: [dep for dep in deps.get(section, []) if dep not in completed]
+        for section in remaining
+        if section not in ready
+    }
+    return print_json(
+        {
+            "success": bool(ready) or not remaining,
+            "planning_dir": str(planning_dir),
+            "next_section": ready[0] if ready else None,
+            "ready_sections": ready,
+            "remaining_sections": remaining,
+            "blocked_sections": blocked,
+            "completed_sections": sorted(completed),
+        },
+        0 if ready or not remaining else 1,
+    )
+
+
+def parallel_plan(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    progress = check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"}:
+        return print_json({"success": False, "section_progress": progress}, 1)
+    deps = dependency_graph(planning_dir, progress)
+    completed = completed_sections(planning_dir)
+    known = set(progress["sections"])
+    remaining = [section for section in progress["sections"] if section not in completed]
+    available = set(completed)
+    layers: list[list[str]] = []
+    unresolved = set(remaining)
+
+    while unresolved:
+        layer = sorted(
+            section
+            for section in unresolved
+            if all(dep in available for dep in deps.get(section, []) if dep in known)
+        )
+        if not layer:
+            break
+        layers.append(layer)
+        available.update(layer)
+        unresolved.difference_update(layer)
+
+    unknown_dependencies = {
+        section: [dep for dep in deps.get(section, []) if dep not in known]
+        for section in progress["sections"]
+        if any(dep not in known for dep in deps.get(section, []))
+    }
+    success = not unresolved and not unknown_dependencies
+    return print_json(
+        {
+            "success": success,
+            "planning_dir": str(planning_dir),
+            "completed_sections": sorted(completed),
+            "layers": layers,
+            "blocked_or_cyclic": sorted(unresolved),
+            "unknown_dependencies": unknown_dependencies,
+        },
+        0 if success else 1,
+    )
+
+
+def changed_files_from_diff(text: str) -> list[str]:
+    files: set[str] = set()
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                files.add(parts[3].removeprefix("b/"))
+        elif line.startswith("+++ b/"):
+            files.add(line[6:].strip())
+        else:
+            stripped = line.strip().removeprefix("./")
+            if FILE_PATH_RE.fullmatch(stripped):
+                files.add(stripped.strip("`"))
+    return sorted(file for file in files if file != "/dev/null")
+
+
+def git_changed_files(repo: Path, staged: bool) -> tuple[list[str], str | None]:
+    args = ["diff", "--name-only"]
+    if staged:
+        args.append("--cached")
+    result = git(args, repo)
+    if result.returncode != 0:
+        return [], result.stderr.strip() or result.stdout.strip()
+    return sorted(line.strip() for line in result.stdout.splitlines() if line.strip()), None
+
+
+def patch_scope(args: argparse.Namespace) -> int:
+    section_file = resolve_path(args.section_file)
+    if not section_file.exists():
+        return print_json({"success": False, "error": f"Section file not found: {section_file}"}, 1)
+    declared = set(extract_file_paths(read_text(section_file)))
+    if args.diff_file:
+        diff_path = resolve_path(args.diff_file)
+        if not diff_path.exists():
+            return print_json({"success": False, "error": f"Diff file not found: {diff_path}"}, 1)
+        changed = set(changed_files_from_diff(read_text(diff_path)))
+    else:
+        changed_list, error = git_changed_files(resolve_path(args.repo), args.staged)
+        if error:
+            return print_json({"success": False, "error": error}, 1)
+        changed = set(changed_list)
+
+    out_of_scope = sorted(file for file in changed if file not in declared)
+    missing_declared = sorted(file for file in declared if file not in changed)
+    findings: list[Finding] = []
+    for file in out_of_scope:
+        findings.append(finding("high", "out-of-scope-file", f"Changed file is not declared in section: {file}", section_file))
+    if missing_declared:
+        findings.append(
+            finding(
+                "low",
+                "declared-file-not-changed",
+                f"Declared files not present in patch: {', '.join(missing_declared)}",
+                section_file,
+            )
+        )
+    payload = quality_from_args(
+        "patch-scope",
+        findings,
+        args,
+        {
+            "section_file": str(section_file),
+            "declared_files": sorted(declared),
+            "changed_files": sorted(changed),
+            "out_of_scope": out_of_scope,
+            "missing_declared": missing_declared,
+        },
+    )
+    return emit_payload(payload, args)
+
+
+def commit_message(args: argparse.Namespace) -> int:
+    section_file = resolve_path(args.section_file)
+    if not section_file.exists():
+        return print_json({"success": False, "error": f"Section file not found: {section_file}"}, 1)
+    section = section_file.stem
+    label = section.removeprefix("section-").replace("-", " ")
+    if args.style == "conventional":
+        subject = f"feat: implement {label}"
+    else:
+        subject = f"Implement {label}"
+    text = read_text(section_file)
+    req_ids = requirement_ids(text)
+    files = extract_file_paths(text)
+    body_lines = []
+    if req_ids:
+        body_lines.append(f"Requirements: {', '.join(req_ids)}")
+    if files:
+        body_lines.append(f"Scope: {', '.join(files[:8])}" + (" ..." if len(files) > 8 else ""))
+    body_lines.append("Tests and review follow the section plan.")
+    return print_json(
+        {
+            "success": True,
+            "section_file": str(section_file),
+            "subject": subject[:72],
+            "body": "\n".join(body_lines),
+            "message": subject[:72] + "\n\n" + "\n".join(body_lines),
+        }
+    )
+
+
+def requirement_candidate(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith(("-", "*")):
+        return False
+    if "REQ-" in stripped:
+        return False
+    return contains_any(
+        stripped,
+        ["must", "should", "shall", "allow", "support", "enable", "provide", "user can", "system can", "needs to"],
+    )
+
+
+def extract_requirements(args: argparse.Namespace) -> int:
+    path = resolve_path(args.file)
+    if not path.exists():
+        return print_json({"success": False, "error": f"File not found: {path}"}, 1)
+    text = read_text(path)
+    existing = requirement_ids(text)
+    next_number = 1
+    if existing:
+        numeric = [int(match.group(1)) for req in existing if (match := re.match(r"REQ-(\d+)$", req))]
+        next_number = max(numeric, default=0) + 1
+
+    requirements: list[dict[str, str]] = []
+    rewritten: list[str] = []
+    for line in text.splitlines():
+        if requirement_candidate(line):
+            req_id = f"REQ-{next_number:03d}"
+            next_number += 1
+            prefix, body = line.split(maxsplit=1)
+            rewritten_line = f"{prefix} {req_id}: {body}"
+            requirements.append({"id": req_id, "text": body.strip(), "line": rewritten_line})
+            rewritten.append(rewritten_line)
+        else:
+            rewritten.append(line)
+
+    if args.write and requirements:
+        path.write_text("\n".join(rewritten) + ("\n" if text.endswith("\n") else ""), encoding="utf-8")
+
+    return print_json(
+        {
+            "success": True,
+            "file": str(path),
+            "requirements": requirements,
+            "updated": bool(args.write and requirements),
+            "content": "\n".join(rewritten),
+        }
+    )
+
+
+def trace_export(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    findings, extras = traceability_analysis(planning_dir)
+    payload = quality_from_args("traceability", findings, args, extras)
+    rows = [
+        {
+            "requirement": req_id,
+            "in_plan": str(item["in_plan"]).lower(),
+            "in_tdd": str(item["in_tdd"]).lower(),
+            "sections": ";".join(item["sections"]),
+            "covered": str(item["covered"]).lower(),
+        }
+        for req_id, item in payload["coverage"].items()
+    ]
+
+    if args.format == "json":
+        content = json.dumps({"rows": rows, "orphans": payload["orphans"]}, indent=2, sort_keys=True) + "\n"
+    elif args.format == "csv":
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=["requirement", "in_plan", "in_tdd", "sections", "covered"])
+        writer.writeheader()
+        writer.writerows(rows)
+        content = buffer.getvalue()
+    else:
+        lines = ["| Requirement | In Plan | In TDD | Sections | Covered |", "|-------------|---------|--------|----------|---------|"]
+        for row in rows:
+            lines.append(
+                f"| {row['requirement']} | {row['in_plan']} | {row['in_tdd']} | {row['sections'] or '-'} | {row['covered']} |"
+            )
+        content = "\n".join(lines) + "\n"
+
+    if args.output:
+        output = resolve_path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(content, encoding="utf-8")
+        payload["output"] = str(output)
+    else:
+        payload["content"] = content
+    return emit_payload(payload, args)
+
+
+def agent_prompts(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    prompt_names = sorted(PROMPT_TYPES) if args.type == "all" else [args.type]
+    prompts_dir = planning_dir / ".prompts" / "agents"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    for name in prompt_names:
+        path = prompts_dir / f"{name}.md"
+        path.write_text(
+            (
+                f"# {name.replace('-', ' ').title()}\n\n"
+                f"{PROMPT_TYPES[name]}\n\n"
+                f"Planning directory: `{planning_dir}`\n\n"
+                "Use only evidence from the repository and named planning artifacts. "
+                "Return concise findings with paths, risks, and recommended next actions.\n"
+            ),
+            encoding="utf-8",
+        )
+        written.append(str(path))
+    return print_json({"success": True, "planning_dir": str(planning_dir), "prompt_files": written})
+
+
+def context_budget(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    candidates = [
+        path
+        for path in [
+            artifact(planning_dir, ["codex-spec.md", "claude-spec.md"]),
+            artifact(planning_dir, ["codex-plan.md", "claude-plan.md"]),
+            artifact(planning_dir, ["codex-plan-tdd.md", "claude-plan-tdd.md"]),
+            planning_dir / "decisions.md",
+            planning_dir / "risk-register.md",
+            planning_dir / "traceability.md",
+            planning_dir / "quality-gates.md",
+        ]
+        if path and path.exists()
+    ]
+    sections_dir = planning_dir / "sections"
+    if sections_dir.exists():
+        candidates.extend(sorted(sections_dir.glob("*.md")))
+
+    files = [{"path": str(path), "word_count": word_count(read_text(path))} for path in candidates]
+    total_words = sum(item["word_count"] for item in files)
+    findings: list[Finding] = []
+    if total_words > args.max_words:
+        findings.append(
+            finding(
+                "medium",
+                "context-budget-exceeded",
+                f"Planning artifacts total {total_words} words, above budget {args.max_words}.",
+                planning_dir,
+                "Prefer section-specific context, summaries, and trace exports before implementation.",
+            )
+        )
+    largest = sorted(files, key=lambda item: item["word_count"], reverse=True)[:5]
+    return emit_quality(
+        "context-budget",
+        findings,
+        args,
+        {
+            "planning_dir": str(planning_dir),
+            "max_words": args.max_words,
+            "total_words": total_words,
+            "largest_files": largest,
+        },
+    )
+
+
+def planning_artifacts(planning_dir: Path) -> dict[str, Path | None]:
+    return {
+        "spec": artifact(planning_dir, ["codex-spec.md", "claude-spec.md"]),
+        "research": artifact(planning_dir, ["codex-research.md", "claude-research.md"]),
+        "interview": artifact(planning_dir, ["codex-interview.md", "claude-interview.md"]),
+        "plan": artifact(planning_dir, ["codex-plan.md", "claude-plan.md"]),
+        "integration_notes": artifact(planning_dir, ["codex-integration-notes.md", "claude-integration-notes.md"]),
+        "tdd": artifact(planning_dir, ["codex-plan-tdd.md", "claude-plan-tdd.md"]),
+        "decisions": planning_dir / "decisions.md",
+        "risks": planning_dir / "risk-register.md",
+        "traceability": planning_dir / "traceability.md",
+        "quality": planning_dir / "quality-gates.md",
+    }
+
+
+def existing_artifact_texts(planning_dir: Path) -> dict[str, str]:
+    return {
+        name: read_text(path)
+        for name, path in planning_artifacts(planning_dir).items()
+        if path and path.exists()
+    }
+
+
+def markdown_headings(text: str) -> list[str]:
+    return [line.strip("# ").strip() for line in text.splitlines() if line.startswith("#")]
+
+
+def test_names(text: str) -> list[str]:
+    found: set[str] = set()
+    for pattern in (
+        r"\btest_[A-Za-z0-9_]+\b(?!\.)",
+        r"`([a-z][a-z0-9_]*_[a-z0-9_]+)`",
+        r"\bit\([\"']([^\"']+)[\"']\)",
+        r"\bdescribe\([\"']([^\"']+)[\"']\)",
+    ):
+        for match in re.finditer(pattern, text):
+            found.add(match.group(1) if match.groups() else match.group(0))
+    return sorted(found)
+
+
+def add_term_findings(findings: list[Finding], text: str, groups: dict[str, list[str]], path: Path, severity: str) -> None:
+    for label, terms in groups.items():
+        if not contains_any(text, terms):
+            findings.append(
+                finding(
+                    severity,
+                    f"missing-{label}",
+                    f"Missing {label.replace('-', ' ')} evidence.",
+                    path,
+                    f"Add concrete {label.replace('-', ' ')} details backed by files, commands, contracts, or tests.",
+                )
+            )
+
+
+def lint_evidence(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    texts = existing_artifact_texts(planning_dir)
+    plan_path = planning_artifacts(planning_dir)["plan"] or planning_dir / "codex-plan.md"
+    combined = "\n\n".join(texts.values())
+    findings: list[Finding] = []
+    if not texts.get("plan"):
+        findings.append(finding("critical", "missing-plan", "Implementation plan is missing.", plan_path))
+    add_term_findings(findings, combined, EVIDENCE_TERMS, plan_path, "medium")
+    paths = extract_file_paths(combined)
+    if len(paths) < args.min_files:
+        findings.append(
+            finding(
+                "medium",
+                "thin-file-evidence",
+                f"Only {len(paths)} concrete file paths found; expected at least {args.min_files}.",
+                plan_path,
+                "Name inspected files, tests, config files, and implementation targets.",
+            )
+        )
+    req_ids = requirement_ids(combined)
+    if not req_ids:
+        findings.append(finding("medium", "no-requirement-ids", "No REQ-* IDs found in evidence surface.", plan_path))
+    assumptions = [
+        line.strip()
+        for line in combined.splitlines()
+        if contains_any(line, ["assumption", "unknown", "open question", "stop-line", "stop line"])
+    ]
+    payload = quality_from_args(
+        "evidence",
+        findings,
+        args,
+        {
+            "planning_dir": str(planning_dir),
+            "files": paths,
+            "file_count": len(paths),
+            "requirement_ids": req_ids,
+            "assumption_lines": assumptions[:25],
+            "artifact_word_counts": {name: word_count(text) for name, text in texts.items()},
+        },
+    )
+    return emit_payload(payload, args)
+
+
+def lint_implementation_readiness(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    progress = check_section_progress(planning_dir)
+    findings: list[Finding] = []
+    if progress["state"] in {"invalid_index", "no_index"}:
+        findings.append(finding("critical", "invalid-sections", "Readiness requires a valid sections/index.md.", planning_dir / "sections" / "index.md"))
+        return emit_quality("implementation-readiness", findings, args, {"section_progress": progress})
+
+    deps = dependency_graph(planning_dir, progress)
+    section_payloads: list[dict[str, Any]] = []
+    for section in progress["sections"]:
+        path = planning_dir / "sections" / f"{section}.md"
+        if not path.exists():
+            findings.append(finding("critical", "missing-section-file", f"{section}.md is missing.", path))
+            continue
+        text = read_text(path)
+        metrics = section_metrics(section, path, deps)
+        section_payloads.append(metrics)
+        add_term_findings(findings, text, READINESS_TERMS, path, "medium")
+        if metrics["file_count"] == 0:
+            findings.append(finding("medium", "no-file-ownership", f"{section} names no implementation files.", path))
+        if metrics["file_count"] > args.max_files:
+            findings.append(
+                finding(
+                    "high",
+                    "too-many-owned-files",
+                    f"{section} owns {metrics['file_count']} files; max readiness threshold is {args.max_files}.",
+                    path,
+                    "Split the section or narrow file ownership before implementation.",
+                )
+            )
+        if not test_names(text):
+            findings.append(finding("medium", "no-test-names", f"{section} names no concrete tests.", path))
+
+    return emit_quality(
+        "implementation-readiness",
+        findings,
+        args,
+        {
+            "planning_dir": str(planning_dir),
+            "section_progress": progress,
+            "sections": section_payloads,
+        },
+    )
+
+
+def forge_score(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    pseudo_args = argparse.Namespace(
+        planning_dir=str(planning_dir),
+        depth=args.depth,
+        profile=args.profile,
+        strict=False,
+        export=None,
+        export_format="jsonl",
+        max_files=args.max_files,
+        min_files=args.min_files,
+    )
+    plan_findings, plan_extras = plan_findings_for_score(planning_dir, args.depth)
+    section_findings, section_extras = section_findings_for_score(planning_dir, args.depth)
+    trace_findings, trace_extras = traceability_analysis(planning_dir)
+    evidence_payload = quality_from_args("evidence", evidence_findings_for_score(planning_dir, args.min_files), pseudo_args)
+    readiness_payload = quality_from_args(
+        "implementation-readiness",
+        readiness_findings_for_score(planning_dir, args.max_files),
+        pseudo_args,
+    )
+    components = {
+        "plan_depth": quality_payload("plan", plan_findings, plan_extras, profile=args.profile)["score"],
+        "section_readiness": quality_payload("sections", section_findings, section_extras, profile=args.profile)["score"],
+        "traceability": quality_payload("traceability", trace_findings, trace_extras, profile=args.profile)["score"],
+        "evidence_quality": evidence_payload["score"],
+        "implementation_readiness": readiness_payload["score"],
+    }
+    findings = plan_findings + section_findings + trace_findings
+    findings.extend(evidence_findings_for_score(planning_dir, args.min_files))
+    findings.extend(readiness_findings_for_score(planning_dir, args.max_files))
+    weights = FORGE_COMPONENT_WEIGHTS.get(args.profile, FORGE_COMPONENT_WEIGHTS["solo"])
+    weight_total = sum(weights.get(key, 1.0) for key in components)
+    score = round(sum(value * weights.get(key, 1.0) for key, value in components.items()) / weight_total)
+    blocking_findings = [item for item in findings if item.severity in {"critical", "high"}]
+    advisory_findings = [item for item in findings if item.severity in {"medium", "low"}]
+    blocking_score = quality_score(blocking_findings, args.profile)
+    advisory_score = quality_score(advisory_findings, args.profile)
+    trend = None
+    history_path = planning_dir / ".forge" / "scores" / "history.jsonl"
+    if history_path.exists():
+        previous_rows = [json.loads(line) for line in read_text(history_path).splitlines() if line.strip()]
+        if previous_rows:
+            trend = score - int(previous_rows[-1].get("forge_score", score))
+    payload = quality_payload(
+        "forge-score",
+        findings,
+        {
+            "planning_dir": str(planning_dir),
+            "depth_mode": args.depth,
+            "components": components,
+            "component_weights": weights,
+            "forge_score": score,
+            "blocking_score": blocking_score,
+            "advisory_score": advisory_score,
+            "trend_delta": trend,
+            "grade": "A" if score >= 90 else "B" if score >= 80 else "C" if score >= 70 else "D",
+        },
+        profile=args.profile,
+        strict=args.strict,
+    )
+    payload["score"] = score
+    if args.write_history:
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        row = {
+            "timestamp": now_iso(),
+            "depth_mode": args.depth,
+            "profile": args.profile,
+            "forge_score": score,
+            "components": components,
+            "blocking_score": blocking_score,
+            "advisory_score": advisory_score,
+        }
+        with history_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+        payload["history_path"] = str(history_path)
+    return emit_payload(payload, args)
+
+
+def plan_findings_for_score(planning_dir: Path, depth: str) -> tuple[list[Finding], dict[str, Any]]:
+    args = argparse.Namespace(planning_dir=str(planning_dir), depth=depth, profile="solo", strict=False, export=None, export_format="jsonl")
+    original_emit = emit_payload
+    captured: dict[str, Any] = {}
+
+    def capture(payload: dict[str, Any], _args: argparse.Namespace, exit_code: int | None = None) -> int:
+        captured.update(payload)
+        return 0
+
+    globals()["emit_payload"] = capture
+    try:
+        lint_plan(args)
+    finally:
+        globals()["emit_payload"] = original_emit
+    findings = [Finding(item["severity"], item["code"], item["message"], item.get("path"), item.get("recommendation"), item.get("category", "general")) for item in captured.get("findings", [])]
+    return findings, {key: value for key, value in captured.items() if key not in {"findings", "success", "score", "finding_count"}}
+
+
+def section_findings_for_score(planning_dir: Path, depth: str) -> tuple[list[Finding], dict[str, Any]]:
+    args = argparse.Namespace(planning_dir=str(planning_dir), depth=depth, profile="solo", strict=False, export=None, export_format="jsonl")
+    original_emit = emit_payload
+    captured: dict[str, Any] = {}
+
+    def capture(payload: dict[str, Any], _args: argparse.Namespace, exit_code: int | None = None) -> int:
+        captured.update(payload)
+        return 0
+
+    globals()["emit_payload"] = capture
+    try:
+        lint_sections(args)
+    finally:
+        globals()["emit_payload"] = original_emit
+    findings = [Finding(item["severity"], item["code"], item["message"], item.get("path"), item.get("recommendation"), item.get("category", "general")) for item in captured.get("findings", [])]
+    return findings, {key: value for key, value in captured.items() if key not in {"findings", "success", "score", "finding_count"}}
+
+
+def evidence_findings_for_score(planning_dir: Path, min_files: int) -> list[Finding]:
+    texts = existing_artifact_texts(planning_dir)
+    combined = "\n\n".join(texts.values())
+    path = planning_artifacts(planning_dir)["plan"] or planning_dir / "codex-plan.md"
+    findings: list[Finding] = []
+    add_term_findings(findings, combined, EVIDENCE_TERMS, path, "medium")
+    if len(extract_file_paths(combined)) < min_files:
+        findings.append(finding("medium", "thin-file-evidence", f"Fewer than {min_files} concrete file paths found.", path))
+    return findings
+
+
+def readiness_findings_for_score(planning_dir: Path, max_files: int) -> list[Finding]:
+    progress = check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"}:
+        return [finding("critical", "invalid-sections", "Readiness requires valid sections.", planning_dir / "sections" / "index.md")]
+    deps = dependency_graph(planning_dir, progress)
+    findings: list[Finding] = []
+    for section in progress["sections"]:
+        path = planning_dir / "sections" / f"{section}.md"
+        if not path.exists():
+            findings.append(finding("critical", "missing-section-file", f"{section}.md is missing.", path))
+            continue
+        text = read_text(path)
+        metrics = section_metrics(section, path, deps)
+        add_term_findings(findings, text, READINESS_TERMS, path, "medium")
+        if metrics["file_count"] > max_files:
+            findings.append(finding("high", "too-many-owned-files", f"{section} owns too many files.", path))
+        if not test_names(text):
+            findings.append(finding("medium", "no-test-names", f"{section} names no concrete tests.", path))
+    return findings
+
+
+def assumption_ledger(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    texts = existing_artifact_texts(planning_dir)
+    rows: list[dict[str, str]] = []
+    labels = {
+        "assumption": ["assumption", "assume", "assumes"],
+        "open_question": ["open question", "unknown", "unclear"],
+        "stop_line": ["stop-line", "stop line", "stop and"],
+    }
+    for name, text in texts.items():
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip("- ").strip()
+            if not stripped:
+                continue
+            for label, terms in labels.items():
+                if contains_any(stripped, terms):
+                    rows.append({"type": label, "artifact": name, "line": str(line_no), "text": stripped})
+                    break
+    content = "# Assumption Ledger\n\n| Type | Artifact | Line | Text |\n|------|----------|------|------|\n"
+    for row in rows:
+        safe_text = row["text"].replace("|", "\\|")
+        content += f"| {row['type']} | {row['artifact']} | {row['line']} | {safe_text} |\n"
+    output = None
+    if args.write:
+        output = planning_dir / "assumption-ledger.md"
+        output.write_text(content, encoding="utf-8")
+    return print_json({"success": True, "planning_dir": str(planning_dir), "count": len(rows), "rows": rows, "output": str(output) if output else None, "content": content if not output else None})
+
+
+def implementation_packet(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    section = args.section
+    section_path = planning_dir / "sections" / f"{section}.md"
+    if not section_path.exists():
+        return print_json({"success": False, "error": f"Section file not found: {section_path}"}, 1)
+    artifacts = planning_artifacts(planning_dir)
+    tdd_text = read_text(artifacts["tdd"]) if artifacts["tdd"] and artifacts["tdd"].exists() else ""
+    trace_findings, trace = traceability_analysis(planning_dir)
+    section_text = read_text(section_path)
+    reqs = requirement_ids(section_text)
+    tests = test_names(section_text + "\n" + tdd_text)
+    files = extract_file_paths(section_text)
+    content = (
+        f"# Implementation Packet: {section}\n\n"
+        f"Planning directory: `{planning_dir}`\n\n"
+        f"## Requirements\n\n{', '.join(reqs) if reqs else 'No requirement IDs found.'}\n\n"
+        f"## Owned Files\n\n" + "\n".join(f"- `{file}`" for file in files) + "\n\n"
+        f"## Tests\n\n" + "\n".join(f"- `{name}`" for name in tests) + "\n\n"
+        f"## Traceability\n\n```json\n{json.dumps(trace.get('coverage', {}), indent=2, sort_keys=True)}\n```\n\n"
+        f"## Section\n\n{section_text}\n"
+    )
+    output_dir = resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "packets"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"{section}-packet.md"
+    output.write_text(content, encoding="utf-8")
+    return print_json({"success": not trace_findings, "planning_dir": str(planning_dir), "section": section, "output": str(output), "requirements": reqs, "files": files, "tests": tests})
+
+
+def context_brief(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    section_path = planning_dir / "sections" / f"{args.section}.md" if args.section else None
+    artifacts = planning_artifacts(planning_dir)
+    parts = ["# Context Brief\n"]
+    for name in ("spec", "plan", "tdd", "decisions", "risks", "traceability"):
+        path = artifacts.get(name)
+        if path and path.exists():
+            text = read_text(path)
+            parts.append(f"## {name.replace('_', ' ').title()}\n")
+            parts.append("\n".join(text.splitlines()[: args.lines_per_artifact]))
+            parts.append("\n")
+    if section_path and section_path.exists():
+        parts.append(f"## Section: {args.section}\n")
+        parts.append(read_text(section_path))
+    content = "\n".join(parts)
+    output = None
+    if args.output:
+        output = resolve_path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(content, encoding="utf-8")
+    return print_json({"success": True, "planning_dir": str(planning_dir), "section": args.section, "word_count": word_count(content), "output": str(output) if output else None, "content": None if output else content})
+
+
+def tdd_skeletons(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    artifacts = planning_artifacts(planning_dir)
+    if not artifacts["tdd"] or not artifacts["tdd"].exists():
+        return print_json({"success": False, "error": "codex-plan-tdd.md is missing"}, 1)
+    text = read_text(artifacts["tdd"])
+    tests = test_names(text)
+    output_dir = resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "tdd-skeletons"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ext = {"pytest": "py", "vitest": "ts", "go": "go", "rust": "rs"}[args.framework]
+    output = output_dir / f"test_skeleton.{ext}"
+    if args.framework == "pytest":
+        body = "\n\n".join(f"def {name}():\n    \"\"\"Generated from Forge TDD plan. Replace with real red test.\"\"\"\n    raise AssertionError(\"red test not implemented\")" for name in tests if name.startswith("test_"))
+    elif args.framework == "vitest":
+        body = "import { describe, it, expect } from 'vitest';\n\n" + "\n\n".join(f"it('{name}', () => {{\n  expect.fail('red test not implemented');\n}});" for name in tests)
+    elif args.framework == "go":
+        body = "package tests\n\nimport \"testing\"\n\n" + "\n\n".join(f"func Test{re.sub(r'[^A-Za-z0-9]', '', name.title())}(t *testing.T) {{\n\tt.Fatal(\"red test not implemented\")\n}}" for name in tests)
+    else:
+        body = "\n\n".join(f"#[test]\nfn {re.sub(r'[^a-zA-Z0-9_]', '_', name.lower())}() {{\n    panic!(\"red test not implemented\");\n}}" for name in tests)
+    output.write_text(body + "\n", encoding="utf-8")
+    return print_json({"success": True, "planning_dir": str(planning_dir), "framework": args.framework, "tests": tests, "output": str(output)})
+
+
+def plan_diff(args: argparse.Namespace) -> int:
+    before = resolve_path(args.before)
+    after = resolve_path(args.after)
+    if not before.exists() or not after.exists():
+        return print_json({"success": False, "error": "Both --before and --after must exist."}, 1)
+    before_text = read_text(before)
+    after_text = read_text(after)
+    result = {
+        "success": True,
+        "before": str(before),
+        "after": str(after),
+        "word_delta": word_count(after_text) - word_count(before_text),
+        "requirements_added": sorted(set(requirement_ids(after_text)) - set(requirement_ids(before_text))),
+        "requirements_removed": sorted(set(requirement_ids(before_text)) - set(requirement_ids(after_text))),
+        "headings_added": sorted(set(markdown_headings(after_text)) - set(markdown_headings(before_text))),
+        "headings_removed": sorted(set(markdown_headings(before_text)) - set(markdown_headings(after_text))),
+        "files_added": sorted(set(extract_file_paths(after_text)) - set(extract_file_paths(before_text))),
+        "files_removed": sorted(set(extract_file_paths(before_text)) - set(extract_file_paths(after_text))),
+    }
+    return print_json(result)
+
+
+def lint_review_integration(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    findings: list[Finding] = []
+    reviews_dir = planning_dir / "reviews"
+    integration = planning_artifacts(planning_dir)["integration_notes"]
+    plan = planning_artifacts(planning_dir)["plan"]
+    review_files = sorted(reviews_dir.glob("*.md")) if reviews_dir.exists() else []
+    if not review_files:
+        findings.append(finding("medium", "missing-reviews", "No review files found.", reviews_dir))
+    if not integration or not integration.exists():
+        findings.append(finding("medium", "missing-integration-notes", "Integration notes are missing.", planning_dir / "codex-integration-notes.md"))
+        integration_text = ""
+    else:
+        integration_text = read_text(integration)
+        add_term_findings(
+            findings,
+            integration_text,
+            {
+                "accepted-review-items": ["accepted", "integrated", "changed", "updated"],
+                "rejected-review-items": ["rejected", "deferred", "not accepted", "rationale"],
+                "plan-edits": ["plan", "codex-plan.md", "section", "tdd"],
+            },
+            integration,
+            "medium",
+        )
+    if plan and plan.exists() and review_files and not contains_any(read_text(plan), ["review integration", "review-integrated", "accepted review"]):
+        findings.append(finding("medium", "plan-missing-review-integration", "Plan does not mention review integration.", plan))
+    return emit_quality(
+        "review-integration",
+        findings,
+        args,
+        {
+            "planning_dir": str(planning_dir),
+            "review_files": [str(path) for path in review_files],
+            "integration_notes": str(integration) if integration else None,
+            "integration_word_count": word_count(integration_text),
+        },
+    )
+
+
+def implement_progress(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    state_dir = planning_dir / "implementation"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / "forge-progress.json"
+    state = load_json(path) if path.exists() else {"events": [], "created_at": now_iso()}
+    event = {
+        "timestamp": now_iso(),
+        "section": args.section,
+        "stage": args.stage,
+        "command": args.command,
+        "result": args.result,
+        "notes": args.notes,
+    }
+    state.setdefault("events", []).append(event)
+    write_json(path, state)
+    return print_json({"success": True, "planning_dir": str(planning_dir), "state_path": str(path), "event": event, "event_count": len(state["events"])})
+
+
+def eval_suite(args: argparse.Namespace) -> int:
+    root = resolve_path(args.examples_dir)
+    planning_dirs = sorted(path for path in root.glob("**/codex-plan.md") if "invalid" not in path.parts)
+    rows: list[dict[str, Any]] = []
+    for plan_path in planning_dirs:
+        planning_dir = plan_path.parent
+        score_args = argparse.Namespace(
+            planning_dir=str(planning_dir),
+            depth=args.depth,
+            profile=args.profile,
+            strict=False,
+            export=None,
+            export_format="jsonl",
+            max_files=8,
+            min_files=3,
+        )
+        plan_findings, _ = plan_findings_for_score(planning_dir, args.depth)
+        section_findings, _ = section_findings_for_score(planning_dir, args.depth)
+        trace_findings, _ = traceability_analysis(planning_dir)
+        evidence_findings = evidence_findings_for_score(planning_dir, 3)
+        readiness_findings = readiness_findings_for_score(planning_dir, 8)
+        components = {
+            "plan": quality_score(plan_findings, args.profile),
+            "sections": quality_score(section_findings, args.profile),
+            "traceability": quality_score(trace_findings, args.profile),
+            "evidence": quality_score(evidence_findings, args.profile),
+            "readiness": quality_score(readiness_findings, args.profile),
+        }
+        rows.append(
+            {
+                "planning_dir": str(planning_dir),
+                "forge_score": round(sum(components.values()) / len(components)),
+                "components": components,
+                "findings": sum(len(items) for items in [plan_findings, section_findings, trace_findings, evidence_findings, readiness_findings]),
+            }
+        )
+    payload = {"success": True, "examples_dir": str(root), "depth_mode": args.depth, "profile": args.profile, "rows": rows}
+    if args.output:
+        output = resolve_path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        payload["output"] = str(output)
+    return print_json(payload)
+
+
+def markdown_tables(text: str) -> list[list[list[str]]]:
+    tables: list[list[list[str]]] = []
+    current: list[list[str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells):
+                continue
+            current.append(cells)
+        else:
+            if current:
+                tables.append(current)
+                current = []
+    if current:
+        tables.append(current)
+    return tables
+
+
+def table_has_columns(tables: list[list[list[str]]], required: list[str]) -> bool:
+    required_lower = [item.lower() for item in required]
+    for table in tables:
+        if not table:
+            continue
+        header = [cell.lower() for cell in table[0]]
+        if all(item in header for item in required_lower):
+            return True
+    return False
+
+
+def lint_artifact_schema(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    findings: list[Finding] = []
+    artifacts = planning_artifacts(planning_dir)
+    checks = [
+        ("decisions", ["ID", "Date", "Decision", "Alternatives", "Rationale", "Impact"]),
+        ("risks", ["ID", "Risk", "Severity", "Likelihood", "Mitigation", "Section", "Verification"]),
+        ("traceability", ["Requirement", "Plan Coverage", "Section Coverage", "Test Coverage", "Status"]),
+    ]
+    for name, required in checks:
+        path = artifacts[name]
+        if not path or not path.exists():
+            findings.append(finding("medium", f"missing-{name}", f"{name} artifact is missing.", path or planning_dir / f"{name}.md"))
+            continue
+        text = read_text(path)
+        tables = markdown_tables(text)
+        if not table_has_columns(tables, required):
+            findings.append(
+                finding(
+                    "medium",
+                    f"invalid-{name}-table",
+                    f"{path.name} does not contain the required columns: {', '.join(required)}.",
+                    path,
+                    "Use the Forge governance table schema so automated checks can reason over the artifact.",
+                )
+            )
+    sections_state = check_section_progress(planning_dir)
+    if sections_state["state"] == "invalid_index":
+        findings.append(finding("critical", "invalid-section-index", "sections/index.md does not parse.", planning_dir / "sections" / "index.md"))
+    return emit_quality(
+        "artifact-schema",
+        findings,
+        args,
+        {"planning_dir": str(planning_dir), "section_progress": sections_state},
+    )
+
+
+def suggest_section_splits(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    progress = check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"}:
+        return print_json({"success": False, "section_progress": progress}, 1)
+    deps = dependency_graph(planning_dir, progress)
+    suggestions: list[dict[str, Any]] = []
+    for section in progress["sections"]:
+        path = planning_dir / "sections" / f"{section}.md"
+        if not path.exists():
+            continue
+        metrics = section_metrics(section, path, deps)
+        if metrics["file_count"] <= args.max_files and metrics["word_count"] <= args.max_words:
+            continue
+        groups: dict[str, list[str]] = {}
+        for file in metrics["files"]:
+            parts = Path(file).parts
+            key = parts[1] if len(parts) > 2 and parts[0] in {"src", "app", "lib", "tests"} else parts[0]
+            groups.setdefault(key, []).append(file)
+        proposed = []
+        base_number = int(section.split("-", 2)[1]) if len(section.split("-", 2)) >= 2 and section.split("-", 2)[1].isdigit() else 1
+        for offset, (label, files) in enumerate(sorted(groups.items()), start=0):
+            slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-") or "part"
+            proposed.append(
+                {
+                    "section": f"section-{base_number + offset:02d}-{slug}",
+                    "files": files,
+                    "reason": "Grouped by top-level implementation area.",
+                }
+            )
+        suggestions.append(
+            {
+                "section": section,
+                "word_count": metrics["word_count"],
+                "file_count": metrics["file_count"],
+                "recommendation": "Split before implementation.",
+                "proposed_sections": proposed,
+            }
+        )
+    return print_json({"success": True, "planning_dir": str(planning_dir), "suggestions": suggestions})
+
+
+def implementation_drift(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    progress = check_section_progress(planning_dir)
+    findings: list[Finding] = []
+    if progress["state"] in {"invalid_index", "no_index"}:
+        findings.append(finding("critical", "invalid-sections", "Drift detection requires valid sections.", planning_dir / "sections" / "index.md"))
+        return emit_quality("implementation-drift", findings, args, {"section_progress": progress})
+    if args.diff_file:
+        diff_path = resolve_path(args.diff_file)
+        changed = set(changed_files_from_diff(read_text(diff_path)))
+    else:
+        changed_list, error = git_changed_files(resolve_path(args.repo), args.staged)
+        if error:
+            return print_json({"success": False, "error": error}, 1)
+        changed = set(changed_list)
+
+    section_files = sorted((planning_dir / "sections").glob("section-*.md"))
+    planned_files = set()
+    planned_tests = set()
+    for section_path in section_files:
+        files = extract_file_paths(read_text(section_path))
+        planned_files.update(files)
+        planned_tests.update(file for file in files if contains_any(file, ["test", "spec"]))
+    changed_tests = {file for file in changed if contains_any(file, ["test", "spec"])}
+    out_of_scope = sorted(file for file in changed if file not in planned_files)
+    missing_planned_tests = sorted(file for file in planned_tests if file not in changed_tests)
+    for file in out_of_scope:
+        findings.append(finding("high", "implementation-drift-file", f"Changed file was not planned: {file}", planning_dir))
+    if planned_tests and not changed_tests:
+        findings.append(finding("medium", "planned-tests-not-changed", "No changed test files match planned test ownership.", planning_dir))
+    return emit_quality(
+        "implementation-drift",
+        findings,
+        args,
+        {
+            "planning_dir": str(planning_dir),
+            "planned_files": sorted(planned_files),
+            "changed_files": sorted(changed),
+            "out_of_scope": out_of_scope,
+            "planned_tests": sorted(planned_tests),
+            "changed_tests": sorted(changed_tests),
+            "missing_planned_tests": missing_planned_tests,
+        },
+    )
+
+
+def codebase_evidence(args: argparse.Namespace) -> int:
+    target_dir = resolve_path(args.target_dir)
+    planning_dir = resolve_path(args.planning_dir) if args.planning_dir else target_dir
+    interesting = [
+        "package.json",
+        "pyproject.toml",
+        "go.mod",
+        "Cargo.toml",
+        "Gemfile",
+        "requirements.txt",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "uv.lock",
+    ]
+    found_files = [str(path.relative_to(target_dir)) for name in interesting for path in target_dir.rglob(name) if ".venv" not in path.parts and "node_modules" not in path.parts]
+    test_files = [
+        str(path.relative_to(target_dir))
+        for path in target_dir.rglob("*")
+        if path.is_file()
+        and ".venv" not in path.parts
+        and "node_modules" not in path.parts
+        and contains_any(path.name, ["test", "spec"])
+        and path.suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".rb"}
+    ][: args.max_tests]
+    commands: list[str] = []
+    package_json = target_dir / "package.json"
+    if package_json.exists():
+        try:
+            package = load_json(package_json)
+            scripts = package.get("scripts", {}) if isinstance(package, dict) else {}
+            commands.extend(f"npm run {name}" for name in sorted(scripts) if contains_any(name, ["test", "lint", "typecheck", "check"]))
+        except json.JSONDecodeError:
+            pass
+    if (target_dir / "pyproject.toml").exists():
+        commands.extend(["uv run pytest", "python -m pytest"])
+    if (target_dir / "go.mod").exists():
+        commands.append("go test ./...")
+    if (target_dir / "Cargo.toml").exists():
+        commands.append("cargo test")
+    content = (
+        "# Codebase Evidence\n\n"
+        f"Target: `{target_dir}`\n\n"
+        "## Runtime And Package Files\n\n"
+        + ("\n".join(f"- `{file}`" for file in sorted(found_files)) or "- None found")
+        + "\n\n## Test Files\n\n"
+        + ("\n".join(f"- `{file}`" for file in sorted(test_files)) or "- None found")
+        + "\n\n## Candidate Commands\n\n"
+        + ("\n".join(f"- `{command}`" for command in sorted(set(commands))) or "- None inferred")
+        + "\n"
+    )
+    output = None
+    if args.write:
+        output = planning_dir / "codex-evidence.md"
+        output.write_text(content, encoding="utf-8")
+    return print_json(
+        {
+            "success": True,
+            "target_dir": str(target_dir),
+            "planning_dir": str(planning_dir),
+            "runtime_files": sorted(found_files),
+            "test_files": sorted(test_files),
+            "candidate_commands": sorted(set(commands)),
+            "output": str(output) if output else None,
+            "content": None if output else content,
+        }
+    )
+
+
+def html_report(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    score_args = argparse.Namespace(
+        planning_dir=str(planning_dir),
+        depth=args.depth,
+        profile=args.profile,
+        strict=False,
+        export=None,
+        export_format="jsonl",
+        min_files=3,
+        max_files=8,
+        write_history=False,
+    )
+    plan_findings, _ = plan_findings_for_score(planning_dir, args.depth)
+    section_findings, section_extras = section_findings_for_score(planning_dir, args.depth)
+    trace_findings, trace = traceability_analysis(planning_dir)
+    all_findings = plan_findings + section_findings + trace_findings + evidence_findings_for_score(planning_dir, 3) + readiness_findings_for_score(planning_dir, 8)
+    components = {
+        "Plan": quality_score(plan_findings, args.profile),
+        "Sections": quality_score(section_findings, args.profile),
+        "Traceability": quality_score(trace_findings, args.profile),
+        "Evidence": quality_score(evidence_findings_for_score(planning_dir, 3), args.profile),
+        "Readiness": quality_score(readiness_findings_for_score(planning_dir, 8), args.profile),
+    }
+    score = round(sum(components.values()) / len(components))
+    rows = "".join(f"<tr><th>{html.escape(name)}</th><td>{value}</td></tr>" for name, value in components.items())
+    findings_html = "".join(
+        f"<li><strong>{html.escape(item.severity)}</strong> {html.escape(item.code)}: {html.escape(item.message)}</li>"
+        for item in all_findings
+    ) or "<li>No findings.</li>"
+    coverage_html = "".join(
+        f"<tr><td>{html.escape(req)}</td><td>{html.escape(str(data['covered']))}</td><td>{html.escape(', '.join(data['sections']))}</td></tr>"
+        for req, data in trace.get("coverage", {}).items()
+    )
+    content = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Zagrosi Forge Report</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.45; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; }}
+    th, td {{ border: 1px solid #ccc; padding: 0.5rem; text-align: left; }}
+    .score {{ font-size: 2rem; font-weight: 700; }}
+  </style>
+</head>
+<body>
+  <h1>Zagrosi Forge Report</h1>
+  <p>Planning directory: <code>{html.escape(str(planning_dir))}</code></p>
+  <p class="score">Forge Score: {score}</p>
+  <h2>Components</h2>
+  <table>{rows}</table>
+  <h2>Traceability</h2>
+  <table><tr><th>Requirement</th><th>Covered</th><th>Sections</th></tr>{coverage_html}</table>
+  <h2>Findings</h2>
+  <ul>{findings_html}</ul>
+</body>
+</html>
+"""
+    output = resolve_path(args.output) if args.output else planning_dir / ".forge" / "report.html"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(content, encoding="utf-8")
+    return print_json({"success": True, "planning_dir": str(planning_dir), "output": str(output), "forge_score": score})
+
+
+def e2e_trial_record(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    status_args = argparse.Namespace(path=str(planning_dir))
+    progress = check_section_progress(planning_dir)
+    score_findings = (
+        plan_findings_for_score(planning_dir, args.depth)[0]
+        + section_findings_for_score(planning_dir, args.depth)[0]
+        + traceability_analysis(planning_dir)[0]
+        + evidence_findings_for_score(planning_dir, 3)
+        + readiness_findings_for_score(planning_dir, 8)
+    )
+    score = quality_score(score_findings, args.profile)
+    record = {
+        "timestamp": now_iso(),
+        "trial_name": args.name,
+        "planning_dir": str(planning_dir),
+        "target_repo": args.target_repo,
+        "depth_mode": args.depth,
+        "profile": args.profile,
+        "forge_score": score,
+        "section_progress": progress.get("progress"),
+        "notes": args.notes,
+        "metrics": {
+            "time_to_plan_minutes": args.time_to_plan_minutes,
+            "implementation_success": args.implementation_success,
+            "rework_notes": args.rework_notes,
+        },
+    }
+    output_dir = resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "trials"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output = output_dir / f"{re.sub(r'[^a-zA-Z0-9_.-]+', '-', args.name).strip('-') or 'trial'}.json"
+    output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return print_json({"success": True, "output": str(output), "record": record})
+
+
+def release_check(args: argparse.Namespace) -> int:
+    plugin_root = resolve_path(args.plugin_root)
+    commands = [
+        [sys.executable, "-m", "py_compile", str(plugin_root / "scripts" / "zagrosi_skills.py")],
+        [sys.executable, "-m", "json.tool", str(plugin_root / ".codex-plugin" / "plugin.json")],
+        [sys.executable, "-m", "json.tool", str(plugin_root / ".agents" / "plugins" / "marketplace.json")],
+        [sys.executable, "-m", "json.tool", str(plugin_root / "examples" / "evals" / "suite.json")],
+        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "doctor", "--plugin-root", str(plugin_root), "--strict"],
+        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(plugin_root / "examples" / "saas"), "--strict"],
+        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(plugin_root / "examples" / "typescript-app"), "--strict"],
+        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "eval-suite", "--examples-dir", str(plugin_root / "examples")],
+    ]
+    if args.run_tests:
+        commands.append(["uv", "run", "--with", "pytest", "python", "-m", "pytest"])
+    results = []
+    success = True
+    for command in commands:
+        result = subprocess.run(command, cwd=plugin_root, capture_output=True, text=True)
+        results.append(
+            {
+                "command": " ".join(command),
+                "returncode": result.returncode,
+                "stdout_tail": result.stdout[-1000:],
+                "stderr_tail": result.stderr[-1000:],
+            }
+        )
+        if result.returncode != 0:
+            success = False
+    return print_json({"success": success, "plugin_root": str(plugin_root), "results": results}, 0 if success else 1)
+
+
+def default_codex_config_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
+
+
+def toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def toml_header_token(line: str) -> str | None:
+    match = re.match(r"^\s*(\[\[?.*?\]\]?)\s*(?:#.*)?$", line)
+    return match.group(1) if match else None
+
+
+def find_toml_section(lines: list[str], header: str) -> tuple[int, int] | None:
+    start: int | None = None
+    for index, line in enumerate(lines):
+        token = toml_header_token(line)
+        if token is None:
+            continue
+        if token == header:
+            start = index
+            continue
+        if start is not None:
+            return start, index
+    if start is None:
+        return None
+    return start, len(lines)
+
+
+def upsert_toml_section(text: str, header: str, entries: dict[str, str]) -> tuple[str, list[str]]:
+    lines = text.splitlines()
+    changes: list[str] = []
+    section = find_toml_section(lines, header)
+    if section is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(header)
+        for key, value in entries.items():
+            lines.append(f"{key} = {value}")
+        changes.append(f"added {header}")
+        return "\n".join(lines).rstrip() + "\n", changes
+
+    start, end = section
+    for key, value in entries.items():
+        replacement = f"{key} = {value}"
+        key_re = re.compile(rf"^\s*{re.escape(key)}\s*=.*$")
+        found = False
+        for index in range(start + 1, end):
+            if key_re.match(lines[index]):
+                found = True
+                if lines[index].strip() != replacement:
+                    lines[index] = replacement
+                    changes.append(f"updated {header}.{key}")
+                break
+        if not found:
+            lines.insert(end, replacement)
+            end += 1
+            changes.append(f"added {header}.{key}")
+    return "\n".join(lines).rstrip() + "\n", changes
+
+
+def install_codex(args: argparse.Namespace) -> int:
+    plugin_root = resolve_path(args.plugin_root)
+    config_path = resolve_path(args.config) if args.config else default_codex_config_path()
+    plugin_id = "zagrosi-forge@zagrosi"
+    required = [
+        plugin_root / ".codex-plugin" / "plugin.json",
+        plugin_root / ".agents" / "plugins" / "marketplace.json",
+        plugin_root / "skills" / "zagrosi-project" / "SKILL.md",
+        plugin_root / "skills" / "zagrosi-plan" / "SKILL.md",
+        plugin_root / "skills" / "zagrosi-implement" / "SKILL.md",
+    ]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        return print_json(
+            {
+                "success": False,
+                "operation": "install-codex",
+                "plugin_root": str(plugin_root),
+                "config_path": str(config_path),
+                "plugin": plugin_id,
+                "missing": missing,
+                "error": "Plugin root is missing required package files.",
+            },
+            1,
+        )
+
+    doctor_result = subprocess.run(
+        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "doctor", "--plugin-root", str(plugin_root), "--strict"],
+        cwd=plugin_root,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        doctor_payload: Any = json.loads(doctor_result.stdout) if doctor_result.stdout.strip() else {}
+    except json.JSONDecodeError:
+        doctor_payload = {"stdout": doctor_result.stdout[-1000:], "stderr": doctor_result.stderr[-1000:]}
+    if doctor_result.returncode != 0:
+        return print_json(
+            {
+                "success": False,
+                "operation": "install-codex",
+                "plugin_root": str(plugin_root),
+                "config_path": str(config_path),
+                "plugin": plugin_id,
+                "doctor": doctor_payload,
+                "error": "Package doctor failed; fix the plugin before installing.",
+            },
+            1,
+        )
+
+    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    updated, marketplace_changes = upsert_toml_section(
+        existing,
+        "[marketplaces.zagrosi]",
+        {
+            "source_type": toml_string("local"),
+            "source": toml_string(str(plugin_root)),
+        },
+    )
+    updated, plugin_changes = upsert_toml_section(
+        updated,
+        '[plugins."zagrosi-forge@zagrosi"]',
+        {"enabled": "true"},
+    )
+    changes = marketplace_changes + plugin_changes
+    changed = updated != existing
+    backup_path: Path | None = None
+
+    if changed and not args.dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        if config_path.exists() and not args.no_backup:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+            backup_path = config_path.with_name(f"{config_path.name}.bak-{stamp}")
+            backup_path.write_text(existing, encoding="utf-8")
+        config_path.write_text(updated, encoding="utf-8")
+
+    next_steps = []
+    if args.dry_run:
+        next_steps.append("Run the same command without --dry-run to update Codex config.")
+    elif changed:
+        next_steps.append("Restart Codex so the plugin marketplace is reloaded.")
+    else:
+        next_steps.append("Config already contains the Zagrosi Forge plugin entry.")
+    next_steps.append("Use $zagrosi-project, $zagrosi-plan, or $zagrosi-implement in Codex.")
+
+    payload = {
+        "success": True,
+        "operation": "install-codex",
+        "changed": changed,
+        "dry_run": args.dry_run,
+        "config_path": str(config_path),
+        "plugin_root": str(plugin_root),
+        "plugin": plugin_id,
+        "marketplace": "zagrosi",
+        "backup_path": str(backup_path) if backup_path else None,
+        "changes": changes,
+        "restart_required": bool(changed and not args.dry_run),
+        "next_steps": next_steps,
+    }
+    if args.dry_run:
+        payload["config_preview"] = updated
+    return print_json(payload)
+
+
+def add_quality_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--export")
+    parser.add_argument("--export-format", choices=["jsonl", "sarif"], default="jsonl")
+
+
+def add_flight_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--flight",
+        dest="flight_mode",
+        choices=["auto", "strict", "advisory", "off"],
+        default="auto",
+        help="Run phase-aware flight gates automatically.",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Helpers for Zagrosi Forge Codex skills")
+    parser.add_argument("--pretty", action="store_true", help="Print a human-readable report instead of JSON.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("project-setup", aliases=["project", "zagrosi-project-setup", "deep-project-setup"])
+    p.add_argument("--file", required=True)
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--plugin-root")
+    add_flight_args(p)
+    p.set_defaults(func=deep_project_setup)
+
+    p = sub.add_parser("project-create-dirs", aliases=["zagrosi-project-create-dirs", "deep-project-create-dirs"])
+    p.add_argument("--planning-dir", required=True)
+    add_flight_args(p)
+    p.set_defaults(func=deep_project_create_dirs)
+
+    p = sub.add_parser("plan-setup", aliases=["plan", "zagrosi-plan-setup", "deep-plan-setup"])
+    p.add_argument("--file", required=True)
+    p.add_argument("--plugin-root")
+    p.add_argument("--target-dir")
+    p.add_argument("--write-evidence", action="store_true")
+    p.add_argument("--review-mode", choices=["codex_review", "external_llm", "skip"], default="codex_review")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    add_flight_args(p)
+    p.set_defaults(func=deep_plan_setup)
+
+    p = sub.add_parser("plan-check-sections", aliases=["zagrosi-plan-check-sections", "deep-plan-check-sections"])
+    p.add_argument("--planning-dir", required=True)
+    p.set_defaults(func=deep_plan_check_sections)
+
+    p = sub.add_parser(
+        "plan-generate-section-prompts",
+        aliases=["zagrosi-plan-generate-section-prompts", "deep-plan-generate-section-prompts"],
+    )
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--all", action="store_true")
+    p.set_defaults(func=deep_plan_generate_section_prompts)
+
+    p = sub.add_parser("implement-setup", aliases=["implement", "zagrosi-implement-setup", "deep-implement-setup"])
+    p.add_argument("--sections-dir", required=True)
+    p.add_argument("--target-dir")
+    p.add_argument("--plugin-root")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
+    add_flight_args(p)
+    p.set_defaults(func=deep_implement_setup)
+
+    p = sub.add_parser(
+        "implement-record-section",
+        aliases=["zagrosi-implement-record-section", "deep-implement-record-section"],
+    )
+    p.add_argument("--sections-dir", required=True)
+    p.add_argument("--section", required=True)
+    p.add_argument("--commit")
+    p.add_argument("--notes")
+    p.add_argument("--target-dir")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
+    p.add_argument("--write-report", action="store_true")
+    add_flight_args(p)
+    p.set_defaults(func=deep_implement_record_section)
+
+    p = sub.add_parser("preflight")
+    p.add_argument("--phase", choices=["project", "plan", "implement", "release"], required=True)
+    p.add_argument("--file")
+    p.add_argument("--planning-dir")
+    p.add_argument("--sections-dir")
+    p.add_argument("--target-dir")
+    p.add_argument("--plugin-root")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--write-evidence", action="store_true")
+    p.add_argument("--run-tests", action="store_true")
+    add_quality_args(p)
+    add_flight_args(p)
+    p.set_defaults(func=preflight)
+
+    p = sub.add_parser("postflight")
+    p.add_argument("--phase", choices=["project", "plan", "implement", "release"], required=True)
+    p.add_argument("--file")
+    p.add_argument("--planning-dir")
+    p.add_argument("--sections-dir")
+    p.add_argument("--target-dir")
+    p.add_argument("--plugin-root")
+    p.add_argument("--section-file")
+    p.add_argument("--diff-file")
+    p.add_argument("--staged", action="store_true")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--write-report", action="store_true")
+    p.add_argument("--run-tests", action="store_true")
+    add_quality_args(p)
+    add_flight_args(p)
+    p.set_defaults(func=postflight)
+
+    p = sub.add_parser("lint-project-manifest")
+    p.add_argument("--planning-dir", required=True)
+    add_quality_args(p)
+    p.set_defaults(func=lint_project_manifest)
+
+    p = sub.add_parser("lint-plan")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES))
+    add_quality_args(p)
+    p.set_defaults(func=lint_plan)
+
+    p = sub.add_parser("lint-sections")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES))
+    add_quality_args(p)
+    p.set_defaults(func=lint_sections)
+
+    p = sub.add_parser("lint-implementation-state")
+    p.add_argument("--sections-dir", required=True)
+    add_quality_args(p)
+    p.set_defaults(func=lint_implementation_state)
+
+    p = sub.add_parser("status")
+    p.add_argument("--path", required=True)
+    p.set_defaults(func=status)
+
+    p = sub.add_parser("traceability")
+    p.add_argument("--planning-dir", required=True)
+    add_quality_args(p)
+    p.set_defaults(func=traceability)
+
+    p = sub.add_parser("doctor")
+    p.add_argument("--plugin-root")
+    add_quality_args(p)
+    p.set_defaults(func=doctor)
+
+    p = sub.add_parser("install-codex", aliases=["install", "install-plugin"])
+    p.add_argument("--plugin-root", default=".")
+    p.add_argument("--config")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-backup", action="store_true")
+    p.set_defaults(func=install_codex)
+
+    p = sub.add_parser("section-estimates")
+    p.add_argument("--planning-dir", required=True)
+    p.set_defaults(func=section_estimates)
+
+    p = sub.add_parser("next-section")
+    p.add_argument("--planning-dir", required=True)
+    p.set_defaults(func=next_section)
+
+    p = sub.add_parser("parallel-plan")
+    p.add_argument("--planning-dir", required=True)
+    p.set_defaults(func=parallel_plan)
+
+    p = sub.add_parser("patch-scope")
+    p.add_argument("--section-file", required=True)
+    p.add_argument("--repo", default=".")
+    p.add_argument("--diff-file")
+    p.add_argument("--staged", action="store_true")
+    add_quality_args(p)
+    p.set_defaults(func=patch_scope)
+
+    p = sub.add_parser("commit-message")
+    p.add_argument("--section-file", required=True)
+    p.add_argument("--style", choices=["conventional", "simple"], default="conventional")
+    p.set_defaults(func=commit_message)
+
+    p = sub.add_parser("extract-requirements")
+    p.add_argument("--file", required=True)
+    p.add_argument("--write", action="store_true")
+    p.set_defaults(func=extract_requirements)
+
+    p = sub.add_parser("trace-export")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--format", choices=["json", "csv", "md"], default="json")
+    p.add_argument("--output")
+    add_quality_args(p)
+    p.set_defaults(func=trace_export)
+
+    p = sub.add_parser("agent-prompts")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--type", choices=["all", *sorted(PROMPT_TYPES)], default="all")
+    p.set_defaults(func=agent_prompts)
+
+    p = sub.add_parser("context-budget")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--max-words", type=int, default=12000)
+    add_quality_args(p)
+    p.set_defaults(func=context_budget)
+
+    p = sub.add_parser("forge-score")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--min-files", type=int, default=3)
+    p.add_argument("--max-files", type=int, default=8)
+    p.add_argument("--write-history", action="store_true")
+    add_quality_args(p)
+    p.set_defaults(func=forge_score)
+
+    p = sub.add_parser("lint-evidence")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--min-files", type=int, default=3)
+    add_quality_args(p)
+    p.set_defaults(func=lint_evidence)
+
+    p = sub.add_parser("lint-implementation-readiness")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--max-files", type=int, default=8)
+    add_quality_args(p)
+    p.set_defaults(func=lint_implementation_readiness)
+
+    p = sub.add_parser("lint-review-integration")
+    p.add_argument("--planning-dir", required=True)
+    add_quality_args(p)
+    p.set_defaults(func=lint_review_integration)
+
+    p = sub.add_parser("lint-artifact-schema")
+    p.add_argument("--planning-dir", required=True)
+    add_quality_args(p)
+    p.set_defaults(func=lint_artifact_schema)
+
+    p = sub.add_parser("suggest-section-splits")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--max-files", type=int, default=8)
+    p.add_argument("--max-words", type=int, default=3500)
+    p.set_defaults(func=suggest_section_splits)
+
+    p = sub.add_parser("implementation-drift")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--repo", default=".")
+    p.add_argument("--diff-file")
+    p.add_argument("--staged", action="store_true")
+    add_quality_args(p)
+    p.set_defaults(func=implementation_drift)
+
+    p = sub.add_parser("codebase-evidence")
+    p.add_argument("--target-dir", default=".")
+    p.add_argument("--planning-dir")
+    p.add_argument("--max-tests", type=int, default=80)
+    p.add_argument("--write", action="store_true")
+    p.set_defaults(func=codebase_evidence)
+
+    p = sub.add_parser("assumption-ledger")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--write", action="store_true")
+    p.set_defaults(func=assumption_ledger)
+
+    p = sub.add_parser("implementation-packet")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--section", required=True)
+    p.add_argument("--output-dir")
+    p.set_defaults(func=implementation_packet)
+
+    p = sub.add_parser("context-brief")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--section")
+    p.add_argument("--lines-per-artifact", type=int, default=80)
+    p.add_argument("--output")
+    p.set_defaults(func=context_brief)
+
+    p = sub.add_parser("tdd-skeletons")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--framework", choices=["pytest", "vitest", "go", "rust"], default="pytest")
+    p.add_argument("--output-dir")
+    p.set_defaults(func=tdd_skeletons)
+
+    p = sub.add_parser("plan-diff")
+    p.add_argument("--before", required=True)
+    p.add_argument("--after", required=True)
+    p.set_defaults(func=plan_diff)
+
+    p = sub.add_parser("implement-progress")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--section", required=True)
+    p.add_argument("--stage", choices=["started", "red", "green", "refactor", "review", "verified", "recorded"], required=True)
+    p.add_argument("--command")
+    p.add_argument("--result")
+    p.add_argument("--notes")
+    p.set_defaults(func=implement_progress)
+
+    p = sub.add_parser("report")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
+    p.add_argument("--output")
+    p.set_defaults(func=html_report)
+
+    p = sub.add_parser("e2e-trial-record")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--target-repo")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
+    p.add_argument("--time-to-plan-minutes", type=float)
+    p.add_argument("--implementation-success", choices=["unknown", "yes", "no", "partial"], default="unknown")
+    p.add_argument("--rework-notes")
+    p.add_argument("--notes")
+    p.add_argument("--output-dir")
+    p.set_defaults(func=e2e_trial_record)
+
+    p = sub.add_parser("eval-suite")
+    p.add_argument("--examples-dir", default="examples")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
+    p.add_argument("--output")
+    p.set_defaults(func=eval_suite)
+
+    p = sub.add_parser("release-check")
+    p.add_argument("--plugin-root", default=".")
+    p.add_argument("--run-tests", action="store_true")
+    p.set_defaults(func=release_check)
+
+    p = sub.add_parser("write-governance-stubs")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.set_defaults(func=write_governance_stubs)
+
+    p = sub.add_parser("review-board-prompts")
+    p.add_argument("--planning-dir", required=True)
+    p.set_defaults(func=review_board_prompts)
+
+    p = sub.add_parser("migrate")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=migrate)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    global PRETTY_OUTPUT
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if "--pretty" in raw_args:
+        PRETTY_OUTPUT = True
+        raw_args = [item for item in raw_args if item != "--pretty"]
+    parser = build_parser()
+    args = parser.parse_args(raw_args)
+    if getattr(args, "pretty", False):
+        PRETTY_OUTPUT = True
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

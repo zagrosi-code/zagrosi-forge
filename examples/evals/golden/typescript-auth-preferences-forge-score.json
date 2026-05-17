@@ -1,0 +1,12 @@
+{
+  "components": {
+    "evidence_quality": 100,
+    "implementation_readiness": 100,
+    "plan_depth": 100,
+    "section_readiness": 100,
+    "traceability": 100
+  },
+  "forge_score": 100,
+  "grade": "A",
+  "planning_dir_name": "01-auth"
+}

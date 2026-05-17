@@ -1,0 +1,31 @@
+{
+  "benchmarks": [
+    {
+      "depth": "standard",
+      "name": "saas-authentication",
+      "planning_dir": "../saas/01-authentication"
+    },
+    {
+      "depth": "standard",
+      "name": "typescript-auth-preferences",
+      "planning_dir": "../typescript-app/01-auth"
+    }
+  ],
+  "metrics": [
+    "plan_depth",
+    "section_readiness",
+    "traceability",
+    "evidence_quality",
+    "implementation_readiness"
+  ],
+  "protocol": "same input brief, same codebase snapshot, same allowed tools, same depth target",
+  "reference_tracks": [
+    {
+      "depth": "deep",
+      "name": "zero-downtime-identity-migration",
+      "path": "../deep-review/zero-downtime-migration",
+      "type": "input-scenario"
+    }
+  ],
+  "snapshots_dir": "golden"
+}
