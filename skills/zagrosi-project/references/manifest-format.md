@@ -25,4 +25,4 @@ After the block, include:
 - parallelization notes
 - shared decisions and cross-cutting constraints
 - exact next command for each split, for example:
-  `Use $zagrosi-plan on @planning/01-authentication/spec.md`
+  `Use $zagrosi-forge:zagrosi-plan on @planning/01-authentication/spec.md`

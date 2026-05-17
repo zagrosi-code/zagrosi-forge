@@ -10,7 +10,7 @@ question categories:
 - data ownership and lifecycle
 - external systems and trust boundaries
 - deployment, migration, and operational constraints
-- unknowns that may need dedicated research in `$zagrosi-plan`
+- unknowns that may need dedicated research in `$zagrosi-forge:zagrosi-plan`
 
 Stop when you can name the major components, explain their dependencies, and
 write a self-contained spec for each one.

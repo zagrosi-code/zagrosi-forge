@@ -7,9 +7,9 @@ Zagrosi Forge packages three skills plus a deterministic helper CLI:
 
 | Skill | Use It For | Output |
 |-------|------------|--------|
-| `$zagrosi-project` | Breaking a broad project brief into focused planning units | `project-manifest.md` and split `spec.md` files |
-| `$zagrosi-plan` | Turning one spec into a reviewed TDD implementation plan | `codex-plan.md`, `codex-plan-tdd.md`, `sections/` |
-| `$zagrosi-implement` | Building section files with tests, review, docs, and git hygiene | completed sections, review artifacts, implementation state |
+| `$zagrosi-forge:zagrosi-project` | Breaking a broad project brief into focused planning units | `project-manifest.md` and split `spec.md` files |
+| `$zagrosi-forge:zagrosi-plan` | Turning one spec into a reviewed TDD implementation plan | `codex-plan.md`, `codex-plan-tdd.md`, `sections/` |
+| `$zagrosi-forge:zagrosi-implement` | Building section files with tests, review, docs, and git hygiene | completed sections, review artifacts, implementation state |
 
 The workflows are resumable because state is inferred from files on disk. There
 are no Claude-specific hooks, injected task files, or hidden session contracts.
@@ -33,9 +33,10 @@ and self-contained implementation sections.
 
 ## Installation
 
-Zagrosi Forge is packaged as a Codex plugin with a local marketplace entry.
-You need Codex with plugin/marketplace support and Python 3.11 or newer. `uv`
-is optional, but useful for running the test suite. No API keys are required.
+Zagrosi Forge is packaged as a Codex plugin with a local marketplace entry and
+an installer that materializes Codex's plugin cache. You need Codex with plugin
+support and Python 3.11 or newer. `uv` is optional, but useful for running the
+test suite. No API keys are required.
 
 Clone the repository and run the installer:
 
@@ -50,22 +51,31 @@ Or ask Codex to do the local install for you:
 ```text
 Please install the Codex plugin from https://github.com/zagrosi-code/zagrosi-forge.
 Clone it into my open-source projects folder, run its installer, preserve any
-existing ~/.codex/config.toml settings, and tell me when to restart Codex.
+existing ~/.codex/config.toml settings, verify it with codex debug prompt-input,
+and tell me when to restart Codex.
 ```
 
 The installer validates the package, creates a timestamped backup of
-`~/.codex/config.toml` when it changes, and writes the local marketplace/plugin
-entries for you. Restart Codex after it reports success. The skills should then
-be available as `$zagrosi-project`, `$zagrosi-plan`, and `$zagrosi-implement`.
+`~/.codex/config.toml` when it changes, writes the local marketplace/plugin
+entries, copies the package into Codex's plugin cache, and verifies the skills
+with `codex debug prompt-input` when the `codex` CLI is available. Restart Codex
+after it reports success. The canonical installed skill names are:
 
-Preview the config change without writing it:
+```text
+$zagrosi-forge:zagrosi-project
+$zagrosi-forge:zagrosi-plan
+$zagrosi-forge:zagrosi-implement
+```
+
+Preview the config and cache changes without writing them:
 
 ```bash
 python3 scripts/zagrosi_skills.py install --dry-run --pretty
 ```
 
-Manual install is still possible if you prefer editing config yourself. Add the
-repo as a local marketplace in `~/.codex/config.toml`:
+Manual install is still possible if you prefer editing config yourself, but it
+requires both config and cache state. Add the repo as a local marketplace in
+`~/.codex/config.toml`:
 
 ```toml
 [marketplaces.zagrosi]
@@ -75,6 +85,21 @@ source = "/absolute/path/to/zagrosi-forge"
 [plugins."zagrosi-forge@zagrosi"]
 enabled = true
 ```
+
+Then copy the package into the versioned cache path shown in
+`.codex-plugin/plugin.json`, for example:
+
+```text
+~/.codex/plugins/cache/zagrosi/zagrosi-forge/0.2.0/
+```
+
+For most users, the installer is the safer path because it keeps those pieces in
+sync.
+
+`codex plugin marketplace add zagrosi-code/zagrosi-forge` can register the
+public GitHub marketplace, but by itself it does not enable or materialize the
+plugin cache in current Codex CLI versions. Use the installer until Codex
+exposes a complete non-interactive marketplace install command.
 
 Quick verification:
 
@@ -98,20 +123,20 @@ python3 /absolute/path/to/zagrosi-forge/scripts/zagrosi_skills.py status \
 Use the skills directly inside Codex:
 
 ```text
-Use $zagrosi-project on @planning/requirements.md
-Use $zagrosi-plan on @planning/01-auth/spec.md
-Use $zagrosi-implement on @planning/01-auth/sections/.
+Use $zagrosi-forge:zagrosi-project on @planning/requirements.md
+Use $zagrosi-forge:zagrosi-plan on @planning/01-auth/spec.md
+Use $zagrosi-forge:zagrosi-implement on @planning/01-auth/sections/.
 ```
 
 Typical flow:
 
 ```text
 requirements.md
-  -> $zagrosi-project
+  -> $zagrosi-forge:zagrosi-project
   -> project-manifest.md + split specs
-  -> $zagrosi-plan
+  -> $zagrosi-forge:zagrosi-plan
   -> reviewed plan + TDD plan + section files
-  -> $zagrosi-implement
+  -> $zagrosi-forge:zagrosi-implement
   -> tested implementation + review artifacts
 ```
 
@@ -361,7 +386,7 @@ gates. Invalid examples stay short because they prove gate failures.
 
 ## Domain Packs
 
-`$zagrosi-plan` can load focused reference packs when a spec enters a common
+`$zagrosi-forge:zagrosi-plan` can load focused reference packs when a spec enters a common
 risk area:
 
 | Reference | Use For |

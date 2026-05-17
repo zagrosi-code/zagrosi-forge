@@ -5,7 +5,7 @@ description: Implement Zagrosi Forge section files with test-first development, 
 
 # Zagrosi Implement
 
-Implement `$zagrosi-plan` section files one at a time. The workflow prioritizes
+Implement `$zagrosi-forge:zagrosi-plan` section files one at a time. The workflow prioritizes
 small tested changes, review before commit, and resumable progress.
 
 ## First Actions

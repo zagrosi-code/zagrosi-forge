@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,10 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "zagrosi_skills.py"
 
 
-def run_cmd(*args: str, cwd: Path | None = None) -> dict:
+def run_cmd(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> dict:
     result = subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         cwd=cwd or ROOT,
+        env=env,
         text=True,
         capture_output=True,
     )
@@ -21,10 +23,11 @@ def run_cmd(*args: str, cwd: Path | None = None) -> dict:
     return json.loads(result.stdout)
 
 
-def run_raw(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def run_raw(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         cwd=cwd or ROOT,
+        env=env,
         text=True,
         capture_output=True,
     )
@@ -422,7 +425,7 @@ def test_doctor_and_requirement_extraction(tmp_path: Path) -> None:
 
     marketplace = json.loads((ROOT / ".agents" / "plugins" / "marketplace.json").read_text())
     assert marketplace["plugins"][0]["name"] == "zagrosi-forge"
-    assert marketplace["plugins"][0]["source"] == {"source": "local", "path": "."}
+    assert marketplace["plugins"][0]["source"] == {"source": "local", "path": "./"}
     assert marketplace["plugins"][0]["policy"]["authentication"] == "ON_INSTALL"
 
     req_file = tmp_path / "brief.md"
@@ -514,11 +517,14 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
         "--config",
         str(config),
         "--dry-run",
+        "--no-verify-codex",
     )
     assert dry_run["success"] is True
     assert dry_run["changed"] is True
     assert "[marketplaces.zagrosi]" in dry_run["config_preview"]
     assert "[marketplaces.zagrosi]" not in config.read_text()
+    assert dry_run["cache"]["changed"] is True
+    assert not Path(dry_run["cache"]["path"]).exists()
 
     installed = run_cmd(
         "install",
@@ -526,9 +532,11 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
         str(ROOT),
         "--config",
         str(config),
+        "--no-verify-codex",
     )
     assert installed["success"] is True
     assert installed["changed"] is True
+    assert installed["config_changed"] is True
     assert installed["backup_path"]
     updated = config.read_text()
     assert "[marketplaces.zagrosi]" in updated
@@ -536,6 +544,10 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
     assert '[plugins."zagrosi-forge@zagrosi"]' in updated
     assert "enabled = true" in updated
     assert Path(installed["backup_path"]).exists()
+    cache_path = Path(installed["cache"]["path"])
+    assert cache_path == tmp_path / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / "0.2.0"
+    assert (cache_path / ".codex-plugin" / "plugin.json").exists()
+    assert (cache_path / "skills" / "zagrosi-project" / "SKILL.md").exists()
 
     repeated = run_cmd(
         "install",
@@ -543,10 +555,45 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
         str(ROOT),
         "--config",
         str(config),
+        "--no-verify-codex",
     )
     assert repeated["success"] is True
     assert repeated["changed"] is False
+    assert repeated["cache"]["changed"] is False
     assert repeated["backup_path"] is None
+
+
+def test_install_codex_verifies_prompt_input_with_cached_plugin(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"debug\" ] && [ \"$2\" = \"prompt-input\" ]; then\n"
+        "  printf '%s\\n' 'zagrosi-forge:zagrosi-project' 'zagrosi-forge:zagrosi-plan' 'zagrosi-forge:zagrosi-implement'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 2\n",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+
+    installed = run_cmd(
+        "install",
+        "--plugin-root",
+        str(ROOT),
+        "--config",
+        str(config),
+        "--verify-codex",
+        env=env,
+    )
+
+    assert installed["success"] is True
+    assert installed["verification"]["status"] == "passed"
+    assert installed["verification"]["missing"] == []
 
 
 def test_strict_profile_blocks_medium_findings(tmp_path: Path) -> None:

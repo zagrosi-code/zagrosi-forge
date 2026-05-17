@@ -269,7 +269,7 @@ For release or benchmark evaluation, read `references/evaluation.md` and run
 Return the key generated files and the next command:
 
 ```text
-Use $zagrosi-implement on @{planning_dir}/sections/.
+Use $zagrosi-forge:zagrosi-implement on @{planning_dir}/sections/.
 ```
 
 Do not start implementation unless the user asks.

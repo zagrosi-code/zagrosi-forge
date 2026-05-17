@@ -6,7 +6,7 @@ description: Decompose broad or vague software project requirements into focused
 # Zagrosi Project
 
 Turn a broad project brief into small planning units that can each be handed to
-`$zagrosi-plan`. This is part of Zagrosi Forge: progress is inferred from files
+`$zagrosi-forge:zagrosi-plan`. This is part of Zagrosi Forge: progress is inferred from files
 on disk, and task tracking uses Codex plans when available.
 
 ## First Actions
@@ -70,7 +70,7 @@ Use `references/interview.md` for question strategy.
 Decide whether the work should remain one planning unit or be split. Use
 `references/splitting.md`.
 
-Good splits are large enough to deserve `$zagrosi-plan`, but small enough that one
+Good splits are large enough to deserve `$zagrosi-forge:zagrosi-plan`, but small enough that one
 plan can stay coherent. Split by user-facing capability, bounded subsystem,
 integration boundary, data model ownership, or risk area.
 
@@ -87,7 +87,7 @@ The file must start with a `SPLIT_MANIFEST` block. See
 `references/workflow-contract.md`.
 
 After the block, include the reasoning, dependency order, parallelization
-opportunities, shared concerns, and the exact `$zagrosi-plan` command for each
+opportunities, shared concerns, and the exact `$zagrosi-forge:zagrosi-plan` command for each
 future spec.
 
 ### 4. Confirmation
@@ -112,7 +112,7 @@ command also emits a `postflight` report for the project phase.
 For each missing `spec.md`, write a self-contained spec in the corresponding
 split directory. Use `references/spec-format.md`.
 
-Each spec must include enough context for a fresh `$zagrosi-plan` run without
+Each spec must include enough context for a fresh `$zagrosi-forge:zagrosi-plan` run without
 requiring the original project brief or interview transcript.
 
 ### 7. Quality Gate
@@ -143,6 +143,6 @@ End with a compact summary:
 - manifest path
 - created split directories
 - specs written
-- recommended `$zagrosi-plan @.../spec.md` order
+- recommended `$zagrosi-forge:zagrosi-plan @.../spec.md` order
 
-Do not start `$zagrosi-plan` automatically unless the user asks.
+Do not start `$zagrosi-forge:zagrosi-plan` automatically unless the user asks.

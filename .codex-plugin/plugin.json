@@ -32,9 +32,9 @@
     "privacyPolicyURL": "https://github.com/zagrosi-code/zagrosi-forge",
     "termsOfServiceURL": "https://github.com/zagrosi-code/zagrosi-forge",
     "defaultPrompt": [
-      "Use $zagrosi-project to split this project idea into planning specs",
-      "Use $zagrosi-plan to create a reviewed TDD implementation plan",
-      "Use $zagrosi-implement to build these sections with TDD"
+      "Use $zagrosi-forge:zagrosi-project to split this project idea into planning specs",
+      "Use $zagrosi-forge:zagrosi-plan to create a reviewed TDD implementation plan",
+      "Use $zagrosi-forge:zagrosi-implement to build these sections with TDD"
     ],
     "brandColor": "#0F766E",
     "screenshots": []
