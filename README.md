@@ -50,7 +50,7 @@ Or ask Codex to do the local install for you:
 
 ```text
 Please install the Codex plugin from https://github.com/zagrosi-code/zagrosi-forge.
-Clone it into my open-source projects folder, run its installer, preserve any
+Clone it into a local projects directory, run its installer, preserve any
 existing ~/.codex/config.toml settings, verify it with codex debug prompt-input,
 and tell me when to restart Codex.
 ```
