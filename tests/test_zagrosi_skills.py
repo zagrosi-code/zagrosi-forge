@@ -64,6 +64,33 @@ def test_project_setup_and_create_dirs(tmp_path: Path) -> None:
     assert str(tmp_path / "01-auth" / "spec.md") in created["missing_specs"]
 
 
+def test_project_setup_from_chat_brief_materializes_requirements(tmp_path: Path) -> None:
+    brief = "Improve Zagrosi Forge so project decomposition can start from a chat idea and interview."
+
+    setup = run_cmd("project-setup", "--brief", brief, "--planning-dir", str(tmp_path))
+
+    generated = tmp_path / "requirements.md"
+    assert setup["success"] is True
+    assert setup["input_mode"] == "chat"
+    assert setup["initial_file"] == str(generated)
+    assert setup["generated_requirements_file"] == str(generated)
+    assert setup["resume_step"] == 1
+    assert setup["preflight"]["input_mode"] == "chat"
+    assert setup["preflight"]["gates"][0]["name"] == "chat-brief"
+    assert generated.exists()
+    assert brief in generated.read_text()
+
+    resumed = run_cmd("project-setup", "--brief", brief, "--planning-dir", str(tmp_path))
+    assert resumed["mode"] == "resume"
+    assert resumed["initial_file"] == str(generated)
+    assert resumed["generated_requirements_file"] is None
+    assert not (tmp_path / "requirements-2.md").exists()
+
+    preflight = run_cmd("preflight", "--phase", "project", "--brief", brief, "--planning-dir", str(tmp_path))
+    assert preflight["success"] is True
+    assert preflight["input_mode"] == "chat"
+
+
 def test_plan_setup_sections_and_prompts(tmp_path: Path) -> None:
     spec = tmp_path / "spec.md"
     spec.write_text("# Auth\n\nAdd OAuth login.\n")

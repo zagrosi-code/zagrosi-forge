@@ -1,5 +1,5 @@
 interface:
   display_name: "Zagrosi Project"
-  short_description: "Decompose broad projects for planning"
+  short_description: "Decompose broad chat ideas or briefs for planning"
   brand_color: "#0F766E"
-  default_prompt: "Use $zagrosi-forge:zagrosi-project to decompose this project brief into focused planning specs."
+  default_prompt: "Use $zagrosi-forge:zagrosi-project to decompose this project idea or brief into focused planning specs."

@@ -123,6 +123,7 @@ python3 /absolute/path/to/zagrosi-forge/scripts/zagrosi_skills.py status \
 Use the skills directly inside Codex:
 
 ```text
+Use $zagrosi-forge:zagrosi-project to split this idea: improve billing, auth, and dashboard workflows for our SaaS app.
 Use $zagrosi-forge:zagrosi-project on @planning/requirements.md
 Use $zagrosi-forge:zagrosi-plan on @planning/01-auth/spec.md
 Use $zagrosi-forge:zagrosi-implement on @planning/01-auth/sections/.
@@ -131,7 +132,7 @@ Use $zagrosi-forge:zagrosi-implement on @planning/01-auth/sections/.
 Typical flow:
 
 ```text
-requirements.md
+chat idea or requirements.md
   -> $zagrosi-forge:zagrosi-project
   -> project-manifest.md + split specs
   -> $zagrosi-forge:zagrosi-plan
@@ -173,6 +174,7 @@ Control the automation with `--flight`:
 ### Project Commands
 
 ```bash
+python3 scripts/zagrosi_skills.py project-setup --brief "Build a SaaS app with auth, billing, and dashboard workflows." --planning-dir planning/saas
 python3 scripts/zagrosi_skills.py project-setup --file planning/requirements.md
 python3 scripts/zagrosi_skills.py project --file planning/requirements.md
 python3 scripts/zagrosi_skills.py project-create-dirs --planning-dir planning
@@ -334,6 +336,7 @@ are therefore the source of truth:
 commands run automatically:
 
 ```bash
+python3 scripts/zagrosi_skills.py preflight --phase project --brief "Build a SaaS app with auth, billing, and dashboard workflows." --planning-dir planning/saas
 python3 scripts/zagrosi_skills.py preflight --phase project --file planning/requirements.md
 python3 scripts/zagrosi_skills.py postflight --phase project --planning-dir planning
 

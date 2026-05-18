@@ -15,6 +15,9 @@ Add a `FORGE_META` block near the top:
 END_FORGE_META -->
 ```
 
+For chat-backed starts, `project-setup --brief` materializes the initial idea
+as `requirements.md`; use that generated file as the `source`.
+
 Use requirement IDs in split specs:
 
 - `REQ-001`

@@ -258,6 +258,16 @@ class Finding:
         return payload
 
 
+@dataclass(frozen=True, slots=True)
+class ProjectInput:
+    planning_dir: Path
+    input_file: Path | None
+    input_mode: str
+    generated_file: bool
+    brief_word_count: int
+    warnings: tuple[str, ...] = ()
+
+
 def finding(
     severity: str,
     code: str,
@@ -784,6 +794,93 @@ def ensure_markdown_file(path: Path, label: str) -> tuple[bool, str]:
     return True, ""
 
 
+def unique_markdown_path(directory: Path, stem: str) -> Path:
+    candidate = directory / f"{stem}.md"
+    if not candidate.exists() or not read_text(candidate).strip():
+        return candidate
+    counter = 2
+    while True:
+        candidate = directory / f"{stem}-{counter}.md"
+        if not candidate.exists() or not read_text(candidate).strip():
+            return candidate
+        counter += 1
+
+
+def write_chat_requirements(planning_dir: Path, brief: str) -> tuple[Path, bool]:
+    planning_dir.mkdir(parents=True, exist_ok=True)
+    path = unique_markdown_path(planning_dir, "requirements")
+    content = (
+        "# Project Brief\n\n"
+        "Source: chat brief captured by `$zagrosi-forge:zagrosi-project`.\n\n"
+        f"{brief.strip()}\n\n"
+        "## Interview Notes\n\n"
+        "Detailed interview answers belong in `zagrosi_project_interview.md`.\n"
+    )
+    path.write_text(content, encoding="utf-8")
+    return path, True
+
+
+def existing_project_initial_file(planning_dir: Path) -> Path | None:
+    for state_path in (planning_dir / ".zagrosi-project" / "session.json", planning_dir / ".deep-project" / "session.json"):
+        if not state_path.exists():
+            continue
+        try:
+            state = load_json(state_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        initial_file = state.get("initial_file")
+        if isinstance(initial_file, str):
+            candidate = resolve_path(initial_file)
+            if candidate.exists() and candidate.is_file():
+                return candidate
+    return None
+
+
+def resolve_project_input(args: argparse.Namespace, *, materialize_chat: bool = True) -> tuple[ProjectInput | None, str | None]:
+    file_arg = getattr(args, "file", None)
+    brief = (getattr(args, "brief", None) or "").strip()
+    planning_dir_arg = getattr(args, "planning_dir", None)
+
+    if file_arg and brief:
+        return None, "Use either --file or --brief for project setup, not both."
+
+    if file_arg:
+        input_file = resolve_path(file_arg)
+        ok, error = ensure_markdown_file(input_file, "requirements file")
+        if not ok:
+            return None, error
+        return ProjectInput(
+            planning_dir=input_file.parent,
+            input_file=input_file,
+            input_mode="file",
+            generated_file=False,
+            brief_word_count=word_count(read_text(input_file)),
+        ), None
+
+    if not brief:
+        return None, "Project setup needs either --file PATH or --brief TEXT from the chat."
+
+    planning_dir = resolve_path(planning_dir_arg) if planning_dir_arg else Path.cwd().resolve()
+    input_file: Path | None = None
+    generated = False
+    warnings: tuple[str, ...] = ()
+    if materialize_chat:
+        existing_file = existing_project_initial_file(planning_dir)
+        if existing_file:
+            input_file = existing_file
+            warnings = ("Existing project session found; reusing its initial requirements file.",)
+        else:
+            input_file, generated = write_chat_requirements(planning_dir, brief)
+    return ProjectInput(
+        planning_dir=planning_dir,
+        input_file=input_file,
+        input_mode="chat",
+        generated_file=generated,
+        brief_word_count=word_count(brief),
+        warnings=warnings,
+    ), None
+
+
 def extract_block(text: str, start: str, end: str) -> str | None:
     pattern = re.compile(rf"<!--\s*{re.escape(start)}\s*\n(.*?)\n{re.escape(end)}\s*-->", re.S)
     match = pattern.search(text)
@@ -979,27 +1076,51 @@ def flight_payload(
     return payload
 
 
-def project_preflight_report(input_file: Path, args: argparse.Namespace) -> dict[str, Any]:
+def project_preflight_report(project_input: ProjectInput, args: argparse.Namespace) -> dict[str, Any]:
     mode = effective_flight_mode(args)
     if mode == "off":
         return flight_payload(phase="project", stage="preflight", mode=mode, gates=[])
     plugin_root = resolve_path(getattr(args, "plugin_root", None)) if getattr(args, "plugin_root", None) else current_plugin_root()
-    ok, error = ensure_markdown_file(input_file, "requirements file")
-    gates = [
-        direct_gate(
+    planning_dir = project_input.planning_dir
+    input_file = project_input.input_file
+
+    if project_input.input_mode == "chat":
+        ok = project_input.brief_word_count > 0 and (
+            input_file is None or (input_file.exists() and bool(read_text(input_file).strip()))
+        )
+        input_payload = {
+            "mode": "chat",
+            "planning_dir": str(planning_dir),
+            "materialized_file": str(input_file) if input_file else None,
+            "brief_word_count": project_input.brief_word_count,
+            "generated_file": project_input.generated_file,
+            "error": None if ok else "chat brief is empty or could not be materialized",
+        }
+        input_gate = direct_gate("chat-brief", ok, input_payload)
+    else:
+        ok, error = ensure_markdown_file(input_file, "requirements file") if input_file else (False, "requirements file missing")
+        input_gate = direct_gate(
             "requirements-file",
             ok,
-            {"path": str(input_file), "error": error if error else None},
-        ),
+            {"path": str(input_file) if input_file else None, "error": error if error else None},
+        )
+
+    gates = [
+        input_gate,
         run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
-        run_internal_gate("status", ["status", "--path", str(input_file.parent)], required=False),
+        run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False),
     ]
     return flight_payload(
         phase="project",
         stage="preflight",
         mode=mode,
         gates=gates,
-        extras={"planning_dir": str(input_file.parent), "plugin_root": str(plugin_root)},
+        extras={
+            "planning_dir": str(planning_dir),
+            "plugin_root": str(plugin_root),
+            "input_mode": project_input.input_mode,
+            "input_file": str(input_file) if input_file else None,
+        },
     )
 
 
@@ -1162,9 +1283,10 @@ def release_postflight_report(plugin_root: Path, args: argparse.Namespace) -> di
 
 def preflight(args: argparse.Namespace) -> int:
     if args.phase == "project":
-        if not args.file:
-            return print_json({"success": False, "error": "--file is required for project preflight"}, 1)
-        payload = project_preflight_report(resolve_path(args.file), args)
+        project_input, error = resolve_project_input(args, materialize_chat=False)
+        if error:
+            return print_json({"success": False, "error": error}, 1)
+        payload = project_preflight_report(project_input, args)
     elif args.phase == "plan":
         if not args.file:
             return print_json({"success": False, "error": "--file is required for plan preflight"}, 1)
@@ -1198,12 +1320,12 @@ def postflight(args: argparse.Namespace) -> int:
 
 
 def deep_project_setup(args: argparse.Namespace) -> int:
-    input_file = resolve_path(args.file)
-    ok, error = ensure_markdown_file(input_file, "requirements file")
-    if not ok:
+    project_input, error = resolve_project_input(args)
+    if error or project_input is None:
         return print_json({"success": False, "error": error}, 1)
 
-    planning_dir = input_file.parent
+    input_file = project_input.input_file
+    planning_dir = project_input.planning_dir
     state_dir = planning_dir / ".zagrosi-project"
     state_path = state_dir / "session.json"
     legacy_state_path = planning_dir / ".deep-project" / "session.json"
@@ -1216,16 +1338,19 @@ def deep_project_setup(args: argparse.Namespace) -> int:
         state = load_json(state_path)
     else:
         state = {
-            "initial_file": str(input_file),
+            "initial_file": str(input_file) if input_file else None,
+            "initial_source": project_input.input_mode,
             "created_at": now_iso(),
             "depth_mode": args.depth,
             "workflow": "zagrosi-project",
         }
         write_json(state_path, state)
 
-    warnings: list[str] = []
-    if state.get("initial_file") != str(input_file):
+    warnings: list[str] = list(project_input.warnings)
+    if input_file and state.get("initial_file") and state.get("initial_file") != str(input_file):
         warnings.append(f"Session was created for {state.get('initial_file')}, now using {input_file}")
+    if state.get("initial_source") and state.get("initial_source") != project_input.input_mode:
+        warnings.append(f"Session was created from {state.get('initial_source')}, now using {project_input.input_mode}")
 
     manifest_path = planning_dir / "project-manifest.md"
     split_dirs = [p for p in planning_dir.iterdir() if p.is_dir() and SPLIT_RE.match(p.name)]
@@ -1255,7 +1380,10 @@ def deep_project_setup(args: argparse.Namespace) -> int:
         "mode": mode,
         "planning_dir": str(planning_dir),
         "state_dir": str(state_dir),
-        "initial_file": str(input_file),
+        "initial_file": str(input_file) if input_file else None,
+        "input_mode": project_input.input_mode,
+        "generated_requirements_file": str(input_file) if project_input.generated_file and input_file else None,
+        "brief_word_count": project_input.brief_word_count,
         "depth_mode": state.get("depth_mode", args.depth),
         "resume_step": resume_step,
         "resume_label": resume_label,
@@ -1264,7 +1392,7 @@ def deep_project_setup(args: argparse.Namespace) -> int:
         "warnings": warnings,
     }
     if effective_flight_mode(args) != "off":
-        payload["preflight"] = project_preflight_report(input_file, args)
+        payload["preflight"] = project_preflight_report(project_input, args)
     return print_json(payload)
 
 
@@ -4214,7 +4342,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("project-setup", aliases=["project", "zagrosi-project-setup", "deep-project-setup"])
-    p.add_argument("--file", required=True)
+    p.add_argument("--file", help="Markdown requirements file. Optional when --brief is provided.")
+    p.add_argument("--brief", help="Chat-supplied project brief to materialize into requirements.md.")
+    p.add_argument("--planning-dir", help="Directory for generated project artifacts when using --brief.")
     p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
     p.add_argument("--plugin-root")
     add_flight_args(p)
@@ -4275,6 +4405,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("preflight")
     p.add_argument("--phase", choices=["project", "plan", "implement", "release"], required=True)
     p.add_argument("--file")
+    p.add_argument("--brief")
     p.add_argument("--planning-dir")
     p.add_argument("--sections-dir")
     p.add_argument("--target-dir")
