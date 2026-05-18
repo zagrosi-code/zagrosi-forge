@@ -4,7 +4,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +40,81 @@ def run_text(*args: str, cwd: Path | None = None) -> str:
     result = run_raw(*args, cwd=cwd)
     assert result.returncode == 0, result.stderr + result.stdout
     return result.stdout
+
+
+def load_zagrosi_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("zagrosi_skills_under_test", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def write_required_plan_artifacts(planning_dir: Path) -> None:
+    def write_missing(relative: str, content: str) -> None:
+        path = planning_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(content)
+
+    write_missing(
+        "codex-research.md",
+        "# Research\n\nVerified current state with `rg` and `uv run pytest`. Existing files include `scripts/zagrosi_skills.py`, "
+        "`tests/test_zagrosi_skills.py`, and `skills/zagrosi-implement/SKILL.md`.\n",
+    )
+    write_missing(
+        "codex-evidence.md",
+        "# Codebase Evidence\n\nRuntime: `pyproject.toml`. Source files: `scripts/zagrosi_skills.py`. "
+        "Tests: `tests/test_zagrosi_skills.py`. Commands: `uv run pytest`.\n",
+    )
+    write_missing(
+        "codex-interview.md",
+        "interview_mode: skipped_with_reason\n"
+        "skip_reason: Test fixture has complete approved requirements and no product ambiguity.\n",
+    )
+    write_missing(
+        "codex-spec.md",
+        "# Spec\n\nREQ-001: Implement the planned Forge behavior with tests, traceability, and documentation.\n",
+    )
+    write_missing(
+        "codex-plan.md",
+        "# Plan\n\nREQ-001 updates `scripts/zagrosi_skills.py` and verifies with `tests/test_zagrosi_skills.py`. "
+        "Architecture keeps workflow policy in Forge helpers. Rollback is reverting the helper change.\n",
+    )
+    write_missing(
+        "codex-integration-notes.md",
+        "# Review Integration\n\nAccepted review: enforce process completeness before implementation and keep traceability explicit.\n",
+    )
+    write_missing(
+        "codex-plan-tdd.md",
+        "# TDD Plan\n\nREQ-001: `test_implement_setup_and_record` verifies implementation recording with `uv run pytest`.\n",
+    )
+    write_missing(
+        "decisions.md",
+        "# Decision Log\n\n"
+        "| ID | Date | Decision | Alternatives | Rationale | Impact |\n"
+        "|----|------|----------|--------------|-----------|--------|\n"
+        "| DEC-001 | Test | Enforce Forge process artifacts. | Rely on operator memory. | Durable records are required. | Implementation waits for planning artifacts. |\n",
+    )
+    write_missing(
+        "risk-register.md",
+        "# Risk Register\n\n"
+        "| ID | Risk | Severity | Likelihood | Mitigation | Section | Verification |\n"
+        "|----|------|----------|------------|------------|---------|--------------|\n"
+        "| RISK-001 | Process artifacts are missing. | High | Medium | Gate implementation setup. | section-01-foundation | `uv run pytest`. |\n",
+    )
+    write_missing(
+        "traceability.md",
+        "# Traceability Matrix\n\n"
+        "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Status |\n"
+        "|-------------|---------------|------------------|---------------|--------|\n"
+        "| REQ-001 | `codex-plan.md` | `section-01-foundation.md` | `test_implement_setup_and_record` | Planned |\n",
+    )
+    write_missing("quality-gates.md", "# Quality Gates\n\nRun `uv run pytest`, `lint-plan-artifacts`, and `traceability`.\n")
+    write_missing("reviews/process.md", "# Process Review\n\nNo blocking findings. The plan names files, tests, risks, and verification.\n")
 
 
 def test_project_setup_and_create_dirs(tmp_path: Path) -> None:
@@ -313,6 +391,7 @@ def test_implement_setup_and_record(tmp_path: Path) -> None:
         "END_MANIFEST -->\n"
     )
     (sections / "section-01-foundation.md").write_text("# Section\n\nTests first.\n")
+    write_required_plan_artifacts(tmp_path)
 
     setup = run_cmd(
         "implement-setup",
@@ -365,6 +444,7 @@ def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) 
     )
     (sections / "section-01-status.md").write_text("# Section\n\nREQ-001 with `test_status_flow`.\n")
     (sections / "section-02-docs.md").write_text("# Section\n\nREQ-002 with `test_readme_status_docs`.\n")
+    write_required_plan_artifacts(tmp_path)
     (tmp_path / "traceability.md").write_text(
         "# Traceability Matrix\n\n"
         "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Status |\n"
@@ -389,6 +469,156 @@ def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) 
     assert recorded["traceability_matrix"] == str(tmp_path / "traceability.md")
     assert "| REQ-001 | `codex-plan.md` | `section-01-status.md` | `test_status_flow` | Implemented |" in matrix
     assert "| REQ-002 | `codex-plan.md` | `section-02-docs.md` | `test_readme_status_docs` | Planned |" in matrix
+
+
+def test_implement_setup_blocks_incomplete_forge_process_even_with_flight_off(tmp_path: Path) -> None:
+    sections = tmp_path / "sections"
+    sections.mkdir()
+    (tmp_path / "spec.md").write_text("# Fix Forge\n\nREQ-001: Fix workflow shortcuts.\n")
+    (tmp_path / "decisions.md").write_text(
+        "# Decision Log\n\n"
+        "| ID | Date | Decision | Alternatives | Rationale | Impact |\n"
+        "|----|------|----------|--------------|-----------|--------|\n"
+        "| DEC-001 | TBD | TBD | TBD | TBD | TBD |\n"
+    )
+    (tmp_path / "risk-register.md").write_text(
+        "# Risk Register\n\n"
+        "| ID | Risk | Severity | Likelihood | Mitigation | Section | Verification |\n"
+        "|----|------|----------|------------|------------|---------|--------------|\n"
+        "| RISK-001 | TBD | TBD | TBD | TBD | TBD | TBD |\n"
+    )
+    (tmp_path / "traceability.md").write_text(
+        "# Traceability Matrix\n\n"
+        "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Status |\n"
+        "|-------------|---------------|------------------|---------------|--------|\n"
+        "| REQ-001 | TBD | TBD | TBD | TBD |\n"
+    )
+    (tmp_path / "quality-gates.md").write_text("# Quality Gates\n\n- `lint-plan`\n")
+    (sections / "index.md").write_text(
+        "<!-- PROJECT_CONFIG\n"
+        "runtime: python-uv\n"
+        "test_command: uv run pytest\n"
+        "END_PROJECT_CONFIG -->\n\n"
+        "<!-- SECTION_MANIFEST\n"
+        "section-01-shortcut\n"
+        "END_MANIFEST -->\n"
+    )
+    (sections / "section-01-shortcut.md").write_text("# Section\n\nTests first in `tests/test_zagrosi_skills.py`.\n")
+
+    result = run_raw(
+        "implement-setup",
+        "--sections-dir",
+        str(sections),
+        "--target-dir",
+        str(tmp_path),
+        "--flight",
+        "off",
+    )
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert payload["gate"] == "plan-artifacts"
+    codes = {item["code"] for item in payload["findings"]}
+    assert "missing-research" in codes
+    assert "missing-plan" in codes
+    assert "placeholder-decisions" in codes
+
+
+def test_patch_scope_preserves_long_file_extensions(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-snapshots.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "Update `examples/evals/suite.json`, `src/ui/Widget.jsx`, `src/ui/App.tsx`, and `config/settings.yaml`.\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text(
+        "diff --git a/examples/evals/suite.json b/examples/evals/suite.json\n"
+        "+++ b/examples/evals/suite.json\n"
+        "diff --git a/src/ui/Widget.jsx b/src/ui/Widget.jsx\n"
+        "+++ b/src/ui/Widget.jsx\n"
+        "diff --git a/src/ui/App.tsx b/src/ui/App.tsx\n"
+        "+++ b/src/ui/App.tsx\n"
+        "diff --git a/config/settings.yaml b/config/settings.yaml\n"
+        "+++ b/config/settings.yaml\n"
+    )
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == [
+        "config/settings.yaml",
+        "examples/evals/suite.json",
+        "src/ui/App.tsx",
+        "src/ui/Widget.jsx",
+    ]
+    assert scope["out_of_scope"] == []
+
+
+def test_implement_progress_preserves_overlapping_writes(tmp_path: Path, monkeypatch) -> None:
+    module = load_zagrosi_module()
+    planning = tmp_path / "planning"
+    planning.mkdir()
+    start = threading.Barrier(2)
+    original_write_json = module.write_json
+
+    def slow_progress_write(path: Path, payload: dict) -> None:
+        if path.name == "forge-progress.json":
+            time.sleep(0.05)
+        original_write_json(path, payload)
+
+    monkeypatch.setattr(module, "write_json", slow_progress_write)
+
+    def record(stage: str) -> int:
+        start.wait(timeout=2)
+        return module.implement_progress(
+            SimpleNamespace(
+                planning_dir=str(planning),
+                section="section-01-progress",
+                stage=stage,
+                command=None,
+                result=f"{stage} recorded",
+                notes=None,
+            )
+        )
+
+    threads = [threading.Thread(target=record, args=(stage,)) for stage in ("red", "green")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+    assert not any(thread.is_alive() for thread in threads)
+
+    state = json.loads((planning / "implementation" / "forge-progress.json").read_text())
+    assert sorted(event["stage"] for event in state["events"]) == ["green", "red"]
+
+
+def test_implement_postflight_defers_state_lint_until_sections_recorded(tmp_path: Path) -> None:
+    planning = write_quality_plan_fixture(tmp_path / "planning")
+
+    postflight = run_cmd(
+        "postflight",
+        "--phase",
+        "implement",
+        "--planning-dir",
+        str(planning),
+        "--sections-dir",
+        str(planning / "sections"),
+        "--target-dir",
+        str(tmp_path),
+        "--depth",
+        "fast",
+        "--flight",
+        "strict",
+    )
+
+    assert postflight["success"] is True
+    assert postflight["sections_recorded_complete"] is False
+    assert postflight["remaining_sections"] == ["section-01-auth"]
+    assert "lint-implementation-state" not in postflight["blocking_gates"]
+    progress_gate = next(gate for gate in postflight["gates"] if gate["name"] == "implementation-progress")
+    assert progress_gate["success"] is True
+    assert progress_gate["payload"]["deferred_gate"] == "lint-implementation-state"
 
 
 def write_quality_plan_fixture(tmp_path: Path) -> Path:
@@ -1167,3 +1397,9 @@ def test_skill_files_are_codex_native() -> None:
     plan_skill = (ROOT / "skills" / "zagrosi-plan" / "SKILL.md").read_text().lower()
     assert "source files" in plan_skill
     assert "plan artifact" in plan_skill
+    assert "lint-plan-artifacts" in plan_skill
+
+    implement_skill = (ROOT / "skills" / "zagrosi-implement" / "SKILL.md").read_text().lower()
+    assert "consolidated commit" in implement_skill
+    assert "section commits" in implement_skill
+    assert "lint-plan-artifacts" in implement_skill

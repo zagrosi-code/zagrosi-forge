@@ -11,11 +11,15 @@ small tested changes, review before commit, and resumable progress.
 ## First Actions
 
 1. Require a `sections/` directory containing `index.md`.
-2. Resolve `plugin_root` as the nearest parent containing `scripts/zagrosi_skills.py`.
-3. Determine `target_dir`, the repo where code should be written. Use the
+2. Treat the Forge planning record as mandatory implementation input. Do not
+   start from setup stubs, partial sections, missing reviews, or placeholder
+   governance files. `implement-setup` enforces this with `lint-plan-artifacts`
+   even when flight mode is off.
+3. Resolve `plugin_root` as the nearest parent containing `scripts/zagrosi_skills.py`.
+4. Determine `target_dir`, the repo where code should be written. Use the
    current working directory unless the user specifies another path or a
    previous config exists.
-4. Run setup:
+5. Run setup:
 
 ```bash
 python3 {plugin_root}/scripts/zagrosi_skills.py implement-setup --sections-dir "{sections_dir}" --target-dir "{target_dir}"
@@ -26,20 +30,24 @@ working-tree warnings like Pierce-style preflight warnings: pause for user
 approval before editing when they affect the target repository.
 When showing the command for a human to run outside Codex, add `--pretty`.
 
-5. Parse the JSON. If `success` is false, show the error and stop.
-6. If setup warns about a protected branch or dirty working tree, ask whether
+6. Parse the JSON. If `success` is false, show the error and stop. If
+   `gate` is `plan-artifacts`, resume `$zagrosi-forge:zagrosi-plan`; never
+   patch code or record implementation against an incomplete planning dir.
+7. If setup warns about a protected branch or dirty working tree, ask whether
    to continue before editing.
-7. Run section readiness gates:
+8. Run section readiness gates:
 
 ```bash
+python3 {plugin_root}/scripts/zagrosi_skills.py lint-plan-artifacts --planning-dir "{planning_dir}" --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-sections --planning-dir "{planning_dir}"
 python3 {plugin_root}/scripts/zagrosi_skills.py traceability --planning-dir "{planning_dir}"
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-implementation-readiness --planning-dir "{planning_dir}"
 python3 {plugin_root}/scripts/zagrosi_skills.py next-section --planning-dir "{planning_dir}"
 ```
 
-8. Use `update_plan` when available with one milestone group per section:
-   implement, review, fix, document, commit, record.
+9. Use `update_plan` when available with one milestone group per section:
+   implement, review, fix, document, record. Add commit milestones only when
+   using section commits.
 
 ## Section Loop
 
@@ -135,10 +143,17 @@ Record decisions in:
 Before committing, update the section file so it reflects what was actually
 built. Use `references/section-update.md`.
 
-### 7. Commit
+### 7. Commit Strategy
 
-If in a git repo, commit the section's implementation, tests, review artifacts
-that live inside the repo, and section doc updates that live inside the repo.
+If in a git repo, choose the commit strategy from user or repo preference:
+
+- Section commits: commit each section's implementation, tests, review
+  artifacts that live inside the repo, and section doc updates that live inside
+  the repo.
+- Consolidated commit: do not create small record commits after each section.
+  Record section completion with `--commit none` or the pending final commit
+  label, then make one normal feature commit after final verification. If the
+  planning directory is ignored, do not force-add local planning artifacts.
 
 Use the repo's commit style. Never bypass hooks unless the user explicitly
 instructs it after seeing the failure.
@@ -172,7 +187,9 @@ After all sections are recorded complete:
 
 1. Run the full configured `test_command`.
 2. Write `{planning_dir}/implementation/usage.md` with practical usage notes.
-3. Run final gates:
+3. If using a consolidated commit, stage the completed implementation once and
+   commit it in the repo's normal style.
+4. Run final gates:
 
 ```bash
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-implementation-state --sections-dir "{sections_dir}"
@@ -181,7 +198,7 @@ python3 {plugin_root}/scripts/zagrosi_skills.py status --path "{planning_dir}"
 python3 {plugin_root}/scripts/zagrosi_skills.py report --planning-dir "{planning_dir}"
 ```
 
-4. Summarize completed sections, commits, review files, tests run, and any
+5. Summarize completed sections, commits, review files, tests run, and any
    residual risks.
 
 Do not push or open a PR unless the user asks.

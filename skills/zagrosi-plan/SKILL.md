@@ -245,6 +245,7 @@ Run:
 
 ```bash
 python3 {plugin_root}/scripts/zagrosi_skills.py plan-check-sections --planning-dir "{planning_dir}"
+python3 {plugin_root}/scripts/zagrosi_skills.py lint-plan-artifacts --planning-dir "{planning_dir}" --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-sections --planning-dir "{planning_dir}" --depth standard --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py traceability --planning-dir "{planning_dir}" --strict
 python3 {plugin_root}/scripts/zagrosi_skills.py lint-implementation-readiness --planning-dir "{planning_dir}" --strict
@@ -257,9 +258,12 @@ python3 {plugin_root}/scripts/zagrosi_skills.py status --path "{planning_dir}"
 ```
 
 Use `status` during resume to inspect the current plan artifact state,
-`plan_artifacts`, section progress, and next action. Fix missing sections and
-high/critical gate findings until the section state is `complete` and
-traceability is covered.
+`plan_artifacts`, section progress, and next action. Fix missing sections,
+placeholder governance, missing review files, and high/critical gate findings
+until `lint-plan-artifacts` passes, the section state is `complete`, and
+traceability is covered. Do not proceed to implementation from setup stubs or a
+partially fleshed out planning directory; those files are the durable process
+record and may be referenced later.
 
 If resuming old upstream artifacts, run:
 

@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,9 @@ SPLIT_RE = re.compile(r"^\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
 SECTION_RE = re.compile(r"^section-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
 CONFIG_RE = re.compile(r"^[a-z][a-z0-9_]*:\s*.+$")
 REQ_ID_RE = re.compile(r"\bREQ-[A-Z0-9][A-Z0-9-]*\b")
-FILE_PATH_RE = re.compile(r"`?[\w./-]+\.(?:py|js|jsx|ts|tsx|go|rs|java|rb|php|md|json|ya?ml|toml|sql|sh)`?")
+FILE_PATH_RE = re.compile(
+    r"`?[\w./-]+\.(?:json|jsx|tsx|yaml|yml|toml|sql|java|php|py|js|ts|go|rs|rb|md|sh)(?:`|\b)"
+)
 FORGE_META_START = "FORGE_META"
 LEGACY_META_START = "DEEP_META"
 REVIEW_BOARD_PASSES = [
@@ -317,6 +320,13 @@ COMMAND_CATALOG = [
         "summary": "Check section ownership, tests, contracts, rollback, and file count readiness.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py lint-implementation-readiness --planning-dir planning/01-auth --strict"],
+    },
+    {
+        "name": "lint-plan-artifacts",
+        "phase": "quality",
+        "summary": "Require the full Forge planning record before implementation can start.",
+        "aliases": [],
+        "examples": ["python3 scripts/zagrosi_skills.py lint-plan-artifacts --planning-dir planning/01-auth --strict"],
     },
     {
         "name": "traceability",
@@ -972,6 +982,35 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(read_text(path))
 
 
+def update_json_locked(path: Path, default_factory, mutator, timeout_seconds: float = 5.0) -> dict[str, Any]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    start = time.monotonic()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, f"{os.getpid()} {now_iso()}\n".encode("utf-8"))
+            finally:
+                os.close(fd)
+            break
+        except FileExistsError:
+            if time.monotonic() - start >= timeout_seconds:
+                raise TimeoutError(f"Timed out waiting for progress lock: {lock_path}")
+            time.sleep(0.01)
+
+    try:
+        state = load_json(path) if path.exists() else default_factory()
+        mutator(state)
+        write_json(path, state)
+        return state
+    finally:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def ensure_markdown_file(path: Path, label: str) -> tuple[bool, str]:
     if not path.exists():
         return False, f"{label} not found: {path}"
@@ -1394,6 +1433,7 @@ def implement_preflight_report(sections_dir: Path, target_dir: Path, args: argpa
         direct_gate("sections-directory", sections_dir.exists() and sections_dir.is_dir(), {"sections_dir": str(sections_dir)}),
         direct_gate("target-directory", target_dir.exists() and target_dir.is_dir(), {"target_dir": str(target_dir)}),
         run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
+        run_internal_gate("lint-plan-artifacts", ["lint-plan-artifacts", "--planning-dir", str(planning_dir), "--profile", profile, "--strict"]),
         run_internal_gate("lint-sections", append_strict(["lint-sections", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
         run_internal_gate("traceability", append_strict(["traceability", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
         run_internal_gate("lint-implementation-readiness", append_strict(["lint-implementation-readiness", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
@@ -1422,6 +1462,8 @@ def implement_postflight_report(planning_dir: Path, args: argparse.Namespace) ->
     profile = getattr(args, "profile", "solo")
     sections_dir = resolve_path(getattr(args, "sections_dir", None)) if getattr(args, "sections_dir", None) else planning_dir / "sections"
     target_dir = resolve_path(getattr(args, "target_dir", None)) if getattr(args, "target_dir", None) else Path.cwd()
+    recording_status = implementation_recording_status(planning_dir)
+    final_state_gates = recording_status["sections_recorded_complete"]
     gates: list[dict[str, Any]] = []
     if getattr(args, "diff_file", None) or getattr(args, "staged", False):
         command = ["implementation-drift", "--planning-dir", str(planning_dir), "--repo", str(target_dir), "--profile", profile]
@@ -1437,16 +1479,49 @@ def implement_postflight_report(planning_dir: Path, args: argparse.Namespace) ->
         if getattr(args, "staged", False):
             command.append("--staged")
         gates.append(run_internal_gate("patch-scope", append_strict(command, mode)))
-    gates.extend(
-        [
-            run_internal_gate("lint-implementation-state", append_strict(["lint-implementation-state", "--sections-dir", str(sections_dir), "--profile", profile], mode)),
-            run_internal_gate("forge-score", append_strict(["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile, "--write-history"], mode)),
-        ]
-    )
+    progress_state = recording_status["section_progress"].get("state")
+    if progress_state in {"invalid_index", "no_index"}:
+        gates.append(
+            direct_gate(
+                "sections-index",
+                False,
+                {
+                    "section_progress": recording_status["section_progress"],
+                    "message": "Implementation postflight requires a valid sections/index.md.",
+                },
+            )
+        )
+    elif final_state_gates:
+        gates.append(run_internal_gate("lint-implementation-state", append_strict(["lint-implementation-state", "--sections-dir", str(sections_dir), "--profile", profile], mode)))
+    else:
+        gates.append(
+            direct_gate(
+                "implementation-progress",
+                True,
+                {
+                    "recording_state": recording_status["recording_state"],
+                    "recorded_sections": recording_status["recorded_sections"],
+                    "remaining_sections": recording_status["remaining_sections"],
+                    "deferred_gate": "lint-implementation-state",
+                    "message": "Implementation state lint is deferred until all sections are recorded complete.",
+                },
+                required=False,
+            )
+        )
+    score_command = ["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile, "--write-history"]
+    if final_state_gates:
+        score_command = append_strict(score_command, mode)
+    gates.append(run_internal_gate("forge-score", score_command, required=final_state_gates))
     if getattr(args, "write_report", False):
         gates.append(run_internal_gate("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], required=False))
     gates.append(run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False))
-    return flight_payload(phase="implement", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir)})
+    return flight_payload(
+        phase="implement",
+        stage="postflight",
+        mode=mode,
+        gates=gates,
+        extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir), **recording_status},
+    )
 
 
 def release_preflight_report(plugin_root: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -1833,6 +1908,30 @@ def completed_sections(planning_dir: Path) -> set[str]:
     return set(completed) if isinstance(completed, dict) else set()
 
 
+def implementation_recording_status(planning_dir: Path) -> dict[str, Any]:
+    progress = check_section_progress(planning_dir)
+    sections = progress.get("sections", []) if progress.get("state") not in {"invalid_index", "no_index"} else []
+    known_sections = set(sections)
+    recorded = completed_sections(planning_dir)
+    recorded_known = sorted(section for section in recorded if section in known_sections)
+    remaining = [section for section in sections if section not in recorded]
+    sections_recorded_complete = bool(sections) and not remaining and progress.get("state") == "complete"
+    if sections_recorded_complete:
+        recording_state = "complete"
+    elif recorded_known:
+        recording_state = "partial"
+    else:
+        recording_state = "not_started"
+    return {
+        "section_progress": progress,
+        "recording_state": recording_state,
+        "sections_recorded_complete": sections_recorded_complete,
+        "recorded_sections": recorded_known,
+        "remaining_sections": remaining,
+        "unknown_recorded_sections": sorted(section for section in recorded if section not in known_sections),
+    }
+
+
 def section_metrics(section: str, path: Path, dependencies: dict[str, list[str]]) -> dict[str, Any]:
     text = read_text(path) if path.exists() else ""
     files = extract_file_paths(text)
@@ -2042,6 +2141,11 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
     if progress["state"] in {"invalid_index", "no_index"}:
         return print_json({"success": False, "section_progress": progress}, 1)
 
+    artifact_payload = plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
+    if not artifact_payload["success"]:
+        artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before implementation."
+        return print_json(artifact_payload, 1)
+
     state_dir = planning_dir / "implementation"
     config_path = state_dir / "zagrosi_implement_config.json"
     state_path = state_dir / "zagrosi_implement_state.json"
@@ -2098,6 +2202,10 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
 def deep_implement_record_section(args: argparse.Namespace) -> int:
     sections_dir = resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
+    artifact_payload = plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
+    if not artifact_payload["success"]:
+        artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before recording implementation."
+        return print_json(artifact_payload, 1)
     state_path = sections_dir.parent / "implementation" / "zagrosi_implement_state.json"
     legacy_state_path = sections_dir.parent / "implementation" / "deep_implement_state.json"
     if not state_path.exists() and legacy_state_path.exists():
@@ -3394,6 +3502,134 @@ def planning_artifacts(planning_dir: Path) -> dict[str, Path | None]:
     }
 
 
+def plan_artifact_findings(planning_dir: Path) -> tuple[list[Finding], dict[str, Any]]:
+    artifacts = planning_artifacts(planning_dir)
+    required = {
+        "research": "research notes",
+        "evidence": "codebase evidence",
+        "interview": "interview record",
+        "spec": "normalized spec",
+        "plan": "implementation plan",
+        "integration_notes": "review integration notes",
+        "tdd": "TDD plan",
+        "decisions": "decision log",
+        "risks": "risk register",
+        "traceability": "traceability matrix",
+        "quality": "quality gates",
+    }
+    expected_names = {
+        "research": "codex-research.md",
+        "evidence": "codex-evidence.md",
+        "interview": "codex-interview.md",
+        "spec": "codex-spec.md",
+        "plan": "codex-plan.md",
+        "integration_notes": "codex-integration-notes.md",
+        "tdd": "codex-plan-tdd.md",
+        "decisions": "decisions.md",
+        "risks": "risk-register.md",
+        "traceability": "traceability.md",
+        "quality": "quality-gates.md",
+    }
+    findings: list[Finding] = []
+    present: dict[str, str] = {}
+    def has_placeholder_cell(text: str) -> bool:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.lower() in {"tbd", "todo"} or stripped.lower().startswith("[todo:"):
+                return True
+            if "|" not in stripped:
+                continue
+            cells = [cell.strip().lower() for cell in stripped.strip("|").split("|")]
+            if any(cell in {"tbd", "todo"} or cell.startswith("[todo:") for cell in cells):
+                return True
+        return False
+
+    for key, label in required.items():
+        path = artifacts.get(key)
+        expected = path or planning_dir / expected_names[key]
+        if not path or not path.exists():
+            findings.append(
+                finding(
+                    "critical",
+                    f"missing-{key}",
+                    f"Missing Forge {label}. Complete zagrosi-plan before implementation.",
+                    expected,
+                )
+            )
+            continue
+        text = read_text(path)
+        if not text.strip():
+            findings.append(
+                finding(
+                    "critical",
+                    f"empty-{key}",
+                    f"Forge {label} is empty. Complete zagrosi-plan before implementation.",
+                    path,
+                )
+            )
+            continue
+        present[key] = str(path)
+        if has_placeholder_cell(text):
+            findings.append(
+                finding(
+                    "critical",
+                    f"placeholder-{key}",
+                    f"Forge {label} still contains placeholder text.",
+                    path,
+                    "Replace setup stubs with the completed planning artifact before implementation.",
+                )
+            )
+
+    reviews_dir = planning_dir / "reviews"
+    review_files = sorted(path for path in reviews_dir.glob("*.md") if path.is_file()) if reviews_dir.exists() else []
+    nonempty_review_files = [path for path in review_files if read_text(path).strip()]
+    if not nonempty_review_files:
+        findings.append(
+            finding(
+                "critical",
+                "missing-review",
+                "Missing Forge plan review file under reviews/.",
+                reviews_dir,
+                "Run the review step and write at least one concrete review artifact before implementation.",
+            )
+        )
+    else:
+        present["reviews"] = [str(path) for path in nonempty_review_files]
+
+    progress = check_section_progress(planning_dir)
+    if progress.get("state") == "no_index":
+        findings.append(
+            finding(
+                "critical",
+                "missing-section-index",
+                "Missing sections/index.md. Complete sectioning before implementation.",
+                planning_dir / "sections" / "index.md",
+            )
+        )
+    elif progress.get("state") != "complete":
+        findings.append(
+            finding(
+                "critical",
+                "incomplete-sections",
+                f"Section files are not complete: {progress.get('progress', 'unknown progress')}.",
+                planning_dir / "sections",
+                "Write every section in SECTION_MANIFEST before implementation.",
+            )
+        )
+
+    return findings, {
+        "planning_dir": str(planning_dir),
+        "required_artifacts": sorted(required),
+        "present_artifacts": present,
+        "section_progress": progress,
+    }
+
+
+def plan_artifacts_payload(planning_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    findings, extras = plan_artifact_findings(planning_dir)
+    return quality_from_args("plan-artifacts", findings, args, extras)
+
+
 def existing_artifact_texts(planning_dir: Path) -> dict[str, str]:
     return {
         name: read_text(path)
@@ -3843,7 +4079,6 @@ def implement_progress(args: argparse.Namespace) -> int:
     state_dir = planning_dir / "implementation"
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / "forge-progress.json"
-    state = load_json(path) if path.exists() else {"events": [], "created_at": now_iso()}
     event = {
         "timestamp": now_iso(),
         "section": args.section,
@@ -3852,8 +4087,17 @@ def implement_progress(args: argparse.Namespace) -> int:
         "result": args.result,
         "notes": args.notes,
     }
-    state.setdefault("events", []).append(event)
-    write_json(path, state)
+
+    def default_state() -> dict[str, Any]:
+        return {"events": [], "created_at": now_iso()}
+
+    def append_event(state: dict[str, Any]) -> None:
+        state.setdefault("events", []).append(event)
+
+    try:
+        state = update_json_locked(path, default_state, append_event)
+    except TimeoutError as exc:
+        return print_json({"success": False, "planning_dir": str(planning_dir), "state_path": str(path), "error": str(exc)}, 1)
     return print_json({"success": True, "planning_dir": str(planning_dir), "state_path": str(path), "event": event, "event_count": len(state["events"])})
 
 
@@ -4111,6 +4355,12 @@ def lint_artifact_schema(args: argparse.Namespace) -> int:
         args,
         {"planning_dir": str(planning_dir), "section_progress": sections_state},
     )
+
+
+def lint_plan_artifacts(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    payload = plan_artifacts_payload(planning_dir, args)
+    return emit_payload(payload, args)
 
 
 def suggest_section_splits(args: argparse.Namespace) -> int:
@@ -5141,6 +5391,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--planning-dir", required=True)
     add_quality_args(p)
     p.set_defaults(func=lint_artifact_schema)
+
+    p = sub.add_parser("lint-plan-artifacts")
+    p.add_argument("--planning-dir", required=True)
+    add_quality_args(p)
+    p.set_defaults(func=lint_plan_artifacts)
 
     p = sub.add_parser("suggest-section-splits")
     p.add_argument("--planning-dir", required=True)
