@@ -1171,7 +1171,14 @@ def test_planning_consistency_reports_missing_late_requirement(tmp_path: Path) -
 def test_new_commands_are_discoverable() -> None:
     commands = run_cmd("commands")
     names = {item["name"] for item in commands["commands"]}
-    assert {"workflow-options", "capability-inventory", "review-capabilities", "planning-consistency"} <= names
+    assert {
+        "workflow-options",
+        "capability-inventory",
+        "review-capabilities",
+        "planning-consistency",
+        "update-check",
+        "self-update",
+    } <= names
 
 
 def test_doctor_and_requirement_extraction(tmp_path: Path) -> None:
@@ -1318,6 +1325,48 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
     assert repeated["changed"] is False
     assert repeated["cache"]["changed"] is False
     assert repeated["backup_path"] is None
+
+
+def test_update_check_reports_cache_and_config_status(tmp_path: Path) -> None:
+    config = tmp_path / "codex" / "config.toml"
+
+    status = run_cmd("update-check", "--plugin-root", str(ROOT), "--config", str(config))
+
+    assert status["success"] is True
+    assert status["operation"] == "update-check"
+    assert status["network_policy"] == "local-only"
+    assert status["remote_checked"] is False
+    assert status["cache"]["current"] is False
+    assert status["cache"]["exists"] is False
+    assert status["cache"]["changed"] is True
+    assert Path(status["cache"]["path"]) == tmp_path / "codex" / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / "0.2.0"
+    assert status["config"]["current"] is False
+    assert status["restart_required"] is True
+    assert any("self-update" in item for item in status["next_steps"])
+    assert not config.exists()
+
+
+def test_self_update_materializes_cache_and_update_check_passes(tmp_path: Path) -> None:
+    config = tmp_path / "codex" / "config.toml"
+
+    updated = run_cmd("self-update", "--plugin-root", str(ROOT), "--config", str(config), "--no-verify-codex")
+
+    assert updated["success"] is True
+    assert updated["operation"] == "self-update"
+    assert updated["changed"] is True
+    cache_path = Path(updated["cache"]["path"])
+    assert cache_path == tmp_path / "codex" / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / "0.2.0"
+    assert not (cache_path / "planning").exists()
+    assert config.exists()
+
+    status = run_cmd("update-check", "--plugin-root", str(ROOT), "--config", str(config))
+
+    assert status["success"] is True
+    assert status["cache"]["current"] is True
+    assert status["cache"]["changed"] is False
+    assert status["config"]["current"] is True
+    assert status["restart_required"] is False
+    assert any("already current" in item.lower() for item in status["next_steps"])
 
 
 def test_install_codex_verifies_prompt_input_with_cached_plugin(tmp_path: Path) -> None:
@@ -1663,6 +1712,9 @@ def test_readme_documents_operator_quality_commands() -> None:
         "eval-suite --examples-dir examples --check-snapshots",
         "update-snapshots",
         "release-check --plugin-root .",
+        "update-check",
+        "self-update",
+        "does not poll git remotes automatically",
     ):
         assert phrase in readme
 

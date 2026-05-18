@@ -73,6 +73,23 @@ Preview the config and cache changes without writing them:
 python3 scripts/zagrosi_skills.py install --dry-run --pretty
 ```
 
+Check whether Codex's installed plugin cache matches this local checkout:
+
+```bash
+python3 scripts/zagrosi_skills.py update-check --pretty
+```
+
+If the check reports stale cache or config, refresh the local install:
+
+```bash
+python3 scripts/zagrosi_skills.py self-update --pretty
+```
+
+Restart Codex when `self-update` reports changed cache or config. Forge does not poll git remotes automatically.
+At session start, update the repository checkout yourself when you want newer
+remote source, then run `update-check` or `self-update` to sync Codex's local
+plugin cache.
+
 Manual install is still possible if you prefer editing config yourself, but it
 requires both config and cache state. Add the repo as a local marketplace in
 `~/.codex/config.toml`:

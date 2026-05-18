@@ -342,6 +342,20 @@ COMMAND_CATALOG = [
         "examples": ["python3 scripts/zagrosi_skills.py install --plugin-root . --dry-run"],
     },
     {
+        "name": "update-check",
+        "phase": "utility",
+        "summary": "Check whether the installed Codex plugin cache matches this local checkout.",
+        "aliases": [],
+        "examples": ["python3 scripts/zagrosi_skills.py update-check --plugin-root ."],
+    },
+    {
+        "name": "self-update",
+        "phase": "release",
+        "summary": "Refresh Codex config and the installed plugin cache using the installer path.",
+        "aliases": [],
+        "examples": ["python3 scripts/zagrosi_skills.py self-update --plugin-root ."],
+    },
+    {
         "name": "codebase-evidence",
         "phase": "plan",
         "summary": "Capture runtime files, test files, and candidate commands for planning evidence.",
@@ -936,9 +950,28 @@ def format_setup(payload: dict[str, Any]) -> list[str]:
 def format_pretty(payload: dict[str, Any]) -> str:
     if {"phase", "stage", "gates"}.issubset(payload):
         lines = format_flight(payload)
-    elif payload.get("operation") == "install-codex":
+    elif payload.get("operation") == "update-check":
         lines = [
-            "ZAGROSI FORGE INSTALL",
+            "ZAGROSI FORGE UPDATE CHECK",
+            f"Status: {plain_status(payload.get('success'))}   Restart required: {payload.get('restart_required', False)}",
+            f"Config: {payload.get('config_path')}",
+            f"Codex home: {payload.get('codex_home')}",
+            f"Plugin root: {payload.get('plugin_root')}",
+            f"Network policy: {payload.get('network_policy')}",
+        ]
+        cache = payload.get("cache") or {}
+        if cache:
+            lines.append(f"Cache: {cache.get('path')}   Current: {cache.get('current')}")
+        config = payload.get("config") or {}
+        if config:
+            lines.append(f"Config current: {config.get('current')}")
+        next_steps = payload.get("next_steps") or []
+        if next_steps:
+            lines.append("Next:")
+            lines.extend(f"  - {step}" for step in next_steps)
+    elif payload.get("operation") in {"install-codex", "self-update"}:
+        lines = [
+            "ZAGROSI FORGE SELF UPDATE" if payload.get("operation") == "self-update" else "ZAGROSI FORGE INSTALL",
             f"Status: {plain_status(payload.get('success'))}   Changed: {payload.get('changed', False)}",
             f"Config: {payload.get('config_path')}",
             f"Codex home: {payload.get('codex_home')}",
@@ -5294,6 +5327,7 @@ PLUGIN_CACHE_IGNORE_DIRS = {
     ".tox",
     ".venv",
     "__pycache__",
+    "planning",
 }
 PLUGIN_CACHE_IGNORE_FILES = {".DS_Store"}
 
@@ -5373,6 +5407,91 @@ def materialize_plugin_cache(plugin_root: Path, cache_path: Path, dry_run: bool)
     return payload
 
 
+def expected_codex_config(existing: str, plugin_root: Path) -> tuple[str, list[str]]:
+    updated, marketplace_changes = upsert_toml_section(
+        existing,
+        "[marketplaces.zagrosi]",
+        {
+            "source_type": toml_string("local"),
+            "source": toml_string(str(plugin_root)),
+        },
+    )
+    updated, plugin_changes = upsert_toml_section(
+        updated,
+        '[plugins."zagrosi-forge@zagrosi"]',
+        {"enabled": "true"},
+    )
+    return updated, marketplace_changes + plugin_changes
+
+
+def update_check(args: argparse.Namespace) -> int:
+    plugin_root = resolve_path(args.plugin_root)
+    config_path = resolve_path(args.config) if args.config else default_codex_config_path()
+    codex_home = codex_home_for_config(config_path, bool(args.config))
+    try:
+        manifest = package_manifest(plugin_root)
+    except (json.JSONDecodeError, ValueError) as exc:
+        return print_json(
+            {
+                "success": False,
+                "operation": "update-check",
+                "plugin_root": str(plugin_root),
+                "config_path": str(config_path),
+                "error": f"Could not read plugin manifest: {exc}",
+            },
+            1,
+        )
+
+    plugin_name = str(manifest.get("name") or "zagrosi-forge")
+    plugin_version = str(manifest.get("version") or "0.0.0")
+    cache_path = plugin_cache_path(codex_home, "zagrosi", plugin_name, plugin_version)
+    source_fingerprint = plugin_tree_fingerprint(plugin_root)
+    cached_fingerprint = plugin_tree_fingerprint(cache_path)
+    cache_exists = cache_path.exists()
+    cache_current = cache_exists and source_fingerprint == cached_fingerprint
+
+    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    expected_config, config_changes = expected_codex_config(existing, plugin_root)
+    config_current = expected_config == existing
+    restart_required = not cache_current or not config_current
+    next_steps: list[str] = []
+    if restart_required:
+        next_steps.append("Run python3 scripts/zagrosi_skills.py self-update --plugin-root . to refresh Codex config and plugin cache.")
+        next_steps.append("Restart Codex after self-update reports changed cache or config.")
+    else:
+        next_steps.append("Codex config and Zagrosi Forge plugin cache are already current.")
+    next_steps.append("This check is local-only; update the git checkout separately when you want newer remote source.")
+
+    payload = {
+        "success": True,
+        "operation": "update-check",
+        "plugin_root": str(plugin_root),
+        "config_path": str(config_path),
+        "codex_home": str(codex_home),
+        "plugin": "zagrosi-forge@zagrosi",
+        "plugin_name": plugin_name,
+        "plugin_version": plugin_version,
+        "network_policy": "local-only",
+        "remote_checked": False,
+        "cache": {
+            "path": str(cache_path),
+            "exists": cache_exists,
+            "current": cache_current,
+            "changed": not cache_current,
+            "source_fingerprint": source_fingerprint,
+            "cached_fingerprint": cached_fingerprint or None,
+        },
+        "config": {
+            "current": config_current,
+            "changed": not config_current,
+            "changes": config_changes,
+        },
+        "restart_required": restart_required,
+        "next_steps": next_steps,
+    }
+    return print_json(payload)
+
+
 def verify_codex_install(codex_home: Path, require_codex: bool) -> dict[str, Any]:
     codex = shutil.which("codex")
     if not codex:
@@ -5429,11 +5548,12 @@ def install_codex(args: argparse.Namespace) -> int:
     config_path = resolve_path(args.config) if args.config else default_codex_config_path()
     codex_home = codex_home_for_config(config_path, bool(args.config))
     plugin_id = "zagrosi-forge@zagrosi"
+    operation = "self-update" if getattr(args, "command", "") == "self-update" else "install-codex"
     if args.verify_codex and args.no_verify_codex:
         return print_json(
             {
                 "success": False,
-                "operation": "install-codex",
+                "operation": operation,
                 "plugin_root": str(plugin_root),
                 "config_path": str(config_path),
                 "plugin": plugin_id,
@@ -5453,7 +5573,7 @@ def install_codex(args: argparse.Namespace) -> int:
         return print_json(
             {
                 "success": False,
-                "operation": "install-codex",
+                "operation": operation,
                 "plugin_root": str(plugin_root),
                 "config_path": str(config_path),
                 "plugin": plugin_id,
@@ -5477,7 +5597,7 @@ def install_codex(args: argparse.Namespace) -> int:
         return print_json(
             {
                 "success": False,
-                "operation": "install-codex",
+                "operation": operation,
                 "plugin_root": str(plugin_root),
                 "config_path": str(config_path),
                 "plugin": plugin_id,
@@ -5493,7 +5613,7 @@ def install_codex(args: argparse.Namespace) -> int:
         return print_json(
             {
                 "success": False,
-                "operation": "install-codex",
+                "operation": operation,
                 "plugin_root": str(plugin_root),
                 "config_path": str(config_path),
                 "plugin": plugin_id,
@@ -5507,20 +5627,7 @@ def install_codex(args: argparse.Namespace) -> int:
     cache = materialize_plugin_cache(plugin_root, cache_path, args.dry_run)
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    updated, marketplace_changes = upsert_toml_section(
-        existing,
-        "[marketplaces.zagrosi]",
-        {
-            "source_type": toml_string("local"),
-            "source": toml_string(str(plugin_root)),
-        },
-    )
-    updated, plugin_changes = upsert_toml_section(
-        updated,
-        '[plugins."zagrosi-forge@zagrosi"]',
-        {"enabled": "true"},
-    )
-    changes = marketplace_changes + plugin_changes
+    updated, changes = expected_codex_config(existing, plugin_root)
     changed = updated != existing or bool(cache.get("changed"))
     backup_path: Path | None = None
 
@@ -5551,7 +5658,7 @@ def install_codex(args: argparse.Namespace) -> int:
             return print_json(
                 {
                     "success": False,
-                    "operation": "install-codex",
+                    "operation": operation,
                     "changed": changed,
                     "dry_run": args.dry_run,
                     "config_path": str(config_path),
@@ -5581,7 +5688,7 @@ def install_codex(args: argparse.Namespace) -> int:
 
     payload = {
         "success": True,
-        "operation": "install-codex",
+        "operation": operation,
         "changed": changed,
         "config_changed": config_changed,
         "dry_run": args.dry_run,
@@ -5799,7 +5906,25 @@ def build_parser() -> argparse.ArgumentParser:
     add_quality_args(p)
     p.set_defaults(func=lint_interview)
 
+    p = sub.add_parser("update-check", help=command_help("update-check"))
+    p.add_argument("--plugin-root", default=".")
+    p.add_argument("--config")
+    p.set_defaults(func=update_check)
+
     p = sub.add_parser("install-codex", aliases=["install", "install-plugin"], help=command_help("install-codex"))
+    p.add_argument("--plugin-root", default=".")
+    p.add_argument("--config")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-backup", action="store_true")
+    p.add_argument(
+        "--verify-codex",
+        action="store_true",
+        help="Fail if the codex CLI is unavailable or the installed skills are not visible.",
+    )
+    p.add_argument("--no-verify-codex", action="store_true", help="Skip codex debug prompt-input verification.")
+    p.set_defaults(func=install_codex)
+
+    p = sub.add_parser("self-update", help=command_help("self-update"))
     p.add_argument("--plugin-root", default=".")
     p.add_argument("--config")
     p.add_argument("--dry-run", action="store_true")
