@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,6 +43,32 @@ REVIEW_BOARD_PASSES = [
     "product-ambiguity",
     "implementation-feasibility",
 ]
+SENSITIVE_KEY_RE = re.compile(r"(token|secret|key|password|credential|authorization|bearer)", re.I)
+WORKFLOW_AMBIGUITY_TERMS = [
+    "maybe",
+    "option",
+    "or",
+    "recommend",
+    "whatever",
+    "vague",
+    "decide",
+    "should",
+    "could",
+    "autonomous",
+    "external",
+    "privacy",
+    "review",
+    "ci",
+    "pr",
+    "workflow",
+    "research",
+    "auto",
+]
+LOCAL_TOOL_NAMES = ["gh", "codex", "claude", "gemini"]
+DEPTH_REMEDIATION_RECOMMENDATION = (
+    "Identify missing decisions, codebase evidence, documentation support, or review substance; "
+    "ask relevant questions or perform targeted research before expanding prose to meet the depth target."
+)
 DEPTH_MODES = {"fast", "standard", "deep"}
 DEPTH_WORD_TARGETS = {
     "fast": {
@@ -271,6 +298,34 @@ COMMAND_CATALOG = [
             "python3 scripts/zagrosi_skills.py commands --pretty",
             "python3 scripts/zagrosi_skills.py commands --phase plan",
         ],
+    },
+    {
+        "name": "workflow-options",
+        "phase": "utility",
+        "summary": "Recommend interview, depth, git/privacy, and autonomy options for a Forge run.",
+        "aliases": [],
+        "examples": ["python3 scripts/zagrosi_skills.py workflow-options --brief 'Improve this project'"],
+    },
+    {
+        "name": "capability-inventory",
+        "phase": "utility",
+        "summary": "Inventory configured plugins, MCP servers, and local tools without leaking secrets.",
+        "aliases": [],
+        "examples": ["python3 scripts/zagrosi_skills.py capability-inventory --plugin-root ."],
+    },
+    {
+        "name": "review-capabilities",
+        "phase": "utility",
+        "summary": "Report mandatory Codex review fallback and opt-in external review candidates.",
+        "aliases": [],
+        "examples": ["python3 scripts/zagrosi_skills.py review-capabilities --planning-dir planning/01-auth"],
+    },
+    {
+        "name": "planning-consistency",
+        "phase": "quality",
+        "summary": "Detect late-request requirement drift across Forge planning artifacts.",
+        "aliases": [],
+        "examples": ["python3 scripts/zagrosi_skills.py planning-consistency --planning-dir planning/01-auth --strict"],
     },
     {
         "name": "doctor",
@@ -630,7 +685,7 @@ def add_depth_finding(
                 code,
                 f"{artifact_label} has {actual_words} words; hard floor is {hard_floor}.",
                 path,
-                "Expand this into a self-contained artifact with concrete context, contracts, tests, risks, and verification details.",
+                DEPTH_REMEDIATION_RECOMMENDATION,
             )
         )
     elif actual_words < target_words:
@@ -640,7 +695,7 @@ def add_depth_finding(
                 code,
                 f"{artifact_label} has {actual_words} words; target for this depth is {target_words}.",
                 path,
-                "Match the Forge depth standard before treating this as implementation-ready.",
+                DEPTH_REMEDIATION_RECOMMENDATION,
             )
         )
 
@@ -980,6 +1035,27 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def load_json(path: Path) -> dict[str, Any]:
     return json.loads(read_text(path))
+
+
+def normalize_repeated(values: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        item = str(value).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+    return normalized
+
+
+def compact_values(values: list[str], label: str, limit: int = 2) -> str | None:
+    if not values:
+        return None
+    shown = values[:limit]
+    suffix = f", +{len(values) - limit} more" if len(values) > limit else ""
+    rendered = ", ".join(f"`{Path(item).name if label == 'review' else item}`" for item in shown)
+    return f"{label}: {rendered}{suffix}"
 
 
 def update_json_locked(path: Path, default_factory, mutator, timeout_seconds: float = 5.0) -> dict[str, Any]:
@@ -1897,10 +1973,7 @@ def dependency_graph(planning_dir: Path, progress: dict[str, Any] | None = None)
 
 
 def completed_sections(planning_dir: Path) -> set[str]:
-    state_path = planning_dir / "implementation" / "zagrosi_implement_state.json"
-    legacy_state_path = planning_dir / "implementation" / "deep_implement_state.json"
-    if not state_path.exists() and legacy_state_path.exists():
-        state_path = legacy_state_path
+    state_path = implementation_state_path(planning_dir)
     if not state_path.exists():
         return set()
     state = load_json(state_path)
@@ -2199,6 +2272,46 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
     return print_json(payload)
 
 
+def implementation_state_path(planning_dir: Path) -> Path:
+    state_path = planning_dir / "implementation" / "zagrosi_implement_state.json"
+    legacy_state_path = planning_dir / "implementation" / "deep_implement_state.json"
+    if not state_path.exists() and legacy_state_path.exists():
+        return legacy_state_path
+    return state_path
+
+
+def load_implementation_state(planning_dir: Path) -> dict[str, Any]:
+    state_path = implementation_state_path(planning_dir)
+    return load_json(state_path) if state_path.exists() else {"completed_sections": {}, "created_at": now_iso()}
+
+
+def implementation_evidence_by_section(planning_dir: Path) -> dict[str, dict[str, Any]]:
+    state = load_implementation_state(planning_dir)
+    completed = state.get("completed_sections", {})
+    return completed if isinstance(completed, dict) else {}
+
+
+def compact_section_evidence(record: dict[str, Any]) -> str:
+    parts: list[str] = []
+    commit = record.get("commit")
+    if commit:
+        parts.append(f"commit `{commit}`")
+    commit_status = record.get("commit_status")
+    if commit_status and not commit:
+        parts.append(f"commit status `{commit_status}`")
+    for key, label in (
+        ("files_changed", "files"),
+        ("test_files", "tests"),
+        ("review_artifacts", "review"),
+        ("verification", "verification"),
+    ):
+        values = normalize_repeated(record.get(key, [])) if isinstance(record, dict) else []
+        rendered = compact_values(values, label)
+        if rendered:
+            parts.append(rendered)
+    return "; ".join(parts) if parts else "-"
+
+
 def deep_implement_record_section(args: argparse.Namespace) -> int:
     sections_dir = resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
@@ -2206,15 +2319,17 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
     if not artifact_payload["success"]:
         artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before recording implementation."
         return print_json(artifact_payload, 1)
-    state_path = sections_dir.parent / "implementation" / "zagrosi_implement_state.json"
-    legacy_state_path = sections_dir.parent / "implementation" / "deep_implement_state.json"
-    if not state_path.exists() and legacy_state_path.exists():
-        state_path = legacy_state_path
-    state = load_json(state_path) if state_path.exists() else {"completed_sections": {}, "created_at": now_iso()}
+    state_path = implementation_state_path(planning_dir)
+    state = load_implementation_state(planning_dir)
     section_record = {
         "completed_at": now_iso(),
         "commit": args.commit,
         "notes": args.notes,
+        "files_changed": normalize_repeated(args.files_changed),
+        "test_files": normalize_repeated(args.test_files),
+        "review_artifacts": normalize_repeated(args.review_artifacts),
+        "verification": normalize_repeated(args.verification),
+        "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
     }
     state.setdefault("completed_sections", {})[args.section] = section_record
     write_json(state_path, state)
@@ -2665,10 +2780,27 @@ def lint_implementation_state(args: argparse.Namespace) -> int:
             findings.append(finding("low", "missing-commit", f"{section} has no commit recorded.", state_path))
         review_path = code_review_dir / f"{section}-review.md"
         diff_path = code_review_dir / f"{section}-diff.md"
+        decisions_path = code_review_dir / f"{section}-decisions.md"
         if not review_path.exists():
             findings.append(finding("medium", "missing-review", f"Review file missing for {section}.", review_path))
         if not diff_path.exists():
             findings.append(finding("low", "missing-diff", f"Diff file missing for {section}.", diff_path))
+        if not decisions_path.exists():
+            findings.append(
+                finding(
+                    "medium",
+                    "missing-review-decisions",
+                    f"Review decisions file missing for {section}.",
+                    decisions_path,
+                    "Write a decisions artifact that records accepted, rejected, and deferred review findings.",
+                )
+            )
+        if "files_changed" in record and not record.get("files_changed"):
+            findings.append(finding("low", "missing-file-evidence", f"{section} has no changed files recorded.", state_path))
+        if "test_files" in record and not record.get("test_files"):
+            findings.append(finding("low", "missing-test-evidence", f"{section} has no test files recorded.", state_path))
+        if "review_artifacts" in record and not record.get("review_artifacts"):
+            findings.append(finding("low", "missing-review-evidence", f"{section} has no review artifacts recorded.", state_path))
 
     if not usage_path.exists():
         findings.append(finding("medium", "missing-usage", "implementation/usage.md is missing.", usage_path))
@@ -2682,6 +2814,336 @@ def lint_implementation_state(args: argparse.Namespace) -> int:
             "state_path": str(state_path),
             "completed_sections": sorted(completed.keys()),
         },
+    )
+    return emit_payload(payload, args)
+
+
+def local_tool_status(names: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    return {
+        name: {
+            "available": bool(path := shutil.which(name)),
+            "path": path,
+        }
+        for name in (names or LOCAL_TOOL_NAMES)
+    }
+
+
+def load_toml_config(path: Path | None) -> tuple[dict[str, Any], list[str], str | None]:
+    if path is None:
+        default = Path.home() / ".codex" / "config.toml"
+        path = default if default.exists() else None
+    if path is None:
+        return {}, ["No Codex config file found."], None
+    if not path.exists():
+        return {}, [f"Config file not found: {path}"], str(path)
+    try:
+        data = tomllib.loads(read_text(path))
+    except Exception as exc:  # pragma: no cover - exact parser errors vary by Python version.
+        return {}, [f"Config file could not be parsed: {exc.__class__.__name__}"], str(path)
+    return data if isinstance(data, dict) else {}, [], str(path)
+
+
+def summarize_plugins(config: dict[str, Any]) -> list[dict[str, Any]]:
+    plugins = config.get("plugins", {})
+    if not isinstance(plugins, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for plugin_id, settings in sorted(plugins.items()):
+        enabled = True
+        if isinstance(settings, dict) and "enabled" in settings:
+            enabled = bool(settings.get("enabled"))
+        rows.append({"id": str(plugin_id), "enabled": enabled})
+    return rows
+
+
+def mcp_transport(settings: dict[str, Any]) -> str:
+    if settings.get("url"):
+        return "http"
+    if settings.get("command"):
+        return "stdio"
+    return "unknown"
+
+
+def has_sensitive_key(mapping: dict[str, Any]) -> bool:
+    return any(SENSITIVE_KEY_RE.search(str(key)) for key in mapping)
+
+
+def summarize_mcp_servers(config: dict[str, Any]) -> list[dict[str, Any]]:
+    servers = config.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        return []
+    rows: list[dict[str, Any]] = []
+    for name, settings in sorted(servers.items()):
+        server = settings if isinstance(settings, dict) else {}
+        env = server.get("env", {})
+        env_vars = server.get("env_vars", {})
+        headers = server.get("http_headers", {})
+        has_env = isinstance(env, dict) and bool(env)
+        has_env_vars = isinstance(env_vars, (dict, list)) and bool(env_vars)
+        has_http_headers = isinstance(headers, dict) and bool(headers)
+        has_auth = (
+            bool(server.get("bearer_token"))
+            or bool(server.get("bearer_token_env_var"))
+            or has_http_headers
+            or (isinstance(env, dict) and has_sensitive_key(env))
+            or (isinstance(env_vars, dict) and has_sensitive_key(env_vars))
+        )
+        rows.append(
+            {
+                "name": str(name),
+                "transport": mcp_transport(server),
+                "enabled": bool(server.get("enabled", True)),
+                "has_env": has_env,
+                "has_env_vars": has_env_vars,
+                "has_http_headers": has_http_headers,
+                "has_auth": has_auth,
+            }
+        )
+    return rows
+
+
+def capability_inventory(args: argparse.Namespace) -> int:
+    plugin_root = resolve_path(args.plugin_root or ".")
+    config_path = resolve_path(args.config) if args.config else None
+    config, warnings, loaded_config = load_toml_config(config_path)
+    tools = local_tool_status()
+    plugins = summarize_plugins(config)
+    mcp_servers = summarize_mcp_servers(config)
+    recommendations: list[str] = []
+    if any(server["name"] == "context7" and server["enabled"] for server in mcp_servers):
+        recommendations.append("Use Context7 or configured documentation MCP for current library/API documentation when relevant.")
+    if tools["gh"]["available"]:
+        recommendations.append("GitHub CLI is available for opt-in PR and CI inspection workflows.")
+    if tools["claude"]["available"]:
+        recommendations.append("Claude CLI appears available as a possible external review candidate after explicit consent.")
+    if not tools["gemini"]["available"]:
+        recommendations.append("Gemini CLI was not detected; do not assume Gemini-based review is available.")
+    payload = {
+        "success": True,
+        "gate": "capability-inventory",
+        "plugin_root": str(plugin_root),
+        "config_path": loaded_config,
+        "warnings": warnings,
+        "plugins": {"configured": plugins},
+        "mcp_servers": {"configured": mcp_servers},
+        "local_tools": tools,
+        "recommendations": recommendations,
+    }
+    return print_json(payload)
+
+
+def matched_workflow_terms(text: str) -> list[str]:
+    haystack = text.lower()
+    return [term for term in WORKFLOW_AMBIGUITY_TERMS if re.search(rf"\b{re.escape(term)}\b", haystack)]
+
+
+def recommended_option(label: str, recommended: bool, rationale: str) -> dict[str, Any]:
+    payload = {"label": label, "recommended": recommended, "rationale": rationale}
+    if recommended:
+        payload["recommended_label"] = f"{label} (Recommended)"
+    return payload
+
+
+def workflow_options(args: argparse.Namespace) -> int:
+    brief_parts = [args.brief or ""]
+    if args.spec_file:
+        spec_path = resolve_path(args.spec_file)
+        if not spec_path.exists():
+            return print_json({"success": False, "gate": "workflow-options", "error": f"Spec file not found: {spec_path}"}, 1)
+        brief_parts.append(read_text(spec_path))
+    text = "\n".join(part for part in brief_parts if part)
+    matched = matched_workflow_terms(text)
+    explicit_depth = args.depth
+    broad_prompt = len(matched) >= 1 or len(requirement_ids(text)) >= 3
+    recommended_depth = explicit_depth or ("deep" if broad_prompt else "standard")
+    depth_available = [
+        {"value": "fast", "description": "Lightweight pass for narrow, low-risk changes."},
+        {"value": "standard", "description": "Reviewed planning for ordinary implementation work."},
+        {"value": "deep", "description": "Auditor-grade planning with review board and stronger traceability."},
+    ]
+    depth_rationale = (
+        "The brief is broad or contains workflow decision terms: " + ", ".join(matched)
+        if matched
+        else "No broad workflow ambiguity was detected."
+    )
+    depth_options = [
+        recommended_option("Deep", recommended_depth == "deep", depth_rationale if recommended_depth == "deep" else "Use for broad, high-impact, or ambiguous work."),
+        recommended_option("Standard", recommended_depth == "standard", "Use for ordinary reviewed implementation with fewer governance decisions."),
+        recommended_option("Fast", recommended_depth == "fast", "Use only for narrow, low-risk changes where detailed planning is unnecessary."),
+    ]
+    privacy_options = [
+        recommended_option(
+            "Local ignored planning",
+            True,
+            "Conservative default: planning artifacts stay local/ignored unless the user opts into publishing them.",
+        ),
+        recommended_option("Commit planning records", False, "Use only when the team wants planning records in repository history."),
+    ]
+    autonomy_options = [
+        recommended_option("Manual", True, "Push, PR, CI watch, and fix loops require explicit opt-in."),
+        recommended_option("Auto commit", False, "Only enable after user approval for local commit automation."),
+        recommended_option("Auto PR and CI watch", False, "Requires remote credentials, branch policy, and explicit user approval."),
+    ]
+    payload = {
+        "success": True,
+        "gate": "workflow-options",
+        "matched_terms": matched,
+        "depth": {
+            "selected": explicit_depth,
+            "recommended": recommended_depth,
+            "requires_confirmation": explicit_depth is None and broad_prompt,
+            "available": depth_available,
+            "reason": depth_rationale,
+        },
+        "interview": {
+            "required": broad_prompt or recommended_depth == "deep",
+            "use_structured_input_when_available": True,
+            "fallback": "chat",
+            "option_sets": [
+                {"id": "depth", "question": "What Forge depth should this run use?", "options": depth_options},
+                {"id": "planning_privacy", "question": "How should Forge planning artifacts be handled?", "options": privacy_options},
+                {"id": "autonomy", "question": "How much git/PR/CI autonomy should Forge use?", "options": autonomy_options},
+            ],
+        },
+        "git_privacy": {
+            "planning_artifacts": "local_ignored",
+            "mention_planning_docs": False,
+            "offer_gitignore": True,
+            "commit_style": "ask",
+        },
+        "autonomy": {
+            "auto_commit": False,
+            "auto_pr": False,
+            "ci_watch": False,
+            "fix_watch_loop": False,
+            "requires_explicit_opt_in": True,
+        },
+        "recommendations": [
+            "Ask or record material interview choices before planning.",
+            "Use structured user input when available; otherwise ask in chat and record the answer.",
+        ],
+    }
+    return print_json(payload)
+
+
+def review_capabilities(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir) if args.planning_dir else None
+    config: dict[str, Any] = {}
+    warnings: list[str] = []
+    config_path = resolve_path(args.config) if getattr(args, "config", None) else None
+    if config_path:
+        if config_path.exists():
+            try:
+                loaded = load_json(config_path)
+                config = loaded if isinstance(loaded, dict) else {}
+            except Exception as exc:  # pragma: no cover - exact JSON errors vary by Python version.
+                warnings.append(f"Review config could not be parsed: {exc.__class__.__name__}")
+        else:
+            warnings.append(f"Review config file not found: {config_path}")
+    elif planning_dir and (planning_dir / "zagrosi_plan_config.json").exists():
+        config_path = planning_dir / "zagrosi_plan_config.json"
+        config = load_json(config_path)
+    configured_mode = config.get("review_mode", "codex_review")
+    tools = local_tool_status(["claude", "gemini"])
+    external = {
+        name: {"available": item["available"], "path": item["path"], "execution": "opt_in" if item["available"] else "not_configured"}
+        for name, item in tools.items()
+    }
+    recommendations = ["Run Codex review for every non-trivial plan and implementation section."]
+    if configured_mode == "skip":
+        recommendations.append("Review mode is skip; do not skip review for non-trivial or deep Forge work.")
+    if configured_mode == "external_llm" and not any(item["available"] for item in external.values()):
+        recommendations.append("External review mode is configured but no external CLI candidate was detected; use Codex review fallback.")
+    elif configured_mode == "external_llm":
+        recommendations.append("External review candidates are opt-in; run them only after explicit user consent.")
+    payload = {
+        "success": True,
+        "gate": "review-capabilities",
+        "planning_dir": str(planning_dir) if planning_dir else None,
+        "config_path": str(config_path) if config_path else None,
+        "configured_mode": configured_mode,
+        "warnings": warnings,
+        "baseline": {
+            "codex_review": {
+                "available": True,
+                "mandatory": True,
+                "execution": "agent_review",
+            }
+        },
+        "external": external,
+        "recommendations": recommendations,
+    }
+    return print_json(payload)
+
+
+def artifact_requirement_ids(path: Path) -> tuple[list[str], list[str]]:
+    text = read_text(path)
+    ids = requirement_ids(text)
+    meta_ids: list[str] = []
+    if FORGE_META_START in text or LEGACY_META_START in text:
+        meta, errors = parse_forge_meta(text)
+        if not errors and isinstance(meta, dict) and isinstance(meta.get("requirement_ids"), list):
+            meta_ids = [str(item) for item in meta["requirement_ids"]]
+    return ids, meta_ids
+
+
+def planning_consistency(args: argparse.Namespace) -> int:
+    planning_dir = resolve_path(args.planning_dir)
+    source_path = artifact(planning_dir, ["codex-spec.md", "claude-spec.md", "spec.md"])
+    findings: list[Finding] = []
+    if not source_path:
+        findings.append(finding("critical", "missing-requirement-source", "No normalized or split spec found.", planning_dir))
+        return emit_quality("planning-consistency", findings, args, {"planning_dir": str(planning_dir)})
+    source_ids = requirement_ids(read_text(source_path))
+    required_artifact_names = [
+        "codex-plan.md",
+        "claude-plan.md",
+        "codex-plan-tdd.md",
+        "claude-plan-tdd.md",
+        "codex-integration-notes.md",
+        "claude-integration-notes.md",
+        "codex-consistency-review.md",
+        "traceability.md",
+        "sections/index.md",
+    ]
+    review_artifact_names = [str(path.relative_to(planning_dir)) for path in sorted((planning_dir / "reviews").glob("*.md"))]
+    artifact_names = required_artifact_names + review_artifact_names
+    required_artifacts = set(required_artifact_names)
+    checked: dict[str, Any] = {}
+    recommendation = "Review planning docs for consistency and ask the user where clashes, replacements, or overlaps are unresolved."
+    for name in artifact_names:
+        path = planning_dir / name
+        if not path.exists():
+            continue
+        ids, meta_ids = artifact_requirement_ids(path)
+        missing = [req_id for req_id in source_ids if req_id not in ids]
+        stale_meta = [req_id for req_id in source_ids if meta_ids and req_id not in meta_ids]
+        checked[name] = {"requirement_ids": ids, "metadata_requirement_ids": meta_ids}
+        if missing and name in required_artifacts:
+            findings.append(
+                finding(
+                    "medium",
+                    "missing-requirement-reference",
+                    f"{name} is missing requirement references: {', '.join(missing)}",
+                    path,
+                    recommendation,
+                )
+            )
+        if stale_meta and name in required_artifacts:
+            findings.append(
+                finding(
+                    "medium",
+                    "stale-requirement-metadata",
+                    f"{name} metadata is missing requirement IDs: {', '.join(stale_meta)}",
+                    path,
+                    recommendation,
+                )
+            )
+    payload = quality_from_args(
+        "planning-consistency",
+        findings,
+        args,
+        {"planning_dir": str(planning_dir), "source": str(source_path), "requirement_ids": source_ids, "checked_artifacts": checked},
     )
     return emit_payload(payload, args)
 
@@ -2816,6 +3278,7 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[Finding], dict[str, 
         "planning_dir": str(planning_dir),
         "requirement_ids": req_ids,
         "coverage": coverage,
+        "implementation_evidence": implementation_evidence_by_section(planning_dir),
         "orphans": {
             "sections": section_orphans,
             "tests": test_orphans,
@@ -2866,19 +3329,26 @@ def traceability_matrix_content(planning_dir: Path) -> str | None:
         return None
     existing = existing_traceability_cells(planning_dir / "traceability.md")
     completed = completed_sections(planning_dir)
+    evidence = implementation_evidence_by_section(planning_dir)
     lines = [
         "# Traceability Matrix",
         "",
-        "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Status |",
-        "|-------------|---------------|------------------|---------------|--------|",
+        "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Implementation Evidence | Status |",
+        "|-------------|---------------|------------------|---------------|-------------------------|--------|",
     ]
     for req_id, item in coverage.items():
         previous = existing.get(req_id, {})
         plan_coverage = previous.get("Plan Coverage") or ("`codex-plan.md`" if item.get("in_plan") else "-")
         sections = "; ".join(f"`{section}`" for section in item.get("sections", [])) or previous.get("Section Coverage") or "-"
         test_coverage = previous.get("Test Coverage") or ("`codex-plan-tdd.md`" if item.get("in_tdd") else "-")
+        evidence_items = [
+            compact_section_evidence(evidence[Path(section).stem])
+            for section in item.get("sections", [])
+            if Path(section).stem in evidence
+        ]
+        implementation_evidence = "; ".join(item for item in evidence_items if item and item != "-") or previous.get("Implementation Evidence") or "-"
         status = requirement_implementation_status(item, completed)
-        lines.append(f"| {req_id} | {plan_coverage} | {sections} | {test_coverage} | {status} |")
+        lines.append(f"| {req_id} | {plan_coverage} | {sections} | {test_coverage} | {implementation_evidence} | {status} |")
     if findings:
         lines.extend(["", "Open traceability findings:"])
         lines.extend(f"- {item.severity}: {item.code} - {item.message}" for item in findings)
@@ -5215,6 +5685,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--section", required=True)
     p.add_argument("--commit")
     p.add_argument("--notes")
+    p.add_argument("--file", action="append", dest="files_changed", default=[])
+    p.add_argument("--test-file", action="append", dest="test_files", default=[])
+    p.add_argument("--review-artifact", action="append", dest="review_artifacts", default=[])
+    p.add_argument("--verification", action="append", default=[])
+    p.add_argument("--commit-status")
     p.add_argument("--target-dir")
     p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
     p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
@@ -5283,6 +5758,30 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("commands", aliases=["help-commands"], help=command_help("commands"))
     p.add_argument("--phase", choices=sorted({item["phase"] for item in COMMAND_CATALOG}))
     p.set_defaults(func=command_catalog)
+
+    p = sub.add_parser("workflow-options", help=command_help("workflow-options"))
+    p.add_argument("--brief")
+    p.add_argument("--spec-file")
+    p.add_argument("--planning-dir")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES))
+    p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
+    p.set_defaults(func=workflow_options)
+
+    p = sub.add_parser("capability-inventory", help=command_help("capability-inventory"))
+    p.add_argument("--plugin-root")
+    p.add_argument("--config")
+    p.add_argument("--planning-dir")
+    p.set_defaults(func=capability_inventory)
+
+    p = sub.add_parser("review-capabilities", help=command_help("review-capabilities"))
+    p.add_argument("--planning-dir")
+    p.add_argument("--config")
+    p.set_defaults(func=review_capabilities)
+
+    p = sub.add_parser("planning-consistency", help=command_help("planning-consistency"))
+    p.add_argument("--planning-dir", required=True)
+    add_quality_args(p)
+    p.set_defaults(func=planning_consistency)
 
     p = sub.add_parser("traceability", help=command_help("traceability"))
     p.add_argument("--planning-dir", required=True)

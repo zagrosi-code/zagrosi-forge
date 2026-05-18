@@ -126,12 +126,17 @@ Write:
 {planning_dir}/implementation/code_review/{section}-review.md
 ```
 
+Every implemented section needs a review record. If external review tooling is
+configured and the user opted in, include it as additional evidence; otherwise
+the local Codex review is the mandatory fallback.
+
 ### 5. Triage Review
 
 Fix correctness, security, data loss, and requirement-mismatch issues before
 continuing. Ask the user only about product choices, tradeoffs, or changes that
 alter scope.
 
+Review decisions are required, even when the review has no blocking findings.
 Record decisions in:
 
 ```text
@@ -173,11 +178,19 @@ python3 {plugin_root}/scripts/zagrosi_skills.py implement-record-section \
   --sections-dir "{sections_dir}" \
   --section "{section}" \
   --commit "{commit_hash_or_none}" \
-  --notes "{short_note}"
+  --notes "{short_note}" \
+  --file "{changed_file}" \
+  --test-file "{test_file}" \
+  --review-artifact "implementation/code_review/{section}-review.md" \
+  --review-artifact "implementation/code_review/{section}-decisions.md" \
+  --verification "{test_or_gate_command}"
 ```
 
 This updates implementation state and refreshes `{planning_dir}/traceability.md`
 so requirement status follows recorded section completion.
+After a squash, amend, rebase, or final consolidated commit, refresh each
+section record with the final commit hash and the same file, test, review, and
+verification evidence so traceability does not point at stale history.
 
 Then continue to the next section.
 
@@ -201,4 +214,5 @@ python3 {plugin_root}/scripts/zagrosi_skills.py report --planning-dir "{planning
 5. Summarize completed sections, commits, review files, tests run, and any
    residual risks.
 
-Do not push or open a PR unless the user asks.
+Do not push, open a PR, start a CI watch, or run a fix-watch loop unless the
+user asks or has explicitly opted into that autonomy mode.

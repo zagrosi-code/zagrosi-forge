@@ -117,6 +117,31 @@ def write_required_plan_artifacts(planning_dir: Path) -> None:
     write_missing("reviews/process.md", "# Process Review\n\nNo blocking findings. The plan names files, tests, risks, and verification.\n")
 
 
+def write_single_section_fixture(planning_dir: Path, section: str = "section-01-foundation") -> Path:
+    sections = planning_dir / "sections"
+    sections.mkdir(parents=True, exist_ok=True)
+    (sections / "index.md").write_text(
+        "<!-- PROJECT_CONFIG\n"
+        "runtime: python-uv\n"
+        "test_command: uv run pytest\n"
+        "END_PROJECT_CONFIG -->\n\n"
+        "<!-- SECTION_MANIFEST\n"
+        f"{section}\n"
+        "END_MANIFEST -->\n"
+    )
+    (sections / f"{section}.md").write_text(
+        "# Section\n\n"
+        "REQ-001 changes `scripts/zagrosi_skills.py` and `tests/test_zagrosi_skills.py`.\n"
+        "Tests first, expected failure, implementation, acceptance, rollback, and verification.\n"
+    )
+    write_required_plan_artifacts(planning_dir)
+    review_dir = planning_dir / "implementation" / "code_review"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    (review_dir / f"{section}-diff.md").write_text("# Diff\n\nChanged helper and tests.\n")
+    (review_dir / f"{section}-review.md").write_text("# Review\n\nNo blocking findings.\n")
+    return sections
+
+
 def test_project_setup_and_create_dirs(tmp_path: Path) -> None:
     req = tmp_path / "requirements.md"
     req.write_text("# Build a SaaS app\n\nAuth, billing, dashboard.\n")
@@ -467,8 +492,125 @@ def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) 
 
     matrix = (tmp_path / "traceability.md").read_text()
     assert recorded["traceability_matrix"] == str(tmp_path / "traceability.md")
-    assert "| REQ-001 | `codex-plan.md` | `section-01-status.md` | `test_status_flow` | Implemented |" in matrix
-    assert "| REQ-002 | `codex-plan.md` | `section-02-docs.md` | `test_readme_status_docs` | Planned |" in matrix
+    assert "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Implementation Evidence | Status |" in matrix
+    assert (
+        "| REQ-001 | `codex-plan.md` | `section-01-status.md` | `test_status_flow` | commit `abc123` | Implemented |"
+        in matrix
+    )
+    assert (
+        "| REQ-002 | `codex-plan.md` | `section-02-docs.md` | `test_readme_status_docs` | - | Planned |"
+        in matrix
+    )
+
+
+def test_implement_record_section_stores_evidence_and_refreshes_traceability(tmp_path: Path) -> None:
+    sections = write_single_section_fixture(tmp_path)
+    (tmp_path / "implementation" / "code_review" / "section-01-foundation-decisions.md").write_text(
+        "# Decisions\n\nAccepted implementation evidence and traceability updates.\n"
+    )
+
+    recorded = run_cmd(
+        "implement-record-section",
+        "--sections-dir",
+        str(sections),
+        "--section",
+        "section-01-foundation",
+        "--commit",
+        "abc123",
+        "--file",
+        "scripts/zagrosi_skills.py",
+        "--file",
+        "scripts/zagrosi_skills.py",
+        "--test-file",
+        "tests/test_zagrosi_skills.py",
+        "--review-artifact",
+        "implementation/code_review/section-01-foundation-review.md",
+        "--review-artifact",
+        "implementation/code_review/section-01-foundation-decisions.md",
+        "--verification",
+        "uv run pytest",
+        "--flight",
+        "off",
+    )
+
+    assert recorded["success"] is True
+    record = recorded["record"]
+    assert record["files_changed"] == ["scripts/zagrosi_skills.py"]
+    assert record["test_files"] == ["tests/test_zagrosi_skills.py"]
+    assert record["review_artifacts"] == [
+        "implementation/code_review/section-01-foundation-review.md",
+        "implementation/code_review/section-01-foundation-decisions.md",
+    ]
+    assert record["verification"] == ["uv run pytest"]
+    assert record["commit_status"] == "recorded"
+
+    state = json.loads((tmp_path / "implementation" / "zagrosi_implement_state.json").read_text())
+    persisted = state["completed_sections"]["section-01-foundation"]
+    assert persisted["files_changed"] == ["scripts/zagrosi_skills.py"]
+    assert persisted["test_files"] == ["tests/test_zagrosi_skills.py"]
+
+    matrix = (tmp_path / "traceability.md").read_text()
+    assert "Implementation Evidence" in matrix
+    assert "abc123" in matrix
+    assert "scripts/zagrosi_skills.py" in matrix
+    assert "tests/test_zagrosi_skills.py" in matrix
+
+
+def test_traceability_handles_legacy_implementation_records(tmp_path: Path) -> None:
+    write_single_section_fixture(tmp_path)
+    state_path = tmp_path / "implementation" / "zagrosi_implement_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "completed_sections": {
+                    "section-01-foundation": {
+                        "completed_at": "2026-05-18T00:00:00+00:00",
+                        "commit": "abc123",
+                        "notes": "legacy record",
+                    }
+                }
+            }
+        )
+    )
+
+    trace = run_cmd("traceability", "--planning-dir", str(tmp_path), "--strict")
+    assert trace["success"] is True
+    assert trace["implementation_evidence"]["section-01-foundation"]["commit"] == "abc123"
+
+
+def test_implementation_state_requires_review_decisions(tmp_path: Path) -> None:
+    sections = write_single_section_fixture(tmp_path)
+    run_cmd(
+        "implement-record-section",
+        "--sections-dir",
+        str(sections),
+        "--section",
+        "section-01-foundation",
+        "--commit",
+        "abc123",
+        "--file",
+        "scripts/zagrosi_skills.py",
+        "--test-file",
+        "tests/test_zagrosi_skills.py",
+        "--review-artifact",
+        "implementation/code_review/section-01-foundation-review.md",
+        "--verification",
+        "uv run pytest",
+        "--flight",
+        "off",
+    )
+    (tmp_path / "implementation" / "usage.md").write_text("# Usage\n\nRun `uv run pytest`.\n")
+
+    missing = run_raw("lint-implementation-state", "--sections-dir", str(sections), "--strict")
+    assert missing.returncode != 0
+    payload = json.loads(missing.stdout)
+    assert "missing-review-decisions" in {item["code"] for item in payload["findings"]}
+
+    (tmp_path / "implementation" / "code_review" / "section-01-foundation-decisions.md").write_text(
+        "# Decisions\n\nAccepted all review items.\n"
+    )
+    passed = run_cmd("lint-implementation-state", "--sections-dir", str(sections), "--strict")
+    assert passed["success"] is True
 
 
 def test_implement_setup_blocks_incomplete_forge_process_even_with_flight_off(tmp_path: Path) -> None:
@@ -886,6 +1028,150 @@ def test_quality_gates_traceability_and_status(tmp_path: Path) -> None:
     diffed = run_cmd("plan-diff", "--before", str(planning / "codex-spec.md"), "--after", str(planning / "codex-plan.md"))
     assert diffed["success"] is True
     assert diffed["word_delta"] > 0
+
+
+def test_workflow_options_recommends_deep_and_interview_for_ambiguous_prompt() -> None:
+    payload = run_cmd(
+        "workflow-options",
+        "--brief",
+        "maybe use external review or auto PR, whatever you recommend",
+    )
+
+    assert payload["success"] is True
+    assert payload["depth"]["recommended"] == "deep"
+    assert payload["depth"]["requires_confirmation"] is True
+    assert payload["interview"]["required"] is True
+    assert payload["interview"]["use_structured_input_when_available"] is True
+    assert payload["interview"]["fallback"] == "chat"
+    assert payload["autonomy"]["auto_commit"] is False
+    assert payload["autonomy"]["auto_pr"] is False
+    assert payload["autonomy"]["ci_watch"] is False
+    assert payload["autonomy"]["fix_watch_loop"] is False
+
+
+def test_workflow_options_respects_explicit_depth() -> None:
+    payload = run_cmd("workflow-options", "--brief", "small docs fix", "--depth", "fast")
+
+    assert payload["success"] is True
+    assert payload["depth"]["selected"] == "fast"
+    assert payload["depth"]["recommended"] == "fast"
+    assert payload["depth"]["requires_confirmation"] is False
+
+
+def test_workflow_options_includes_recommended_interview_choices_with_rationale() -> None:
+    payload = run_cmd(
+        "workflow-options",
+        "--brief",
+        "maybe use external review, web research, auto PR, whatever you recommend",
+    )
+
+    option_sets = payload["interview"]["option_sets"]
+    assert option_sets
+    assert any(
+        len([option for option in option_set["options"] if option["recommended"]]) == 1
+        for option_set in option_sets
+    )
+    for option_set in option_sets:
+        recommended = [option for option in option_set["options"] if option["recommended"]]
+        assert len(recommended) <= 1
+        if recommended:
+            option = recommended[0]
+            assert option["recommended_label"].endswith("(Recommended)")
+            assert option["rationale"]
+
+
+def test_capability_inventory_redacts_secrets_and_reports_tools(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[plugins."github@openai-curated"]\n'
+        "enabled = true\n\n"
+        '[plugins."zagrosi-forge@zagrosi"]\n'
+        "enabled = true\n\n"
+        "[mcp_servers.context7]\n"
+        'url = "https://mcp.context7.com/mcp"\n\n'
+        "[mcp_servers.context7.http_headers]\n"
+        'CONTEXT7_API_KEY = "SECRET-DO-NOT-LEAK"\n'
+    )
+
+    payload = run_cmd("capability-inventory", "--plugin-root", str(ROOT), "--config", str(config))
+    serialized = json.dumps(payload)
+
+    assert payload["success"] is True
+    assert "SECRET-DO-NOT-LEAK" not in serialized
+    assert {"gh", "codex", "claude", "gemini"} <= set(payload["local_tools"])
+    assert "github@openai-curated" in {item["id"] for item in payload["plugins"]["configured"]}
+    assert "zagrosi-forge@zagrosi" in {item["id"] for item in payload["plugins"]["configured"]}
+    assert "context7" in {item["name"] for item in payload["mcp_servers"]["configured"]}
+    assert payload["recommendations"]
+
+
+def test_capability_inventory_handles_missing_config(tmp_path: Path) -> None:
+    payload = run_cmd("capability-inventory", "--plugin-root", str(ROOT), "--config", str(tmp_path / "missing.toml"))
+
+    assert payload["success"] is True
+    assert {"gh", "codex", "claude", "gemini"} <= set(payload["local_tools"])
+    assert payload["warnings"]
+
+
+def test_review_capabilities_reports_mandatory_codex_fallback(tmp_path: Path) -> None:
+    (tmp_path / "zagrosi_plan_config.json").write_text(json.dumps({"review_mode": "external_llm"}))
+
+    payload = run_cmd("review-capabilities", "--planning-dir", str(tmp_path))
+
+    assert payload["success"] is True
+    assert payload["configured_mode"] == "external_llm"
+    assert payload["baseline"]["codex_review"]["available"] is True
+    assert payload["baseline"]["codex_review"]["mandatory"] is True
+    assert payload["external"]
+    assert {item["execution"] for item in payload["external"].values()} <= {"opt_in", "not_configured"}
+
+
+def test_review_capabilities_warns_on_skip_mode(tmp_path: Path) -> None:
+    (tmp_path / "zagrosi_plan_config.json").write_text(json.dumps({"review_mode": "skip"}))
+
+    payload = run_cmd("review-capabilities", "--planning-dir", str(tmp_path))
+
+    assert payload["success"] is True
+    assert payload["configured_mode"] == "skip"
+    assert any("skip" in item.lower() and "review" in item.lower() for item in payload["recommendations"])
+
+
+def test_lint_plan_thin_artifacts_recommend_questions_before_padding(tmp_path: Path) -> None:
+    planning = write_quality_plan_fixture(tmp_path)
+    review_file = planning / "reviews" / "architecture.md"
+    review_file.parent.mkdir(exist_ok=True)
+    review_file.write_text("# Architecture\n\nREQ-001: too short.\n")
+
+    result = run_raw("lint-plan", "--planning-dir", str(planning), "--depth", "deep", "--strict")
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    thin_findings = [item for item in payload["findings"] if item["code"].endswith("too-thin")]
+    assert thin_findings
+    recommendation = " ".join(item.get("recommendation", "") for item in thin_findings).lower()
+    assert "ask relevant questions" in recommendation or "targeted research" in recommendation or "missing decisions" in recommendation
+    assert "add more words" not in recommendation
+
+
+def test_planning_consistency_reports_missing_late_requirement(tmp_path: Path) -> None:
+    (tmp_path / "codex-spec.md").write_text("# Spec\n\nREQ-001: Existing behavior.\nREQ-011: Late interview consistency.\n")
+    (tmp_path / "codex-plan.md").write_text("# Plan\n\nREQ-001 only.\n")
+    (tmp_path / "codex-plan-tdd.md").write_text("# TDD\n\nREQ-001 only.\n")
+
+    result = run_raw("planning-consistency", "--planning-dir", str(tmp_path), "--strict")
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert any("REQ-011" in item["message"] for item in payload["findings"])
+    recommendation = " ".join(item.get("recommendation", "") for item in payload["findings"]).lower()
+    assert "review planning docs" in recommendation
+    assert "ask the user" in recommendation
+
+
+def test_new_commands_are_discoverable() -> None:
+    commands = run_cmd("commands")
+    names = {item["name"] for item in commands["commands"]}
+    assert {"workflow-options", "capability-inventory", "review-capabilities", "planning-consistency"} <= names
 
 
 def test_doctor_and_requirement_extraction(tmp_path: Path) -> None:
@@ -1398,8 +1684,27 @@ def test_skill_files_are_codex_native() -> None:
     assert "source files" in plan_skill
     assert "plan artifact" in plan_skill
     assert "lint-plan-artifacts" in plan_skill
+    assert "capability-inventory" in plan_skill
+    assert "review-capabilities" in plan_skill
+    assert "planning-consistency" in plan_skill
+    assert "ask relevant questions" in plan_skill
+    assert "targeted research" in plan_skill
+    assert "(recommended)" in plan_skill
 
     implement_skill = (ROOT / "skills" / "zagrosi-implement" / "SKILL.md").read_text().lower()
     assert "consolidated commit" in implement_skill
     assert "section commits" in implement_skill
     assert "lint-plan-artifacts" in implement_skill
+    assert "--review-artifact" in implement_skill
+    assert "--verification" in implement_skill
+    assert "review decisions" in implement_skill
+    assert "refresh" in implement_skill
+    assert "ci watch" in implement_skill
+
+    project_skill = (ROOT / "skills" / "zagrosi-project" / "SKILL.md").read_text().lower()
+    assert "workflow-options" in project_skill
+    assert "capability-inventory" in project_skill
+    assert "structured" in project_skill
+    assert "chat" in project_skill
+    assert "(recommended)" in project_skill
+    assert "consistency review" in project_skill
