@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 dist/
 build/
+planning/
 *.egg-info/
 *.pyc
 uv.lock

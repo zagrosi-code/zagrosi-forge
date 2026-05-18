@@ -161,6 +161,9 @@ python3 {plugin_root}/scripts/zagrosi_skills.py implement-record-section \
   --notes "{short_note}"
 ```
 
+This updates implementation state and refreshes `{planning_dir}/traceability.md`
+so requirement status follows recorded section completion.
+
 Then continue to the next section.
 
 ## Completion

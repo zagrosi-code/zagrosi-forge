@@ -19,16 +19,21 @@ This directory documents the benchmark surface used by `eval-suite`.
 Run:
 
 ```bash
-python3 scripts/zagrosi_skills.py eval-suite --examples-dir examples --output examples/evals/latest.json
+python3 scripts/zagrosi_skills.py eval-suite --examples-dir examples --check-snapshots --output examples/evals/latest.json
 ```
 
 The report scores plan depth, section readiness, traceability, evidence
-quality, and implementation readiness. Invalid fixtures are intentionally
-excluded from benchmark rows.
+quality, and implementation readiness. When `suite.json` exists, it is the
+benchmark contract: row names, row order, planning directories, depth, and the
+golden snapshot directory come from that file. If a suite file is absent,
+`eval-suite` keeps the older glob fallback and discovers valid `codex-plan.md`
+fixtures outside `examples/invalid`.
 
 Golden snapshots live in `examples/evals/golden/`. They record the expected
 Forge Score component shape for the current valid tracks and are checked by the
-test suite so scoring changes are deliberate.
+test suite so scoring changes are deliberate. Use `--check-snapshots` for
+normal verification. Use `--update-snapshots` only after intentionally changing
+scoring behavior and reviewing the new golden payloads.
 
 ## Comparison Protocol
 

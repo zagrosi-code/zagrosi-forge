@@ -171,6 +171,19 @@ Control the automation with `--flight`:
 | `advisory` | Run the gates and report findings without blocking the wrapper. |
 | `off` | Skip automatic flight reports. |
 
+For command discovery, use the helper itself instead of reading the whole
+argparse listing:
+
+```bash
+python3 scripts/zagrosi_skills.py commands --pretty
+python3 scripts/zagrosi_skills.py commands --phase plan
+```
+
+Plan-aware status is available through `status`: run it after setup or during
+resume to see the current planning directory, section progress,
+`plan_artifacts`, and next action. Missing or empty artifacts do not advance the
+next action.
+
 ### Project Commands
 
 ```bash
@@ -218,6 +231,10 @@ python3 scripts/zagrosi_skills.py implement-progress --planning-dir planning/01-
 python3 scripts/zagrosi_skills.py implement-record-section --sections-dir planning/01-auth/sections --section section-01-auth
 python3 scripts/zagrosi_skills.py lint-implementation-state --sections-dir planning/01-auth/sections
 ```
+
+`implement-record-section` updates implementation state and refreshes
+`traceability.md` so requirement rows move from planned to partial or
+implemented as sections are recorded.
 
 Old `zagrosi-*` and upstream-style `deep-*` helper command names are kept as
 aliases for compatibility. New documentation uses the shorter Forge command
@@ -287,7 +304,7 @@ python3 scripts/zagrosi_skills.py trace-export --planning-dir planning/01-auth -
 python3 scripts/zagrosi_skills.py agent-prompts --planning-dir planning/01-auth --type all
 python3 scripts/zagrosi_skills.py context-budget --planning-dir planning/01-auth --max-words 12000
 python3 scripts/zagrosi_skills.py e2e-trial-record --planning-dir planning/01-auth --name first-real-repo-pass
-python3 scripts/zagrosi_skills.py eval-suite --examples-dir examples --output examples/evals/latest.json
+python3 scripts/zagrosi_skills.py eval-suite --examples-dir examples --check-snapshots --output examples/evals/latest.json
 python3 scripts/zagrosi_skills.py release-check --plugin-root .
 ```
 
@@ -322,13 +339,20 @@ are therefore the source of truth:
 
 | Command | Purpose |
 |---------|---------|
-| `codebase-evidence --write` | Captures runtime files, test files, and candidate commands from the target repo |
+| `codebase-evidence --write` | Writes expanded codebase evidence: runtime files, source files, tests, skills, plugin metadata, CI, examples, eval metadata, and candidate commands |
 | `lint-artifact-schema` | Verifies governance tables are machine-readable |
 | `implementation-drift` | Compares changed files against planned section ownership |
 | `suggest-section-splits` | Proposes smaller sections when ownership or word count gets too large |
 | `report` | Writes a local HTML score and traceability report |
 | `e2e-trial-record` | Records real-world planning/implementation trial metrics |
 | `release-check` | Runs the repo-level validator bundle before publishing |
+
+Expanded codebase evidence is bounded and content-free: it records relative
+paths and inferred commands, not source contents. `eval-suite` uses
+`examples/evals/suite.json` when present, can check golden snapshots with
+`--check-snapshots`, and only changes snapshots when a maintainer intentionally
+runs `--update-snapshots`. `release-check --plugin-root .` includes the
+snapshot gate and never updates snapshots.
 
 ### Flight Gates
 

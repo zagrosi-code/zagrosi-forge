@@ -132,6 +132,174 @@ def test_plan_setup_sections_and_prompts(tmp_path: Path) -> None:
     assert Path(prompts["prompt_files"][0]).exists()
 
 
+def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Improve Forge\n\nMake operator workflows clearer.\n")
+    run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
+
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "codex-research.md" in status["next_action"]
+
+    (tmp_path / "codex-research.md").write_text("# Research\n\nCurrent state verified with `rg` and `uv run pytest`.\n")
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "codex-interview.md" in status["next_action"]
+
+    (tmp_path / "codex-interview.md").write_text(
+        "interview_mode: skipped_with_reason\n"
+        "skip_reason: Fixture has enough detail to proceed.\n"
+    )
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "codex-spec.md" in status["next_action"]
+
+    (tmp_path / "codex-spec.md").write_text("# Spec\n\nREQ-001: Improve status.\n")
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "codex-plan.md" in status["next_action"]
+
+    (tmp_path / "codex-plan.md").write_text("")
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "codex-plan.md" in status["next_action"]
+
+    (tmp_path / "codex-plan.md").write_text("# Plan\n\nREQ-001 implementation plan.\n")
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "review" in status["next_action"].lower()
+
+    (tmp_path / "codex-integration-notes.md").write_text("# Review Integration\n\nAccepted review items.\n")
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "codex-plan-tdd.md" in status["next_action"]
+
+    (tmp_path / "codex-plan-tdd.md").write_text("# TDD\n\n`test_status_reports_plan_artifact_sequence` fails first.\n")
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "sections/index.md" in status["next_action"]
+
+    sections = tmp_path / "sections"
+    sections.mkdir()
+    (sections / "index.md").write_text(
+        "<!-- PROJECT_CONFIG\n"
+        "runtime: python-uv\n"
+        "test_command: uv run pytest\n"
+        "END_PROJECT_CONFIG -->\n\n"
+        "<!-- SECTION_MANIFEST\n"
+        "section-01-status\n"
+        "END_MANIFEST -->\n\n"
+        "# Sections\n"
+    )
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert "section files" in status["next_action"]
+
+
+def test_status_exposes_plan_artifact_state(tmp_path: Path) -> None:
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Improve Forge\n\nExpose plan artifact state.\n")
+    run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
+    (tmp_path / "codex-research.md").write_text("# Research\n\nVerified current state.\n")
+    (tmp_path / "codex-plan.md").write_text("   ")
+
+    status = run_cmd("status", "--path", str(tmp_path))
+
+    assert status["files"]["zagrosi_plan_config"] == str(tmp_path / "zagrosi_plan_config.json")
+    assert status["plan_artifacts"]["research"] == str(tmp_path / "codex-research.md")
+    assert status["plan_artifacts"]["interview"] is None
+    assert status["plan_artifacts"]["plan"] is None
+    assert status["plan_artifacts"]["section_index"] is None
+    assert status["section_progress"]["state"] == "no_index"
+
+
+def test_commands_catalog_outputs_grouped_json_and_pretty_text() -> None:
+    catalog = run_cmd("commands")
+
+    required = {"project-setup", "plan-setup", "implement-setup", "status", "codebase-evidence", "eval-suite", "release-check"}
+    by_name = {entry["name"]: entry for entry in catalog["commands"]}
+    assert required <= set(by_name)
+    for name in required:
+        entry = by_name[name]
+        assert entry["phase"]
+        assert entry["summary"]
+        assert isinstance(entry["aliases"], list)
+        assert entry["examples"]
+
+    plan_catalog = run_cmd("commands", "--phase", "plan")
+    assert plan_catalog["commands"]
+    assert {entry["phase"] for entry in plan_catalog["commands"]} <= {"plan", "all", "quality", "utility"}
+
+    pretty = run_text("commands", "--pretty")
+    assert "PLAN" in pretty.upper()
+    assert "status" in pretty
+    assert "codebase-evidence" in pretty
+
+
+def test_command_catalog_matches_parser_aliases() -> None:
+    catalog = run_cmd("commands")
+    entries = catalog["commands"]
+    names = {entry["name"] for entry in entries}
+    aliases = {alias for entry in entries for alias in entry["aliases"]}
+
+    assert {"project-setup", "plan-setup", "implement-setup", "status", "doctor", "eval-suite", "release-check"} <= names
+    assert {
+        "project",
+        "plan",
+        "implement",
+        "install",
+        "deep-project-setup",
+        "deep-plan-setup",
+        "deep-implement-setup",
+    } <= aliases
+
+    help_text = run_text("--help")
+    assert "Inspect workflow state" in help_text
+    assert "Show grouped command catalog" in help_text
+
+
+def test_codebase_evidence_includes_forge_surface_without_cache_noise(tmp_path: Path) -> None:
+    planning = tmp_path / "planning"
+    planning.mkdir()
+
+    evidence = run_cmd("codebase-evidence", "--target-dir", str(ROOT), "--planning-dir", str(planning), "--write")
+
+    assert "scripts/zagrosi_skills.py" in evidence["source_files"]
+    assert "skills/zagrosi-plan/SKILL.md" in evidence["skill_files"]
+    assert ".codex-plugin/plugin.json" in evidence["plugin_metadata"]
+    assert ".github/workflows/validate.yml" in evidence["ci_files"]
+    assert "examples/evals/suite.json" in evidence["example_files"]
+
+    grouped_paths = [
+        path
+        for key in ("runtime_files", "test_files", "source_files", "skill_files", "plugin_metadata", "ci_files", "example_files")
+        for path in evidence[key]
+    ]
+    assert not any(".git/" in path or ".venv/" in path or "__pycache__/" in path for path in grouped_paths)
+    assert not any(".codex/plugins/cache" in path for path in grouped_paths)
+
+    written = Path(evidence["output"]).read_text()
+    assert "Forge Source Files" in written
+    assert "Skills" in written
+    assert "Assumptions / Open Questions" in written
+
+
+def test_lint_evidence_accepts_expanded_codebase_evidence(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "pyproject.toml").write_text("[project]\nname = 'fixture'\n")
+    (target / "scripts").mkdir()
+    (target / "scripts" / "tool.py").write_text("print('fixture')\n")
+    (target / "tests").mkdir()
+    (target / "tests" / "test_tool.py").write_text("def test_tool():\n    assert True\n")
+
+    planning = tmp_path / "planning"
+    planning.mkdir()
+    run_cmd("codebase-evidence", "--target-dir", str(target), "--planning-dir", str(planning), "--write")
+    (planning / "codex-plan.md").write_text(
+        "# Plan\n\n"
+        "REQ-006: Current state verified with `uv run pytest`; see `codex-evidence.md` for existing files.\n"
+        "Assumption: no open question blocks evidence linting.\n"
+    )
+
+    evidence = run_cmd("lint-evidence", "--planning-dir", str(planning), "--strict")
+
+    assert evidence["success"] is True
+    assert evidence["file_count"] >= 3
+    assert "codex-evidence.md" in evidence["artifacts"]
+
+
 def test_implement_setup_and_record(tmp_path: Path) -> None:
     sections = tmp_path / "sections"
     sections.mkdir()
@@ -175,6 +343,52 @@ def test_implement_setup_and_record(tmp_path: Path) -> None:
     impl_gate = run_cmd("lint-implementation-state", "--sections-dir", str(sections))
     assert impl_gate["success"] is True
     assert "section-01-foundation" in impl_gate["completed_sections"]
+
+
+def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) -> None:
+    sections = tmp_path / "sections"
+    sections.mkdir()
+    (tmp_path / "codex-spec.md").write_text("# Spec\n\nREQ-001: Implement status.\nREQ-002: Document status.\n")
+    (tmp_path / "codex-plan.md").write_text("# Plan\n\nREQ-001 in `scripts/tool.py`.\nREQ-002 in `README.md`.\n")
+    (tmp_path / "codex-plan-tdd.md").write_text(
+        "# TDD\n\nREQ-001: `test_status_flow`.\nREQ-002: `test_readme_status_docs`.\n"
+    )
+    (sections / "index.md").write_text(
+        "<!-- PROJECT_CONFIG\n"
+        "runtime: python-uv\n"
+        "test_command: uv run pytest\n"
+        "END_PROJECT_CONFIG -->\n\n"
+        "<!-- SECTION_MANIFEST\n"
+        "section-01-status\n"
+        "section-02-docs\n"
+        "END_MANIFEST -->\n"
+    )
+    (sections / "section-01-status.md").write_text("# Section\n\nREQ-001 with `test_status_flow`.\n")
+    (sections / "section-02-docs.md").write_text("# Section\n\nREQ-002 with `test_readme_status_docs`.\n")
+    (tmp_path / "traceability.md").write_text(
+        "# Traceability Matrix\n\n"
+        "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Status |\n"
+        "|-------------|---------------|------------------|---------------|--------|\n"
+        "| REQ-001 | `codex-plan.md` | `section-01-status.md` | `test_status_flow` | Planned |\n"
+        "| REQ-002 | `codex-plan.md` | `section-02-docs.md` | `test_readme_status_docs` | Planned |\n"
+    )
+
+    recorded = run_cmd(
+        "implement-record-section",
+        "--sections-dir",
+        str(sections),
+        "--section",
+        "section-01-status",
+        "--commit",
+        "abc123",
+        "--flight",
+        "off",
+    )
+
+    matrix = (tmp_path / "traceability.md").read_text()
+    assert recorded["traceability_matrix"] == str(tmp_path / "traceability.md")
+    assert "| REQ-001 | `codex-plan.md` | `section-01-status.md` | `test_status_flow` | Implemented |" in matrix
+    assert "| REQ-002 | `codex-plan.md` | `section-02-docs.md` | `test_readme_status_docs` | Planned |" in matrix
 
 
 def write_quality_plan_fixture(tmp_path: Path) -> Path:
@@ -690,6 +904,58 @@ def test_eval_suite_and_new_invalid_fixtures() -> None:
     assert {"invalid-decisions-table", "invalid-risks-table", "invalid-traceability-table"} <= governance_codes
 
 
+def test_eval_suite_uses_suite_json_rows_and_snapshot_check(tmp_path: Path) -> None:
+    examples = tmp_path / "examples"
+    evals = examples / "evals"
+    evals.mkdir(parents=True)
+    planning = write_quality_plan_fixture(examples / "benchmarks" / "alpha")
+    suite = {
+        "benchmarks": [
+            {"name": "missing-bench", "planning_dir": "../missing"},
+            {"name": "alpha-bench", "planning_dir": "../benchmarks/alpha", "depth": "standard"},
+        ],
+        "snapshots_dir": "golden",
+    }
+    suite_path = evals / "suite.json"
+    suite_path.write_text(json.dumps(suite))
+
+    missing = run_raw("eval-suite", "--examples-dir", str(examples))
+    assert missing.returncode != 0
+    missing_payload = json.loads(missing.stdout)
+    assert missing_payload["success"] is False
+    assert "missing-bench" in {item["name"] for item in missing_payload["suite_errors"]}
+
+    suite["benchmarks"] = [{"name": "alpha-bench", "planning_dir": "../benchmarks/alpha", "depth": "standard"}]
+    suite_path.write_text(json.dumps(suite))
+    report = run_cmd("eval-suite", "--examples-dir", str(examples))
+    assert [row["name"] for row in report["rows"]] == ["alpha-bench"]
+    assert Path(report["rows"][0]["planning_dir"]) == planning
+
+    updated = run_cmd("eval-suite", "--examples-dir", str(examples), "--update-snapshots")
+    assert updated["snapshot_summary"]["updated"] == ["alpha-bench"]
+
+    checked = run_cmd("eval-suite", "--examples-dir", str(examples), "--check-snapshots")
+    assert checked["snapshot_summary"]["matched"] == ["alpha-bench"]
+
+    snapshot = evals / "golden" / "alpha-bench-forge-score.json"
+    snapshot.write_text(json.dumps({"planning_dir_name": "wrong", "forge_score": 1, "grade": "D", "components": {}}))
+    drifted = run_raw("eval-suite", "--examples-dir", str(examples), "--check-snapshots")
+    assert drifted.returncode != 0
+    drift_payload = json.loads(drifted.stdout)
+    assert "alpha-bench" in {item["name"] for item in drift_payload["snapshot_summary"]["drifted"]}
+
+
+def test_eval_suite_keeps_glob_fallback_without_suite_json(tmp_path: Path) -> None:
+    examples = tmp_path / "examples"
+    planning = write_quality_plan_fixture(examples / "gallery" / "alpha")
+
+    report = run_cmd("eval-suite", "--examples-dir", str(examples))
+
+    assert report["success"] is True
+    assert [Path(row["planning_dir"]) for row in report["rows"]] == [planning]
+    assert report["discovery_mode"] == "glob"
+
+
 def test_advanced_operational_commands_and_snapshots(tmp_path: Path) -> None:
     planning = write_quality_plan_fixture(tmp_path / "planning")
 
@@ -835,6 +1101,7 @@ def test_advanced_operational_commands_and_snapshots(tmp_path: Path) -> None:
     release = run_cmd("release-check", "--plugin-root", str(ROOT))
     assert release["success"] is True
     assert any(".agents/plugins/marketplace.json" in row["command"] for row in release["results"])
+    assert any("eval-suite" in row["command"] and "--check-snapshots" in row["command"] for row in release["results"])
 
 
 def test_lint_project_manifest_fixture() -> None:
@@ -867,6 +1134,28 @@ def test_typescript_fixture_and_invalid_fixture_snapshots() -> None:
     assert "vague-section-name" in codes
 
 
+def test_readme_documents_operator_quality_commands() -> None:
+    readme = (ROOT / "README.md").read_text().lower()
+
+    for phrase in (
+        "commands --pretty",
+        "commands --phase plan",
+        "plan-aware status",
+        "plan_artifacts",
+        "expanded codebase evidence",
+        "source files",
+        "eval-suite --examples-dir examples --check-snapshots",
+        "update-snapshots",
+        "release-check --plugin-root .",
+    ):
+        assert phrase in readme
+
+
+def test_validate_workflow_mentions_snapshot_eval() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text()
+    assert "eval-suite --examples-dir examples --check-snapshots" in workflow
+
+
 def test_skill_files_are_codex_native() -> None:
     banned = ["TaskList", "TaskUpdate", "AskUserQuestion", "CLAUDE_CODE_TASK_LIST_ID"]
     for skill in (ROOT / "skills").glob("*/SKILL.md"):
@@ -874,3 +1163,7 @@ def test_skill_files_are_codex_native() -> None:
         assert "[TODO:" not in content
         for token in banned:
             assert token not in content, f"{token} leaked into {skill}"
+
+    plan_skill = (ROOT / "skills" / "zagrosi-plan" / "SKILL.md").read_text().lower()
+    assert "source files" in plan_skill
+    assert "plan artifact" in plan_skill

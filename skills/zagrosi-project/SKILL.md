@@ -148,7 +148,7 @@ also address medium findings unless the user explicitly accepts the risk.
 For package-level examples or benchmark suites, run:
 
 ```bash
-python3 {plugin_root}/scripts/zagrosi_skills.py eval-suite --examples-dir examples
+python3 {plugin_root}/scripts/zagrosi_skills.py eval-suite --examples-dir examples --check-snapshots
 python3 {plugin_root}/scripts/zagrosi_skills.py release-check --plugin-root "{plugin_root}"
 ```
 

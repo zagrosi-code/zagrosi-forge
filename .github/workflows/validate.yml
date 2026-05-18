@@ -33,4 +33,4 @@ jobs:
           python scripts/zagrosi_skills.py traceability --planning-dir examples/typescript-app/01-auth --strict
           python scripts/zagrosi_skills.py forge-score --planning-dir examples/typescript-app/01-auth --depth standard --strict
       - name: Run eval suite
-        run: python scripts/zagrosi_skills.py eval-suite --examples-dir examples --output examples/evals/latest.json
+        run: python scripts/zagrosi_skills.py eval-suite --examples-dir examples --check-snapshots --output examples/evals/latest.json

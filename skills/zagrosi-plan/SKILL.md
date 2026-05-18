@@ -83,6 +83,10 @@ early so later Codex turns can resume after compaction:
 python3 {plugin_root}/scripts/zagrosi_skills.py codebase-evidence --target-dir "." --planning-dir "{planning_dir}" --write
 ```
 
+This evidence is bounded and content-free. It records relative paths for
+runtime files, source files, tests, skills, plugin metadata, CI, examples, eval
+metadata, and inferred commands, but it does not copy source contents.
+
 If the spec touches a common high-risk domain, load only the relevant domain
 pack: `domain-auth.md`, `domain-frontend.md`, `domain-payments.md`,
 `domain-data-migration.md`, `domain-ai-products.md`, or `domain-infra.md`.
@@ -252,8 +256,10 @@ python3 {plugin_root}/scripts/zagrosi_skills.py context-budget --planning-dir "{
 python3 {plugin_root}/scripts/zagrosi_skills.py status --path "{planning_dir}"
 ```
 
-Fix missing sections and high/critical gate findings until the section state is
-`complete` and traceability is covered.
+Use `status` during resume to inspect the current plan artifact state,
+`plan_artifacts`, section progress, and next action. Fix missing sections and
+high/critical gate findings until the section state is `complete` and
+traceability is covered.
 
 If resuming old upstream artifacts, run:
 
@@ -262,7 +268,8 @@ python3 {plugin_root}/scripts/zagrosi_skills.py migrate --planning-dir "{plannin
 ```
 
 For release or benchmark evaluation, read `references/evaluation.md` and run
-`eval-suite` against the examples directory.
+`eval-suite --examples-dir examples --check-snapshots` against the examples
+directory.
 
 ## Completion
 
