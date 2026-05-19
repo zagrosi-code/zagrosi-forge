@@ -18,6 +18,7 @@
     "skills"
   ],
   "skills": "./skills/",
+  "scripts": "./scripts/",
   "interface": {
     "displayName": "Zagrosi Forge",
     "shortDescription": "Plan and implement complex work with TDD",
