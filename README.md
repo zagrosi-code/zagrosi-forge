@@ -55,10 +55,15 @@ python3 scripts/zagrosi_skills.py self-update --pretty
 Forge does not poll git remotes automatically. Pull newer source when you want
 it, then run `update-check` or `self-update` to sync Codex's local plugin cache.
 
-> [!TIP]
-> `codex plugin marketplace add zagrosi-code/zagrosi-forge` can register the
-> public marketplace, but current Codex CLI versions still require the installer
-> to enable and materialize the plugin cache non-interactively.
+The Codex CLI also supports a marketplace flow:
+
+```bash
+codex plugin marketplace add zagrosi-code/zagrosi-forge
+codex plugin add zagrosi-forge@zagrosi
+```
+
+The local installer remains the recommended path for this repository because it
+also runs Forge's validation and update checks.
 
 <details>
 <summary>Manual install</summary>
