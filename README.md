@@ -369,7 +369,8 @@ paths and inferred commands, not source contents. `eval-suite` uses
 `examples/evals/suite.json` when present, can check golden snapshots with
 `--check-snapshots`, and only changes snapshots when a maintainer intentionally
 runs `--update-snapshots`. `release-check --plugin-root .` includes the
-snapshot gate and never updates snapshots.
+snapshot gate when the source-tree `examples/` fixtures are present, skips those
+example-only gates in mirrored plugin bundles, and never updates snapshots.
 
 ### Flight Gates
 
