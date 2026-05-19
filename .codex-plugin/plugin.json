@@ -39,6 +39,9 @@
       "Use $zagrosi-forge:zagrosi-implement to build these sections with TDD"
     ],
     "brandColor": "#0F766E",
-    "screenshots": []
+    "screenshots": [
+      "./assets/readme-hero.svg",
+      "./assets/readme-workflow.svg"
+    ]
   }
 }
