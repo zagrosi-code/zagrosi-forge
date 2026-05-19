@@ -790,7 +790,7 @@ def test_patch_scope_reports_untracked_files_by_default(tmp_path: Path) -> None:
     assert any(item["code"] == "out-of-scope-file" for item in payload["findings"])
 
 
-def test_patch_scope_staged_includes_tracked_worktree_changes(tmp_path: Path) -> None:
+def test_patch_scope_staged_excludes_unstaged_worktree_changes(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
@@ -810,12 +810,41 @@ def test_patch_scope_staged_includes_tracked_worktree_changes(tmp_path: Path) ->
     section_file = tmp_path / "section-01-auth.md"
     section_file.write_text("# Section\n\nModify `src/auth/oauth.py`.\n")
 
-    scope = run_raw("patch-scope", "--section-file", str(section_file), "--repo", str(repo), "--staged")
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--repo", str(repo), "--staged")
 
-    assert scope.returncode != 0
-    payload = json.loads(scope.stdout)
-    assert "src/auth/extra.py" in payload["changed_files"]
-    assert payload["out_of_scope"] == ["src/auth/extra.py"]
+    assert scope["changed_files"] == []
+    assert scope["out_of_scope"] == []
+
+
+def test_implementation_drift_staged_excludes_unstaged_worktree_changes(tmp_path: Path) -> None:
+    planning = tmp_path / "planning"
+    write_single_section_fixture(planning, "section-01-auth")
+    (planning / "sections" / "section-01-auth.md").write_text("# Section\n\nImplement `src/auth/oauth.py`.\n")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "src/auth").mkdir(parents=True)
+    planned = repo / "src/auth/oauth.py"
+    unrelated = repo / "src/auth/local.py"
+    planned.write_text("VALUE = 1\n")
+    unrelated.write_text("LOCAL = 1\n")
+    subprocess.run(["git", "add", "src/auth/oauth.py", "src/auth/local.py"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    planned.write_text("VALUE = 2\n")
+    subprocess.run(["git", "add", "src/auth/oauth.py"], cwd=repo, check=True, capture_output=True, text=True)
+    unrelated.write_text("LOCAL = 2\n")
+
+    drift = run_cmd("implementation-drift", "--planning-dir", str(planning), "--repo", str(repo), "--staged")
+
+    assert drift["changed_files"] == ["src/auth/oauth.py"]
+    assert drift["out_of_scope"] == []
 
 
 def test_implement_progress_preserves_overlapping_writes(tmp_path: Path, monkeypatch) -> None:

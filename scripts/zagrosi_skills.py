@@ -3765,12 +3765,13 @@ def changed_files_from_diff(text: str) -> list[str]:
 
 
 def git_changed_files(repo: Path, staged: bool) -> tuple[list[str], str | None]:
-    commands = [
-        ["diff", "--name-only"],
-        ["diff", "--name-only", "--cached"],
-    ]
+    commands = [["diff", "--name-only", "--cached"]]
     if not staged:
-        commands.append(["ls-files", "--others", "--exclude-standard"])
+        commands = [
+            ["diff", "--name-only"],
+            ["diff", "--name-only", "--cached"],
+            ["ls-files", "--others", "--exclude-standard"],
+        ]
     changed: set[str] = set()
     for command in commands:
         result = git(command, repo)
