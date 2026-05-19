@@ -28,6 +28,7 @@
       "Interactive",
       "Write"
     ],
+    "composerIcon": "./assets/icon.svg",
     "websiteURL": "https://github.com/zagrosi-code/zagrosi-forge",
     "privacyPolicyURL": "https://github.com/zagrosi-code/zagrosi-forge",
     "termsOfServiceURL": "https://github.com/zagrosi-code/zagrosi-forge",
