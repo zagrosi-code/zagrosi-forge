@@ -726,6 +726,25 @@ def test_patch_scope_preserves_long_file_extensions(tmp_path: Path) -> None:
     assert scope["out_of_scope"] == []
 
 
+def test_patch_scope_reports_untracked_files_by_default(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "src/auth").mkdir(parents=True)
+    (repo / "src/auth/extra.py").write_text("SECRET = 'new file'\n")
+
+    section_file = tmp_path / "section-01-auth.md"
+    section_file.write_text("# Section\n\nModify `src/auth/oauth.py`.\n")
+
+    scope = run_raw("patch-scope", "--section-file", str(section_file), "--repo", str(repo))
+
+    assert scope.returncode != 0
+    payload = json.loads(scope.stdout)
+    assert "src/auth/extra.py" in payload["changed_files"]
+    assert payload["out_of_scope"] == ["src/auth/extra.py"]
+    assert any(item["code"] == "out-of-scope-file" for item in payload["findings"])
+
+
 def test_implement_progress_preserves_overlapping_writes(tmp_path: Path, monkeypatch) -> None:
     module = load_zagrosi_module()
     planning = tmp_path / "planning"

@@ -3765,13 +3765,18 @@ def changed_files_from_diff(text: str) -> list[str]:
 
 
 def git_changed_files(repo: Path, staged: bool) -> tuple[list[str], str | None]:
-    args = ["diff", "--name-only"]
-    if staged:
-        args.append("--cached")
-    result = git(args, repo)
-    if result.returncode != 0:
-        return [], result.stderr.strip() or result.stdout.strip()
-    return sorted(line.strip() for line in result.stdout.splitlines() if line.strip()), None
+    commands = [["diff", "--name-only", "--cached"]] if staged else [
+        ["diff", "--name-only"],
+        ["diff", "--name-only", "--cached"],
+        ["ls-files", "--others", "--exclude-standard"],
+    ]
+    changed: set[str] = set()
+    for command in commands:
+        result = git(command, repo)
+        if result.returncode != 0:
+            return [], result.stderr.strip() or result.stdout.strip()
+        changed.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+    return sorted(changed), None
 
 
 def patch_scope(args: argparse.Namespace) -> int:
