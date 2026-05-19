@@ -4681,6 +4681,11 @@ def snapshot_filename(name: str) -> str:
 
 
 def eval_suite_benchmarks(root: Path, default_depth: str) -> tuple[str, Path | None, Path | None, list[dict[str, Any]], list[dict[str, str]]]:
+    if not root.exists():
+        return "missing", None, None, [], [{"name": root.name or "examples", "error": "examples_dir does not exist"}]
+    if not root.is_dir():
+        return "missing", None, None, [], [{"name": root.name or "examples", "error": "examples_dir is not a directory"}]
+
     suite_path = root / "evals" / "suite.json"
     if not suite_path.exists():
         benchmarks = [
@@ -4692,6 +4697,8 @@ def eval_suite_benchmarks(root: Path, default_depth: str) -> tuple[str, Path | N
             for plan_path in sorted(root.glob("**/codex-plan.md"))
             if "invalid" not in plan_path.relative_to(root).parts
         ]
+        if not benchmarks:
+            return "glob", None, None, [], [{"name": root.name or "examples", "error": "No benchmark planning fixtures found"}]
         return "glob", None, None, benchmarks, []
 
     try:
@@ -4726,6 +4733,8 @@ def eval_suite_benchmarks(root: Path, default_depth: str) -> tuple[str, Path | N
                 "depth": str(raw.get("depth") or default_depth),
             }
         )
+    if not benchmarks and not errors:
+        errors.append({"name": "suite.json", "error": "benchmarks list is empty"})
     return "suite", suite_path, snapshots_dir, benchmarks, errors
 
 

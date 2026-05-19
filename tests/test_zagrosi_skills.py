@@ -1631,6 +1631,33 @@ def test_eval_suite_uses_suite_json_rows_and_snapshot_check(tmp_path: Path) -> N
     assert "alpha-bench" in {item["name"] for item in drift_payload["snapshot_summary"]["drifted"]}
 
 
+def test_eval_suite_fails_when_fixtures_are_absent_or_empty(tmp_path: Path) -> None:
+    missing = run_raw("eval-suite", "--examples-dir", str(tmp_path / "missing"), "--check-snapshots")
+    assert missing.returncode != 0
+    missing_payload = json.loads(missing.stdout)
+    assert missing_payload["success"] is False
+    assert missing_payload["discovery_mode"] == "missing"
+    assert missing_payload["suite_errors"][0]["error"] == "examples_dir does not exist"
+
+    empty = tmp_path / "empty-examples"
+    empty.mkdir()
+    empty_result = run_raw("eval-suite", "--examples-dir", str(empty), "--check-snapshots")
+    assert empty_result.returncode != 0
+    empty_payload = json.loads(empty_result.stdout)
+    assert empty_payload["success"] is False
+    assert empty_payload["discovery_mode"] == "glob"
+    assert empty_payload["suite_errors"][0]["error"] == "No benchmark planning fixtures found"
+
+    evals = empty / "evals"
+    evals.mkdir()
+    (evals / "suite.json").write_text(json.dumps({"benchmarks": [], "snapshots_dir": "golden"}))
+    suite_empty = run_raw("eval-suite", "--examples-dir", str(empty), "--check-snapshots")
+    assert suite_empty.returncode != 0
+    suite_empty_payload = json.loads(suite_empty.stdout)
+    assert suite_empty_payload["discovery_mode"] == "suite"
+    assert suite_empty_payload["suite_errors"][0]["error"] == "benchmarks list is empty"
+
+
 def test_eval_suite_keeps_glob_fallback_without_suite_json(tmp_path: Path) -> None:
     examples = tmp_path / "examples"
     planning = write_quality_plan_fixture(examples / "gallery" / "alpha")
