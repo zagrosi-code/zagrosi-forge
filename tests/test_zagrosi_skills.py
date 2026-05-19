@@ -264,6 +264,31 @@ def test_parallel_plan_parses_documented_dependency_graph_prose(tmp_path: Path) 
     ]
 
 
+def test_parallel_plan_reports_unknown_dependency_tokens(tmp_path: Path) -> None:
+    sections = tmp_path / "sections"
+    sections.mkdir(parents=True)
+    (sections / "index.md").write_text(
+        "<!-- PROJECT_CONFIG\n"
+        "runtime: python-uv\n"
+        "test_command: uv run pytest\n"
+        "END_PROJECT_CONFIG -->\n\n"
+        "<!-- SECTION_MANIFEST\n"
+        "section-01-foundation\n"
+        "section-02-api\n"
+        "END_MANIFEST -->\n\n"
+        "# Sections\n\n"
+        "## Dependency Graph\n\n"
+        "- section-02-api depends on section-99-missing.\n"
+    )
+
+    result = run_raw("parallel-plan", "--planning-dir", str(tmp_path))
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["unknown_dependencies"] == {"section-02-api": ["section-99-missing"]}
+    assert payload["blocked_or_cyclic"] == ["section-02-api"]
+
+
 def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
     spec = tmp_path / "spec.md"
     spec.write_text("# Improve Forge\n\nMake operator workflows clearer.\n")
@@ -726,6 +751,26 @@ def test_patch_scope_preserves_long_file_extensions(tmp_path: Path) -> None:
     assert scope["out_of_scope"] == []
 
 
+def test_patch_scope_accepts_declared_frontend_assets(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-ui.md"
+    section_file.write_text("# Section\n\nUpdate `index.html`, `src/App.css`, and `public/logo.svg`.\n")
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text(
+        "diff --git a/index.html b/index.html\n"
+        "+++ b/index.html\n"
+        "diff --git a/src/App.css b/src/App.css\n"
+        "+++ b/src/App.css\n"
+        "diff --git a/public/logo.svg b/public/logo.svg\n"
+        "+++ b/public/logo.svg\n"
+    )
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == ["index.html", "public/logo.svg", "src/App.css"]
+    assert scope["out_of_scope"] == []
+
+
 def test_patch_scope_reports_untracked_files_by_default(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -743,6 +788,34 @@ def test_patch_scope_reports_untracked_files_by_default(tmp_path: Path) -> None:
     assert "src/auth/extra.py" in payload["changed_files"]
     assert payload["out_of_scope"] == ["src/auth/extra.py"]
     assert any(item["code"] == "out-of-scope-file" for item in payload["findings"])
+
+
+def test_patch_scope_staged_includes_tracked_worktree_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "src/auth").mkdir(parents=True)
+    extra = repo / "src/auth/extra.py"
+    extra.write_text("VALUE = 1\n")
+    subprocess.run(["git", "add", "src/auth/extra.py"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    extra.write_text("VALUE = 2\n")
+
+    section_file = tmp_path / "section-01-auth.md"
+    section_file.write_text("# Section\n\nModify `src/auth/oauth.py`.\n")
+
+    scope = run_raw("patch-scope", "--section-file", str(section_file), "--repo", str(repo), "--staged")
+
+    assert scope.returncode != 0
+    payload = json.loads(scope.stdout)
+    assert "src/auth/extra.py" in payload["changed_files"]
+    assert payload["out_of_scope"] == ["src/auth/extra.py"]
 
 
 def test_implement_progress_preserves_overlapping_writes(tmp_path: Path, monkeypatch) -> None:

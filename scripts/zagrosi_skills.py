@@ -32,7 +32,7 @@ SECTION_TOKEN_RE = re.compile(r"\bsection-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*\b")
 CONFIG_RE = re.compile(r"^[a-z][a-z0-9_]*:\s*.+$")
 REQ_ID_RE = re.compile(r"\bREQ-[A-Z0-9][A-Z0-9-]*\b")
 FILE_PATH_RE = re.compile(
-    r"`?[\w./-]+\.(?:json|jsx|tsx|yaml|yml|toml|sql|java|php|py|js|ts|go|rs|rb|md|sh)(?:`|\b)"
+    r"`?[\w./-]+\.(?:avif|css|gif|go|htm|html|ico|java|jpeg|jpg|js|json|jsx|less|md|php|png|py|rb|rs|sass|scss|sh|sql|svg|toml|ts|tsx|webp|yaml|yml)(?:`|\b)"
 )
 FORGE_META_START = "FORGE_META"
 LEGACY_META_START = "DEEP_META"
@@ -1993,7 +1993,7 @@ def parse_section_dependencies(index_text: str, sections: list[str]) -> dict[str
             return
         current = dependencies.setdefault(section, [])
         for dep in deps:
-            if dep in known and dep != section and dep not in current:
+            if dep != section and dep not in current:
                 current.append(dep)
 
     for line in index_text.splitlines():
@@ -3721,7 +3721,7 @@ def parallel_plan(args: argparse.Namespace) -> int:
         layer = sorted(
             section
             for section in unresolved
-            if all(dep in available for dep in deps.get(section, []) if dep in known)
+            if all(dep in available for dep in deps.get(section, []))
         )
         if not layer:
             break
@@ -3765,11 +3765,12 @@ def changed_files_from_diff(text: str) -> list[str]:
 
 
 def git_changed_files(repo: Path, staged: bool) -> tuple[list[str], str | None]:
-    commands = [["diff", "--name-only", "--cached"]] if staged else [
+    commands = [
         ["diff", "--name-only"],
         ["diff", "--name-only", "--cached"],
-        ["ls-files", "--others", "--exclude-standard"],
     ]
+    if not staged:
+        commands.append(["ls-files", "--others", "--exclude-standard"])
     changed: set[str] = set()
     for command in commands:
         result = git(command, repo)
