@@ -5218,7 +5218,6 @@ def release_check(args: argparse.Namespace) -> int:
         [sys.executable, "-m", "py_compile", str(plugin_root / "scripts" / "zagrosi_skills.py")],
         [sys.executable, "-m", "json.tool", str(plugin_root / ".codex-plugin" / "plugin.json")],
         [sys.executable, "-m", "json.tool", str(plugin_root / ".agents" / "plugins" / "marketplace.json")],
-        [sys.executable, "-m", "json.tool", str(plugin_root / "examples" / "evals" / "suite.json")],
         [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "doctor", "--plugin-root", str(plugin_root), "--strict"],
         [
             sys.executable,
@@ -5230,10 +5229,17 @@ def release_check(args: argparse.Namespace) -> int:
             str(plugin_root / ".release-check" / "config.toml"),
             "--dry-run",
         ],
-        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(plugin_root / "examples" / "saas"), "--strict"],
-        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(plugin_root / "examples" / "typescript-app"), "--strict"],
-        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "eval-suite", "--examples-dir", str(plugin_root / "examples"), "--check-snapshots"],
     ]
+    examples_dir = plugin_root / "examples"
+    if examples_dir.exists():
+        commands.extend(
+            [
+                [sys.executable, "-m", "json.tool", str(examples_dir / "evals" / "suite.json")],
+                [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(examples_dir / "saas"), "--strict"],
+                [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(examples_dir / "typescript-app"), "--strict"],
+                [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "eval-suite", "--examples-dir", str(examples_dir), "--check-snapshots"],
+            ]
+        )
     if args.run_tests:
         commands.append(["uv", "run", "--with", "pytest", "python", "-m", "pytest"])
     results = []

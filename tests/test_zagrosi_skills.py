@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -1667,6 +1668,29 @@ def test_advanced_operational_commands_and_snapshots(tmp_path: Path) -> None:
     assert release["success"] is True
     assert any(".agents/plugins/marketplace.json" in row["command"] for row in release["results"])
     assert any("eval-suite" in row["command"] and "--check-snapshots" in row["command"] for row in release["results"])
+
+
+def test_release_check_skips_example_gates_when_examples_are_absent(tmp_path: Path) -> None:
+    package = tmp_path / "bundle"
+    for relative in [
+        ".agents",
+        ".codex-plugin",
+        "assets",
+        "scripts",
+        "skills",
+    ]:
+        shutil.copytree(ROOT / relative, package / relative)
+    for filename in [".codexignore", "LICENSE", "NOTICE.md", "README.md", "pyproject.toml"]:
+        shutil.copy2(ROOT / filename, package / filename)
+
+    release = run_cmd("release-check", "--plugin-root", str(package))
+
+    assert release["success"] is True
+    command_text = "\n".join(row["command"] for row in release["results"])
+    assert "examples/evals/suite.json" not in command_text
+    assert "lint-project-manifest" not in command_text
+    assert "eval-suite" not in command_text
+    assert ".agents/plugins/marketplace.json" in command_text
 
 
 def test_lint_project_manifest_fixture() -> None:
