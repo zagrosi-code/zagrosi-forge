@@ -236,6 +236,34 @@ def test_plan_setup_sections_and_prompts(tmp_path: Path) -> None:
     assert Path(prompts["prompt_files"][0]).exists()
 
 
+def test_parallel_plan_parses_documented_dependency_graph_prose(tmp_path: Path) -> None:
+    sections = tmp_path / "sections"
+    sections.mkdir(parents=True)
+    (sections / "index.md").write_text(
+        "<!-- PROJECT_CONFIG\n"
+        "runtime: python-uv\n"
+        "test_command: uv run pytest\n"
+        "END_PROJECT_CONFIG -->\n\n"
+        "<!-- SECTION_MANIFEST\n"
+        "section-01-foundation\n"
+        "section-02-api\n"
+        "section-03-ui\n"
+        "END_MANIFEST -->\n\n"
+        "# Sections\n\n"
+        "## Dependency Graph\n\n"
+        "- section-02-api depends on section-01-foundation.\n"
+        "- `section-03-ui` depends on `section-02-api`.\n"
+    )
+
+    parallel = run_cmd("parallel-plan", "--planning-dir", str(tmp_path))
+
+    assert parallel["layers"] == [
+        ["section-01-foundation"],
+        ["section-02-api"],
+        ["section-03-ui"],
+    ]
+
+
 def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
     spec = tmp_path / "spec.md"
     spec.write_text("# Improve Forge\n\nMake operator workflows clearer.\n")

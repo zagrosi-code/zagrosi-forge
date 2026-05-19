@@ -28,6 +28,7 @@ from typing import Any
 
 SPLIT_RE = re.compile(r"^\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
 SECTION_RE = re.compile(r"^section-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
+SECTION_TOKEN_RE = re.compile(r"\bsection-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*\b")
 CONFIG_RE = re.compile(r"^[a-z][a-z0-9_]*:\s*.+$")
 REQ_ID_RE = re.compile(r"\bREQ-[A-Z0-9][A-Z0-9-]*\b")
 FILE_PATH_RE = re.compile(
@@ -1986,14 +1987,32 @@ def extract_file_paths(text: str) -> list[str]:
 def parse_section_dependencies(index_text: str, sections: list[str]) -> dict[str, list[str]]:
     known = set(sections)
     dependencies = {section: [] for section in sections}
+
+    def add_dependencies(section: str, deps: list[str]) -> None:
+        if section not in known:
+            return
+        current = dependencies.setdefault(section, [])
+        for dep in deps:
+            if dep in known and dep != section and dep not in current:
+                current.append(dep)
+
     for line in index_text.splitlines():
-        if "|" not in line:
+        stripped = line.strip()
+        if "|" in stripped:
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if cells and cells[0] in known:
+                depends_cell = cells[1] if len(cells) > 1 else ""
+                add_dependencies(cells[0], SECTION_TOKEN_RE.findall(depends_cell))
             continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if not cells or cells[0] not in known:
+
+        lower = stripped.lower()
+        if "depends on" not in lower:
             continue
-        depends_cell = cells[1] if len(cells) > 1 else ""
-        dependencies[cells[0]] = SECTION_RE.findall(depends_cell)
+        before, after = re.split(r"\bdepends on\b", stripped, maxsplit=1, flags=re.IGNORECASE)
+        dependent_candidates = SECTION_TOKEN_RE.findall(before)
+        if not dependent_candidates:
+            continue
+        add_dependencies(dependent_candidates[0], SECTION_TOKEN_RE.findall(after))
     return dependencies
 
 
