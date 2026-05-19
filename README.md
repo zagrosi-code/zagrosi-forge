@@ -121,8 +121,8 @@ exposes a complete non-interactive marketplace install command.
 Quick verification:
 
 ```bash
-python3 /absolute/path/to/zagrosi-forge/scripts/zagrosi_skills.py doctor \
-  --plugin-root /absolute/path/to/zagrosi-forge \
+python3 scripts/zagrosi_skills.py doctor \
+  --plugin-root . \
   --pretty
 ```
 
@@ -130,7 +130,7 @@ You can also use the helper CLI without enabling the plugin, but Codex will not
 auto-load the skills unless the plugin is enabled:
 
 ```bash
-python3 /absolute/path/to/zagrosi-forge/scripts/zagrosi_skills.py status \
+python3 scripts/zagrosi_skills.py status \
   --path planning/01-auth \
   --pretty
 ```
@@ -471,9 +471,7 @@ tests/                          CLI and gate tests
 
 ```bash
 uv run --with pytest python -m pytest
-uv run --with pyyaml python /Users/zagrosi/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/zagrosi-project
-uv run --with pyyaml python /Users/zagrosi/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/zagrosi-plan
-uv run --with pyyaml python /Users/zagrosi/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/zagrosi-implement
+python3 scripts/zagrosi_skills.py doctor --plugin-root . --strict
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
 ```
