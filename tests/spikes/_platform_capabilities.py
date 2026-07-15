@@ -1515,7 +1515,11 @@ def _windows_security_descriptor_fingerprint(path: Path) -> str:
             raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _windows_dacl_fingerprint(path: Path) -> str:
+WindowsDaclAce = tuple[str, str, str, str, str, str]
+WindowsDacl = tuple[str, tuple[WindowsDaclAce, ...]]
+
+
+def _windows_dacl_components(path: Path) -> WindowsDacl:
     descriptor = _windows_security_descriptor_fingerprint(path)
     start = descriptor.find("D:")
     if start < 0:
@@ -1528,7 +1532,7 @@ def _windows_dacl_fingerprint(path: Path) -> str:
     if remainder:
         raise RuntimeError("DACL SDDL has unsupported control flags")
 
-    normalized_aces: list[str] = []
+    normalized_aces: list[WindowsDaclAce] = []
     body = "(" + body
     while body:
         if not body.startswith("("):
@@ -1546,10 +1550,12 @@ def _windows_dacl_fingerprint(path: Path) -> str:
             for offset in range(0, len(fields[1]), 2)
             if fields[1][offset : offset + 2] != "ID"
         )
-        normalized_aces.append(f"({';'.join(fields)})")
+        normalized_aces.append(
+            (fields[0], fields[1], fields[2], fields[3], fields[4], fields[5])
+        )
         body = body[end + 1 :]
     protected = "P" if "P" in header else ""
-    return f"D:{protected}{''.join(sorted(normalized_aces))}"
+    return protected, tuple(sorted(normalized_aces))
 
 
 def _windows_dacl_state(path: Path) -> tuple[bool, bool, bool]:
@@ -1816,7 +1822,7 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         original_attributes = _windows_attributes(config)
         _set_windows_attributes(config, original_attributes | 0x00000002)
         supported_before = _windows_attributes(config) & 0x00000002
-        dacl_before = _windows_dacl_fingerprint(config)
+        dacl_before = _windows_dacl_components(config)
         supported_name = None
     else:
         config.chmod(0o640)
@@ -1837,7 +1843,8 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         metadata_preserved = (
             _windows_attributes(config) & 0x00000002 == supported_before
         )
-        dacl_preserved = _windows_dacl_fingerprint(config) == dacl_before
+        dacl_after = _windows_dacl_components(config)
+        dacl_preserved = dacl_after == dacl_before
     else:
         status = config.stat()
         metadata_preserved = (
@@ -1853,6 +1860,18 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
     }
     if dacl_before is not None:
         evidence["dacl_preserved"] = dacl_preserved
+        evidence["dacl_control_preserved"] = dacl_after[0] == dacl_before[0]
+        evidence["dacl_ace_count_preserved"] = len(dacl_after[1]) == len(dacl_before[1])
+        for label, field in (
+            ("flags", 1),
+            ("masks", 2),
+            ("object_scopes", 3),
+            ("inherit_scopes", 4),
+            ("trustees", 5),
+        ):
+            evidence[f"dacl_{label}_preserved"] = tuple(
+                ace[field] for ace in dacl_after[1]
+            ) == tuple(ace[field] for ace in dacl_before[1])
     elif platform == "macos":
         provenance_name = b"com.apple.provenance"
         evidence["provenance_preserved"] = (
