@@ -1,26 +1,17 @@
-# Operating system files
 .DS_Store
-
-# Python environments and caches
-*.pyc
 __pycache__/
 .pytest_cache/
 .venv/
-
-# Build artifacts
-build/
 dist/
-*.egg-info/
-
-# Planning artifacts
-.deep-project/
-.zagrosi-project/
-deep_plan_config.json
+build/
 planning/
+*.egg-info/
+*.pyc
+.zagrosi-project/
+.deep-project/
 zagrosi_plan_config.json
-
-# Implementation state
-implementation/deep_implement_config.json
-implementation/deep_implement_state.json
+deep_plan_config.json
 implementation/zagrosi_implement_config.json
 implementation/zagrosi_implement_state.json
+implementation/deep_implement_config.json
+implementation/deep_implement_state.json
