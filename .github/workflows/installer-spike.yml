@@ -520,6 +520,29 @@ jobs:
             throw "platform hard gate requires exactly 8 passed tests and zero failures, errors, or skips"
           }
 
+      - name: Prove installer path and ownership authority
+        id: authority-tests
+        if: always() && steps.acquire.outcome == 'success' && steps.sync.outcome == 'success'
+        shell: pwsh
+        env:
+          MATRIX_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $EvidenceRoot = Join-Path $env:RUNNER_TEMP "zagrosi-evidence"
+          New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+          $Junit = Join-Path $EvidenceRoot "raw-authority.xml"
+          & $env:ZAGROSI_UV_BIN run --locked --no-sync python -m pytest tests/package/test_safe_paths.py tests/package/test_ownership_authority.py --tb=short --junitxml $Junit
+          $TestExit = $LASTEXITCODE
+          if ($TestExit -ne 0) { exit $TestExit }
+          [xml] $Document = Get-Content -LiteralPath $Junit -Raw
+          $Cases = @($Document.SelectNodes("//testcase"))
+          $Failures = @($Document.SelectNodes("//testcase/failure | //testcase/error"))
+          $Skips = @($Document.SelectNodes("//testcase/skipped"))
+          $ExpectedSkips = if ($env:MATRIX_PLATFORM -eq "windows-x86_64") { 0 } else { 1 }
+          if ($Cases.Count -ne 90 -or $Failures.Count -ne 0 -or $Skips.Count -ne $ExpectedSkips) {
+            throw "authority hard gate requires 90 cases, zero failures/errors, and $ExpectedSkips platform skips"
+          }
+
       - name: Prove Codex cachebuster behavior
         id: codex-tests
         if: always() && steps.acquire.outcome == 'success' && steps.sync.outcome == 'success'
@@ -546,6 +569,7 @@ jobs:
           ACQUIRE_OUTCOME: ${{ steps.acquire.outcome }}
           SYNC_OUTCOME: ${{ steps.sync.outcome }}
           PLATFORM_OUTCOME: ${{ steps.platform-tests.outcome }}
+          AUTHORITY_OUTCOME: ${{ steps.authority-tests.outcome }}
           CODEX_OUTCOME: ${{ steps.codex-tests.outcome }}
           MATRIX_OS: ${{ matrix.os }}
           MATRIX_PLATFORM: ${{ matrix.platform }}
@@ -606,6 +630,7 @@ jobs:
           }
 
           Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-platform.xml") (Join-Path $EvidenceRoot "junit-platform.xml")
+          Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-authority.xml") (Join-Path $EvidenceRoot "junit-authority.xml")
           Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-codex.xml") (Join-Path $EvidenceRoot "junit-codex.xml")
 
           function File-Digest([string] $Path) {
@@ -644,6 +669,7 @@ jobs:
               locked_sync = $env:SYNC_OUTCOME
               package_contracts = "not_applicable"
               native_primitives = $env:PLATFORM_OUTCOME
+              installer_authority = $env:AUTHORITY_OUTCOME
               codex_cachebuster = $env:CODEX_OUTCOME
             }
           }
@@ -663,6 +689,7 @@ jobs:
           path: |
             ${{ runner.temp }}/zagrosi-evidence/evidence.json
             ${{ runner.temp }}/zagrosi-evidence/junit-platform.xml
+            ${{ runner.temp }}/zagrosi-evidence/junit-authority.xml
             ${{ runner.temp }}/zagrosi-evidence/junit-codex.xml
           if-no-files-found: error
           retention-days: 7
