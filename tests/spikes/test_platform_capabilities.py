@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import _platform_capabilities as platform_capabilities
 from _platform_capabilities import (
     atomic_supported_metadata_replacement,
     exclusive_absent_directory_publication,
@@ -114,7 +115,7 @@ def test_platform_kernel_lock_releases_after_process_death(
 
 
 def test_platform_atomically_replaces_supported_config_metadata(
-    isolated_root: Path,
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     evidence = atomic_supported_metadata_replacement(isolated_root / "replace")
     expected = {
@@ -127,6 +128,20 @@ def test_platform_atomically_replaces_supported_config_metadata(
     elif os.uname().sysname == "Darwin":
         expected["provenance_preserved"] = True
     assert evidence == expected
+
+    probe = isolated_root / "optional-xattr-probe"
+    probe.touch()
+    name = b"com.apple.provenance"
+    monkeypatch.setattr(platform_capabilities, "_list_xattrs", lambda _path: ())
+    monkeypatch.setattr(
+        platform_capabilities,
+        "_get_xattr",
+        lambda _path, _name: pytest.fail("absent xattr must not be read"),
+    )
+    assert platform_capabilities._optional_xattr(probe, name) is None
+    monkeypatch.setattr(platform_capabilities, "_list_xattrs", lambda _path: (name,))
+    monkeypatch.setattr(platform_capabilities, "_get_xattr", lambda _path, _name: b"")
+    assert platform_capabilities._optional_xattr(probe, name) == b""
 
 
 def test_platform_rejects_unsupported_acl_xattr_dacl_or_flags(

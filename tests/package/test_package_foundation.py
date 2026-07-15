@@ -210,6 +210,12 @@ def test_python_support_is_exactly_311_through_314() -> None:
     assert _project()["project"]["requires-python"] == ">=3.11,<3.15"  # type: ignore[index]
 
 
+def test_git_checkout_preserves_lf_for_hashed_records() -> None:
+    assert (ROOT / ".gitattributes").read_text(encoding="utf-8") == (
+        "* text=auto eol=lf\n"
+    )
+
+
 def test_package_subprocess_environment_is_isolated(
     isolated_package_environment: tuple[Path, Path, bytes, tuple[int, int]],
 ) -> None:

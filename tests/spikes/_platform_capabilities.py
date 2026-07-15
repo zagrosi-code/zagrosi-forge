@@ -1299,6 +1299,10 @@ def _get_xattr(path: Path, name: bytes) -> bytes:
     return bytes(buffer.raw[:result])
 
 
+def _optional_xattr(path: Path, name: bytes) -> bytes | None:
+    return _get_xattr(path, name) if name in _list_xattrs(path) else None
+
+
 def _set_xattr(path: Path, name: bytes, value: bytes) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
     function = libc.setxattr
@@ -1695,8 +1699,10 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
     root.mkdir(parents=True)
     config = root / "config.json"
     config.write_bytes(b'{"generation":1}\n')
+    platform = _platform()
+    provenance_before: bytes | None = None
 
-    if _platform() == "windows":
+    if platform == "windows":
         original_attributes = _windows_attributes(config)
         _set_windows_attributes(config, original_attributes | 0x00000002)
         supported_before = _windows_attributes(config) & 0x00000002
@@ -1705,20 +1711,19 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
     else:
         config.chmod(0o640)
         supported_name = (
-            b"com.zagrosi.spike" if _platform() == "macos" else b"user.zagrosi.spike"
+            b"com.zagrosi.spike" if platform == "macos" else b"user.zagrosi.spike"
         )
         _set_xattr(config, supported_name, b"preserve-me")
         status = config.stat()
         supported_before = (status.st_uid, status.st_gid, stat.S_IMODE(status.st_mode))
+        provenance_name = b"com.apple.provenance"
         provenance_before = (
-            _get_xattr(config, b"com.apple.provenance")
-            if _platform() == "macos"
-            else None
+            _optional_xattr(config, provenance_name) if platform == "macos" else None
         )
         security_descriptor_before = None
 
     _atomic_replace(config, b'{"generation":2}\n')
-    if _platform() == "windows":
+    if platform == "windows":
         metadata_preserved = (
             _windows_attributes(config) & 0x00000002 == supported_before
         )
@@ -1740,9 +1745,10 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
     }
     if security_descriptor_before is not None:
         evidence["security_descriptor_preserved"] = security_descriptor_preserved
-    elif provenance_before is not None:
+    elif platform == "macos":
+        provenance_name = b"com.apple.provenance"
         evidence["provenance_preserved"] = (
-            _get_xattr(config, b"com.apple.provenance") == provenance_before
+            _optional_xattr(config, provenance_name) == provenance_before
         )
     return evidence
 
