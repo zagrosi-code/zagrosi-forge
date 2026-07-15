@@ -1,13 +1,36 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tomllib
 
 import pytest
 
 
 ROOT = Path(__file__).parents[2]
+
+
+def test_toolchain_verifier_imports_before_distribution_install() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(ROOT / "src")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            str(ROOT / "tools/verify_toolchain.py"),
+            "--help",
+        ],
+        check=False,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout
+    assert "--platform" in result.stdout
 
 
 def test_toolchain_versions_and_platform_hashes_are_exact() -> None:

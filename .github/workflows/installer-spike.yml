@@ -67,7 +67,7 @@ jobs:
           import tarfile
           import zipfile
 
-          MAX_TOOL_BYTES = 128 * 1024 * 1024
+          MAX_TOOL_EXECUTABLE_BYTES = 384 * 1024 * 1024
           root_lock = Path("toolchain.lock.json")
           package_lock = Path("src/zagrosi_forge/install/toolchain-lock.json")
           if root_lock.read_bytes() != package_lock.read_bytes():
@@ -99,12 +99,12 @@ jobs:
                       members = [member for member in archive.getmembers() if member.name == executable]
                       if len(members) != 1 or not members[0].isfile():
                           raise SystemExit("locked executable is not one regular tar member")
-                      if members[0].size > MAX_TOOL_BYTES:
+                      if members[0].size > MAX_TOOL_EXECUTABLE_BYTES:
                           raise SystemExit("locked executable exceeds the byte limit")
                       stream = archive.extractfile(members[0])
                       if stream is None:
                           raise SystemExit("locked tar member cannot be read")
-                      data = stream.read(MAX_TOOL_BYTES + 1)
+                      data = stream.read(MAX_TOOL_EXECUTABLE_BYTES + 1)
               elif artifact["archive_type"] == "zip":
                   with zipfile.ZipFile(archive_path) as archive:
                       matches = [info for info in archive.infolist() if info.filename == executable]
@@ -113,12 +113,12 @@ jobs:
                       mode = matches[0].external_attr >> 16
                       if mode and stat.S_ISLNK(mode):
                           raise SystemExit("locked zip executable is a link")
-                      if matches[0].file_size > MAX_TOOL_BYTES:
+                      if matches[0].file_size > MAX_TOOL_EXECUTABLE_BYTES:
                           raise SystemExit("locked executable exceeds the byte limit")
                       data = archive.read(matches[0])
               else:
                   raise SystemExit("unsupported locked archive type")
-              if not data or len(data) > MAX_TOOL_BYTES:
+              if not data or len(data) > MAX_TOOL_EXECUTABLE_BYTES:
                   raise SystemExit("locked executable has an invalid size")
               return data
 
@@ -387,7 +387,7 @@ jobs:
           import tarfile
           import zipfile
 
-          MAX_TOOL_BYTES = 128 * 1024 * 1024
+          MAX_TOOL_EXECUTABLE_BYTES = 384 * 1024 * 1024
           root_lock = Path("toolchain.lock.json")
           package_lock = Path("src/zagrosi_forge/install/toolchain-lock.json")
           if root_lock.read_bytes() != package_lock.read_bytes():
@@ -419,12 +419,12 @@ jobs:
                       members = [member for member in archive.getmembers() if member.name == executable]
                       if len(members) != 1 or not members[0].isfile():
                           raise SystemExit("locked executable is not one regular tar member")
-                      if members[0].size > MAX_TOOL_BYTES:
+                      if members[0].size > MAX_TOOL_EXECUTABLE_BYTES:
                           raise SystemExit("locked executable exceeds the byte limit")
                       stream = archive.extractfile(members[0])
                       if stream is None:
                           raise SystemExit("locked tar member cannot be read")
-                      data = stream.read(MAX_TOOL_BYTES + 1)
+                      data = stream.read(MAX_TOOL_EXECUTABLE_BYTES + 1)
               elif artifact["archive_type"] == "zip":
                   with zipfile.ZipFile(archive_path) as archive:
                       matches = [info for info in archive.infolist() if info.filename == executable]
@@ -433,12 +433,12 @@ jobs:
                       mode = matches[0].external_attr >> 16
                       if mode and stat.S_ISLNK(mode):
                           raise SystemExit("locked zip executable is a link")
-                      if matches[0].file_size > MAX_TOOL_BYTES:
+                      if matches[0].file_size > MAX_TOOL_EXECUTABLE_BYTES:
                           raise SystemExit("locked executable exceeds the byte limit")
                       data = archive.read(matches[0])
               else:
                   raise SystemExit("unsupported locked archive type")
-              if not data or len(data) > MAX_TOOL_BYTES:
+              if not data or len(data) > MAX_TOOL_EXECUTABLE_BYTES:
                   raise SystemExit("locked executable has an invalid size")
               return data
 

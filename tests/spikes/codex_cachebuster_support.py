@@ -39,7 +39,9 @@ PLUGIN_NAME = "zagrosi-forge"
 MARKER_TOKEN = b"{{MARKER}}"
 MAX_OUTPUT_BYTES = 1024 * 1024
 COMMAND_TIMEOUT_SECONDS = 90
-MAX_CODEX_EXECUTABLE_BYTES = 128 * 1024 * 1024
+# Pinned Linux Codex 0.144.4 expands to about 285 MiB. This test-only tool
+# bound is separate from candidate archive limits and never adapts at runtime.
+MAX_CODEX_EXECUTABLE_BYTES = 384 * 1024 * 1024
 
 PROFILE_VARIABLES = (
     "HOME",
