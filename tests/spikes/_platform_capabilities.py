@@ -1414,6 +1414,20 @@ def _set_windows_attributes(path: Path, attributes: int) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def _copy_windows_file(source: Path, destination: Path) -> None:
+    from ctypes import wintypes
+
+    kernel32 = _windows_api()
+    kernel32.CopyFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.BOOL,
+    ]
+    kernel32.CopyFileW.restype = wintypes.BOOL
+    if not kernel32.CopyFileW(os.fspath(source), os.fspath(destination), True):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _windows_security_descriptor(path: Path) -> bytes:
     from ctypes import wintypes
 
@@ -1708,10 +1722,20 @@ def _atomic_replace_windows(path: Path, new_bytes: bytes) -> None:
     if findings:
         raise UnsupportedSecurityMetadata(",".join(findings))
     attributes = _windows_attributes(path)
+    security_descriptor = _windows_security_descriptor_fingerprint(path)
     temporary = path.with_name(f".{path.name}.replace")
     try:
-        with temporary.open("xb", buffering=0) as stream:
-            stream.write(new_bytes)
+        _copy_windows_file(path, temporary)
+        if _windows_security_descriptor_fingerprint(temporary) != security_descriptor:
+            raise UnsupportedSecurityMetadata("security_descriptor_copy_mismatch")
+        with temporary.open("r+b", buffering=0) as stream:
+            remaining = memoryview(new_bytes)
+            while remaining:
+                written = stream.write(remaining)
+                if written is None or written <= 0:
+                    raise OSError("Windows replacement write made no progress")
+                remaining = remaining[written:]
+            stream.truncate()
             os.fsync(stream.fileno())
         preserved = attributes & (
             0x00000001 | 0x00000002 | 0x00000020 | 0x00001000 | 0x00002000
