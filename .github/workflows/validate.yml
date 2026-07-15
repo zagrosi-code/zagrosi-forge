@@ -19,7 +19,9 @@ jobs:
           python -m json.tool .codex-plugin/plugin.json >/dev/null
           python -m json.tool .agents/plugins/marketplace.json >/dev/null
       - name: Run tests
-        run: uv run --with pytest python -m pytest
+        run: |
+          uv sync --locked --no-default-groups --group test
+          uv run --locked --no-sync python -m pytest
       - name: Run strict example gates
         run: |
           python scripts/zagrosi_skills.py lint-project-manifest --planning-dir examples/saas --strict
