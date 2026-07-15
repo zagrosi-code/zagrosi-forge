@@ -1,0 +1,670 @@
+name: Installer package and platform spike
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-spike-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  UV_NO_PROGRESS: "1"
+  UV_PYTHON_DOWNLOADS: never
+
+jobs:
+  package:
+    name: Package / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Acquire and verify locked uv and Codex
+        id: acquire
+        shell: pwsh
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+          TOOLCHAIN_PLATFORM: linux-x86_64
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ToolRoot = Join-Path $env:RUNNER_TEMP "zagrosi-toolchain"
+          if ($env:RUNNER_ARCH -ne "X64") { throw "linux-x86_64 requires an X64 runner" }
+
+          $UvOutput = & python tools/verify_toolchain.py --tool uv --platform $env:TOOLCHAIN_PLATFORM --destination $ToolRoot 2>&1
+          if ($LASTEXITCODE -ne 0) { throw ($UvOutput -join "`n") }
+          $UvArchive = ($UvOutput | Select-Object -Last 1).ToString().Trim()
+
+          $CodexOutput = & python tools/verify_toolchain.py --tool codex --platform $env:TOOLCHAIN_PLATFORM --destination $ToolRoot 2>&1
+          if ($LASTEXITCODE -ne 0) { throw ($CodexOutput -join "`n") }
+          $CodexArchive = ($CodexOutput | Select-Object -Last 1).ToString().Trim()
+
+          @'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import sys
+          import tarfile
+          import zipfile
+
+          MAX_TOOL_BYTES = 128 * 1024 * 1024
+          root_lock = Path("toolchain.lock.json")
+          package_lock = Path("src/zagrosi_forge/install/toolchain-lock.json")
+          if root_lock.read_bytes() != package_lock.read_bytes():
+              raise SystemExit("root and packaged toolchain locks differ")
+          lock = json.loads(root_lock.read_text(encoding="utf-8"))
+
+          def selected(tool_name: str, platform: str) -> tuple[dict[str, object], dict[str, str]]:
+              tools = [tool for tool in lock["tools"] if tool["name"] == tool_name]
+              if len(tools) != 1:
+                  raise SystemExit(f"tool is not uniquely locked: {tool_name}")
+              artifacts = [
+                  artifact
+                  for artifact in tools[0]["artifacts"]
+                  if artifact["platform"] == platform
+              ]
+              if len(artifacts) != 1:
+                  raise SystemExit(f"artifact is not uniquely locked: {tool_name}/{platform}")
+              return tools[0], artifacts[0]
+
+          def verified_bytes(archive_path: Path, artifact: dict[str, str]) -> bytes:
+              if archive_path.is_symlink() or not archive_path.is_file():
+                  raise SystemExit("verified archive is not a regular file")
+              digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+              if digest != artifact["sha256"]:
+                  raise SystemExit("archive changed after toolchain verification")
+              executable = artifact["executable"]
+              if artifact["archive_type"] == "tar.gz":
+                  with tarfile.open(archive_path, "r:gz") as archive:
+                      members = [member for member in archive.getmembers() if member.name == executable]
+                      if len(members) != 1 or not members[0].isfile():
+                          raise SystemExit("locked executable is not one regular tar member")
+                      if members[0].size > MAX_TOOL_BYTES:
+                          raise SystemExit("locked executable exceeds the byte limit")
+                      stream = archive.extractfile(members[0])
+                      if stream is None:
+                          raise SystemExit("locked tar member cannot be read")
+                      data = stream.read(MAX_TOOL_BYTES + 1)
+              elif artifact["archive_type"] == "zip":
+                  with zipfile.ZipFile(archive_path) as archive:
+                      matches = [info for info in archive.infolist() if info.filename == executable]
+                      if len(matches) != 1 or matches[0].is_dir():
+                          raise SystemExit("locked executable is not one regular zip member")
+                      mode = matches[0].external_attr >> 16
+                      if mode and stat.S_ISLNK(mode):
+                          raise SystemExit("locked zip executable is a link")
+                      if matches[0].file_size > MAX_TOOL_BYTES:
+                          raise SystemExit("locked executable exceeds the byte limit")
+                      data = archive.read(matches[0])
+              else:
+                  raise SystemExit("unsupported locked archive type")
+              if not data or len(data) > MAX_TOOL_BYTES:
+                  raise SystemExit("locked executable has an invalid size")
+              return data
+
+          platform = os.environ["TOOLCHAIN_PLATFORM"]
+          uv_tool, uv_artifact = selected("uv", platform)
+          codex_tool, codex_artifact = selected("codex", platform)
+          destinations = {
+              "uv": (Path(sys.argv[1]), uv_tool, uv_artifact),
+              "codex": (Path(sys.argv[2]), codex_tool, codex_artifact),
+          }
+          bin_dir = Path(sys.argv[3])
+          bin_dir.mkdir(parents=True, exist_ok=False)
+          metadata: dict[str, object] = {}
+          for name, (archive_path, tool, artifact) in destinations.items():
+              suffix = ".exe" if platform.startswith("windows-") else ""
+              executable_path = bin_dir / f"{name}{suffix}"
+              with executable_path.open("xb") as output:
+                  output.write(verified_bytes(archive_path, artifact))
+              executable_path.chmod(0o700)
+              metadata[name] = {
+                  "path": str(executable_path.resolve()),
+                  "sha256": artifact["sha256"],
+                  "version": tool["version"],
+              }
+          Path(sys.argv[4]).write_text(
+              json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          '@ | python - $UvArchive $CodexArchive (Join-Path $ToolRoot "bin") (Join-Path $ToolRoot "metadata.json")
+          if ($LASTEXITCODE -ne 0) { throw "verified tool extraction failed" }
+
+          $Metadata = Get-Content (Join-Path $ToolRoot "metadata.json") -Raw | ConvertFrom-Json
+          $env:ZAGROSI_UV_BIN = $Metadata.uv.path
+          $env:ZAGROSI_CODEX_BIN = $Metadata.codex.path
+          $UvVersion = (& $env:ZAGROSI_UV_BIN --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $UvVersion -notmatch '^uv 0\.11\.23(?:\s|$)') {
+            throw "verified uv reported an unexpected version"
+          }
+          $CodexVersion = (& $env:ZAGROSI_CODEX_BIN --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $CodexVersion -ne "codex-cli 0.144.4") {
+            throw "verified Codex reported an unexpected version"
+          }
+
+          "ZAGROSI_UV_BIN=$($Metadata.uv.path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_UV_SHA256=$($Metadata.uv.sha256)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_UV_VERSION=$UvVersion" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_CODEX_BIN=$($Metadata.codex.path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_CODEX_SHA256=$($Metadata.codex.sha256)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_CODEX_VERSION=$CodexVersion" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "UV_PYTHON=$((Get-Command python).Source)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "UV_CACHE_DIR=$(Join-Path $env:RUNNER_TEMP 'uv-cache')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $ToolRoot "bin") | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Sync locked test environment
+        id: sync
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & $env:ZAGROSI_UV_BIN lock --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:ZAGROSI_UV_BIN sync --locked --no-default-groups --group test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run package contract suite
+        id: package-tests
+        shell: pwsh
+        run: |
+          $EvidenceRoot = Join-Path $env:RUNNER_TEMP "zagrosi-evidence"
+          New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+          & $env:ZAGROSI_UV_BIN run --locked --no-sync python -m pytest tests/package --tb=short --junitxml (Join-Path $EvidenceRoot "raw-package.xml")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Sanitize and summarize evidence
+        if: always()
+        shell: pwsh
+        env:
+          ACQUIRE_OUTCOME: ${{ steps.acquire.outcome }}
+          SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package-tests.outcome }}
+          MATRIX_OS: ubuntu-24.04
+          MATRIX_PLATFORM: linux-x86_64
+          MATRIX_PYTHON: ${{ matrix.python-version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $EvidenceRoot = Join-Path $env:RUNNER_TEMP "zagrosi-evidence"
+          New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+
+          function Protect-Text([string] $Value) {
+            if ($null -eq $Value) { return $Value }
+            $Roots = @(
+              @{ Value = $env:GITHUB_WORKSPACE; Label = "<workspace>" },
+              @{ Value = $env:RUNNER_TEMP; Label = "<temp>" },
+              @{ Value = $env:RUNNER_TOOL_CACHE; Label = "<tool-cache>" },
+              @{ Value = $env:HOME; Label = "<home>" },
+              @{ Value = $env:USERPROFILE; Label = "<profile>" }
+            ) | Where-Object { -not [string]::IsNullOrEmpty($_.Value) } | Sort-Object { $_.Value.Length } -Descending
+            foreach ($Root in $Roots) { $Value = $Value.Replace($Root.Value, $Root.Label) }
+            $Value = [regex]::Replace(
+              $Value,
+              '(?i)(authorization|token|api[_-]?key|secret|password)(\s*[:=]\s*)[^\s<"]+',
+              '$1$2<redacted>'
+            )
+            if ($Value.Length -gt 4096) { return "<bounded-tail>" + $Value.Substring($Value.Length - 4096) }
+            return $Value
+          }
+
+          function Write-FallbackJunit([string] $Destination, [string] $Reason) {
+            $Body = "<?xml version=`"1.0`" encoding=`"utf-8`"?><testsuites tests=`"0`"><system-out>$Reason</system-out></testsuites>"
+            [IO.File]::WriteAllText($Destination, $Body, [Text.UTF8Encoding]::new($false))
+          }
+
+          function Write-SanitizedJunit([string] $Source, [string] $Destination) {
+            if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+              Write-FallbackJunit $Destination "test execution did not produce JUnit"
+              return
+            }
+            try {
+              [xml] $Document = Get-Content -LiteralPath $Source -Raw
+              foreach ($Node in $Document.SelectNodes("//*")) {
+                foreach ($Attribute in $Node.Attributes) { $Attribute.Value = Protect-Text $Attribute.Value }
+                if ($Node.LocalName -in @("failure", "error", "system-out", "system-err")) {
+                  $Node.InnerText = Protect-Text $Node.InnerText
+                }
+              }
+              $Settings = [Xml.XmlWriterSettings]::new()
+              $Settings.Encoding = [Text.UTF8Encoding]::new($false)
+              $Settings.Indent = $false
+              $Writer = [Xml.XmlWriter]::Create($Destination, $Settings)
+              try { $Document.Save($Writer) } finally { $Writer.Dispose() }
+              if ((Get-Item -LiteralPath $Destination).Length -gt 1MB) {
+                Write-FallbackJunit $Destination "sanitized JUnit exceeded the one MiB evidence limit"
+              }
+            } catch {
+              Write-FallbackJunit $Destination "raw JUnit could not be safely sanitized"
+            }
+          }
+
+          Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-package.xml") (Join-Path $EvidenceRoot "junit-package.xml")
+
+          function File-Digest([string] $Path) {
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+            return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+
+          $PolicyFiles = @{}
+          Get-ChildItem "src/zagrosi_forge/install" -Filter "*policy.json" | Sort-Object Name | ForEach-Object {
+            $PolicyFiles[$_.Name] = File-Digest $_.FullName
+          }
+          $NativePolicy = if (Test-Path "src/zagrosi_forge/install/native-support-policy.json") {
+            Get-Content "src/zagrosi_forge/install/native-support-policy.json" -Raw | ConvertFrom-Json
+          } else { $null }
+          $Toolchain = if (Test-Path "toolchain.lock.json") {
+            Get-Content "toolchain.lock.json" -Raw | ConvertFrom-Json
+          } else { $null }
+          $Evidence = [ordered]@{
+            schema_version = "1.0"
+            commit = $env:GITHUB_SHA
+            runner = $env:MATRIX_OS
+            runner_arch = $env:RUNNER_ARCH
+            platform = $env:MATRIX_PLATFORM
+            python = $env:MATRIX_PYTHON
+            lock_digest = File-Digest "uv.lock"
+            policy_digest = $NativePolicy.record_digest
+            policy_file_digests = $PolicyFiles
+            toolchain_digest = $Toolchain.record_digest
+            toolchain_file_digest = File-Digest "toolchain.lock.json"
+            uv_artifact_digest = $env:ZAGROSI_UV_SHA256
+            uv_version = $env:ZAGROSI_UV_VERSION
+            codex_artifact_digest = $env:ZAGROSI_CODEX_SHA256
+            codex_version = $env:ZAGROSI_CODEX_VERSION
+            results = [ordered]@{
+              acquisition = $env:ACQUIRE_OUTCOME
+              locked_sync = $env:SYNC_OUTCOME
+              package_contracts = $env:PACKAGE_OUTCOME
+              native_primitives = "not_applicable"
+              codex_cachebuster = "not_applicable"
+            }
+          }
+          $EvidencePath = Join-Path $EvidenceRoot "evidence.json"
+          [IO.File]::WriteAllText(
+            $EvidencePath,
+            (($Evidence | ConvertTo-Json -Depth 6 -Compress) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+          if ((Get-Item -LiteralPath $EvidencePath).Length -gt 64KB) { throw "summary evidence exceeded 64 KiB" }
+
+      - name: Upload bounded package evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-package-py${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/zagrosi-evidence/evidence.json
+            ${{ runner.temp }}/zagrosi-evidence/junit-package.xml
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          include-hidden-files: false
+
+  spikes:
+    name: Spikes / ${{ matrix.platform }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            python-version: "3.11"
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            python-version: "3.14"
+          - os: macos-15
+            platform: macos-arm64
+            python-version: "3.11"
+          - os: macos-15
+            platform: macos-arm64
+            python-version: "3.14"
+          - os: windows-2025
+            platform: windows-x86_64
+            python-version: "3.11"
+          - os: windows-2025
+            platform: windows-x86_64
+            python-version: "3.14"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Acquire and verify locked uv and Codex
+        id: acquire
+        shell: pwsh
+        env:
+          PYTHONPATH: ${{ github.workspace }}/src
+          TOOLCHAIN_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ToolRoot = Join-Path $env:RUNNER_TEMP "zagrosi-toolchain"
+          $ExpectedArch = if ($env:TOOLCHAIN_PLATFORM -eq "macos-arm64") { "ARM64" } else { "X64" }
+          if ($env:RUNNER_ARCH -ne $ExpectedArch) {
+            throw "$($env:TOOLCHAIN_PLATFORM) requires a $ExpectedArch runner"
+          }
+
+          $UvOutput = & python tools/verify_toolchain.py --tool uv --platform $env:TOOLCHAIN_PLATFORM --destination $ToolRoot 2>&1
+          if ($LASTEXITCODE -ne 0) { throw ($UvOutput -join "`n") }
+          $UvArchive = ($UvOutput | Select-Object -Last 1).ToString().Trim()
+
+          $CodexOutput = & python tools/verify_toolchain.py --tool codex --platform $env:TOOLCHAIN_PLATFORM --destination $ToolRoot 2>&1
+          if ($LASTEXITCODE -ne 0) { throw ($CodexOutput -join "`n") }
+          $CodexArchive = ($CodexOutput | Select-Object -Last 1).ToString().Trim()
+
+          @'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import sys
+          import tarfile
+          import zipfile
+
+          MAX_TOOL_BYTES = 128 * 1024 * 1024
+          root_lock = Path("toolchain.lock.json")
+          package_lock = Path("src/zagrosi_forge/install/toolchain-lock.json")
+          if root_lock.read_bytes() != package_lock.read_bytes():
+              raise SystemExit("root and packaged toolchain locks differ")
+          lock = json.loads(root_lock.read_text(encoding="utf-8"))
+
+          def selected(tool_name: str, platform: str) -> tuple[dict[str, object], dict[str, str]]:
+              tools = [tool for tool in lock["tools"] if tool["name"] == tool_name]
+              if len(tools) != 1:
+                  raise SystemExit(f"tool is not uniquely locked: {tool_name}")
+              artifacts = [
+                  artifact
+                  for artifact in tools[0]["artifacts"]
+                  if artifact["platform"] == platform
+              ]
+              if len(artifacts) != 1:
+                  raise SystemExit(f"artifact is not uniquely locked: {tool_name}/{platform}")
+              return tools[0], artifacts[0]
+
+          def verified_bytes(archive_path: Path, artifact: dict[str, str]) -> bytes:
+              if archive_path.is_symlink() or not archive_path.is_file():
+                  raise SystemExit("verified archive is not a regular file")
+              digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+              if digest != artifact["sha256"]:
+                  raise SystemExit("archive changed after toolchain verification")
+              executable = artifact["executable"]
+              if artifact["archive_type"] == "tar.gz":
+                  with tarfile.open(archive_path, "r:gz") as archive:
+                      members = [member for member in archive.getmembers() if member.name == executable]
+                      if len(members) != 1 or not members[0].isfile():
+                          raise SystemExit("locked executable is not one regular tar member")
+                      if members[0].size > MAX_TOOL_BYTES:
+                          raise SystemExit("locked executable exceeds the byte limit")
+                      stream = archive.extractfile(members[0])
+                      if stream is None:
+                          raise SystemExit("locked tar member cannot be read")
+                      data = stream.read(MAX_TOOL_BYTES + 1)
+              elif artifact["archive_type"] == "zip":
+                  with zipfile.ZipFile(archive_path) as archive:
+                      matches = [info for info in archive.infolist() if info.filename == executable]
+                      if len(matches) != 1 or matches[0].is_dir():
+                          raise SystemExit("locked executable is not one regular zip member")
+                      mode = matches[0].external_attr >> 16
+                      if mode and stat.S_ISLNK(mode):
+                          raise SystemExit("locked zip executable is a link")
+                      if matches[0].file_size > MAX_TOOL_BYTES:
+                          raise SystemExit("locked executable exceeds the byte limit")
+                      data = archive.read(matches[0])
+              else:
+                  raise SystemExit("unsupported locked archive type")
+              if not data or len(data) > MAX_TOOL_BYTES:
+                  raise SystemExit("locked executable has an invalid size")
+              return data
+
+          platform = os.environ["TOOLCHAIN_PLATFORM"]
+          uv_tool, uv_artifact = selected("uv", platform)
+          codex_tool, codex_artifact = selected("codex", platform)
+          destinations = {
+              "uv": (Path(sys.argv[1]), uv_tool, uv_artifact),
+              "codex": (Path(sys.argv[2]), codex_tool, codex_artifact),
+          }
+          bin_dir = Path(sys.argv[3])
+          bin_dir.mkdir(parents=True, exist_ok=False)
+          metadata: dict[str, object] = {}
+          for name, (archive_path, tool, artifact) in destinations.items():
+              suffix = ".exe" if platform.startswith("windows-") else ""
+              executable_path = bin_dir / f"{name}{suffix}"
+              with executable_path.open("xb") as output:
+                  output.write(verified_bytes(archive_path, artifact))
+              executable_path.chmod(0o700)
+              metadata[name] = {
+                  "path": str(executable_path.resolve()),
+                  "sha256": artifact["sha256"],
+                  "version": tool["version"],
+              }
+          Path(sys.argv[4]).write_text(
+              json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          '@ | python - $UvArchive $CodexArchive (Join-Path $ToolRoot "bin") (Join-Path $ToolRoot "metadata.json")
+          if ($LASTEXITCODE -ne 0) { throw "verified tool extraction failed" }
+
+          $Metadata = Get-Content (Join-Path $ToolRoot "metadata.json") -Raw | ConvertFrom-Json
+          $env:ZAGROSI_UV_BIN = $Metadata.uv.path
+          $env:ZAGROSI_CODEX_BIN = $Metadata.codex.path
+          $UvVersion = (& $env:ZAGROSI_UV_BIN --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $UvVersion -notmatch '^uv 0\.11\.23(?:\s|$)') {
+            throw "verified uv reported an unexpected version"
+          }
+          $CodexVersion = (& $env:ZAGROSI_CODEX_BIN --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $CodexVersion -ne "codex-cli 0.144.4") {
+            throw "verified Codex reported an unexpected version"
+          }
+
+          "ZAGROSI_UV_BIN=$($Metadata.uv.path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_UV_SHA256=$($Metadata.uv.sha256)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_UV_VERSION=$UvVersion" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_CODEX_BIN=$($Metadata.codex.path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_CODEX_SHA256=$($Metadata.codex.sha256)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZAGROSI_CODEX_VERSION=$CodexVersion" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "UV_PYTHON=$((Get-Command python).Source)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "UV_CACHE_DIR=$(Join-Path $env:RUNNER_TEMP 'uv-cache')" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          (Join-Path $ToolRoot "bin") | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Sync locked test environment
+        id: sync
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & $env:ZAGROSI_UV_BIN lock --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:ZAGROSI_UV_BIN sync --locked --no-default-groups --group test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prove native platform primitives
+        id: platform-tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $EvidenceRoot = Join-Path $env:RUNNER_TEMP "zagrosi-evidence"
+          New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+          $Junit = Join-Path $EvidenceRoot "raw-platform.xml"
+          & $env:ZAGROSI_UV_BIN run --locked --no-sync python -m pytest tests/spikes/test_platform_capabilities.py --tb=short --junitxml $Junit
+          $TestExit = $LASTEXITCODE
+          if ($TestExit -ne 0) { exit $TestExit }
+          [xml] $Document = Get-Content -LiteralPath $Junit -Raw
+          $Cases = @($Document.SelectNodes("//testcase"))
+          $NonPasses = @($Document.SelectNodes("//testcase/failure | //testcase/error | //testcase/skipped"))
+          if ($Cases.Count -ne 8 -or $NonPasses.Count -ne 0) {
+            throw "platform hard gate requires exactly 8 passed tests and zero failures, errors, or skips"
+          }
+
+      - name: Prove Codex cachebuster behavior
+        id: codex-tests
+        if: always() && steps.acquire.outcome == 'success' && steps.sync.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $EvidenceRoot = Join-Path $env:RUNNER_TEMP "zagrosi-evidence"
+          New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+          $Junit = Join-Path $EvidenceRoot "raw-codex.xml"
+          & $env:ZAGROSI_UV_BIN run --locked --no-sync python -m pytest tests/spikes/test_codex_cachebuster.py --tb=short --junitxml $Junit
+          $TestExit = $LASTEXITCODE
+          if ($TestExit -ne 0) { exit $TestExit }
+          [xml] $Document = Get-Content -LiteralPath $Junit -Raw
+          $Cases = @($Document.SelectNodes("//testcase"))
+          $NonPasses = @($Document.SelectNodes("//testcase/failure | //testcase/error | //testcase/skipped"))
+          if ($Cases.Count -ne 6 -or $NonPasses.Count -ne 0) {
+            throw "Codex hard gate requires exactly 6 passed tests and zero failures, errors, or skips"
+          }
+
+      - name: Sanitize and summarize evidence
+        if: always()
+        shell: pwsh
+        env:
+          ACQUIRE_OUTCOME: ${{ steps.acquire.outcome }}
+          SYNC_OUTCOME: ${{ steps.sync.outcome }}
+          PLATFORM_OUTCOME: ${{ steps.platform-tests.outcome }}
+          CODEX_OUTCOME: ${{ steps.codex-tests.outcome }}
+          MATRIX_OS: ${{ matrix.os }}
+          MATRIX_PLATFORM: ${{ matrix.platform }}
+          MATRIX_PYTHON: ${{ matrix.python-version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $EvidenceRoot = Join-Path $env:RUNNER_TEMP "zagrosi-evidence"
+          New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+
+          function Protect-Text([string] $Value) {
+            if ($null -eq $Value) { return $Value }
+            $Roots = @(
+              @{ Value = $env:GITHUB_WORKSPACE; Label = "<workspace>" },
+              @{ Value = $env:RUNNER_TEMP; Label = "<temp>" },
+              @{ Value = $env:RUNNER_TOOL_CACHE; Label = "<tool-cache>" },
+              @{ Value = $env:HOME; Label = "<home>" },
+              @{ Value = $env:USERPROFILE; Label = "<profile>" }
+            ) | Where-Object { -not [string]::IsNullOrEmpty($_.Value) } | Sort-Object { $_.Value.Length } -Descending
+            foreach ($Root in $Roots) { $Value = $Value.Replace($Root.Value, $Root.Label) }
+            $Value = [regex]::Replace(
+              $Value,
+              '(?i)(authorization|token|api[_-]?key|secret|password)(\s*[:=]\s*)[^\s<"]+',
+              '$1$2<redacted>'
+            )
+            if ($Value.Length -gt 4096) { return "<bounded-tail>" + $Value.Substring($Value.Length - 4096) }
+            return $Value
+          }
+
+          function Write-FallbackJunit([string] $Destination, [string] $Reason) {
+            $Body = "<?xml version=`"1.0`" encoding=`"utf-8`"?><testsuites tests=`"0`"><system-out>$Reason</system-out></testsuites>"
+            [IO.File]::WriteAllText($Destination, $Body, [Text.UTF8Encoding]::new($false))
+          }
+
+          function Write-SanitizedJunit([string] $Source, [string] $Destination) {
+            if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+              Write-FallbackJunit $Destination "test execution did not produce JUnit"
+              return
+            }
+            try {
+              [xml] $Document = Get-Content -LiteralPath $Source -Raw
+              foreach ($Node in $Document.SelectNodes("//*")) {
+                foreach ($Attribute in $Node.Attributes) { $Attribute.Value = Protect-Text $Attribute.Value }
+                if ($Node.LocalName -in @("failure", "error", "system-out", "system-err")) {
+                  $Node.InnerText = Protect-Text $Node.InnerText
+                }
+              }
+              $Settings = [Xml.XmlWriterSettings]::new()
+              $Settings.Encoding = [Text.UTF8Encoding]::new($false)
+              $Settings.Indent = $false
+              $Writer = [Xml.XmlWriter]::Create($Destination, $Settings)
+              try { $Document.Save($Writer) } finally { $Writer.Dispose() }
+              if ((Get-Item -LiteralPath $Destination).Length -gt 1MB) {
+                Write-FallbackJunit $Destination "sanitized JUnit exceeded the one MiB evidence limit"
+              }
+            } catch {
+              Write-FallbackJunit $Destination "raw JUnit could not be safely sanitized"
+            }
+          }
+
+          Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-platform.xml") (Join-Path $EvidenceRoot "junit-platform.xml")
+          Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-codex.xml") (Join-Path $EvidenceRoot "junit-codex.xml")
+
+          function File-Digest([string] $Path) {
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+            return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+
+          $PolicyFiles = @{}
+          Get-ChildItem "src/zagrosi_forge/install" -Filter "*policy.json" | Sort-Object Name | ForEach-Object {
+            $PolicyFiles[$_.Name] = File-Digest $_.FullName
+          }
+          $NativePolicy = if (Test-Path "src/zagrosi_forge/install/native-support-policy.json") {
+            Get-Content "src/zagrosi_forge/install/native-support-policy.json" -Raw | ConvertFrom-Json
+          } else { $null }
+          $Toolchain = if (Test-Path "toolchain.lock.json") {
+            Get-Content "toolchain.lock.json" -Raw | ConvertFrom-Json
+          } else { $null }
+          $Evidence = [ordered]@{
+            schema_version = "1.0"
+            commit = $env:GITHUB_SHA
+            runner = $env:MATRIX_OS
+            runner_arch = $env:RUNNER_ARCH
+            platform = $env:MATRIX_PLATFORM
+            python = $env:MATRIX_PYTHON
+            lock_digest = File-Digest "uv.lock"
+            policy_digest = $NativePolicy.record_digest
+            policy_file_digests = $PolicyFiles
+            toolchain_digest = $Toolchain.record_digest
+            toolchain_file_digest = File-Digest "toolchain.lock.json"
+            uv_artifact_digest = $env:ZAGROSI_UV_SHA256
+            uv_version = $env:ZAGROSI_UV_VERSION
+            codex_artifact_digest = $env:ZAGROSI_CODEX_SHA256
+            codex_version = $env:ZAGROSI_CODEX_VERSION
+            results = [ordered]@{
+              acquisition = $env:ACQUIRE_OUTCOME
+              locked_sync = $env:SYNC_OUTCOME
+              package_contracts = "not_applicable"
+              native_primitives = $env:PLATFORM_OUTCOME
+              codex_cachebuster = $env:CODEX_OUTCOME
+            }
+          }
+          $EvidencePath = Join-Path $EvidenceRoot "evidence.json"
+          [IO.File]::WriteAllText(
+            $EvidencePath,
+            (($Evidence | ConvertTo-Json -Depth 6 -Compress) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+          if ((Get-Item -LiteralPath $EvidencePath).Length -gt 64KB) { throw "summary evidence exceeded 64 KiB" }
+
+      - name: Upload bounded spike evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-spike-${{ matrix.platform }}-py${{ matrix.python-version }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/zagrosi-evidence/evidence.json
+            ${{ runner.temp }}/zagrosi-evidence/junit-platform.xml
+            ${{ runner.temp }}/zagrosi-evidence/junit-codex.xml
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+          include-hidden-files: false

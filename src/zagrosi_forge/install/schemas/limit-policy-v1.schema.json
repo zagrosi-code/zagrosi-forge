@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zagrosi.dev/schemas/limit-policy-v1",
+  "title": "Zagrosi Forge Limit Policy v1",
+  "type": "object",
+  "required": ["schema_version", "schema_digest", "writer_version", "minimum_reader_version", "record_digest", "limit_policy_version", "policy_version", "values"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "schema_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "writer_version": {"type": "string"},
+    "minimum_reader_version": {"type": "string"},
+    "record_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "limit_policy_version": {"const": "1.0"},
+    "policy_version": {"const": "1.0"},
+    "values": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "integer", "minimum": 1}}
+  },
+  "additionalProperties": false,
+  "x-limit-policy-version": "1.0"
+}
