@@ -1168,7 +1168,7 @@ def _windows_private_security_descriptor() -> int:
     from ctypes import wintypes
 
     sid = _windows_current_user_sid()
-    sddl = f"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})"
+    sddl = f"O:{sid}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})"
     advapi32 = _windows_dll("advapi32")
     descriptor = wintypes.LPVOID()
     size = wintypes.ULONG()
@@ -3096,7 +3096,7 @@ class _WindowsSourceRoot(SourceRoot):
                 handle = _windows_open_child(
                     parent,
                     reference.components[-1],
-                    directory=False,
+                    directory=None,
                     read_data=True,
                 )
             except ForgeError:

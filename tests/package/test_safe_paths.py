@@ -208,10 +208,9 @@ def test_open_snapshot_rejects_linked_or_reparse_ancestor_and_leaf(
         }
         with pytest.raises(Exception) as leaf:
             root.open_snapshot((_reference("leaf.txt"),))
-        assert getattr(leaf.value, "code", None) in {
-            "path.linked_leaf",
-            "path.reparse_point",
-        }
+        assert getattr(leaf.value, "code", None) == (
+            "path.reparse_point" if os.name == "nt" else "path.linked_leaf"
+        )
         with pytest.raises(Exception) as directory:
             root.open_snapshot((_reference("directory"),))
         assert getattr(directory.value, "code", None) == "path.outside_root"
