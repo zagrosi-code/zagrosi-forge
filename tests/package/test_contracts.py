@@ -238,6 +238,7 @@ def test_validation_result_is_closed_sorted_and_unwraps() -> None:
         ("metadata:a", "metadata.root_type"),
         ("metadata:z", "metadata.schema"),
     )
+    assert ValidationResult.accepted(None).unwrap() is None
 
     error = ForgeError(
         "metadata.schema", 10, "Package metadata is invalid.", findings=findings
@@ -253,6 +254,13 @@ def test_validation_result_is_closed_sorted_and_unwraps() -> None:
         ValidationResult(value=None, error=RuntimeError("unsafe"))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="findings"):
         ValidationResult.failure(error, findings=(findings[0],))
+    assert ValidationResult.rejected(error).findings == error.findings
+
+    from zagrosi_forge.install.contracts import DiagnosticReport
+
+    report = DiagnosticReport(findings=findings)
+    assert not report.authoritative
+    assert not report.is_valid
 
     same_key = tuple(
         Finding(

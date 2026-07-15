@@ -201,6 +201,18 @@ class ValidationResult(Generic[T]):
             raise TypeError("error")
         return cls(value=None, error=error, findings=findings or error.findings)
 
+    @classmethod
+    def accepted(
+        cls, value: T, *, findings: tuple[Finding, ...] = ()
+    ) -> ValidationResult[T]:
+        return cls.success(value, findings=findings)
+
+    @classmethod
+    def rejected(
+        cls, error: ForgeError, *, findings: tuple[Finding, ...] = ()
+    ) -> ValidationResult[T]:
+        return cls.failure(error, findings=findings)
+
     @property
     def is_ok(self) -> bool:
         return self.error is None
@@ -232,6 +244,10 @@ class DiagnosticReport:
     @property
     def is_valid(self) -> bool:
         return not self.findings
+
+    @property
+    def authoritative(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
