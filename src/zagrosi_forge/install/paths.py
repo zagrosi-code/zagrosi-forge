@@ -3122,7 +3122,12 @@ class _WindowsSourceRoot(SourceRoot):
                     "path.unsupported_filesystem",
                     "The source filesystem is not supported.",
                 )
-            if status.is_directory or status.is_reparse:
+            if status.is_reparse:
+                _windows_close(handle)
+                raise _error(
+                    "path.reparse_point", "Windows reparse points are not allowed."
+                )
+            if status.is_directory:
                 _windows_close(handle)
                 raise _error(
                     "path.outside_root", "The source leaf is not a regular file."

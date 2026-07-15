@@ -54,6 +54,27 @@ def _identity(path: Path) -> tuple[int, int]:
     return metadata.st_dev, metadata.st_ino
 
 
+def _private_test_directory(path: Path) -> Path:
+    """Create one exact-private test directory without weakening production."""
+
+    if os.name != "nt":
+        path.mkdir(mode=0o700)
+        return path
+
+    import zagrosi_forge.install.paths as paths
+
+    parent = paths._windows_open_path(os.fspath(path.parent))
+    child = 0
+    try:
+        child = paths._windows_create_private_directory(parent, path.name)
+        assert paths._windows_private_directory(child, exact=True)
+    finally:
+        if child:
+            paths._windows_close(child)
+        paths._windows_close(parent)
+    return path
+
+
 def _directory_link(target: Path, link: Path) -> None:
     if os.name != "nt":
         link.symlink_to(target, target_is_directory=True)
@@ -122,11 +143,11 @@ def test_containment_rejects_sibling_prefix_and_source_destination_overlap(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     source = tmp_path / "candidate"
-    source.mkdir(mode=0o700)
+    _private_test_directory(source)
     (source / "payload.txt").write_bytes(b"candidate")
     overlapping_home = source
     sibling_home = tmp_path / "candidate-sibling"
-    sibling_home.mkdir(mode=0o700)
+    _private_test_directory(sibling_home)
     authority = PlatformPathAuthority()
 
     with authority.open_source_root(source) as source_root:
@@ -376,7 +397,7 @@ def test_nonexistent_descendant_has_expected_depth_and_owned_ancestor(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
     with owned:
@@ -417,7 +438,7 @@ def test_first_root_bootstrap_is_exclusive_restrictive_and_link_safe(
 
     codex_home = tmp_path / "codex-home"
     external = tmp_path / "external"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     external.mkdir()
     sentinel = external / "sentinel"
     sentinel.write_bytes(b"preserve")
@@ -435,8 +456,8 @@ def test_first_root_bootstrap_is_exclusive_restrictive_and_link_safe(
             )
 
     linked_home = tmp_path / "linked-home"
-    linked_home.mkdir(mode=0o700)
-    (linked_home / "plugins").mkdir(mode=0o700)
+    _private_test_directory(linked_home)
+    _private_test_directory(linked_home / "plugins")
     _directory_link(external, linked_home / "plugins/.zagrosi")
     assert _code(authority.bootstrap_forge_root(linked_home, runner=_runner())) in {
         "path.linked_leaf",
@@ -451,7 +472,7 @@ def test_authenticated_existing_root_reopens_without_granting_deletion(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     first = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
     plugins_identity = first.identity
@@ -473,7 +494,7 @@ def test_concurrent_bootstrap_has_one_publisher_and_one_authenticated_reopen(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
 
     def bootstrap() -> Any:
         return (
@@ -502,7 +523,7 @@ def test_control_claim_tamper_permission_and_namespace_rebind_fail_closed(
     authority = PlatformPathAuthority()
 
     tampered_home = tmp_path / "tampered-home"
-    tampered_home.mkdir(mode=0o700)
+    _private_test_directory(tampered_home)
     authority.bootstrap_forge_root(tampered_home, runner=_runner()).unwrap().close()
     claim = tampered_home / "plugins/.zagrosi/control-v1.json"
     claim.write_bytes(claim.read_bytes().replace(b'"record_kind"', b'"record_k1nd"'))
@@ -513,7 +534,7 @@ def test_control_claim_tamper_permission_and_namespace_rebind_fail_closed(
 
     if os.name == "posix":
         permissive_home = tmp_path / "permissive-home"
-        permissive_home.mkdir(mode=0o700)
+        _private_test_directory(permissive_home)
         authority.bootstrap_forge_root(
             permissive_home, runner=_runner()
         ).unwrap().close()
@@ -524,7 +545,7 @@ def test_control_claim_tamper_permission_and_namespace_rebind_fail_closed(
         )
 
     rebound_home = tmp_path / "rebound-home"
-    rebound_home.mkdir(mode=0o700)
+    _private_test_directory(rebound_home)
     authority.bootstrap_forge_root(rebound_home, runner=_runner()).unwrap().close()
     authentic = rebound_home / "plugins/.zagrosi"
     displaced = rebound_home / "plugins/displaced"
@@ -552,7 +573,7 @@ def test_control_claim_schema_and_minimum_reader_are_enforced(tmp_path: Path) ->
         ("minimum_reader_version", "999.0.0"),
     ):
         codex_home = tmp_path / field
-        codex_home.mkdir(mode=0o700)
+        _private_test_directory(codex_home)
         authority = PlatformPathAuthority()
         authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap().close()
         claim = codex_home / "plugins/.zagrosi/control-v1.json"
@@ -577,7 +598,7 @@ def test_live_control_namespace_rebind_invalidates_root_and_path_proof(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
     with owned:
@@ -604,7 +625,7 @@ def test_live_plugins_namespace_rebind_invalidates_root_and_path_proof(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
     with owned:
@@ -634,7 +655,7 @@ def test_live_descendant_rebind_invalidates_path_proof(tmp_path: Path) -> None:
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
     with owned:
@@ -685,7 +706,7 @@ def test_partial_bootstrap_rollback_never_deletes_a_name_swapped_directory(
         return
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     attacker = codex_home / "attacker"
     attacker.mkdir()
     attacker_identity = _identity(attacker)
@@ -762,8 +783,10 @@ def test_preexisting_unowned_zagrosi_root_is_preserved(tmp_path: Path) -> None:
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
+    _private_test_directory(codex_home)
+    _private_test_directory(codex_home / "plugins")
     unowned = codex_home / "plugins/.zagrosi"
-    unowned.mkdir(parents=True, mode=0o700)
+    unowned.mkdir(mode=0o700)
     sentinel = unowned / "sentinel"
     sentinel.write_bytes(b"unmanaged")
     before = (_identity(unowned), _identity(sentinel), sentinel.read_bytes())
@@ -795,7 +818,7 @@ def test_path_capabilities_are_bound_to_the_minting_authority(tmp_path: Path) ->
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     first = PlatformPathAuthority()
     second = PlatformPathAuthority()
     owned = first.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
@@ -823,7 +846,7 @@ def test_path_proof_consumption_revalidates_live_control_claim(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     with authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap() as owned:
         (codex_home / "plugins/stages").mkdir()
@@ -974,7 +997,7 @@ def test_authenticated_root_rejects_unknown_descriptor_xattrs(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / target_kind
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap().close()
     control = codex_home / "plugins/.zagrosi"
@@ -1043,7 +1066,7 @@ def test_authenticated_root_rejects_macos_acl_and_flags(
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / metadata_kind
-    codex_home.mkdir(mode=0o700)
+    _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap().close()
     control = codex_home / "plugins/.zagrosi"
