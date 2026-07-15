@@ -399,7 +399,10 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def decode_persistent_record(
-    raw: bytes, *, supported_major: int = 1
+    raw: bytes,
+    *,
+    supported_major: int = 1,
+    reader_version: str | None = None,
 ) -> Mapping[str, object]:
     """Decode a persistent JSON record without performing filesystem effects."""
 
@@ -460,8 +463,13 @@ def decode_persistent_record(
             "record.invalid", 10, "Persistent record digest header is invalid."
         )
     _release_version(decoded["writer_version"])
-    if _release_version(decoded["minimum_reader_version"]) > _release_version(
+    running_version = (
         distribution_version("zagrosi-forge")
+        if reader_version is None
+        else reader_version
+    )
+    if _release_version(decoded["minimum_reader_version"]) > _release_version(
+        running_version
     ):
         raise ForgeError(
             "record.reader_unsupported",

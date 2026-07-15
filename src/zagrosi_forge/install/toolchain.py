@@ -21,7 +21,7 @@ TOOLCHAIN_SCHEMA_DIGEST = (
 MAX_TOOL_BYTES = 128 * 1024 * 1024
 
 
-def load_toolchain_lock() -> Mapping[str, object]:
+def load_toolchain_lock(*, reader_version: str | None = None) -> Mapping[str, object]:
     """Load the immutable toolchain mirror installed with the trusted package."""
 
     install_root = resources.files("zagrosi_forge.install")
@@ -33,7 +33,8 @@ def load_toolchain_lock() -> Mapping[str, object]:
             "Packaged toolchain schema digest does not match.",
         )
     lock = decode_persistent_record(
-        install_root.joinpath("toolchain-lock.json").read_bytes()
+        install_root.joinpath("toolchain-lock.json").read_bytes(),
+        reader_version=reader_version,
     )
     if lock.get("schema_digest") != TOOLCHAIN_SCHEMA_DIGEST:
         raise ForgeError(
