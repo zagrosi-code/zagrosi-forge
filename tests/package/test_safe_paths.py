@@ -67,7 +67,18 @@ def _private_test_directory(path: Path) -> Path:
     child = 0
     try:
         child = paths._windows_create_private_directory(parent, path.name)
-        assert paths._windows_private_directory(child, exact=True)
+        if not paths._windows_private_directory(child, exact=True):
+            current_sid = paths._windows_current_user_sid()
+            rendered = paths._windows_security_sddl(child)
+            try:
+                parsed: object = paths._parse_windows_authorization_sddl(rendered)
+            except ValueError as exc:
+                parsed = f"parse-error:{exc}"
+            pytest.fail(
+                "native exact-private directory creation failed: "
+                f"current_sid={current_sid!r}; "
+                f"rendered_sddl={rendered!r}; parsed={parsed!r}"
+            )
     finally:
         if child:
             paths._windows_close(child)
