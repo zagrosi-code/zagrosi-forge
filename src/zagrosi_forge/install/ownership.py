@@ -1505,6 +1505,107 @@ def _receipt_parent_chain_is_private(
                     os.close(descriptor)
 
 
+@dataclass(frozen=True, slots=True)
+class _ReceiptBindingState:
+    control_live: bool
+    parent_bound: bool
+    leaf_bound: bool
+    leaf_private: bool
+
+    @property
+    def valid(self) -> bool:
+        return (
+            self.control_live
+            and self.parent_bound
+            and self.leaf_bound
+            and self.leaf_private
+        )
+
+
+def _receipt_binding_state(
+    owned_root: OwnedRoot,
+    reference: _SafeReferenceSnapshot,
+    *,
+    expected_parent_identity: tuple[int, int],
+    retained_leaf: int | None = None,
+    expected_leaf_identity: tuple[int, int] | None = None,
+) -> _ReceiptBindingState:
+    control = parent = canonical_leaf = -1
+    control_live = parent_bound = leaf_bound = leaf_private = False
+    if (retained_leaf is None) == (expected_leaf_identity is None):
+        return _ReceiptBindingState(False, False, False, False)
+    try:
+        control = owned_root._duplicate_control_descriptor()
+        if not owned_root._validate_control_descriptor(control):
+            return _ReceiptBindingState(False, False, False, False)
+        control_live = True
+        device = _native_identity(control)[0]
+        if device != owned_root.identity[0]:
+            return _ReceiptBindingState(True, False, False, False)
+        if os.name == "nt":
+            parent = _windows_open_private_directory_chain(
+                control,
+                reference.components[1:-1],
+                volume=device,
+                create_missing=False,
+            )
+        else:
+            parent = _open_private_directory_chain(
+                control,
+                reference.components[1:-1],
+                device=device,
+                create_missing=False,
+            )
+        parent_bound = _native_identity(parent) == expected_parent_identity
+        if not parent_bound:
+            return _ReceiptBindingState(True, False, False, False)
+        if os.name == "nt":
+            canonical_leaf = _windows_open_raw_child(
+                parent,
+                reference.components[-1],
+                directory=False,
+                read_data=True,
+            )
+        else:
+            canonical_leaf = os.open(
+                reference.components[-1],
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+        retained_identity = (
+            expected_leaf_identity
+            if retained_leaf is None
+            else _native_identity(retained_leaf)
+        )
+        leaf_bound = _native_identity(canonical_leaf) == retained_identity
+        if leaf_bound:
+            leaf_private = _private_receipt_descriptor(
+                canonical_leaf,
+                device=device,
+            )
+            if retained_leaf is not None:
+                leaf_private = leaf_private and _private_receipt_descriptor(
+                    retained_leaf,
+                    device=device,
+                )
+    except (ForgeError, OSError):
+        pass
+    finally:
+        for descriptor in (canonical_leaf, parent, control):
+            if descriptor >= 0:
+                _close_native(descriptor)
+    try:
+        control_live = control_live and owned_root._validate_control_binding()
+    except (ForgeError, OSError):
+        control_live = False
+    return _ReceiptBindingState(
+        control_live,
+        parent_bound,
+        leaf_bound,
+        leaf_private,
+    )
+
+
 def _read_posix_descriptor(descriptor: int, *, limit: int) -> bytes:
     status = os.fstat(descriptor)
     if status.st_size > limit:
@@ -1528,7 +1629,9 @@ def _receipt_temp_leaf(leaf: str) -> str:
     return f".receipt-{identity_prefix}-{secrets.token_hex(8)}.tmp"
 
 
-def _matching_posix_receipt(parent: int, leaf: str, raw: bytes, *, device: int) -> bool:
+def _open_matching_posix_receipt(
+    parent: int, leaf: str, raw: bytes, *, device: int
+) -> int | None:
     descriptor = -1
     try:
         descriptor = os.open(
@@ -1538,16 +1641,21 @@ def _matching_posix_receipt(parent: int, leaf: str, raw: bytes, *, device: int) 
         )
         before = os.fstat(descriptor)
         if not _private_posix_receipt(descriptor, before, device=device):
-            return False
+            return None
         rendered = _read_posix_descriptor(descriptor, limit=256 * 1024)
         after = os.fstat(descriptor)
-        return (
+        matches = (
             _identity(descriptor) == (before.st_dev, before.st_ino)
             and _paths._posix_status_fingerprint(before)
             == _paths._posix_status_fingerprint(after)
             and _private_posix_receipt(descriptor, after, device=device)
             and rendered == raw
         )
+        if not matches:
+            return None
+        retained = descriptor
+        descriptor = -1
+        return retained
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -1576,14 +1684,28 @@ def _publish_posix_receipt(
         parent = _open_private_directory_chain(
             control, safe_reference.components[1:-1], device=device
         )
+        expected_parent_identity = _identity(parent)
+        existing = -1
         try:
-            if _matching_posix_receipt(parent, leaf, raw, device=device):
-                if (
-                    not _private_posix_receipt_parent(parent, device=device)
-                    or not owned_root._validate_control_binding()
-                ):
+            matched = _open_matching_posix_receipt(parent, leaf, raw, device=device)
+            if matched is not None:
+                existing = matched
+                binding = _receipt_binding_state(
+                    owned_root,
+                    safe_reference,
+                    expected_parent_identity=expected_parent_identity,
+                    retained_leaf=existing,
+                )
+                if not binding.control_live:
                     raise _error(
                         "ownership.unowned", "The receipt root is not trusted."
+                    )
+                if not binding.valid:
+                    return Result.failure(
+                        _error(
+                            "ownership.receipt_conflict",
+                            "The canonical receipt binding changed.",
+                        )
                     )
                 return Result.success(ReceiptPublication(reference, False))
             return Result.failure(
@@ -1594,6 +1716,9 @@ def _publish_posix_receipt(
             )
         except FileNotFoundError:
             pass
+        finally:
+            if existing >= 0:
+                os.close(existing)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
         for _attempt in range(8):
             temp_leaf = _receipt_temp_leaf(leaf)
@@ -1627,21 +1752,37 @@ def _publish_posix_receipt(
         try:
             _exclusive_rename(parent, temp_leaf, leaf)
         except FileExistsError:
-            if _matching_posix_receipt(parent, leaf, raw, device=device):
-                if (
-                    not _private_posix_receipt_parent(parent, device=device)
-                    or not owned_root._validate_control_binding()
-                ):
-                    raise _error(
-                        "ownership.unowned", "The receipt root is not trusted."
-                    )
-                return Result.success(ReceiptPublication(reference, False))
-            return Result.failure(
-                _error(
-                    "ownership.receipt_conflict",
-                    "Committed receipt bytes already differ.",
+            existing = -1
+            try:
+                matched = _open_matching_posix_receipt(
+                    parent,
+                    leaf,
+                    raw,
+                    device=device,
                 )
-            )
+                if matched is not None:
+                    existing = matched
+                    binding = _receipt_binding_state(
+                        owned_root,
+                        safe_reference,
+                        expected_parent_identity=expected_parent_identity,
+                        retained_leaf=existing,
+                    )
+                    if not binding.control_live:
+                        raise _error(
+                            "ownership.unowned", "The receipt root is not trusted."
+                        )
+                    if binding.valid:
+                        return Result.success(ReceiptPublication(reference, False))
+                return Result.failure(
+                    _error(
+                        "ownership.receipt_conflict",
+                        "Committed receipt bytes already differ.",
+                    )
+                )
+            finally:
+                if existing >= 0:
+                    os.close(existing)
         renamed = True
         current = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
         published = os.fstat(descriptor)
@@ -1657,11 +1798,21 @@ def _publish_posix_receipt(
         ):
             raise OSError(errno.ESTALE, "published receipt identity changed")
         os.fsync(parent)
-        if (
-            not _private_posix_receipt_parent(parent, device=device)
-            or not owned_root._validate_control_binding()
-        ):
+        binding = _receipt_binding_state(
+            owned_root,
+            safe_reference,
+            expected_parent_identity=expected_parent_identity,
+            retained_leaf=descriptor,
+        )
+        if not binding.control_live:
             raise _error("ownership.unowned", "The receipt root is not trusted.")
+        if not binding.valid:
+            return Result.failure(
+                _error(
+                    "ownership.receipt_conflict",
+                    "The canonical receipt binding changed.",
+                )
+            )
         return Result.success(ReceiptPublication(reference, True))
     except ForgeError as exc:
         if exc.code.startswith("ownership."):
@@ -1710,6 +1861,7 @@ def _publish_windows_receipt(
         parent = _windows_open_private_directory_chain(
             control, safe_reference.components[1:-1], volume=volume
         )
+        expected_parent_identity = _native_identity(parent)
         leaf = safe_reference.components[-1]
         existing = 0
         try:
@@ -1730,12 +1882,22 @@ def _publish_windows_receipt(
                     and status.size <= 256 * 1024
                     and _paths._windows_read(existing, limit=256 * 1024) == raw
                 ):
-                    if (
-                        not _paths._windows_private_directory(parent, exact=True)
-                        or not owned_root._validate_control_binding()
-                    ):
+                    binding = _receipt_binding_state(
+                        owned_root,
+                        safe_reference,
+                        expected_parent_identity=expected_parent_identity,
+                        retained_leaf=existing,
+                    )
+                    if not binding.control_live:
                         raise _error(
                             "ownership.unowned", "The receipt root is not trusted."
+                        )
+                    if not binding.valid:
+                        return Result.failure(
+                            _error(
+                                "ownership.receipt_conflict",
+                                "The canonical receipt binding changed.",
+                            )
                         )
                     return Result.success(ReceiptPublication(reference, False))
                 return Result.failure(
@@ -1788,12 +1950,22 @@ def _publish_windows_receipt(
                     and current.size <= 256 * 1024
                     and _paths._windows_read(existing, limit=256 * 1024) == raw
                 ):
-                    if (
-                        not _paths._windows_private_directory(parent, exact=True)
-                        or not owned_root._validate_control_binding()
-                    ):
+                    binding = _receipt_binding_state(
+                        owned_root,
+                        safe_reference,
+                        expected_parent_identity=expected_parent_identity,
+                        retained_leaf=existing,
+                    )
+                    if not binding.control_live:
                         raise _error(
                             "ownership.unowned", "The receipt root is not trusted."
+                        )
+                    if not binding.valid:
+                        return Result.failure(
+                            _error(
+                                "ownership.receipt_conflict",
+                                "The canonical receipt binding changed.",
+                            )
                         )
                     return Result.success(ReceiptPublication(reference, False))
                 return Result.failure(
@@ -1821,11 +1993,21 @@ def _publish_windows_receipt(
                 raise OSError(errno.ESTALE, "published receipt identity changed")
         finally:
             _paths._windows_close(current_handle)
-        if (
-            not _paths._windows_private_directory(parent, exact=True)
-            or not owned_root._validate_control_binding()
-        ):
+        binding = _receipt_binding_state(
+            owned_root,
+            safe_reference,
+            expected_parent_identity=expected_parent_identity,
+            retained_leaf=handle,
+        )
+        if not binding.control_live:
             raise _error("ownership.unowned", "The receipt root is not trusted.")
+        if not binding.valid:
+            return Result.failure(
+                _error(
+                    "ownership.receipt_conflict",
+                    "The canonical receipt binding changed.",
+                )
+            )
         return Result.success(ReceiptPublication(reference, True))
     except ForgeError as exc:
         if exc.code.startswith("ownership."):
@@ -1916,10 +2098,36 @@ def validate_committed_receipt(
     root = -1
     namespace: _paths._NamespaceCapability | None = None
     try:
+        expected_receipt = _snapshot_safe_reference(
+            committed_receipt_reference(
+                observed.effective_marketplace_id,
+                observed.identity,
+            )
+        )
         try:
             raw = receipt.read_bytes(limit=256 * 1024)
         except ForgeError as exc:
             if exc.code.startswith("path."):
+                binding = (
+                    _receipt_binding_state(
+                        owned_root,
+                        expected_receipt,
+                        expected_parent_identity=receipt.parent_identity,
+                        expected_leaf_identity=receipt.identity,
+                    )
+                    if expected_receipt is not None
+                    and receipt_reference.value == expected_receipt.value
+                    else _ReceiptBindingState(False, False, False, False)
+                )
+                if not (
+                    binding.control_live and binding.parent_bound and binding.leaf_bound
+                ):
+                    return Result.failure(
+                        _error(
+                            "ownership.identity_mismatch",
+                            "The ownership receipt containment does not match.",
+                        )
+                    )
                 return Result.failure(
                     _error(
                         "ownership.receipt_invalid",
@@ -1953,10 +2161,6 @@ def validate_committed_receipt(
                     "The observed manifest does not match.",
                 )
             )
-        expected_reference = committed_receipt_reference(
-            observed.effective_marketplace_id, observed.identity
-        )
-        expected_receipt = _snapshot_safe_reference(expected_reference)
         if (
             expected_receipt is None
             or receipt_reference.value != expected_receipt.value
@@ -2011,17 +2215,20 @@ def validate_committed_receipt(
                     "The ownership receipt containment changed.",
                 )
             )
-        if not _receipt_parent_chain_is_private(owned_root, expected_receipt):
+        binding = _receipt_binding_state(
+            owned_root,
+            expected_receipt,
+            expected_parent_identity=receipt.parent_identity,
+            retained_leaf=descriptor,
+        )
+        if not (binding.control_live and binding.parent_bound and binding.leaf_bound):
             return Result.failure(
                 _error(
                     "ownership.identity_mismatch",
                     "The ownership receipt containment does not match.",
                 )
             )
-        if not _private_receipt_descriptor(
-            descriptor,
-            device=owned_root.identity[0],
-        ):
+        if not binding.leaf_private:
             return Result.failure(
                 _error(
                     "ownership.receipt_invalid",

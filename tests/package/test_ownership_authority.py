@@ -63,11 +63,32 @@ def _reference(raw: str):
     return validate_reference(raw, role="ownership-test", limits=LIMIT_POLICY).unwrap()
 
 
+def _private_test_directory(path: Path) -> Path:
+    """Create one exact-private test directory without weakening production."""
+
+    if os.name != "nt":
+        path.mkdir(mode=0o700)
+        return path
+
+    import zagrosi_forge.install.paths as paths
+
+    parent = paths._windows_open_path(os.fspath(path.parent))
+    child = 0
+    try:
+        child = paths._windows_create_private_directory(parent, path.name)
+        assert paths._windows_private_directory(child, exact=True)
+    finally:
+        if child:
+            paths._windows_close(child)
+        paths._windows_close(parent)
+    return path
+
+
 def _owned(tmp_path: Path):
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     home = tmp_path / "codex-home"
-    home.mkdir(mode=0o700)
+    _private_test_directory(home)
     authority = PlatformPathAuthority()
     owned = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
     return authority, owned, home / "plugins"
@@ -242,6 +263,60 @@ def _receipt_proof(tmp_path: Path):
     opened = source.open_regular_file(committed_receipt_reference("zagrosi", identity))
     result = validate_committed_receipt(opened, owned_root=owned, observed=observed)
     return result, receipt_path, opened, source, observed_path, owned
+
+
+def _write_private_receipt_replacement(
+    owned: Any,
+    receipt_path: Path,
+    reference: Any,
+    raw: bytes,
+    *,
+    create_parent: bool,
+) -> None:
+    if os.name != "nt":
+        if create_parent:
+            receipt_path.parent.mkdir(mode=0o700)
+        receipt_path.write_bytes(raw)
+        receipt_path.chmod(0o600)
+        return
+
+    import zagrosi_forge.install.ownership as ownership
+
+    control = parent = leaf = 0
+    try:
+        control = owned._duplicate_control_descriptor()
+        volume = ownership._paths._windows_handle_status(control).identity[0]
+        if create_parent:
+            grandparent = ownership._windows_open_private_directory_chain(
+                control,
+                reference.components[1:-2],
+                volume=volume,
+                create_missing=False,
+            )
+            try:
+                parent = ownership._paths._windows_create_private_directory(
+                    grandparent,
+                    reference.components[-2],
+                )
+            finally:
+                ownership._paths._windows_close(grandparent)
+        else:
+            parent = ownership._windows_open_private_directory_chain(
+                control,
+                reference.components[1:-1],
+                volume=volume,
+                create_missing=False,
+            )
+        leaf = ownership._paths._windows_create_private_file(
+            parent,
+            reference.components[-1],
+        )
+        ownership._windows_write_all(leaf, raw)
+        ownership._windows_flush(leaf)
+    finally:
+        for handle in (leaf, parent, control):
+            if handle:
+                ownership._paths._windows_close(handle)
 
 
 def _validate_existing_receipt(
@@ -545,6 +620,220 @@ def test_receipt_authority_rejects_macos_acl_and_flags(
         source.close()
         observed_path.close()
         owned.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor policy")
+def test_posix_receipt_matcher_rejects_untrusted_metadata(tmp_path: Path) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    parent_path = tmp_path / "receipts"
+    parent_path.mkdir(mode=0o700)
+    raw = b"receipt"
+    receipt_path = parent_path / "receipt.json"
+    receipt_path.write_bytes(raw)
+    receipt_path.chmod(0o644)
+    parent = os.open(
+        parent_path,
+        os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+    )
+    try:
+        assert (
+            ownership._open_matching_posix_receipt(
+                parent,
+                "receipt.json",
+                raw,
+                device=os.fstat(parent).st_dev,
+            )
+            is None
+        )
+    finally:
+        os.close(parent)
+
+
+@pytest.mark.parametrize("target_kind", ("parent", "leaf"))
+def test_receipt_validation_rejects_canonical_rebind_and_preserves_state(
+    tmp_path: Path, target_kind: str
+) -> None:
+    from zagrosi_forge.install.ownership import (
+        committed_receipt_reference,
+        validate_committed_receipt,
+    )
+
+    result, receipt_path, opened, source, observed_path, owned = _receipt_proof(
+        tmp_path
+    )
+    proof = result.unwrap()
+    observed = proof.observed
+    raw = receipt_path.read_bytes()
+    reference = committed_receipt_reference("zagrosi", observed.identity)
+    parent = receipt_path.parent
+    original_canary = parent / "original-canary"
+    original_canary.write_bytes(b"preserve-original")
+    proof.close()
+
+    if target_kind == "parent":
+        displaced_parent = parent.with_name(f"{parent.name}-displaced")
+        parent.rename(displaced_parent)
+        displaced_receipt = displaced_parent / receipt_path.name
+        displaced_canary = displaced_parent / original_canary.name
+        _write_private_receipt_replacement(
+            owned,
+            receipt_path,
+            reference,
+            raw,
+            create_parent=True,
+        )
+    else:
+        displaced_receipt = receipt_path.with_suffix(".displaced")
+        receipt_path.rename(displaced_receipt)
+        displaced_canary = original_canary
+        _write_private_receipt_replacement(
+            owned,
+            receipt_path,
+            reference,
+            raw,
+            create_parent=False,
+        )
+    replacement_canary = receipt_path.parent / "replacement-canary"
+    replacement_canary.write_bytes(b"preserve-replacement")
+
+    def file_state(path: Path) -> tuple[int, int, bytes]:
+        status = path.stat()
+        return status.st_dev, status.st_ino, path.read_bytes()
+
+    before = (
+        file_state(displaced_receipt),
+        file_state(receipt_path),
+        file_state(displaced_canary),
+        file_state(replacement_canary),
+    )
+
+    validation = validate_committed_receipt(
+        opened,
+        owned_root=owned,
+        observed=observed,
+    )
+
+    assert _code(validation) == "ownership.identity_mismatch"
+    assert (
+        file_state(displaced_receipt),
+        file_state(receipt_path),
+        file_state(displaced_canary),
+        file_state(replacement_canary),
+    ) == before
+    opened.close()
+    source.close()
+    observed_path.close()
+    owned.close()
+
+
+@pytest.mark.parametrize("target_kind", ("parent", "leaf"))
+def test_receipt_publication_rejects_midflight_canonical_rebind_and_preserves_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_kind: str
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, root = _owned(tmp_path)
+    identity = _install_identity()
+    raw = _record_bytes(
+        _receipt(
+            identity,
+            relative=_source_relative(identity),
+            manifest="9" * 64,
+        )
+    )
+    reference = ownership.committed_receipt_reference("zagrosi", identity)
+    receipt_path = root / reference.value
+    ownership.publish_committed_receipt(owned, raw=raw).unwrap()
+    parent = receipt_path.parent
+    original_canary = parent / "original-canary"
+    original_canary.write_bytes(b"preserve-original")
+    rebound_paths: tuple[Path, Path, Path, Path] | None = None
+    before: tuple[tuple[int, int, bytes], ...] | None = None
+
+    def file_state(path: Path) -> tuple[int, int, bytes]:
+        status = path.stat()
+        return status.st_dev, status.st_ino, path.read_bytes()
+
+    def rebind() -> None:
+        nonlocal before, rebound_paths
+        if rebound_paths is not None:
+            return
+        if target_kind == "parent":
+            displaced_parent = parent.with_name(f"{parent.name}-displaced")
+            parent.rename(displaced_parent)
+            displaced_receipt = displaced_parent / receipt_path.name
+            displaced_canary = displaced_parent / original_canary.name
+            _write_private_receipt_replacement(
+                owned,
+                receipt_path,
+                reference,
+                raw,
+                create_parent=True,
+            )
+        else:
+            displaced_receipt = receipt_path.with_suffix(".displaced")
+            receipt_path.rename(displaced_receipt)
+            displaced_canary = original_canary
+            _write_private_receipt_replacement(
+                owned,
+                receipt_path,
+                reference,
+                raw,
+                create_parent=False,
+            )
+        replacement_canary = receipt_path.parent / "replacement-canary"
+        replacement_canary.write_bytes(b"preserve-replacement")
+        rebound_paths = (
+            displaced_receipt,
+            receipt_path,
+            displaced_canary,
+            replacement_canary,
+        )
+        before = tuple(file_state(path) for path in rebound_paths)
+
+    if os.name == "nt":
+        original_read = ownership._paths._windows_read
+
+        def rebind_after_read(handle: int, *, limit: int) -> bytes:
+            rendered = original_read(handle, limit=limit)
+            rebind()
+            return rendered
+
+        monkeypatch.setattr(ownership._paths, "_windows_read", rebind_after_read)
+    else:
+        original_match = ownership._open_matching_posix_receipt
+
+        def rebind_after_match(
+            parent_descriptor: int,
+            leaf: str,
+            candidate: bytes,
+            *,
+            device: int,
+        ) -> int | None:
+            matched = original_match(
+                parent_descriptor,
+                leaf,
+                candidate,
+                device=device,
+            )
+            if matched is not None:
+                rebind()
+            return matched
+
+        monkeypatch.setattr(
+            ownership,
+            "_open_matching_posix_receipt",
+            rebind_after_match,
+        )
+
+    publication = ownership.publish_committed_receipt(owned, raw=raw)
+
+    assert _code(publication) == "ownership.receipt_conflict"
+    assert rebound_paths is not None
+    assert before is not None
+    assert tuple(file_state(path) for path in rebound_paths) == before
+    owned.close()
 
 
 def test_committed_receipt_is_hidden_until_atomic_publish(
