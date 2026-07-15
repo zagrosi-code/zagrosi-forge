@@ -1082,6 +1082,61 @@ WindowsDaclAce = tuple[str, str, str, str, str, str]
 WindowsAuthorization = tuple[str, str, str, frozenset[WindowsDaclAce]]
 
 
+def _windows_canonical_sddl_sid(value: str) -> str:
+    """Resolve numeric and abbreviated SDDL principals to one SID spelling."""
+
+    from ctypes import wintypes
+
+    advapi32 = _windows_dll("advapi32")
+    descriptor = wintypes.LPVOID()
+    size = wintypes.ULONG()
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.ULONG),
+    ]
+    advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = (
+        wintypes.BOOL
+    )
+    owner = wintypes.LPVOID()
+    defaulted = wintypes.BOOL()
+    rendered = wintypes.LPWSTR()
+    advapi32.GetSecurityDescriptorOwner.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    advapi32.ConvertSidToStringSidW.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    try:
+        if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            f"O:{value}", 1, ctypes.byref(descriptor), ctypes.byref(size)
+        ):
+            raise _windows_error(_windows_last_error())
+        if not advapi32.GetSecurityDescriptorOwner(
+            descriptor, ctypes.byref(owner), ctypes.byref(defaulted)
+        ):
+            raise _windows_error(_windows_last_error())
+        if not owner.value:
+            raise _error("path.root_unowned", "The Windows SID is unavailable.")
+        if not advapi32.ConvertSidToStringSidW(owner, ctypes.byref(rendered)):
+            raise _windows_error(_windows_last_error())
+        canonical = rendered.value
+        if canonical is None:
+            raise _error("path.root_unowned", "The Windows SID is unavailable.")
+        return canonical
+    finally:
+        if rendered:
+            _windows_local_free(rendered)
+        if descriptor:
+            _windows_local_free(descriptor)
+
+
 def _parse_windows_authorization_sddl(sddl: str) -> WindowsAuthorization:
     """Parse exactly the Section 01 supported effective-authorization subset."""
 
@@ -1124,34 +1179,51 @@ def _parse_windows_authorization_sddl(sddl: str) -> WindowsAuthorization:
             (fields[0], fields[1], fields[2], fields[3], fields[4], fields[5])
         )
         body = body[end + 1 :]
-    protected = "P" if "P" in header else ""
-    return owner, group, protected, frozenset(normalized)
+    return owner, group, header, frozenset(normalized)
 
 
 def _windows_private_authorization(handle: int, *, exact: bool) -> bool:
     try:
-        owner, _group, protected, aces = _parse_windows_authorization_sddl(
+        owner, _group, dacl_control, aces = _parse_windows_authorization_sddl(
             _windows_security_sddl(handle)
         )
-        current_sid = _windows_current_user_sid()
+        current_sid = _windows_canonical_sddl_sid(_windows_current_user_sid())
+        owner_sid = _windows_canonical_sddl_sid(owner)
+        system_sid = _windows_canonical_sddl_sid("SY")
+        administrators_sid = _windows_canonical_sddl_sid("BA")
+        owner_rights_sid = _windows_canonical_sddl_sid("OW")
     except (ForgeError, OSError, ValueError):
         return False
-    if owner != current_sid or (exact and protected != "P"):
+    if owner_sid != current_sid or (exact and dacl_control != "P"):
         return False
-    allowed = {current_sid, "SY", "BA", "OW"}
+    allowed = {current_sid, system_sid, administrators_sid, owner_rights_sid}
     current_has_full_access = False
-    for _kind, flags, rights, object_guid, inherited_guid, trustee in aces:
-        if trustee not in allowed or object_guid or inherited_guid or (exact and flags):
-            return False
-        normalized_rights = rights.lower()
-        full_access = rights == "FA" or normalized_rights in {
-            "0x1f01ff",
-            "0x001f01ff",
-        }
-        if not full_access:
-            return False
-        if trustee in {current_sid, "OW"}:
-            current_has_full_access = True
+    try:
+        for _kind, flags, rights, object_guid, inherited_guid, trustee in aces:
+            trustee_sid = _windows_canonical_sddl_sid(trustee)
+            flag_tokens = {
+                flags[offset : offset + 2] for offset in range(0, len(flags), 2)
+            }
+            if (
+                trustee_sid not in allowed
+                or object_guid
+                or inherited_guid
+                or "IO" in flag_tokens
+                or not flag_tokens <= {"OI", "CI", "NP"}
+                or (exact and flag_tokens)
+            ):
+                return False
+            normalized_rights = rights.lower()
+            full_access = rights == "FA" or normalized_rights in {
+                "0x1f01ff",
+                "0x001f01ff",
+            }
+            if not full_access:
+                return False
+            if trustee_sid in {current_sid, owner_rights_sid}:
+                current_has_full_access = True
+    except (ForgeError, OSError, ValueError):
+        return False
     return current_has_full_access
 
 

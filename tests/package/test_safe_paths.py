@@ -67,18 +67,7 @@ def _private_test_directory(path: Path) -> Path:
     child = 0
     try:
         child = paths._windows_create_private_directory(parent, path.name)
-        if not paths._windows_private_directory(child, exact=True):
-            current_sid = paths._windows_current_user_sid()
-            rendered = paths._windows_security_sddl(child)
-            try:
-                parsed: object = paths._parse_windows_authorization_sddl(rendered)
-            except ValueError as exc:
-                parsed = f"parse-error:{exc}"
-            pytest.fail(
-                "native exact-private directory creation failed: "
-                f"current_sid={current_sid!r}; "
-                f"rendered_sddl={rendered!r}; parsed={parsed!r}"
-            )
+        assert paths._windows_private_directory(child, exact=True)
     finally:
         if child:
             paths._windows_close(child)
@@ -773,20 +762,44 @@ def test_relative_windows_root_has_complete_drive_ancestry(
             assert len(relative_root.absolute_ancestry) > 2
 
 
-def test_windows_acl_semantics_reject_unknown_ace_types() -> None:
-    from zagrosi_forge.install.paths import _parse_windows_authorization_sddl
+def test_windows_acl_semantics_reject_unknown_ace_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.paths as paths
 
     sid = "S-1-5-21-100-200-300-1001"
     valid = f"O:{sid}G:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})"
-    parsed = _parse_windows_authorization_sddl(valid)
-    inherited = _parse_windows_authorization_sddl(
+    parsed = paths._parse_windows_authorization_sddl(valid)
+    inherited = paths._parse_windows_authorization_sddl(
         f"O:{sid}G:SYD:P(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;{sid})"
     )
     assert parsed == inherited
     for ace_type in ("D", "OA", "XA", "AU", "ML"):
         hostile = valid.replace("(A;;FA;;;SY)", f"({ace_type};;FA;;;SY)")
         with pytest.raises(ValueError):
-            _parse_windows_authorization_sddl(hostile)
+            paths._parse_windows_authorization_sddl(hostile)
+
+    canonical = {
+        "LA": sid,
+        sid: sid,
+        "SY": "S-1-5-18",
+        "BA": "S-1-5-32-544",
+        "OW": "S-1-3-4",
+    }
+    rendered = "O:LAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;LA)"
+    monkeypatch.setattr(paths, "_windows_security_sddl", lambda _handle: rendered)
+    monkeypatch.setattr(paths, "_windows_current_user_sid", lambda: sid)
+    monkeypatch.setattr(
+        paths,
+        "_windows_canonical_sddl_sid",
+        lambda value: canonical[value],
+    )
+    assert paths._windows_private_authorization(1, exact=True)
+
+    rendered = "O:LAG:SYD:AI(A;IO;FA;;;LA)"
+    assert not paths._windows_private_authorization(1, exact=False)
+    rendered = "O:LAG:SYD:PAI(A;;FA;;;LA)"
+    assert not paths._windows_private_authorization(1, exact=True)
 
 
 def test_preexisting_unowned_zagrosi_root_is_preserved(tmp_path: Path) -> None:
