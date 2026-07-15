@@ -124,7 +124,7 @@ def test_platform_atomically_replaces_supported_config_metadata(
         "supported_metadata_preserved": True,
     }
     if os.name == "nt":
-        expected["security_authorization_preserved"] = True
+        expected["dacl_preserved"] = True
     elif os.uname().sysname == "Darwin":
         expected["provenance_preserved"] = True
     assert evidence == expected
