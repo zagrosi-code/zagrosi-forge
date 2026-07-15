@@ -1502,14 +1502,22 @@ def _windows_security_descriptor_fingerprint(path: Path) -> str:
 
 
 WindowsDaclAce = tuple[str, str, str, str, str, str]
-WindowsDacl = tuple[str, tuple[WindowsDaclAce, ...]]
+WindowsAuthorization = tuple[str, str, str, frozenset[WindowsDaclAce]]
 
 
-def _windows_dacl_components(path: Path) -> WindowsDacl:
+def _windows_authorization_components(path: Path) -> WindowsAuthorization:
     descriptor = _windows_security_descriptor_fingerprint(path)
     start = descriptor.find("D:")
     if start < 0:
         raise RuntimeError("security descriptor has no DACL SDDL")
+    principals = descriptor[:start]
+    group_start = principals.find("G:", 2)
+    if not principals.startswith("O:") or group_start < 0:
+        raise RuntimeError("security descriptor has unsupported principals")
+    owner = principals[2:group_start]
+    group = principals[group_start + 2 :]
+    if not owner or not group:
+        raise RuntimeError("security descriptor has an empty principal")
     sddl = descriptor[start:]
     if "(" not in sddl or not sddl.endswith(")"):
         raise RuntimeError("DACL SDDL has an unsupported shape")
@@ -1541,7 +1549,7 @@ def _windows_dacl_components(path: Path) -> WindowsDacl:
         )
         body = body[end + 1 :]
     protected = "P" if "P" in header else ""
-    return protected, tuple(normalized_aces)
+    return owner, group, protected, frozenset(normalized_aces)
 
 
 def _windows_dacl_state(path: Path) -> tuple[bool, bool, bool]:
@@ -1750,6 +1758,10 @@ def _atomic_replace_windows(path: Path, new_bytes: bytes) -> None:
     findings = _security_metadata(path)
     if findings:
         raise UnsupportedSecurityMetadata(",".join(findings))
+    try:
+        authorization = _windows_authorization_components(path)
+    except RuntimeError as error:
+        raise UnsupportedSecurityMetadata("unsupported_dacl") from error
     attributes = _windows_attributes(path)
     temporary = path.with_name(f".{path.name}.replace")
     try:
@@ -1766,6 +1778,8 @@ def _atomic_replace_windows(path: Path, new_bytes: bytes) -> None:
             0x00000001 | 0x00000002 | 0x00000020 | 0x00001000 | 0x00002000
         )
         _set_windows_attributes(temporary, preserved or 0x00000080)
+        if _windows_authorization_components(temporary) != authorization:
+            raise UnsupportedSecurityMetadata("temporary_authorization_mismatch")
         kernel32 = _windows_api()
         kernel32.ReplaceFileW.argtypes = [
             wintypes.LPCWSTR,
@@ -1780,6 +1794,8 @@ def _atomic_replace_windows(path: Path, new_bytes: bytes) -> None:
             os.fspath(path), os.fspath(temporary), None, 0, None, None
         ):
             raise ctypes.WinError(ctypes.get_last_error())
+        if _windows_authorization_components(path) != authorization:
+            raise UnsupportedSecurityMetadata("replacement_authorization_mismatch")
         _flush_windows_file(path)
     finally:
         if temporary.exists():
@@ -1804,7 +1820,7 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         original_attributes = _windows_attributes(config)
         _set_windows_attributes(config, original_attributes | 0x00000002)
         supported_before = _windows_attributes(config) & 0x00000002
-        dacl_before = _windows_dacl_components(config)
+        authorization_before = _windows_authorization_components(config)
         supported_name = None
     else:
         config.chmod(0o640)
@@ -1818,15 +1834,16 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         provenance_before = (
             _optional_xattr(config, provenance_name) if platform == "macos" else None
         )
-        dacl_before = None
+        authorization_before = None
 
     _atomic_replace(config, b'{"generation":2}\n')
     if platform == "windows":
         metadata_preserved = (
             _windows_attributes(config) & 0x00000002 == supported_before
         )
-        dacl_after = _windows_dacl_components(config)
-        dacl_preserved = dacl_after == dacl_before
+        authorization_preserved = (
+            _windows_authorization_components(config) == authorization_before
+        )
     else:
         status = config.stat()
         metadata_preserved = (
@@ -1840,25 +1857,8 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         "replacement_data_flushed": True,
         "supported_metadata_preserved": metadata_preserved,
     }
-    if dacl_before is not None:
-        evidence["dacl_preserved"] = dacl_preserved
-        evidence["dacl_control_preserved"] = dacl_after[0] == dacl_before[0]
-        evidence["dacl_ace_count_preserved"] = len(dacl_after[1]) == len(dacl_before[1])
-        before_aces = set(dacl_before[1])
-        after_aces = set(dacl_after[1])
-        evidence["dacl_existing_aces_preserved"] = before_aces <= after_aces
-        evidence["dacl_no_new_aces"] = after_aces <= before_aces
-        evidence["dacl_unique_aces_preserved"] = after_aces == before_aces
-        for label, field in (
-            ("flags", 1),
-            ("masks", 2),
-            ("object_scopes", 3),
-            ("inherit_scopes", 4),
-            ("trustees", 5),
-        ):
-            evidence[f"dacl_{label}_preserved"] = tuple(
-                ace[field] for ace in dacl_after[1]
-            ) == tuple(ace[field] for ace in dacl_before[1])
+    if authorization_before is not None:
+        evidence["security_authorization_preserved"] = authorization_preserved
     elif platform == "macos":
         provenance_name = b"com.apple.provenance"
         evidence["provenance_preserved"] = (

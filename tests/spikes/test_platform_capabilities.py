@@ -124,21 +124,7 @@ def test_platform_atomically_replaces_supported_config_metadata(
         "supported_metadata_preserved": True,
     }
     if os.name == "nt":
-        expected.update(
-            {
-                "dacl_ace_count_preserved": True,
-                "dacl_control_preserved": True,
-                "dacl_existing_aces_preserved": True,
-                "dacl_flags_preserved": True,
-                "dacl_inherit_scopes_preserved": True,
-                "dacl_masks_preserved": True,
-                "dacl_no_new_aces": True,
-                "dacl_object_scopes_preserved": True,
-                "dacl_preserved": True,
-                "dacl_trustees_preserved": True,
-                "dacl_unique_aces_preserved": True,
-            }
-        )
+        expected["security_authorization_preserved"] = True
     elif os.uname().sysname == "Darwin":
         expected["provenance_preserved"] = True
     assert evidence == expected
