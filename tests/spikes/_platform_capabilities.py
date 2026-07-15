@@ -1414,20 +1414,6 @@ def _set_windows_attributes(path: Path, attributes: int) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _copy_windows_file(source: Path, destination: Path) -> None:
-    from ctypes import wintypes
-
-    kernel32 = _windows_api()
-    kernel32.CopyFileW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
-        wintypes.BOOL,
-    ]
-    kernel32.CopyFileW.restype = wintypes.BOOL
-    if not kernel32.CopyFileW(os.fspath(source), os.fspath(destination), True):
-        raise ctypes.WinError(ctypes.get_last_error())
-
-
 def _windows_security_descriptor(path: Path) -> bytes:
     from ctypes import wintypes
 
@@ -1555,7 +1541,7 @@ def _windows_dacl_components(path: Path) -> WindowsDacl:
         )
         body = body[end + 1 :]
     protected = "P" if "P" in header else ""
-    return protected, tuple(sorted(normalized_aces))
+    return protected, tuple(normalized_aces)
 
 
 def _windows_dacl_state(path: Path) -> tuple[bool, bool, bool]:
@@ -1765,13 +1751,9 @@ def _atomic_replace_windows(path: Path, new_bytes: bytes) -> None:
     if findings:
         raise UnsupportedSecurityMetadata(",".join(findings))
     attributes = _windows_attributes(path)
-    security_descriptor = _windows_security_descriptor_fingerprint(path)
     temporary = path.with_name(f".{path.name}.replace")
     try:
-        _copy_windows_file(path, temporary)
-        if _windows_security_descriptor_fingerprint(temporary) != security_descriptor:
-            raise UnsupportedSecurityMetadata("security_descriptor_copy_mismatch")
-        with temporary.open("r+b", buffering=0) as stream:
+        with temporary.open("xb", buffering=0) as stream:
             remaining = memoryview(new_bytes)
             while remaining:
                 written = stream.write(remaining)
