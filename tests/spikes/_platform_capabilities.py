@@ -544,33 +544,48 @@ def stable_parent_and_leaf_identity(root: Path) -> Evidence:
     (parent / "leaf").write_bytes(b"original")
 
     if _platform() == "windows":
-        parent_handle = _open_windows_handle(parent, reject_reparse=True)
+        root_handle = _open_windows_handle(
+            root, reject_reparse=True, directory_traverse=True
+        )
         try:
-            leaf_handle = _open_windows_handle(parent / "leaf", reject_reparse=True)
+            parent_handle = _open_windows_child_handle(
+                root_handle, "parent", directory=True, delete_access=True
+            )
             try:
                 original_parent = _windows_identity(parent_handle)
-                original_leaf = _windows_identity(leaf_handle)
-                parent.rename(root / "relocated")
-                parent.mkdir()
-                (parent / "leaf").write_bytes(b"replacement")
-                new_parent_handle = _open_windows_handle(parent, reject_reparse=True)
+                _rename_windows_handle(parent_handle, root_handle, "relocated")
+                leaf_handle = _open_windows_child_handle(
+                    parent_handle, "leaf", directory=False, delete_access=True
+                )
                 try:
-                    new_leaf_handle = _open_windows_handle(
-                        parent / "leaf", reject_reparse=True
+                    original_leaf = _windows_identity(leaf_handle)
+                    _rename_windows_handle(
+                        leaf_handle, parent_handle, "relocated-leaf"
+                    )
+                    parent.mkdir()
+                    (parent / "leaf").write_bytes(b"replacement")
+                    new_parent_handle = _open_windows_child_handle(
+                        root_handle, "parent", directory=True
                     )
                     try:
-                        new_parent = _windows_identity(new_parent_handle)
-                        new_leaf = _windows_identity(new_leaf_handle)
+                        new_leaf_handle = _open_windows_child_handle(
+                            new_parent_handle, "leaf", directory=False
+                        )
+                        try:
+                            new_parent = _windows_identity(new_parent_handle)
+                            new_leaf = _windows_identity(new_leaf_handle)
+                        finally:
+                            _close_windows_handle(new_leaf_handle)
                     finally:
-                        _close_windows_handle(new_leaf_handle)
+                        _close_windows_handle(new_parent_handle)
+                    stable_parent = _windows_identity(parent_handle) == original_parent
+                    stable_leaf = _windows_identity(leaf_handle) == original_leaf
                 finally:
-                    _close_windows_handle(new_parent_handle)
-                stable_parent = _windows_identity(parent_handle) == original_parent
-                stable_leaf = _windows_identity(leaf_handle) == original_leaf
+                    _close_windows_handle(leaf_handle)
             finally:
-                _close_windows_handle(leaf_handle)
+                _close_windows_handle(parent_handle)
         finally:
-            _close_windows_handle(parent_handle)
+            _close_windows_handle(root_handle)
     else:
         root_fd = os.open(root, _posix_directory_flags())
         parent_fd = os.open("parent", _posix_directory_flags(), dir_fd=root_fd)
@@ -1452,6 +1467,62 @@ def _windows_security_descriptor(path: Path) -> bytes:
     return bytes(descriptor.raw[: needed.value])
 
 
+def _windows_dacl_fingerprint(path: Path) -> tuple[bytes, bool]:
+    from ctypes import wintypes
+
+    descriptor = ctypes.create_string_buffer(_windows_security_descriptor(path))
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    present = wintypes.BOOL()
+    defaulted = wintypes.BOOL()
+    dacl = wintypes.LPVOID()
+    advapi32.GetSecurityDescriptorDacl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+    if not advapi32.GetSecurityDescriptorDacl(
+        descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if not present.value or not dacl.value:
+        raise RuntimeError("security descriptor DACL is absent")
+
+    class AclSizeInformation(ctypes.Structure):
+        _fields_ = [
+            ("AceCount", wintypes.DWORD),
+            ("AclBytesInUse", wintypes.DWORD),
+            ("AclBytesFree", wintypes.DWORD),
+        ]
+
+    size = AclSizeInformation()
+    advapi32.GetAclInformation.argtypes = [
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.c_int,
+    ]
+    advapi32.GetAclInformation.restype = wintypes.BOOL
+    if not advapi32.GetAclInformation(dacl, ctypes.byref(size), ctypes.sizeof(size), 2):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    control = wintypes.WORD()
+    revision = wintypes.DWORD()
+    advapi32.GetSecurityDescriptorControl.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    if not advapi32.GetSecurityDescriptorControl(
+        descriptor, ctypes.byref(control), ctypes.byref(revision)
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return ctypes.string_at(dacl, size.AclBytesInUse), bool(control.value & 0x1000)
+
+
 def _windows_dacl_state(path: Path) -> tuple[bool, bool, bool]:
     from ctypes import wintypes
 
@@ -1706,7 +1777,7 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         original_attributes = _windows_attributes(config)
         _set_windows_attributes(config, original_attributes | 0x00000002)
         supported_before = _windows_attributes(config) & 0x00000002
-        security_descriptor_before = _windows_security_descriptor(config)
+        dacl_before = _windows_dacl_fingerprint(config)
         supported_name = None
     else:
         config.chmod(0o640)
@@ -1720,16 +1791,14 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         provenance_before = (
             _optional_xattr(config, provenance_name) if platform == "macos" else None
         )
-        security_descriptor_before = None
+        dacl_before = None
 
     _atomic_replace(config, b'{"generation":2}\n')
     if platform == "windows":
         metadata_preserved = (
             _windows_attributes(config) & 0x00000002 == supported_before
         )
-        security_descriptor_preserved = (
-            _windows_security_descriptor(config) == security_descriptor_before
-        )
+        dacl_preserved = _windows_dacl_fingerprint(config) == dacl_before
     else:
         status = config.stat()
         metadata_preserved = (
@@ -1743,8 +1812,8 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         "replacement_data_flushed": True,
         "supported_metadata_preserved": metadata_preserved,
     }
-    if security_descriptor_before is not None:
-        evidence["security_descriptor_preserved"] = security_descriptor_preserved
+    if dacl_before is not None:
+        evidence["dacl_preserved"] = dacl_preserved
     elif platform == "macos":
         provenance_name = b"com.apple.provenance"
         evidence["provenance_preserved"] = (
