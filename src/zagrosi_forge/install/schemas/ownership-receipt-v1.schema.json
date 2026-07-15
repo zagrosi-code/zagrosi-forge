@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zagrosi.dev/schemas/ownership-receipt-v1.schema.json",
+  "title": "Zagrosi Forge committed ownership receipt v1",
+  "x-limit-policy-version": "1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_kind", "schema_version", "schema_digest", "writer_version",
+    "minimum_reader_version", "record_digest", "state_machine_version",
+    "policy_version", "transformation_version", "effective_marketplace_id",
+    "identity", "transaction", "source", "cache", "config", "tools",
+    "created_at"
+  ],
+  "properties": {
+    "record_kind": {"const": "committed"},
+    "schema_version": {"const": "1.0"},
+    "schema_digest": {"$ref": "#/$defs/digest"},
+    "writer_version": {"$ref": "#/$defs/version"},
+    "minimum_reader_version": {"$ref": "#/$defs/version"},
+    "record_digest": {"$ref": "#/$defs/digest"},
+    "state_machine_version": {"const": "1.0"},
+    "policy_version": {"const": "1.0"},
+    "transformation_version": {"type": "string", "minLength": 1},
+    "effective_marketplace_id": {"$ref": "#/$defs/identifier"},
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["marketplace_id", "plugin_id", "base_version", "install_version", "base_payload_digest", "rendered_payload_digest", "policy_digest", "transformation_profile", "contract_versions"],
+      "properties": {
+        "marketplace_id": {"$ref": "#/$defs/identifier"},
+        "plugin_id": {"$ref": "#/$defs/identifier"},
+        "base_version": {"$ref": "#/$defs/version"},
+        "install_version": {"type": "string", "minLength": 1},
+        "base_payload_digest": {"$ref": "#/$defs/digest"},
+        "rendered_payload_digest": {"$ref": "#/$defs/digest"},
+        "policy_digest": {"$ref": "#/$defs/digest"},
+        "transformation_profile": {"type": "string", "minLength": 1},
+        "contract_versions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "transaction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "lineage"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "lineage": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}
+    },
+    "source": {"$ref": "#/$defs/generation"},
+    "cache": {"$ref": "#/$defs/generation"},
+    "config": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path_id", "before_digest", "after_digest"],
+      "properties": {"path_id": {"type": "string", "minLength": 1}, "before_digest": {"$ref": "#/$defs/digest"}, "after_digest": {"$ref": "#/$defs/digest"}}
+    },
+    "tools": {
+      "type": "object", "additionalProperties": false,
+      "required": ["installer_version", "python_version", "codex_version", "platform", "verifier_version"],
+      "properties": {
+        "installer_version": {"$ref": "#/$defs/version"}, "python_version": {"$ref": "#/$defs/version"},
+        "codex_version": {"$ref": "#/$defs/version"}, "platform": {"type": "string", "minLength": 1},
+        "verifier_version": {"$ref": "#/$defs/version"}
+      }
+    },
+    "created_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"},
+    "version": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"},
+    "generation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["relative_path", "manifest_digest"],
+      "properties": {"relative_path": {"type": "string", "minLength": 1, "maxLength": 240}, "manifest_digest": {"$ref": "#/$defs/digest"}}
+    }
+  }
+}

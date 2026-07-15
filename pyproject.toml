@@ -17,6 +17,7 @@ build-backend = "uv_build"
 [dependency-groups]
 test = [
   "hypothesis>=6,<7",
+  "jsonschema>=4.26,<5",
   "mypy>=1.15,<2",
   "pytest>=8,<10",
   "ruff>=0.14,<1",

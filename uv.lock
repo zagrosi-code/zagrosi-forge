@@ -3026,6 +3026,7 @@ security = [
 ]
 test = [
     { name = "hypothesis" },
+    { name = "jsonschema" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
@@ -3038,6 +3039,7 @@ test = [
 security = [{ name = "plugin-scanner", specifier = "==2.0.274" }]
 test = [
     { name = "hypothesis", specifier = ">=6,<7" },
+    { name = "jsonschema", specifier = ">=4.26,<5" },
     { name = "mypy", specifier = ">=1.15,<2" },
     { name = "pytest", specifier = ">=8,<10" },
     { name = "ruff", specifier = ">=0.14,<1" },

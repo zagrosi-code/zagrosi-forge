@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zagrosi.dev/schemas/plugin-v1.schema.json",
+  "x-limit-policy-version": "1.0",
+  "type": "object",
+  "$defs": {
+    "unicodeScalarValue": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[^\\uD800-\\uDFFF]*$"},
+        {"type": "array", "items": {"$ref": "#/$defs/unicodeScalarValue"}},
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/unicodeScalarValue"}
+        },
+        {"type": ["number", "boolean", "null"]}
+      ]
+    },
+    "assetReference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "pattern": "^(?:\\./)?(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Ll][Oo][Cc][Kk]\\$|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?(?:/(?!(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Ll][Oo][Cc][Kk]\\$|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.|/|$))[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_-])?)*(?![\\s\\S])"
+    }
+  },
+  "allOf": [{"$ref": "#/$defs/unicodeScalarValue"}],
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "version",
+    "description",
+    "author",
+    "homepage",
+    "repository",
+    "license",
+    "keywords",
+    "skills",
+    "scripts",
+    "interface"
+  ],
+  "properties": {
+    "name": {"const": "zagrosi-forge", "type": "string"},
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "description": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "url": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "homepage": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "repository": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "license": {"type": "string", "minLength": 1, "maxLength": 128},
+    "keywords": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 63}
+    },
+    "skills": {"const": "./skills/", "type": "string"},
+    "scripts": {"const": "./scripts/", "type": "string"},
+    "interface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "displayName",
+        "shortDescription",
+        "longDescription",
+        "developerName",
+        "category",
+        "capabilities",
+        "composerIcon",
+        "websiteURL",
+        "privacyPolicyURL",
+        "termsOfServiceURL",
+        "defaultPrompt",
+        "brandColor",
+        "screenshots"
+      ],
+      "properties": {
+        "displayName": {"type": "string", "minLength": 1, "maxLength": 128},
+        "shortDescription": {"type": "string", "minLength": 1, "maxLength": 512},
+        "longDescription": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "developerName": {"type": "string", "minLength": 1, "maxLength": 128},
+        "category": {"type": "string", "minLength": 1, "maxLength": 128},
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 128}
+        },
+        "composerIcon": {"$ref": "#/$defs/assetReference"},
+        "websiteURL": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "privacyPolicyURL": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "termsOfServiceURL": {"type": "string", "minLength": 1, "maxLength": 2048},
+        "defaultPrompt": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "brandColor": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"},
+        "screenshots": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/assetReference"}
+        }
+      }
+    }
+  }
+}
