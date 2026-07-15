@@ -11,16 +11,18 @@ import json
 import math
 import re
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Generic, Mapping, TypeVar, cast
 
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_RELEASE_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\Z")
+_RELEASE_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+_CONTRACT_VERSION = re.compile(r"[a-z][a-z0-9-]*-v(?:0|[1-9][0-9]*)\Z")
 _MAX_CANONICAL_DEPTH = 32
 _MAX_RECORD_BYTES = 256 * 1024
 _MAX_JSON_MEMBERS = 512
 _MAX_FINDING_TEXT_BYTES = 4_096
 _MAX_FINDING_KEY_BYTES = 128
+T = TypeVar("T")
 
 
 def _freeze_value(value: object) -> object:
@@ -76,17 +78,24 @@ def _validate_finding_details(details: object) -> Mapping[str, object]:
     return details
 
 
-def _release_version(value: object) -> tuple[int, int, int]:
-    if not isinstance(value, str):
-        raise ForgeError(
-            "record.invalid", 10, "Persistent record reader version is invalid."
-        )
-    match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", value)
-    if match is None:
-        raise ForgeError(
-            "record.invalid", 10, "Persistent record reader version is invalid."
-        )
+def parse_release_version(value: object) -> tuple[int, int, int]:
+    """Parse the canonical release-only SemVer subset used by installer records."""
+
+    if (
+        not isinstance(value, str)
+        or (match := _RELEASE_VERSION.fullmatch(value)) is None
+    ):
+        raise ValueError("release_version")
     return (int(match[1]), int(match[2]), int(match[3]))
+
+
+def _release_version(value: object) -> tuple[int, int, int]:
+    try:
+        return parse_release_version(value)
+    except ValueError as exc:
+        raise ForgeError(
+            "record.invalid", 10, "Persistent record reader version is invalid."
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,7 +144,7 @@ class ForgeError(Exception):
         self.code = code
         self.exit_category = exit_category
         self.safe_message = safe_message
-        self.findings = tuple(findings)
+        self.findings = tuple(sorted(findings, key=_finding_sort_key))
         self.recovery_instructions = tuple(recovery_instructions)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -147,6 +156,82 @@ class ForgeError(Exception):
         if name in self._READ_ONLY_FIELDS and name in self.__dict__:
             raise AttributeError(f"{name} is read-only")
         Exception.__delattr__(self, name)
+
+
+def _finding_sort_key(finding: Finding) -> bytes:
+    return canonical_json_bytes(finding)
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationResult(Generic[T]):
+    """Closed success-or-error result with deterministic diagnostics."""
+
+    value: T | None
+    error: ForgeError | None
+    findings: tuple[Finding, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.error is not None and not isinstance(self.error, ForgeError):
+            raise TypeError("error")
+        if self.error is not None and self.value is not None:
+            raise ValueError("result")
+        if not isinstance(self.findings, tuple) or any(
+            not isinstance(finding, Finding) for finding in self.findings
+        ):
+            raise ValueError("findings")
+        findings = tuple(sorted(self.findings, key=_finding_sort_key))
+        if self.error is not None:
+            if not findings:
+                findings = self.error.findings
+            elif findings != self.error.findings:
+                raise ValueError("findings")
+        object.__setattr__(self, "findings", findings)
+
+    @classmethod
+    def success(
+        cls, value: T, *, findings: tuple[Finding, ...] = ()
+    ) -> ValidationResult[T]:
+        return cls(value=value, error=None, findings=findings)
+
+    @classmethod
+    def failure(
+        cls, error: ForgeError, *, findings: tuple[Finding, ...] = ()
+    ) -> ValidationResult[T]:
+        if not isinstance(error, ForgeError):
+            raise TypeError("error")
+        return cls(value=None, error=error, findings=findings or error.findings)
+
+    @property
+    def is_ok(self) -> bool:
+        return self.error is None
+
+    def unwrap(self) -> T:
+        if self.error is not None:
+            raise self.error
+        return cast(T, self.value)
+
+
+Result = ValidationResult
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticReport:
+    """Effect-free inspection findings that never carry installer authority."""
+
+    findings: tuple[Finding, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.findings, tuple) or any(
+            not isinstance(finding, Finding) for finding in self.findings
+        ):
+            raise ValueError("findings")
+        object.__setattr__(
+            self, "findings", tuple(sorted(self.findings, key=_finding_sort_key))
+        )
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.findings
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,14 +259,22 @@ class InstallIdentity:
         for name in ("base_payload_digest", "rendered_payload_digest", "policy_digest"):
             if not _DIGEST.fullmatch(getattr(self, name)):
                 raise ValueError(name)
-        if not _RELEASE_VERSION.fullmatch(self.base_version):
-            raise ValueError("base_version")
+        try:
+            parse_release_version(self.base_version)
+        except ValueError as exc:
+            raise ValueError("base_version") from exc
         if self.install_version != _expected_install_version(
             self.base_version, self.base_payload_digest
         ):
             raise ValueError("install_version")
-        if not self.contract_versions or any(
-            not value for value in self.contract_versions
+        if (
+            not isinstance(self.contract_versions, tuple)
+            or not self.contract_versions
+            or any(
+                not isinstance(value, str) or not _CONTRACT_VERSION.fullmatch(value)
+                for value in self.contract_versions
+            )
+            or tuple(sorted(set(self.contract_versions))) != self.contract_versions
         ):
             raise ValueError("contract_versions")
 
@@ -206,8 +299,10 @@ class ActiveInstallRelation:
         for name in ("base_payload_digest", "rendered_payload_digest"):
             if not _DIGEST.fullmatch(getattr(self, name)):
                 raise ValueError(name)
-        if not _RELEASE_VERSION.fullmatch(self.base_version):
-            raise ValueError("base_version")
+        try:
+            parse_release_version(self.base_version)
+        except ValueError as exc:
+            raise ValueError("base_version") from exc
         if self.install_version != _expected_install_version(
             self.base_version, self.base_payload_digest
         ):

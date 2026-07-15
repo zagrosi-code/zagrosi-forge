@@ -31,14 +31,69 @@ _DETAIL_TOKEN = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,127}\Z")
 _MAX_DIAGNOSTIC_INPUT_BYTES = 4_096
 _MAX_DIAGNOSTIC_OUTPUT_BYTES = 1_024
 
+_INSTALLER_FINDING_TEXT = {
+    "metadata.too_large": "Package metadata exceeds the trusted limit.",
+    "metadata.invalid_utf8": "Package metadata is not valid UTF-8.",
+    "metadata.duplicate_key": "Package metadata contains a duplicate key.",
+    "metadata.root_type": "Package metadata has the wrong root type.",
+    "metadata.schema": "Package metadata does not match the trusted schema.",
+    "metadata.unknown_field": "Package metadata contains an unknown field.",
+    "metadata.version": "Package metadata has an invalid release version.",
+    "metadata.version_mismatch": "Package metadata release versions disagree.",
+    "metadata.duplicate_plugin": "Marketplace metadata repeats a plugin entry.",
+    "metadata.selected_plugin": "Marketplace metadata does not select one plugin.",
+    "metadata.reference_unsafe": "Package metadata contains an unsafe reference.",
+    "metadata.reference_missing": "A required package reference is missing.",
+    "metadata.reference_type": "A required package reference has the wrong type.",
+    "metadata.policy_mismatch": "Candidate policy data differs from trusted policy.",
+    "package.runner_upgrade_required": "The runner cannot validate this package policy.",
+    "runner.untrusted": "The current runner is not trusted for this operation.",
+    "path.component_invalid": "A path component is invalid.",
+    "path.absolute": "An absolute path is not allowed.",
+    "path.traversal": "Path traversal is not allowed.",
+    "path.windows_prefix": "A Windows path prefix is not allowed.",
+    "path.reserved": "A reserved path component is not allowed.",
+    "path.normalization_collision": "Package references collide after normalization.",
+    "path.linked_ancestor": "A path ancestor is linked.",
+    "path.linked_leaf": "A path leaf is linked.",
+    "path.reparse_point": "A Windows reparse point is not allowed.",
+    "path.hardlink": "A hard-linked file is not allowed.",
+    "path.outside_root": "A path is outside its authorized root.",
+    "path.overlap": "Source and destination paths overlap.",
+    "path.depth": "A path has an unexpected containment depth.",
+    "path.identity_changed": "An opened path identity changed.",
+    "path.unsupported_filesystem": "The filesystem is not supported safely.",
+    "path.root_unowned": "The existing Forge root is not owned by this installer.",
+    "ownership.receipt_invalid": "The ownership receipt is invalid.",
+    "ownership.receipt_corrupt": "The ownership receipt is corrupt.",
+    "ownership.receipt_unsupported": "The ownership receipt requires a newer reader.",
+    "ownership.receipt_conflict": "A different ownership receipt already exists.",
+    "ownership.identity_mismatch": "Current state does not match the owned identity.",
+    "ownership.manifest_mismatch": "Current state does not match the owned manifest.",
+    "ownership.unowned": "Deletion ownership could not be proven.",
+    "ownership.already_quarantined": "Owned state was already quarantined.",
+    "ownership.quarantine_conflict": "The quarantine destination is occupied.",
+    "ownership.cleanup_incomplete": "Quarantined cleanup is incomplete.",
+}
 _TRUSTED_FINDING_TEMPLATES = {
     "metadata.invalid": (
         "error",
         "Package metadata is invalid.",
         "Correct the package metadata and retry.",
     ),
+    **{
+        code: (
+            "error",
+            message,
+            "Review the reported package state and retry safely.",
+        )
+        for code, message in _INSTALLER_FINDING_TEXT.items()
+    },
 }
-_TRUSTED_FINDING_DETAILS = {"metadata.invalid": frozenset({"count", "state"})}
+_TRUSTED_FINDING_DETAILS = {
+    "metadata.invalid": frozenset({"count", "state"}),
+    **{code: frozenset() for code in _INSTALLER_FINDING_TEXT},
+}
 _TRUSTED_METADATA_STATES = frozenset({"rejected"})
 
 

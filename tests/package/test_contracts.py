@@ -208,6 +208,166 @@ def test_install_identity_enforces_derived_version_relation() -> None:
         )
 
 
+def test_validation_result_is_closed_sorted_and_unwraps() -> None:
+    from zagrosi_forge.install.contracts import (
+        Finding,
+        ForgeError,
+        ValidationResult,
+    )
+
+    findings = tuple(
+        Finding(
+            code=code,
+            severity="error",
+            message="safe",
+            subject=subject,
+            authority="metadata-schema",
+            authority_version="1",
+            remediation="safe",
+            details={},
+        )
+        for subject, code in (
+            ("metadata:z", "metadata.schema"),
+            ("metadata:a", "metadata.root_type"),
+        )
+    )
+    success = ValidationResult.success("accepted", findings=findings)
+    assert success.is_ok
+    assert success.unwrap() == "accepted"
+    assert tuple((item.subject, item.code) for item in success.findings) == (
+        ("metadata:a", "metadata.root_type"),
+        ("metadata:z", "metadata.schema"),
+    )
+
+    error = ForgeError(
+        "metadata.schema", 10, "Package metadata is invalid.", findings=findings
+    )
+    failure = ValidationResult.failure(error, findings=findings)
+    assert not failure.is_ok
+    assert failure.value is None
+    assert failure.error is error
+    with pytest.raises(ForgeError) as caught:
+        failure.unwrap()
+    assert caught.value is error
+    with pytest.raises(TypeError, match="error"):
+        ValidationResult(value=None, error=RuntimeError("unsafe"))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="findings"):
+        ValidationResult.failure(error, findings=(findings[0],))
+
+    same_key = tuple(
+        Finding(
+            code="metadata.schema",
+            severity="error",
+            message=message,
+            subject="metadata:plugin",
+            authority="metadata-schema",
+            authority_version="1",
+            remediation="safe",
+            details={},
+        )
+        for message in ("z", "a")
+    )
+    assert tuple(
+        item.message
+        for item in ValidationResult.success("accepted", findings=same_key).findings
+    ) == ("a", "z")
+
+
+def test_section_two_diagnostic_codes_use_closed_templates() -> None:
+    from zagrosi_forge.install.contracts import Finding
+    from zagrosi_forge.install.diagnostics import finding_to_dict
+
+    codes = (
+        "metadata.too_large",
+        "metadata.invalid_utf8",
+        "metadata.duplicate_key",
+        "metadata.root_type",
+        "metadata.schema",
+        "metadata.unknown_field",
+        "metadata.version",
+        "metadata.version_mismatch",
+        "metadata.duplicate_plugin",
+        "metadata.selected_plugin",
+        "metadata.reference_unsafe",
+        "metadata.reference_missing",
+        "metadata.reference_type",
+        "metadata.policy_mismatch",
+        "package.runner_upgrade_required",
+        "runner.untrusted",
+        "path.component_invalid",
+        "path.absolute",
+        "path.traversal",
+        "path.windows_prefix",
+        "path.reserved",
+        "path.normalization_collision",
+        "path.linked_ancestor",
+        "path.linked_leaf",
+        "path.reparse_point",
+        "path.hardlink",
+        "path.outside_root",
+        "path.overlap",
+        "path.depth",
+        "path.identity_changed",
+        "path.unsupported_filesystem",
+        "path.root_unowned",
+        "ownership.receipt_invalid",
+        "ownership.receipt_corrupt",
+        "ownership.receipt_unsupported",
+        "ownership.receipt_conflict",
+        "ownership.identity_mismatch",
+        "ownership.manifest_mismatch",
+        "ownership.unowned",
+        "ownership.already_quarantined",
+        "ownership.quarantine_conflict",
+        "ownership.cleanup_incomplete",
+    )
+    for code in codes:
+        rendered = finding_to_dict(
+            Finding(
+                code=code,
+                severity="error",
+                message="candidate token: secret-value",
+                subject="installer:validation",
+                authority="installer-core",
+                authority_version="1",
+                remediation="candidate /private/path",
+                details={},
+            )
+        )
+        assert rendered["code"] == code
+        assert "secret-value" not in repr(rendered)
+        assert "/private/path" not in repr(rendered)
+
+
+@pytest.mark.parametrize(
+    "version",
+    ("01.2.3", "1.02.3", "1.2.03", "v1.2.3", "1.2", "1.2.3+local"),
+)
+def test_release_semver_rejects_noncanonical_forms(version: str) -> None:
+    from zagrosi_forge.install.contracts import parse_release_version
+    from zagrosi_forge.install.version import derive_install_version
+
+    with pytest.raises(ValueError, match="release_version"):
+        parse_release_version(version)
+    with pytest.raises(Exception) as caught:
+        derive_install_version(version, "a" * 64)
+    assert getattr(caught.value, "code", None) == "diagnostic.value_rejected"
+
+
+def test_install_identity_contract_versions_are_canonical_and_immutable() -> None:
+    from dataclasses import replace
+
+    identity = _identity()
+    for versions in (
+        ["finding-v1", "identity-v1"],
+        ("identity-v1", "finding-v1"),
+        ("finding-v1", "finding-v1"),
+        ("finding-v1", "../identity-v1"),
+    ):
+        with pytest.raises(ValueError, match="contract_versions"):
+            replace(identity, contract_versions=versions)
+
+
 def test_same_path_different_full_digest_is_corruption() -> None:
     from zagrosi_forge.install.contracts import ForgeError
     from zagrosi_forge.install.version import require_digest_match
