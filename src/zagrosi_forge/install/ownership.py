@@ -399,7 +399,11 @@ def _windows_open_parent(root: int, components: tuple[str, ...]) -> int:
 
 
 def _windows_open_private_directory_chain(
-    root: int, components: tuple[str, ...], *, volume: int
+    root: int,
+    components: tuple[str, ...],
+    *,
+    volume: int,
+    create_missing: bool = True,
 ) -> int:
     current = _paths._windows_duplicate(root)
     try:
@@ -414,6 +418,8 @@ def _windows_open_private_directory_chain(
                     if not isinstance(exc, FileNotFoundError) and getattr(
                         exc, "winerror", None
                     ) not in {2, 3}:
+                        raise
+                    if not create_missing:
                         raise
                     child = _paths._windows_create_private_directory(current, component)
                 status = _paths._windows_handle_status(child)
@@ -1369,28 +1375,68 @@ def _decode_committed_receipt(raw: bytes) -> _DecodedReceipt:
     return _DecodedReceipt(record, identity, source, cache, effective)
 
 
+def _private_posix_receipt_parent(descriptor: int, *, device: int) -> bool:
+    status = os.fstat(descriptor)
+    return status.st_dev == device and _paths._private_directory(
+        descriptor,
+        status,
+        exact=True,
+    )
+
+
+def _private_posix_receipt(
+    descriptor: int,
+    status: os.stat_result,
+    *,
+    device: int,
+    size: int | None = None,
+) -> bool:
+    try:
+        return (
+            stat.S_ISREG(status.st_mode)
+            and status.st_uid == os.geteuid()
+            and stat.S_IMODE(status.st_mode) == 0o600
+            and status.st_nlink == 1
+            and status.st_dev == device
+            and (size is None or status.st_size == size)
+            and _paths._posix_security_metadata_supported(descriptor, status)
+        )
+    except OSError:
+        return False
+
+
+def _private_receipt_descriptor(descriptor: int, *, device: int) -> bool:
+    if os.name == "posix":
+        return _private_posix_receipt(
+            descriptor,
+            os.fstat(descriptor),
+            device=device,
+        )
+    receipt_status = _paths._windows_handle_status(descriptor)
+    return receipt_status.identity[0] == device and _windows_private_file(descriptor)
+
+
 def _open_private_directory_chain(
-    root: int, components: tuple[str, ...], *, device: int
+    root: int,
+    components: tuple[str, ...],
+    *,
+    device: int,
+    create_missing: bool = True,
 ) -> int:
     current = os.dup(root)
     try:
         for component in components:
             created = False
             child = -1
-            try:
-                os.mkdir(component, 0o700, dir_fd=current)
-                created = True
-            except FileExistsError:
-                pass
+            if create_missing:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=current)
+                    created = True
+                except FileExistsError:
+                    pass
             try:
                 child = os.open(component, _directory_flags(), dir_fd=current)
-                status = os.fstat(child)
-                if (
-                    not stat.S_ISDIR(status.st_mode)
-                    or status.st_uid != os.geteuid()
-                    or stat.S_IMODE(status.st_mode) != 0o700
-                    or status.st_dev != device
-                ):
+                if not _private_posix_receipt_parent(child, device=device):
                     raise _error(
                         "ownership.receipt_conflict",
                         "The receipt parent is not privately owned.",
@@ -1408,6 +1454,55 @@ def _open_private_directory_chain(
     except BaseException:
         os.close(current)
         raise
+
+
+def _receipt_parent_chain_is_private(
+    owned_root: OwnedRoot,
+    reference: _SafeReferenceSnapshot,
+) -> bool:
+    control = parent = 0 if os.name == "nt" else -1
+    try:
+        control = owned_root._duplicate_control_descriptor()
+        if not owned_root._validate_control_descriptor(control):
+            return False
+        if os.name == "nt":
+            volume = _paths._windows_handle_status(control).identity[0]
+            parent = _windows_open_private_directory_chain(
+                control,
+                reference.components[1:-1],
+                volume=volume,
+                create_missing=False,
+            )
+            return (
+                _paths._windows_handle_status(parent).identity[0] == volume
+                and _paths._windows_private_directory(parent, exact=True)
+                and owned_root._validate_control_binding()
+            )
+        device = os.fstat(control).st_dev
+        parent = _open_private_directory_chain(
+            control,
+            reference.components[1:-1],
+            device=device,
+            create_missing=False,
+        )
+        return (
+            _private_posix_receipt_parent(
+                parent,
+                device=device,
+            )
+            and owned_root._validate_control_binding()
+        )
+    except (ForgeError, OSError):
+        return False
+    finally:
+        if os.name == "nt":
+            for handle in (parent, control):
+                if handle:
+                    _paths._windows_close(handle)
+        else:
+            for descriptor in (parent, control):
+                if descriptor >= 0:
+                    os.close(descriptor)
 
 
 def _read_posix_descriptor(descriptor: int, *, limit: int) -> bytes:
@@ -1441,14 +1536,17 @@ def _matching_posix_receipt(parent: int, leaf: str, raw: bytes, *, device: int) 
             os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
             dir_fd=parent,
         )
-        status = os.fstat(descriptor)
+        before = os.fstat(descriptor)
+        if not _private_posix_receipt(descriptor, before, device=device):
+            return False
+        rendered = _read_posix_descriptor(descriptor, limit=256 * 1024)
+        after = os.fstat(descriptor)
         return (
-            stat.S_ISREG(status.st_mode)
-            and status.st_uid == os.geteuid()
-            and stat.S_IMODE(status.st_mode) == 0o600
-            and status.st_nlink == 1
-            and status.st_dev == device
-            and _read_posix_descriptor(descriptor, limit=256 * 1024) == raw
+            _identity(descriptor) == (before.st_dev, before.st_ino)
+            and _paths._posix_status_fingerprint(before)
+            == _paths._posix_status_fingerprint(after)
+            and _private_posix_receipt(descriptor, after, device=device)
+            and rendered == raw
         )
     finally:
         if descriptor >= 0:
@@ -1480,7 +1578,10 @@ def _publish_posix_receipt(
         )
         try:
             if _matching_posix_receipt(parent, leaf, raw, device=device):
-                if not owned_root._validate_control_binding():
+                if (
+                    not _private_posix_receipt_parent(parent, device=device)
+                    or not owned_root._validate_control_binding()
+                ):
                     raise _error(
                         "ownership.unowned", "The receipt root is not trusted."
                     )
@@ -1514,20 +1615,23 @@ def _publish_posix_receipt(
         os.fsync(descriptor)
         status = os.fstat(descriptor)
         if (
-            (status.st_dev, status.st_ino) != staged_identity
-            or not stat.S_ISREG(status.st_mode)
-            or status.st_uid != os.geteuid()
-            or stat.S_IMODE(status.st_mode) != 0o600
-            or status.st_nlink != 1
-            or status.st_size != len(raw)
-            or status.st_dev != device
+            status.st_dev,
+            status.st_ino,
+        ) != staged_identity or not _private_posix_receipt(
+            descriptor,
+            status,
+            device=device,
+            size=len(raw),
         ):
             raise OSError(errno.ESTALE, "staged receipt identity changed")
         try:
             _exclusive_rename(parent, temp_leaf, leaf)
         except FileExistsError:
             if _matching_posix_receipt(parent, leaf, raw, device=device):
-                if not owned_root._validate_control_binding():
+                if (
+                    not _private_posix_receipt_parent(parent, device=device)
+                    or not owned_root._validate_control_binding()
+                ):
                     raise _error(
                         "ownership.unowned", "The receipt root is not trusted."
                     )
@@ -1540,10 +1644,23 @@ def _publish_posix_receipt(
             )
         renamed = True
         current = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != staged_identity:
+        published = os.fstat(descriptor)
+        if (
+            (current.st_dev, current.st_ino) != staged_identity
+            or (published.st_dev, published.st_ino) != staged_identity
+            or not _private_posix_receipt(
+                descriptor,
+                published,
+                device=device,
+                size=len(raw),
+            )
+        ):
             raise OSError(errno.ESTALE, "published receipt identity changed")
         os.fsync(parent)
-        if not owned_root._validate_control_binding():
+        if (
+            not _private_posix_receipt_parent(parent, device=device)
+            or not owned_root._validate_control_binding()
+        ):
             raise _error("ownership.unowned", "The receipt root is not trusted.")
         return Result.success(ReceiptPublication(reference, True))
     except ForgeError as exc:
@@ -1613,7 +1730,10 @@ def _publish_windows_receipt(
                     and status.size <= 256 * 1024
                     and _paths._windows_read(existing, limit=256 * 1024) == raw
                 ):
-                    if not owned_root._validate_control_binding():
+                    if (
+                        not _paths._windows_private_directory(parent, exact=True)
+                        or not owned_root._validate_control_binding()
+                    ):
                         raise _error(
                             "ownership.unowned", "The receipt root is not trusted."
                         )
@@ -1668,7 +1788,10 @@ def _publish_windows_receipt(
                     and current.size <= 256 * 1024
                     and _paths._windows_read(existing, limit=256 * 1024) == raw
                 ):
-                    if not owned_root._validate_control_binding():
+                    if (
+                        not _paths._windows_private_directory(parent, exact=True)
+                        or not owned_root._validate_control_binding()
+                    ):
                         raise _error(
                             "ownership.unowned", "The receipt root is not trusted."
                         )
@@ -1698,7 +1821,10 @@ def _publish_windows_receipt(
                 raise OSError(errno.ESTALE, "published receipt identity changed")
         finally:
             _paths._windows_close(current_handle)
-        if not owned_root._validate_control_binding():
+        if (
+            not _paths._windows_private_directory(parent, exact=True)
+            or not owned_root._validate_control_binding()
+        ):
             raise _error("ownership.unowned", "The receipt root is not trusted.")
         return Result.success(ReceiptPublication(reference, True))
     except ForgeError as exc:
@@ -1790,7 +1916,17 @@ def validate_committed_receipt(
     root = -1
     namespace: _paths._NamespaceCapability | None = None
     try:
-        raw = receipt.read_bytes(limit=256 * 1024)
+        try:
+            raw = receipt.read_bytes(limit=256 * 1024)
+        except ForgeError as exc:
+            if exc.code.startswith("path."):
+                return Result.failure(
+                    _error(
+                        "ownership.receipt_invalid",
+                        "The ownership receipt permissions are invalid.",
+                    )
+                )
+            raise
         decoded = _decode_committed_receipt(raw)
         selected = decoded.source if observed.root_role == "source" else decoded.cache
         if (
@@ -1828,6 +1964,7 @@ def validate_committed_receipt(
             or observed.path.owned_ancestor_identity != owned_root.identity
             or not owned_root._validate_live_descriptor()
             or not owned_root._validate_control_descriptor()
+            or not _receipt_parent_chain_is_private(owned_root, expected_receipt)
         ):
             return Result.failure(
                 _error(
@@ -1836,25 +1973,10 @@ def validate_committed_receipt(
                 )
             )
         descriptor = receipt._duplicate_descriptor()
-        if os.name == "posix":
-            status = os.fstat(descriptor)
-            receipt_private = (
-                stat.S_ISREG(status.st_mode)
-                and status.st_uid == os.geteuid()
-                and stat.S_IMODE(status.st_mode) == 0o600
-                and status.st_nlink == 1
-                and status.st_dev == owned_root.identity[0]
-            )
-        else:
-            receipt_status = _paths._windows_handle_status(descriptor)
-            receipt_private = (
-                not receipt_status.is_directory
-                and not receipt_status.is_reparse
-                and receipt_status.link_count == 1
-                and receipt_status.identity[0] == owned_root.identity[0]
-                and _windows_private_file(descriptor)
-            )
-        if not receipt_private:
+        if not _private_receipt_descriptor(
+            descriptor,
+            device=owned_root.identity[0],
+        ):
             return Result.failure(
                 _error(
                     "ownership.receipt_invalid",
@@ -1887,6 +2009,23 @@ def validate_committed_receipt(
                 _error(
                     "ownership.identity_mismatch",
                     "The ownership receipt containment changed.",
+                )
+            )
+        if not _receipt_parent_chain_is_private(owned_root, expected_receipt):
+            return Result.failure(
+                _error(
+                    "ownership.identity_mismatch",
+                    "The ownership receipt containment does not match.",
+                )
+            )
+        if not _private_receipt_descriptor(
+            descriptor,
+            device=owned_root.identity[0],
+        ):
+            return Result.failure(
+                _error(
+                    "ownership.receipt_invalid",
+                    "The ownership receipt permissions are invalid.",
                 )
             )
         proof = OwnershipProof(

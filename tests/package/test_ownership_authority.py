@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import ast
 import copy
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -148,6 +150,58 @@ def _record_bytes(record: dict[str, object]) -> bytes:
     payload = copy.deepcopy(record)
     payload["record_digest"] = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     return canonical_json_bytes(payload, final_newline=True)
+
+
+def _set_untrusted_xattr(target: Path) -> None:
+    if os.name != "posix" or not (
+        sys.platform.startswith("linux") or sys.platform == "darwin"
+    ):
+        pytest.skip("descriptor xattr policy is POSIX-specific")
+    name = (
+        "com.zagrosi.unhandled"
+        if sys.platform == "darwin"
+        else "user.zagrosi.unhandled"
+    )
+    unsupported = {errno.ENOTSUP, errno.EPERM}
+    if hasattr(errno, "EOPNOTSUPP"):
+        unsupported.add(errno.EOPNOTSUPP)
+    setter = getattr(os, "setxattr", None)
+    if callable(setter):
+        try:
+            setter(target, name, b"hostile")
+            return
+        except OSError as exc:
+            if exc.errno not in unsupported:
+                raise
+        except (NotImplementedError, TypeError):
+            pass
+    xattr = Path("/usr/bin/xattr")
+    if sys.platform != "darwin" or not xattr.is_file():
+        pytest.skip("test filesystem has no writable xattr interface")
+    completed = subprocess.run(
+        [str(xattr), "-w", name, "hostile", str(target)],
+        check=False,
+        capture_output=True,
+        timeout=10,
+    )
+    if completed.returncode != 0:
+        pytest.skip("test filesystem does not support writable xattrs")
+
+
+def _macos_metadata_commands(
+    target: Path, metadata_kind: str
+) -> tuple[list[str], list[str]]:
+    if os.name != "posix" or sys.platform != "darwin":
+        pytest.skip("extended ACL and file-flag policy is macOS-specific")
+    if metadata_kind == "extended-acl":
+        return (
+            ["/bin/chmod", "+a", "everyone deny execute", str(target)],
+            ["/bin/chmod", "-N", str(target)],
+        )
+    return (
+        ["/usr/bin/chflags", "hidden", str(target)],
+        ["/usr/bin/chflags", "nohidden", str(target)],
+    )
 
 
 def _receipt_proof(tmp_path: Path):
@@ -377,6 +431,120 @@ def test_committed_receipt_rejects_mutated_internal_reference(
     assert _code(result) == "ownership.receipt_invalid"
     assert not (root / "escaped-receipt.json").exists()
     owned.close()
+
+
+@pytest.mark.parametrize("target_kind", ("receipt", "parent", "control"))
+def test_receipt_authority_rejects_untrusted_xattrs(
+    tmp_path: Path, target_kind: str
+) -> None:
+    from zagrosi_forge.install.ownership import (
+        publish_committed_receipt,
+        validate_committed_receipt,
+    )
+
+    result, receipt_path, opened, source, observed_path, owned = _receipt_proof(
+        tmp_path
+    )
+    proof = result.unwrap()
+    observed = proof.observed
+    raw = receipt_path.read_bytes()
+    target = {
+        "receipt": receipt_path,
+        "parent": receipt_path.parent,
+        "control": receipt_path.parents[3],
+    }[target_kind]
+    proof.close()
+    try:
+        _set_untrusted_xattr(target)
+        publication = publish_committed_receipt(owned, raw=raw)
+        validation = validate_committed_receipt(
+            opened,
+            owned_root=owned,
+            observed=observed,
+        )
+        expected_publication = (
+            "ownership.unowned"
+            if target_kind == "control"
+            else "ownership.receipt_conflict"
+        )
+        expected_validation = (
+            "ownership.receipt_invalid"
+            if target_kind == "receipt"
+            else "ownership.identity_mismatch"
+        )
+        assert _code(publication) == expected_publication
+        assert _code(validation) == expected_validation
+    finally:
+        opened.close()
+        source.close()
+        observed_path.close()
+        owned.close()
+
+
+@pytest.mark.parametrize("metadata_kind", ("extended-acl", "file-flags"))
+@pytest.mark.parametrize("target_kind", ("receipt", "parent", "control"))
+def test_receipt_authority_rejects_macos_acl_and_flags(
+    tmp_path: Path, target_kind: str, metadata_kind: str
+) -> None:
+    from zagrosi_forge.install.ownership import (
+        publish_committed_receipt,
+        validate_committed_receipt,
+    )
+
+    result, receipt_path, opened, source, observed_path, owned = _receipt_proof(
+        tmp_path
+    )
+    proof = result.unwrap()
+    observed = proof.observed
+    raw = receipt_path.read_bytes()
+    target = {
+        "receipt": receipt_path,
+        "parent": receipt_path.parent,
+        "control": receipt_path.parents[3],
+    }[target_kind]
+    apply, clear = _macos_metadata_commands(target, metadata_kind)
+    proof.close()
+    applied = False
+    try:
+        completed = subprocess.run(
+            apply,
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+        if completed.returncode != 0:
+            pytest.skip("test filesystem rejected macOS security metadata")
+        applied = True
+        publication = publish_committed_receipt(owned, raw=raw)
+        validation = validate_committed_receipt(
+            opened,
+            owned_root=owned,
+            observed=observed,
+        )
+        expected_publication = (
+            "ownership.unowned"
+            if target_kind == "control"
+            else "ownership.receipt_conflict"
+        )
+        expected_validation = (
+            "ownership.receipt_invalid"
+            if target_kind == "receipt"
+            else "ownership.identity_mismatch"
+        )
+        assert _code(publication) == expected_publication
+        assert _code(validation) == expected_validation
+    finally:
+        if applied:
+            subprocess.run(
+                clear,
+                check=False,
+                capture_output=True,
+                timeout=10,
+            )
+        opened.close()
+        source.close()
+        observed_path.close()
+        owned.close()
 
 
 def test_committed_receipt_is_hidden_until_atomic_publish(
