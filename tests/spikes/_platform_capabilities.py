@@ -1515,6 +1515,44 @@ def _windows_security_descriptor_fingerprint(path: Path) -> str:
             raise ctypes.WinError(ctypes.get_last_error())
 
 
+def _windows_authorization_fingerprint(path: Path) -> str:
+    descriptor = _windows_security_descriptor_fingerprint(path)
+    start = descriptor.find("D:")
+    if start < 0:
+        raise RuntimeError("security descriptor has no DACL SDDL")
+    principals = descriptor[:start]
+    if not principals.startswith("O:") or "G:" not in principals:
+        raise RuntimeError("security descriptor has no owner or group SDDL")
+    sddl = descriptor[start:]
+    if "(" not in sddl or not sddl.endswith(")"):
+        raise RuntimeError("DACL SDDL has an unsupported shape")
+    header, body = sddl[2:].split("(", 1)
+    remainder = header.replace("AI", "").replace("AR", "").replace("P", "")
+    if remainder:
+        raise RuntimeError("DACL SDDL has unsupported control flags")
+
+    normalized_aces: list[str] = []
+    body = "(" + body
+    while body:
+        if not body.startswith("("):
+            raise RuntimeError("DACL SDDL ACE list is malformed")
+        end = body.find(")")
+        if end < 0:
+            raise RuntimeError("DACL SDDL ACE is unterminated")
+        fields = body[1:end].split(";")
+        if len(fields) != 6 or len(fields[1]) % 2:
+            raise RuntimeError("DACL SDDL ACE has an unsupported shape")
+        fields[1] = "".join(
+            fields[1][offset : offset + 2]
+            for offset in range(0, len(fields[1]), 2)
+            if fields[1][offset : offset + 2] != "ID"
+        )
+        normalized_aces.append(f"({';'.join(fields)})")
+        body = body[end + 1 :]
+    protected = "P" if "P" in header else ""
+    return f"{principals}D:{protected}{''.join(normalized_aces)}"
+
+
 def _windows_dacl_state(path: Path) -> tuple[bool, bool, bool]:
     from ctypes import wintypes
 
@@ -1779,7 +1817,7 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         original_attributes = _windows_attributes(config)
         _set_windows_attributes(config, original_attributes | 0x00000002)
         supported_before = _windows_attributes(config) & 0x00000002
-        security_descriptor_before = _windows_security_descriptor_fingerprint(config)
+        authorization_before = _windows_authorization_fingerprint(config)
         supported_name = None
     else:
         config.chmod(0o640)
@@ -1793,16 +1831,15 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         provenance_before = (
             _optional_xattr(config, provenance_name) if platform == "macos" else None
         )
-        security_descriptor_before = None
+        authorization_before = None
 
     _atomic_replace(config, b'{"generation":2}\n')
     if platform == "windows":
         metadata_preserved = (
             _windows_attributes(config) & 0x00000002 == supported_before
         )
-        security_descriptor_preserved = (
-            _windows_security_descriptor_fingerprint(config)
-            == security_descriptor_before
+        authorization_preserved = (
+            _windows_authorization_fingerprint(config) == authorization_before
         )
     else:
         status = config.stat()
@@ -1817,8 +1854,8 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         "replacement_data_flushed": True,
         "supported_metadata_preserved": metadata_preserved,
     }
-    if security_descriptor_before is not None:
-        evidence["security_descriptor_preserved"] = security_descriptor_preserved
+    if authorization_before is not None:
+        evidence["security_authorization_preserved"] = authorization_preserved
     elif platform == "macos":
         provenance_name = b"com.apple.provenance"
         evidence["provenance_preserved"] = (
