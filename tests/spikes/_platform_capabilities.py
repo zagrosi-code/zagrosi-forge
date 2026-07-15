@@ -1539,6 +1539,8 @@ def _windows_dacl_fingerprint(path: Path) -> str:
         fields = body[1:end].split(";")
         if len(fields) != 6 or len(fields[1]) % 2:
             raise RuntimeError("DACL SDDL ACE has an unsupported shape")
+        if fields[0] != "A":
+            raise RuntimeError("DACL SDDL has a non-allow ACE")
         fields[1] = "".join(
             fields[1][offset : offset + 2]
             for offset in range(0, len(fields[1]), 2)
@@ -1547,7 +1549,7 @@ def _windows_dacl_fingerprint(path: Path) -> str:
         normalized_aces.append(f"({';'.join(fields)})")
         body = body[end + 1 :]
     protected = "P" if "P" in header else ""
-    return f"D:{protected}{''.join(normalized_aces)}"
+    return f"D:{protected}{''.join(sorted(normalized_aces))}"
 
 
 def _windows_dacl_state(path: Path) -> tuple[bool, bool, bool]:
