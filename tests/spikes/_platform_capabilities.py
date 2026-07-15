@@ -1862,6 +1862,11 @@ def atomic_supported_metadata_replacement(root: Path) -> Evidence:
         evidence["dacl_preserved"] = dacl_preserved
         evidence["dacl_control_preserved"] = dacl_after[0] == dacl_before[0]
         evidence["dacl_ace_count_preserved"] = len(dacl_after[1]) == len(dacl_before[1])
+        before_aces = set(dacl_before[1])
+        after_aces = set(dacl_after[1])
+        evidence["dacl_existing_aces_preserved"] = before_aces <= after_aces
+        evidence["dacl_no_new_aces"] = after_aces <= before_aces
+        evidence["dacl_unique_aces_preserved"] = after_aces == before_aces
         for label, field in (
             ("flags", 1),
             ("masks", 2),
