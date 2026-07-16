@@ -208,6 +208,78 @@ def test_install_identity_enforces_derived_version_relation() -> None:
         )
 
 
+def test_bundle_contracts_are_canonical_immutable_and_bounded() -> None:
+    from dataclasses import replace
+
+    from zagrosi_forge.install.contracts import BundleEntry, BundleManifest
+
+    entries = (
+        BundleEntry(
+            path=".codex-plugin/plugin.json",
+            file_type="regular",
+            mode=0o644,
+            size=17,
+            sha256="a" * 64,
+        ),
+        BundleEntry(
+            path="scripts/zagrosi_skills.py",
+            file_type="regular",
+            mode=0o755,
+            size=31,
+            sha256="b" * 64,
+        ),
+    )
+    manifest = BundleManifest(
+        schema_version="1.0",
+        base_version="0.2.0",
+        policy_digest="c" * 64,
+        entries=entries,
+        aggregate_size=48,
+        payload_digest="d" * 64,
+        builder_version="0.2.0",
+        normalization_profile="bundle-v1",
+    )
+
+    assert manifest.entries == entries
+    with pytest.raises((AttributeError, TypeError)):
+        manifest.entries[0].path = "retargeted"  # type: ignore[misc]
+
+    invalid_entries = (
+        {"path": "../outside"},
+        {"path": "C:/outside"},
+        {"path": "CON"},
+        {"path": "dir/NUL.txt"},
+        {"path": "dir/~private"},
+        {"path": "dir/format\u200bmark"},
+        {"file_type": "symlink"},
+        {"mode": 0o600},
+        {"size": -1},
+        {"sha256": "A" * 64},
+    )
+    valid_entry = {
+        "path": entries[0].path,
+        "file_type": entries[0].file_type,
+        "mode": entries[0].mode,
+        "size": entries[0].size,
+        "sha256": entries[0].sha256,
+    }
+    for changed in invalid_entries:
+        with pytest.raises(ValueError):
+            BundleEntry(**(valid_entry | changed))
+
+    for changed in (
+        {"entries": tuple(reversed(entries))},
+        {"entries": (entries[0], entries[0])},
+        {"aggregate_size": 47},
+        {"schema_version": "2.0"},
+        {"base_version": "0.2.0+local"},
+        {"payload_digest": "D" * 64},
+        {"normalization_profile": "../bundle-v1"},
+    ):
+        with pytest.raises(ValueError):
+            replace(manifest, **changed)
+
+
 def test_validation_result_is_closed_sorted_and_unwraps() -> None:
     from zagrosi_forge.install.contracts import (
         Finding,

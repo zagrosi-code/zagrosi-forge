@@ -9,14 +9,21 @@ from importlib import resources
 from importlib.metadata import version as distribution_version
 import json
 import math
+from pathlib import PurePosixPath
 import re
 from types import MappingProxyType
 from typing import Any, Generic, Mapping, TypeVar, cast
+import unicodedata
 
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _RELEASE_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 _CONTRACT_VERSION = re.compile(r"[a-z][a-z0-9-]*-v(?:0|[1-9][0-9]*)\Z")
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CLOCK$"}
+    | {f"COM{number}" for number in range(1, 10)}
+    | {f"LPT{number}" for number in range(1, 10)}
+)
 _MAX_CANONICAL_DEPTH = 32
 _MAX_RECORD_BYTES = 256 * 1024
 _MAX_JSON_MEMBERS = 512
@@ -52,6 +59,20 @@ def _bounded_utf8(value: str, *, limit: int) -> bool:
         return len(value.encode("utf-8")) <= limit
     except UnicodeEncodeError:
         return False
+
+
+def _is_portable_bundle_component(component: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", component)
+    basename = normalized.split(".", 1)[0].upper()
+    return not (
+        component.startswith("~")
+        or any(
+            unicodedata.category(character).startswith("C") for character in component
+        )
+        or normalized.endswith((".", " "))
+        or ":" in normalized
+        or basename in _WINDOWS_RESERVED
+    )
 
 
 def _validate_finding_details(details: object) -> Mapping[str, object]:
@@ -248,6 +269,115 @@ class DiagnosticReport:
     @property
     def authoritative(self) -> bool:
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class BundleEntry:
+    """One canonical regular-file member in a trusted bundle projection."""
+
+    path: str
+    file_type: str
+    mode: int
+    size: int
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError("path")
+        try:
+            encoded = self.path.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("path") from exc
+        parts = PurePosixPath(self.path).parts
+        if (
+            len(encoded) > 240
+            or unicodedata.normalize("NFC", self.path) != self.path
+            or self.path.startswith(("/", "~"))
+            or "\\" in self.path
+            or ":" in self.path
+            or "\0" in self.path
+            or any(
+                ord(character) < 32 or ord(character) == 127 for character in self.path
+            )
+            or not parts
+            or len(parts) > 16
+            or any(
+                part in {"", ".", ".."}
+                or len(part.encode("utf-8")) > 63
+                or not _is_portable_bundle_component(part)
+                for part in parts
+            )
+            or PurePosixPath(*parts).as_posix() != self.path
+        ):
+            raise ValueError("path")
+        if self.file_type != "regular":
+            raise ValueError("file_type")
+        if isinstance(self.mode, bool) or self.mode not in {0o644, 0o755}:
+            raise ValueError("mode")
+        if (
+            isinstance(self.size, bool)
+            or not isinstance(self.size, int)
+            or not 0 <= self.size <= 2**63 - 1
+        ):
+            raise ValueError("size")
+        if not isinstance(self.sha256, str) or not _DIGEST.fullmatch(self.sha256):
+            raise ValueError("sha256")
+
+
+@dataclass(frozen=True, slots=True)
+class BundleManifest:
+    """Canonical, nonrecursive identity for one ordered bundle payload."""
+
+    schema_version: str
+    base_version: str
+    policy_digest: str
+    entries: tuple[BundleEntry, ...]
+    aggregate_size: int
+    payload_digest: str
+    builder_version: str
+    normalization_profile: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != "1.0":
+            raise ValueError("schema_version")
+        for name in ("base_version", "builder_version"):
+            try:
+                parse_release_version(getattr(self, name))
+            except ValueError as exc:
+                raise ValueError(name) from exc
+        for name in ("policy_digest", "payload_digest"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not _DIGEST.fullmatch(value):
+                raise ValueError(name)
+        if (
+            not isinstance(self.entries, tuple)
+            or not self.entries
+            or any(type(entry) is not BundleEntry for entry in self.entries)
+        ):
+            raise ValueError("entries")
+        ordered = tuple(
+            sorted(self.entries, key=lambda entry: entry.path.encode("utf-8"))
+        )
+        collision_keys = tuple(
+            unicodedata.normalize("NFKC", entry.path).casefold()
+            for entry in self.entries
+        )
+        if (
+            ordered != self.entries
+            or len(set(entry.path for entry in self.entries)) != len(self.entries)
+            or len(set(collision_keys)) != len(collision_keys)
+        ):
+            raise ValueError("entries")
+        if (
+            isinstance(self.aggregate_size, bool)
+            or not isinstance(self.aggregate_size, int)
+            or self.aggregate_size != sum(entry.size for entry in self.entries)
+        ):
+            raise ValueError("aggregate_size")
+        if not re.fullmatch(
+            r"[a-z][a-z0-9-]*-v[1-9][0-9]*", self.normalization_profile
+        ):
+            raise ValueError("normalization_profile")
 
 
 @dataclass(frozen=True, slots=True)
