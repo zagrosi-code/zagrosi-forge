@@ -37,6 +37,7 @@ from .paths import (
     validate_reference_set,
 )
 from .policies import LIMIT_POLICY
+from .vendor import load_vendor_receipt
 from .version import VERSION, derive_install_version
 
 
@@ -102,9 +103,7 @@ _ARCHIVE_PROFILE: Mapping[str, str | int] = {
 _CONDITION_KEYS = frozenset(
     {"licenses", "schemas", "skill_entrypoints", "vendor_records"}
 )
-_LOCAL_SKILL_REFERENCE = re.compile(
-    r"(?<![A-Za-z0-9._/\\-])(references[/\\][^\s`'\"()<>{}\[\]]+)"
-)
+_SKILL_TOKEN_SPLIT = re.compile(r"[\s`'\"()<>{}\[\]]+")
 _SKILL_FRONTMATTER_NAME = re.compile(r"(?m)^name:[ \t]*([a-z0-9-]+)[ \t]*$")
 _SKILL_PROMPT_REFERENCE = re.compile(r"\$zagrosi-forge:([a-z0-9-]+)")
 _BUNDLE_JSON_MEMBER_LIMIT = LIMIT_POLICY.value("bundle_files") * 8 + 256
@@ -260,6 +259,17 @@ class _MarketplaceProjection:
     category: str
     installation_policy: str
     authentication_policy: str
+
+
+def _expected_marketplace_projection() -> _MarketplaceProjection:
+    return _MarketplaceProjection(
+        marketplace_name="zagrosi",
+        display_name="Zagrosi",
+        plugin_name="zagrosi-forge",
+        category="Coding",
+        installation_policy="AVAILABLE",
+        authentication_policy="ON_INSTALL",
+    )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -559,15 +569,7 @@ def _is_canonical(value: object) -> bool:
             or not isinstance(value.source_snapshot_identity, str)
             or not value.source_snapshot_identity
             or type(value.marketplace) is not _MarketplaceProjection
-            or value.marketplace
-            != _MarketplaceProjection(
-                marketplace_name="zagrosi",
-                display_name="Zagrosi",
-                plugin_name="zagrosi-forge",
-                category="Coding",
-                installation_policy="AVAILABLE",
-                authentication_policy="ON_INSTALL",
-            )
+            or value.marketplace != _expected_marketplace_projection()
         ):
             return False
         for entry in manifest.entries:
@@ -1031,13 +1033,27 @@ def _skill_local_references(
     except UnicodeDecodeError as exc:
         raise _skill_graph_error() from exc
     references: set[str] = set()
-    for match in _LOCAL_SKILL_REFERENCE.finditer(text):
-        token = match.group(1)
+    for candidate_token in _SKILL_TOKEN_SPLIT.split(text):
+        raw_token = candidate_token.rstrip(".,;!?")
+        if not raw_token or "://" in raw_token:
+            continue
+        normalized = raw_token.replace("\\", "/")
+        parts = normalized.split("/")
+        if not any(part.casefold() == "references" for part in parts):
+            continue
         if (
-            "\\" in token
-            or not token.startswith("references/")
-            or not token.endswith(".md")
+            "\\" in raw_token
+            or normalized.startswith("/")
+            or ".." in parts
+            or any(part == "" for part in parts)
         ):
+            raise _skill_graph_error()
+        while parts and parts[0] == ".":
+            parts.pop(0)
+        if "." in parts:
+            raise _skill_graph_error()
+        token = "/".join(parts)
+        if not token.startswith("references/") or not token.endswith(".md"):
             raise _skill_graph_error()
         candidate = f"{skill_root}/{token}"
         validated = validate_reference(
@@ -1113,6 +1129,76 @@ def _validate_required_reference_graph(
         raise _skill_graph_error()
 
 
+def _validate_vendor_selection(entry_bytes: Mapping[str, bytes]) -> None:
+    try:
+        receipt = load_vendor_receipt()
+        selected = receipt["selected_files"]
+        tree_digest = receipt["selected_tree_digest"]
+        license_record = receipt["license"]
+        if (
+            not isinstance(selected, tuple)
+            or not selected
+            or not isinstance(tree_digest, str)
+            or _DIGEST.fullmatch(tree_digest) is None
+            or not isinstance(license_record, Mapping)
+        ):
+            raise TypeError("vendor receipt")
+
+        tree_rows: list[tuple[str, str, int]] = []
+        for record in selected:
+            if not isinstance(record, Mapping):
+                raise TypeError("vendor record")
+            relative = record.get("path")
+            digest = record.get("sha256")
+            size = record.get("size")
+            if (
+                not isinstance(relative, str)
+                or not relative.startswith("tomlkit/")
+                or not isinstance(digest, str)
+                or _DIGEST.fullmatch(digest) is None
+                or isinstance(size, bool)
+                or not isinstance(size, int)
+                or size < 0
+            ):
+                raise TypeError("vendor record")
+            tree_rows.append((relative, digest, size))
+
+        calculated_tree_digest = hashlib.sha256(
+            "".join(
+                f"{path}\0{digest}\0{size}\n"
+                for path, digest, size in sorted(tree_rows)
+            ).encode("utf-8")
+        ).hexdigest()
+        if calculated_tree_digest != tree_digest:
+            raise TypeError("vendor tree digest")
+
+        license_path = license_record.get("path")
+        license_digest = license_record.get("sha256")
+        if (
+            not isinstance(license_path, str)
+            or license_path != "tomlkit-LICENSE"
+            or not isinstance(license_digest, str)
+            or _DIGEST.fullmatch(license_digest) is None
+        ):
+            raise TypeError("vendor license")
+    except (ForgeError, KeyError, TypeError, ValueError) as exc:
+        raise _policy_error("The trusted vendor receipt is invalid.") from exc
+
+    expected = (*tree_rows, (license_path, license_digest, -1))
+    for relative, digest, size in expected:
+        path = f"src/zagrosi_forge/_vendor/{relative}"
+        raw = entry_bytes.get(path)
+        if (
+            not isinstance(raw, bytes)
+            or (size >= 0 and len(raw) != size)
+            or not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), digest)
+        ):
+            raise _error(
+                "bundle.digest_mismatch",
+                "Vendored runtime content differs from the trusted receipt.",
+            )
+
+
 def _manifest_domain(
     *,
     base_version: str,
@@ -1169,6 +1255,7 @@ def enumerate_base_bundle(
         )
     ordered_entries = tuple(entries)
     _validate_required_reference_graph(entry_bytes, policy)
+    _validate_vendor_selection(entry_bytes)
     enforce_bundle_limits(ordered_entries, policy)
 
     domain = _manifest_domain(
@@ -1196,6 +1283,10 @@ def enumerate_base_bundle(
         installation_policy=selected.installation_policy,
         authentication_policy=selected.authentication_policy,
     )
+    if marketplace != _expected_marketplace_projection():
+        raise _policy_error(
+            "Candidate marketplace metadata differs from installed trust."
+        )
     return CanonicalBundle(
         manifest=manifest,
         manifest_bytes=canonical_bundle_json_bytes(manifest, final_newline=True),

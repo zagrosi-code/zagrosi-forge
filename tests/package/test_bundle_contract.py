@@ -37,6 +37,9 @@ _EXPECTED_PATHS = tuple(json.loads((_EXPECTED / "base-paths.json").read_text()))
 _EXPECTED_CODEXIGNORE = tuple(
     json.loads((_EXPECTED / "codexignore-lines.json").read_text())
 )
+_EXPECTED_SOURCE_MEMBERS = tuple(
+    json.loads((_EXPECTED / "source-members.json").read_text())
+)
 _VALIDATION_ONLY = (".agents/plugins/marketplace.json", ".codexignore")
 _EXECUTABLES = frozenset({"scripts/deep_skills.py", "scripts/zagrosi_skills.py"})
 _DIRTY_CANARY = b"ZAGROSI_DIRTY_SECRET_"
@@ -67,21 +70,40 @@ def _copy_file(source: Path, destination: Path) -> None:
     shutil.copyfile(source, destination)
 
 
+def _required_fixture_paths() -> frozenset[str]:
+    trusted = load_installed_trusted_policy_set()
+    return frozenset(
+        (
+            *_EXPECTED_PATHS,
+            *_VALIDATION_ONLY,
+            *trusted.authority_file_digests,
+            *trusted.required_regular_references,
+        )
+    )
+
+
+def _expected_source_members() -> dict[str, dict[str, object]]:
+    selected = {record["path"]: record for record in _EXPECTED_SOURCE_MEMBERS}
+    assert len(selected) == len(_EXPECTED_SOURCE_MEMBERS)
+    return selected
+
+
 def _materialize_candidate(destination: Path, *, dirty: bool = False) -> Path:
     shutil.copytree(_VALID, destination)
-    trusted = load_installed_trusted_policy_set()
-    required = {
-        *_EXPECTED_PATHS,
-        *_VALIDATION_ONLY,
-        *trusted.authority_file_digests,
-        *trusted.required_regular_references,
-    }
-    for relative in sorted(required):
+    required = _required_fixture_paths()
+    expected = _expected_source_members()
+    assert set(expected) == set(required)
+    for relative in sorted(required, key=str.encode):
         source = _PROJECT_ROOT / relative
         target = destination / relative
-        if source.is_file():
-            _copy_file(source, target)
-        assert target.is_file(), f"bundle fixture source is missing: {relative}"
+        assert source.is_file(), f"bundle fixture source is missing: {relative}"
+        raw = source.read_bytes()
+        record = expected[relative]
+        assert record["size"] == len(raw), f"bundle fixture size drift: {relative}"
+        assert record["sha256"] == hashlib.sha256(raw).hexdigest(), (
+            f"bundle fixture digest drift: {relative}"
+        )
+        _copy_file(source, target)
     if dirty:
         dirty_tree = json.loads((_DIRTY / "tree.json").read_bytes())
         for relative, content in dirty_tree.items():
@@ -300,8 +322,41 @@ def test_positive_policy_includes_exact_required_runtime_members() -> None:
     assert "src/zagrosi_forge/install/bundle-policy.json" in policy.required_files
 
 
+def test_valid_fixture_projection_is_complete_and_content_addressed() -> None:
+    required = _required_fixture_paths()
+    expected = _expected_source_members()
+    seed_paths = {
+        path.relative_to(_VALID).as_posix()
+        for path in _VALID.rglob("*")
+        if path.is_file()
+    }
+
+    assert set(expected) == set(required)
+    assert seed_paths <= set(required)
+    for relative, record in expected.items():
+        raw = (_PROJECT_ROOT / relative).read_bytes()
+        assert record == {
+            "path": relative,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "size": len(raw),
+        }
+
+
 @pytest.mark.parametrize(
-    "mutation", ("undeclared-reference", "agent-rebind", "unreachable-reference")
+    "mutation",
+    (
+        "undeclared-reference",
+        "dot-reference",
+        "repeated-dot-reference",
+        "double-separator-reference",
+        "absolute-reference",
+        "root-backslash-reference",
+        "case-reference",
+        "windows-dot-reference",
+        "parent-reference",
+        "agent-rebind",
+        "unreachable-reference",
+    ),
 )
 def test_skill_agent_reference_graph_must_be_closed(
     tmp_path: Path, mutation: str
@@ -310,10 +365,21 @@ def test_skill_agent_reference_graph_must_be_closed(
     root = _materialize_candidate(tmp_path / mutation)
     skill = root / "skills/zagrosi-project/SKILL.md"
     agent = root / "skills/zagrosi-project/agents/openai.yaml"
-    if mutation == "undeclared-reference":
+    reference_mutations = {
+        "undeclared-reference": "references/not-declared.md",
+        "dot-reference": "./references/not-declared.md",
+        "repeated-dot-reference": "././references/not-declared.md",
+        "double-separator-reference": ".//references/not-declared.md",
+        "absolute-reference": "/references/not-declared.md",
+        "root-backslash-reference": "\\references\\not-declared.md",
+        "case-reference": "References/not-declared.md",
+        "windows-dot-reference": ".\\references\\not-declared.md",
+        "parent-reference": "../references/not-declared.md",
+    }
+    if mutation in reference_mutations:
         skill.write_text(
             skill.read_text(encoding="utf-8")
-            + "\nRead `references/not-declared.md`.\n",
+            + f"\nRead `{reference_mutations[mutation]}`.\n",
             encoding="utf-8",
         )
     elif mutation == "agent-rebind":
@@ -340,6 +406,61 @@ def test_skill_agent_reference_graph_must_be_closed(
                 _bundle_error(
                     lambda: api.enumerate_base_bundle(package, snapshot, policy),
                     "bundle.unexpected_member",
+                )
+    finally:
+        package.source_snapshot.close()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "src/zagrosi_forge/_vendor/tomlkit/api.py",
+        "src/zagrosi_forge/_vendor/tomlkit-LICENSE",
+    ),
+)
+def test_vendor_receipt_binds_selected_runtime_files_and_license(
+    tmp_path: Path, relative: str
+) -> None:
+    api = _api()
+    root = _materialize_candidate(tmp_path / "vendor-tamper")
+    target = root / relative
+    target.write_bytes(target.read_bytes() + b"\n# candidate tamper\n")
+    package = _validated_package(root)
+    policy = api.load_trusted_bundle_policy()
+    authority = PlatformPathAuthority()
+    try:
+        with authority.open_source_root(root) as source:
+            with api.open_bundle_snapshot(source, policy) as snapshot:
+                _bundle_error(
+                    lambda: api.enumerate_base_bundle(package, snapshot, policy),
+                    "bundle.digest_mismatch",
+                )
+    finally:
+        package.source_snapshot.close()
+
+
+@pytest.mark.parametrize("field", ("display_name", "category"))
+def test_marketplace_projection_must_match_trusted_generated_contract(
+    tmp_path: Path, field: str
+) -> None:
+    api = _api()
+    root = _materialize_candidate(tmp_path / field)
+    marketplace_path = root / ".agents/plugins/marketplace.json"
+    marketplace = json.loads(marketplace_path.read_bytes())
+    if field == "display_name":
+        marketplace["interface"]["displayName"] = "Candidate Variant"
+    else:
+        marketplace["plugins"][0]["category"] = "Candidate Variant"
+    marketplace_path.write_bytes(canonical_json_bytes(marketplace, final_newline=True))
+    package = _validated_package(root)
+    policy = api.load_trusted_bundle_policy()
+    authority = PlatformPathAuthority()
+    try:
+        with authority.open_source_root(root) as source:
+            with api.open_bundle_snapshot(source, policy) as snapshot:
+                _bundle_error(
+                    lambda: api.enumerate_base_bundle(package, snapshot, policy),
+                    "bundle.policy_invalid",
                 )
     finally:
         package.source_snapshot.close()

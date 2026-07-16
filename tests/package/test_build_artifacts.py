@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -486,7 +487,7 @@ def test_archive_inspector_rejects_traversal_duplicates_links_and_zip_bomb(
     )
 
 
-def test_real_canonical_bundle_round_trips_through_controlled_zip(
+def test_plugin_zip_contains_exact_base_projection_and_adjacent_manifest(
     plugin_authority: _PluginAuthority,
 ) -> None:
     raw = _api().write_controlled_plugin_zip(
@@ -608,6 +609,37 @@ def test_archive_size_and_ratio_limits_are_enforced_streamingly(
         )
         == "bundle.limit_exceeded"
     )
+
+
+def test_controlled_plugin_writer_rejects_its_own_ratio_limit(
+    tmp_path: Path,
+) -> None:
+    from tests.package.test_bundle_contract import (
+        _materialize_candidate,
+        _validated_package,
+    )
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.policies import LIMIT_POLICY
+
+    root = _materialize_candidate(tmp_path / "compressible-candidate")
+    (root / "README.md").write_bytes(b"x" * LIMIT_POLICY.value("bundle_member_bytes"))
+    package = _validated_package(root)
+    policy = _bundle_policy()
+    authority = PlatformPathAuthority()
+    try:
+        with authority.open_source_root(root) as source:
+            with _api()._bundle_contract.open_bundle_snapshot(
+                source, policy
+            ) as snapshot:
+                bundle = _api()._bundle_contract.enumerate_base_bundle(
+                    package, snapshot, policy
+                )
+        assert (
+            _failure_code(lambda: _api().write_controlled_plugin_zip(bundle, policy))
+            == "bundle.limit_exceeded"
+        )
+    finally:
+        package.source_snapshot.close()
 
 
 def test_archive_member_limit_is_rejected_before_read(
@@ -1787,6 +1819,14 @@ def test_build_environment_uses_only_fresh_private_roots(
         assert path.is_relative_to(tmp_path / "environment")
 
 
+def test_locked_linux_backend_filename_is_not_limited_as_bundle_member() -> None:
+    filename = (
+        "uv_build-0.11.28-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+    )
+
+    assert _api()._safe_backend_filename(filename) == filename
+
+
 def test_build_fails_when_constraint_or_backend_digest_drifts(
     python_builds: _PythonBuilds,
     monkeypatch: pytest.MonkeyPatch,
@@ -2013,7 +2053,7 @@ def test_wheel_from_sdist_rejects_unsafe_members_before_uv(
     assert not invoked
 
 
-def test_build_records_offline_fresh_resolver_configuration(
+def test_clean_archive_build_has_no_network_or_resolver_fallback(
     python_builds: _PythonBuilds,
 ) -> None:
     required_flags = {
@@ -2041,7 +2081,18 @@ def test_build_records_offline_fresh_resolver_configuration(
         assert build.offline_evidence.egress == "not_claimed"
 
 
-def test_bounded_process_timeout_kills_descendant_tree(tmp_path: Path) -> None:
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+def test_bounded_process_timeout_kills_descendant_tree_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    killpg_calls: list[tuple[int, int]] = []
+    real_killpg = os.killpg
+
+    def tracked_killpg(process_group: int, requested_signal: int) -> None:
+        killpg_calls.append((process_group, requested_signal))
+        real_killpg(process_group, requested_signal)
+
+    monkeypatch.setattr(os, "killpg", tracked_killpg)
     marker = tmp_path / "descendant-survived"
     child = (
         "import time; from pathlib import Path; "
@@ -2072,6 +2123,79 @@ def test_bounded_process_timeout_kills_descendant_tree(tmp_path: Path) -> None:
     )
     time.sleep(2.5)
     assert not marker.exists()
+    assert len(killpg_calls) == 1
+    assert killpg_calls[0][1] == signal.SIGKILL
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+def test_bounded_process_output_limit_kills_process_group_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    killpg_calls: list[tuple[int, int]] = []
+    real_killpg = os.killpg
+
+    def tracked_killpg(process_group: int, requested_signal: int) -> None:
+        killpg_calls.append((process_group, requested_signal))
+        real_killpg(process_group, requested_signal)
+
+    monkeypatch.setattr(os, "killpg", tracked_killpg)
+    command = (
+        sys.executable,
+        "-c",
+        "import sys, time; sys.stdout.write('x' * 4096); sys.stdout.flush(); "
+        "time.sleep(30)",
+    )
+
+    assert (
+        _failure_code(
+            lambda: _api()._bounded_process(
+                command,
+                cwd=tmp_path,
+                environment=os.environ,
+                umask=0o077,
+                timeout=5,
+                channel_limit=128,
+                tail_limit=64,
+                failure_code="artifact.build_failed",
+                failure_message="bounded process failed safely",
+            )
+        )
+        == "artifact.build_failed"
+    )
+    assert len(killpg_calls) == 1
+    assert killpg_calls[0][1] == signal.SIGKILL
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+def test_bounded_process_translates_process_group_permission_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    killpg_calls = 0
+
+    def denied_killpg(_process_group: int, _requested_signal: int) -> None:
+        nonlocal killpg_calls
+        killpg_calls += 1
+        raise PermissionError("simulated process-group denial")
+
+    monkeypatch.setattr(os, "killpg", denied_killpg)
+
+    assert (
+        _failure_code(
+            lambda: _api()._bounded_process(
+                (sys.executable, "-c", "pass"),
+                cwd=tmp_path,
+                environment=os.environ,
+                umask=0o077,
+                timeout=5,
+                channel_limit=1024,
+                tail_limit=64,
+                failure_code="artifact.build_failed",
+                failure_message="bounded process failed safely",
+            )
+        )
+        == "artifact.build_failed"
+    )
+    assert killpg_calls == 1
 
 
 def test_build_evidence_never_retains_disposable_absolute_paths(

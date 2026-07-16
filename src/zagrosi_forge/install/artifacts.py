@@ -1348,8 +1348,33 @@ def write_controlled_plugin_zip(bundle: CanonicalBundle, policy: BundlePolicy) -
             "artifact.write_failed", "Controlled plugin archive could not be written."
         ) from exc
     raw = output.getvalue()
-    if len(raw) > LIMIT_POLICY.value("archive_compressed_bytes"):
+    limits = _default_archive_limits()
+    if len(raw) > limits.max_compressed_bytes:
         raise _limit_error()
+    try:
+        central_offset, eocd_offset, entry_count = _validate_zip_framing(raw)
+        with zipfile.ZipFile(io.BytesIO(raw), mode="r") as archive:
+            _validate_zip_member_framing(
+                raw, archive, central_offset, eocd_offset, entry_count
+            )
+            plans = _zip_plan(
+                archive,
+                raw_size=len(raw),
+                limits=limits,
+                allow_directories=False,
+                controlled_profile=True,
+            )
+    except ForgeError:
+        raise
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise _artifact_error(
+            "artifact.write_failed",
+            "Controlled plugin archive could not be verified.",
+        ) from exc
+    if tuple(plan.path for plan in plans) != tuple(entry.path for entry in ordered):
+        raise _artifact_error(
+            "artifact.write_failed", "Controlled plugin archive inventory changed."
+        )
     return raw
 
 
@@ -2813,16 +2838,20 @@ def _extract_locked_uv(raw: bytes, spec: Mapping[str, str], destination: Path) -
 
 
 def _safe_backend_filename(value: str) -> str:
+    try:
+        encoded = value.encode("ascii")
+    except (AttributeError, UnicodeEncodeError):
+        encoded = b""
     if (
         not isinstance(value, str)
-        or not value.endswith(".whl")
+        or not 1 <= len(encoded) <= 255
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*\.whl", value) is None
         or Path(value).name != value
         or value in {".", ".."}
     ):
         raise _artifact_error(
             "artifact.build_input_invalid", "Build backend filename is invalid."
         )
-    _portable_path(value)
     return value
 
 
@@ -2974,7 +3003,8 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], job: int | None) -
         kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
         kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
         kernel32.TerminateJobObject.restype = wintypes.BOOL
-        kernel32.TerminateJobObject(wintypes.HANDLE(job), 1)
+        if not kernel32.TerminateJobObject(wintypes.HANDLE(job), 1):
+            raise OSError("TerminateJobObject failed")
         return
     try:
         process.kill()
@@ -3012,6 +3042,8 @@ def _bounded_process(
     tail = bytearray()
     job: int | None = None
     termination_lock = threading.Lock()
+    termination_attempted = False
+    termination_errors: list[OSError] = []
     try:
         if os.name == "posix" and umask is not None:
             process = subprocess.Popen(
@@ -3063,8 +3095,19 @@ def _bounded_process(
         raise _artifact_error(failure_code, failure_message)
 
     def terminate_tree() -> None:
+        nonlocal termination_attempted
         with termination_lock:
-            _terminate_process_tree(process, job)
+            if termination_attempted:
+                return
+            termination_attempted = True
+            try:
+                _terminate_process_tree(process, job)
+            except OSError as exc:
+                termination_errors.append(exc)
+                try:
+                    process.kill()
+                except OSError:
+                    pass
 
     def drain() -> None:
         try:
@@ -3108,9 +3151,13 @@ def _bounded_process(
         or exceeded.is_set()
         or reader_failed.is_set()
         or reader.is_alive()
+        or termination_errors
         or returncode != 0
     ):
-        raise _artifact_error(failure_code, failure_message)
+        error = _artifact_error(failure_code, failure_message)
+        if termination_errors:
+            raise error from termination_errors[0]
+        raise error
     return total[0], bytes(tail)
 
 
