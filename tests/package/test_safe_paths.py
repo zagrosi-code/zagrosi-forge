@@ -1148,3 +1148,172 @@ def test_filesystem_policy_has_no_public_bypass_and_excludes_refs() -> None:
     assert _windows_supported_filesystem("NTFS", drive_type=3)
     assert not _windows_supported_filesystem("ReFS", drive_type=3)
     assert not _windows_supported_filesystem("NTFS", drive_type=4)
+
+
+def _owned_directory_writer(tmp_path: Path):
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    codex_home = tmp_path / "codex-home"
+    _private_test_directory(codex_home)
+    authority = PlatformPathAuthority()
+    owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
+    destination = codex_home / "plugins/stages/disposable"
+    destination.mkdir(parents=True, mode=0o700)
+    proof = authority.prove_descendant(
+        owned,
+        _reference("stages/disposable"),
+        expected_depth=2,
+    ).unwrap()
+    writer = authority.open_owned_directory_writer(proof).unwrap()
+    return authority, owned, proof, writer, destination
+
+
+def test_owned_directory_writer_is_sealed_nested_exact_and_mode_normalized(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import OwnedDirectoryWriter, PlatformPathAuthority
+
+    authority, owned, proof, writer, destination = _owned_directory_writer(tmp_path)
+    try:
+        assert isinstance(writer, OwnedDirectoryWriter)
+        assert str(destination) not in repr(writer)
+        assert not hasattr(writer, "path")
+        assert not hasattr(writer, "absolute_path")
+        with pytest.raises(TypeError):
+            writer.__reduce__()
+        with pytest.raises(TypeError):
+            OwnedDirectoryWriter(proof)  # type: ignore[call-arg]
+        assert (
+            _code(PlatformPathAuthority().open_owned_directory_writer(proof))
+            == "path.outside_root"
+        )
+
+        expected = {
+            "plugins/zagrosi-forge/.codex-plugin/plugin.json": (b"{}\n", 0o644),
+            "plugins/zagrosi-forge/scripts/zagrosi_skills.py": (
+                b"#!/usr/bin/env python3\n",
+                0o755,
+            ),
+        }
+        previous = os.umask(0o077)
+        try:
+            for relative, (raw, mode) in expected.items():
+                assert (
+                    writer.write_regular_file(
+                        _reference(relative), raw, mode=mode
+                    ).unwrap()
+                    is None
+                )
+        finally:
+            os.umask(previous)
+
+        observed = {
+            path.relative_to(destination).as_posix(): path
+            for path in destination.rglob("*")
+            if path.is_file()
+        }
+        assert tuple(sorted(observed)) == tuple(sorted(expected))
+        for relative, (raw, mode) in expected.items():
+            assert observed[relative].read_bytes() == raw
+            if os.name == "posix":
+                assert stat.S_IMODE(observed[relative].stat().st_mode) == mode
+        assert not any(".tmp" in path.name for path in destination.rglob("*"))
+    finally:
+        writer.close()
+        proof.close()
+        owned.close()
+
+
+def test_owned_directory_writer_rejects_traversal_links_collisions_and_reuse(
+    tmp_path: Path,
+) -> None:
+    authority, owned, proof, writer, destination = _owned_directory_writer(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    canary = outside / "canary"
+    canary.write_bytes(b"preserve")
+    before = (_identity(canary), canary.read_bytes())
+    try:
+        with pytest.raises(TypeError):
+            writer.write_regular_file(  # type: ignore[arg-type]
+                "../outside/escaped", b"bad", mode=0o644
+            )
+
+        mutated = _reference("safe/escaped")
+        object.__setattr__(mutated, "components", ("..", "outside", "escaped"))
+        with pytest.raises(TypeError):
+            writer.write_regular_file(mutated, b"bad", mode=0o644)
+
+        _directory_link(outside, destination / "linked")
+        linked = writer.write_regular_file(
+            _reference("linked/leak.txt"), b"bad", mode=0o644
+        )
+        assert _code(linked) in {"path.linked_ancestor", "path.reparse_point"}
+        assert not (outside / "leak.txt").exists()
+
+        first = _reference("Case/value.txt")
+        assert writer.write_regular_file(first, b"first", mode=0o644).is_ok
+        assert (
+            _code(
+                writer.write_regular_file(
+                    _reference("case/value.txt"), b"collision", mode=0o644
+                )
+            )
+            == "path.normalization_collision"
+        )
+        assert (
+            _code(writer.write_regular_file(first, b"reuse", mode=0o644))
+            == "path.destination_exists"
+        )
+        assert (destination / "Case/value.txt").read_bytes() == b"first"
+        assert (_identity(canary), canary.read_bytes()) == before
+    finally:
+        writer.close()
+        proof.close()
+        owned.close()
+
+
+def test_owned_directory_writer_publishes_only_after_complete_handle_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zagrosi_forge.install.paths as paths
+
+    authority, owned, proof, writer, destination = _owned_directory_writer(tmp_path)
+    relative = _reference("nested/payload.bin")
+    target = destination / relative.value
+    final_was_visible = False
+    try:
+        if os.name == "nt":
+            original_write = paths._windows_write
+
+            def interrupted_write(handle: int, raw: bytes) -> None:
+                nonlocal final_was_visible
+                original_write(handle, raw[: len(raw) // 2])
+                final_was_visible = target.exists()
+                raise OSError(errno.ENOSPC, "injected short write")
+
+            monkeypatch.setattr(paths, "_windows_write", interrupted_write)
+        else:
+            original_write = paths._write_all
+
+            def interrupted_write(descriptor: int, raw: bytes) -> None:
+                nonlocal final_was_visible
+                original_write(descriptor, raw[: len(raw) // 2])
+                final_was_visible = target.exists()
+                raise OSError(errno.ENOSPC, "injected short write")
+
+            monkeypatch.setattr(paths, "_write_all", interrupted_write)
+
+        failed = writer.write_regular_file(relative, b"complete-payload", mode=0o644)
+        assert _code(failed) == "path.write_failed"
+        assert not final_was_visible
+        assert not target.exists()
+        assert not any(path.is_file() for path in destination.rglob("*"))
+
+        monkeypatch.undo()
+        assert writer.write_regular_file(relative, b"retry", mode=0o644).is_ok
+        assert target.read_bytes() == b"retry"
+    finally:
+        writer.close()
+        proof.close()
+        owned.close()

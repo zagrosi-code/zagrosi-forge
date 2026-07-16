@@ -1286,6 +1286,7 @@ def _windows_create_private_file(parent: int, component: str) -> int:
             directory=False,
             read_data=True,
             write_data=True,
+            delete_access=True,
             create=True,
             security_descriptor=descriptor,
         )
@@ -2989,6 +2990,11 @@ class PathProof:
             windows=False,
         )
 
+    def _open_owned_directory_writer(self) -> Result[OwnedDirectoryWriter]:
+        """Derive a writer directly from this live path capability."""
+
+        return _mint_owned_directory_writer(self)
+
     def close(self) -> None:
         if not self._closed:
             os.close(self._descriptor)
@@ -3511,6 +3517,423 @@ class _WindowsPathProof(PathProof):
             self._closed = True
 
 
+class OwnedDirectoryWriter:
+    """Sealed handle-relative authority for atomic regular-file publication."""
+
+    __slots__ = (
+        "_closed",
+        "_descriptor",
+        "_filesystem_guard",
+        "_identity",
+        "_namespace",
+        "_origin",
+        "_published_collisions",
+        "_published_references",
+        "_windows",
+    )
+
+    def __init__(
+        self,
+        descriptor: int,
+        identity: FileIdentity,
+        namespace: _NamespaceCapability,
+        filesystem_guard: FilesystemGuard,
+        origin: _AuthorityOrigin,
+        *,
+        windows: bool,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _CAPABILITY_TOKEN
+            or type(origin) is not _AuthorityOrigin
+            or type(namespace) is not _NamespaceCapability
+        ):
+            raise TypeError(
+                "OwnedDirectoryWriter is created only by filesystem authority"
+            )
+        self._descriptor = descriptor
+        self._identity = identity
+        self._namespace = namespace
+        self._filesystem_guard = filesystem_guard
+        self._origin = origin
+        self._windows = windows
+        self._published_references: set[str] = set()
+        self._published_collisions: set[str] = set()
+        self._closed = False
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise _error("path.identity_changed", "The destination writer is closed.")
+        self._namespace._require_open()
+        if self._windows:
+            windows_status = _windows_handle_status(self._descriptor)
+            valid = (
+                windows_status.is_directory
+                and not windows_status.is_reparse
+                and windows_status.identity == self._identity
+                and windows_status.identity[0] == self._identity[0]
+                and self._filesystem_guard(self._descriptor)
+                and _windows_private_directory(self._descriptor, exact=True)
+            )
+        else:
+            posix_status = os.fstat(self._descriptor)
+            valid = (
+                _identity(posix_status) == self._identity
+                and posix_status.st_dev == self._identity[0]
+                and self._filesystem_guard(self._descriptor)
+                and _private_directory(self._descriptor, posix_status, exact=True)
+            )
+        if not valid:
+            raise _error("path.identity_changed", "The destination identity changed.")
+
+    def _open_posix_parents(
+        self, components: tuple[str, ...]
+    ) -> tuple[list[int], list[tuple[int, str, FileIdentity]]]:
+        descriptors = [os.dup(self._descriptor)]
+        bindings: list[tuple[int, str, FileIdentity]] = []
+        try:
+            for component in components:
+                parent = descriptors[-1]
+                created = False
+                try:
+                    child = _open_directory_component(
+                        parent,
+                        component,
+                        linked_code="path.linked_ancestor",
+                        missing_code="path.missing",
+                    )
+                except ForgeError as exc:
+                    if exc.code != "path.missing":
+                        raise
+                    try:
+                        os.mkdir(component, 0o700, dir_fd=parent)
+                        created = True
+                    except FileExistsError:
+                        pass
+                    child = _open_directory_component(
+                        parent,
+                        component,
+                        linked_code="path.linked_ancestor",
+                    )
+                try:
+                    if created:
+                        os.fchmod(child, 0o700)
+                    status = os.fstat(child)
+                    identity = _identity(status)
+                    if (
+                        status.st_dev != self._identity[0]
+                        or not self._filesystem_guard(child)
+                        or not _private_directory(child, status, exact=True)
+                        or not _posix_namespace_binds(parent, component, identity)
+                    ):
+                        raise _error(
+                            "path.outside_root",
+                            "A destination ancestor is not privately controlled.",
+                        )
+                except BaseException:
+                    os.close(child)
+                    raise
+                descriptors.append(child)
+                bindings.append((parent, component, identity))
+            return descriptors, bindings
+        except BaseException:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+            raise
+
+    def _open_windows_parents(
+        self, components: tuple[str, ...]
+    ) -> tuple[list[int], list[tuple[int, str, FileIdentity]]]:
+        handles = [_windows_duplicate(self._descriptor)]
+        bindings: list[tuple[int, str, FileIdentity]] = []
+        try:
+            for component in components:
+                parent = handles[-1]
+                try:
+                    child = _windows_open_child(parent, component, directory=True)
+                except OSError as exc:
+                    if not isinstance(exc, FileNotFoundError) and getattr(
+                        exc, "winerror", None
+                    ) not in {2, 3}:
+                        raise
+                    try:
+                        child = _windows_create_private_directory(parent, component)
+                    except FileExistsError:
+                        child = _windows_open_child(parent, component, directory=True)
+                try:
+                    status = _windows_handle_status(child)
+                    if (
+                        not status.is_directory
+                        or status.is_reparse
+                        or status.identity[0] != self._identity[0]
+                        or not self._filesystem_guard(child)
+                        or not _windows_private_directory(child, exact=True)
+                        or not _windows_namespace_binds(
+                            parent, component, status.identity
+                        )
+                    ):
+                        raise _error(
+                            "path.outside_root",
+                            "A destination ancestor is not privately controlled.",
+                        )
+                except BaseException:
+                    _windows_close(child)
+                    raise
+                handles.append(child)
+                bindings.append((parent, component, status.identity))
+            return handles, bindings
+        except BaseException:
+            for handle in reversed(handles):
+                _windows_close(handle)
+            raise
+
+    @staticmethod
+    def _discard_posix_temporary(parent: int, component: str, descriptor: int) -> None:
+        try:
+            opened = os.fstat(descriptor)
+            named = os.stat(component, dir_fd=parent, follow_symlinks=False)
+            if (
+                _identity(opened) == _identity(named)
+                and stat.S_ISREG(opened.st_mode)
+                and stat.S_ISREG(named.st_mode)
+            ):
+                os.unlink(component, dir_fd=parent)
+        except OSError:
+            pass
+
+    def _write_posix(self, reference: SafeRelativePath, raw: bytes, mode: int) -> None:
+        descriptors, bindings = self._open_posix_parents(reference.components[:-1])
+        parent = descriptors[-1]
+        temporary = ""
+        descriptor = -1
+        published = False
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+            for _attempt in range(16):
+                temporary = f".zagrosi-{secrets.token_hex(16)}.tmp"
+                try:
+                    descriptor = os.open(temporary, flags, 0o600, dir_fd=parent)
+                except FileExistsError:
+                    continue
+                break
+            if descriptor < 0:
+                raise OSError(errno.EEXIST, "temporary name allocation failed")
+            _write_all(descriptor, raw)
+            os.fchmod(descriptor, mode)
+            os.fsync(descriptor)
+            status = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(status.st_mode)
+                or status.st_uid != os.geteuid()
+                or stat.S_IMODE(status.st_mode) != mode
+                or status.st_nlink != 1
+                or status.st_dev != self._identity[0]
+                or not self._filesystem_guard(descriptor)
+                or not _posix_security_metadata_supported(descriptor, status)
+            ):
+                raise OSError(errno.EPERM, "staged file is not privately controlled")
+            self._require_open()
+            if any(
+                not _posix_namespace_binds(parent_handle, component, identity)
+                for parent_handle, component, identity in bindings
+            ):
+                raise _error("path.identity_changed", "A destination ancestor changed.")
+            _exclusive_posix_rename(parent, temporary, reference.components[-1])
+            published = True
+            os.fsync(parent)
+        finally:
+            if descriptor >= 0:
+                if not published:
+                    self._discard_posix_temporary(parent, temporary, descriptor)
+                os.close(descriptor)
+            for parent_descriptor in reversed(descriptors):
+                os.close(parent_descriptor)
+
+    def _write_windows(
+        self, reference: SafeRelativePath, raw: bytes, mode: int
+    ) -> None:
+        del mode
+        handles, bindings = self._open_windows_parents(reference.components[:-1])
+        parent = handles[-1]
+        temporary = ""
+        handle = 0
+        published = False
+        try:
+            for _attempt in range(16):
+                temporary = f".zagrosi-{secrets.token_hex(16)}.tmp"
+                try:
+                    handle = _windows_create_private_file(parent, temporary)
+                except FileExistsError:
+                    continue
+                break
+            if not handle:
+                raise OSError(errno.EEXIST, "temporary name allocation failed")
+            _windows_write(handle, raw)
+            status = _windows_handle_status(handle)
+            if (
+                status.is_directory
+                or status.is_reparse
+                or status.link_count != 1
+                or status.identity[0] != self._identity[0]
+                or not self._filesystem_guard(handle)
+                or not _windows_private_authorization(handle, exact=True)
+            ):
+                raise OSError(errno.EPERM, "staged file is not privately controlled")
+            self._require_open()
+            if any(
+                not _windows_namespace_binds(parent_handle, component, identity)
+                for parent_handle, component, identity in bindings
+            ):
+                raise _error("path.identity_changed", "A destination ancestor changed.")
+            _windows_rename_handle(handle, parent, reference.components[-1])
+            published = True
+        finally:
+            if handle:
+                if not published:
+                    _windows_rollback_created_directory(handle)
+                _windows_close(handle)
+            for parent_handle in reversed(handles):
+                _windows_close(parent_handle)
+
+    def write_regular_file(
+        self, reference: SafeRelativePath, raw: bytes, *, mode: int
+    ) -> Result[None]:
+        """Publish complete bytes beneath this directory without path reopening."""
+
+        if not _safe_reference_invariants(reference):
+            raise TypeError("write_regular_file requires SafeRelativePath")
+        if type(raw) is not bytes:
+            raise TypeError("write_regular_file requires bytes")
+        if isinstance(mode, bool) or mode not in {0o644, 0o755}:
+            raise ValueError("mode must be 0o644 or 0o755")
+        if len(raw) > LIMIT_POLICY.value("bundle_member_bytes"):
+            return Result.failure(
+                _error("path.write_failed", "The file exceeds the trusted limit.")
+            )
+        if reference.value in self._published_references:
+            return Result.failure(
+                _error("path.destination_exists", "The destination already exists.")
+            )
+        if reference.collision_key in self._published_collisions:
+            return Result.failure(
+                _error(
+                    "path.normalization_collision",
+                    "The destination collides under portable normalization.",
+                )
+            )
+        try:
+            self._require_open()
+            if self._windows:
+                self._write_windows(reference, raw, mode)
+            else:
+                self._write_posix(reference, raw, mode)
+        except FileExistsError:
+            return Result.failure(
+                _error("path.destination_exists", "The destination already exists.")
+            )
+        except ForgeError as exc:
+            return Result.failure(exc)
+        except OSError:
+            return Result.failure(
+                _error("path.write_failed", "The file could not be written safely.")
+            )
+        self._published_references.add(reference.value)
+        self._published_collisions.add(reference.collision_key)
+        return Result.success(None)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        if self._windows:
+            _windows_close(self._descriptor)
+        else:
+            os.close(self._descriptor)
+        self._namespace.close()
+        self._closed = True
+
+    def __enter__(self) -> OwnedDirectoryWriter:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __reduce__(self) -> Never:
+        raise TypeError("filesystem capabilities are not serializable")
+
+
+def _mint_owned_directory_writer(proof: PathProof) -> Result[OwnedDirectoryWriter]:
+    expected_type = _WindowsPathProof if os.name == "nt" else PathProof
+    if type(proof) is not expected_type:
+        return Result.failure(
+            _error("path.outside_root", "The path-proof platform is invalid.")
+        )
+    descriptor = 0 if os.name == "nt" else -1
+    namespace: _NamespaceCapability | None = None
+    try:
+        if (
+            not proof.leaf_exists
+            or proof.existing_depth != proof.expected_depth
+            or proof.leaf_identity is None
+        ):
+            return Result.failure(
+                _error("path.outside_root", "The destination directory is absent.")
+            )
+        descriptor = proof._duplicate_descriptor()
+        namespace = proof._duplicate_namespace_capability()
+        if os.name == "nt":
+            windows_status = _windows_handle_status(descriptor)
+            valid = (
+                windows_status.is_directory
+                and not windows_status.is_reparse
+                and windows_status.identity == proof.leaf_identity
+                and proof._filesystem_guard(descriptor)
+                and _windows_private_directory(descriptor, exact=True)
+            )
+            identity = windows_status.identity
+        else:
+            posix_status = os.fstat(descriptor)
+            valid = (
+                stat.S_ISDIR(posix_status.st_mode)
+                and _identity(posix_status) == proof.leaf_identity
+                and proof._filesystem_guard(descriptor)
+                and _private_directory(descriptor, posix_status, exact=True)
+            )
+            identity = _identity(posix_status)
+        if not valid or not namespace._validate_namespace_binding():
+            return Result.failure(
+                _error(
+                    "path.outside_root",
+                    "The destination directory is not privately controlled.",
+                )
+            )
+        writer = OwnedDirectoryWriter(
+            descriptor,
+            identity,
+            namespace,
+            proof._filesystem_guard,
+            proof._origin,
+            windows=os.name == "nt",
+            _token=_CAPABILITY_TOKEN,
+        )
+        descriptor = 0 if os.name == "nt" else -1
+        namespace = None
+        return Result.success(writer)
+    except ForgeError as exc:
+        return Result.failure(exc)
+    except OSError:
+        return Result.failure(
+            _error("path.identity_changed", "The destination identity changed.")
+        )
+    finally:
+        if namespace is not None:
+            namespace.close()
+        if os.name == "nt":
+            if descriptor:
+                _windows_close(descriptor)
+        elif descriptor >= 0:
+            os.close(descriptor)
+
+
 class PlatformPathAuthority:
     """Fail-closed facade over supported local descriptor primitives."""
 
@@ -3560,6 +3983,20 @@ class PlatformPathAuthority:
             self._origin,
             _token=_CAPABILITY_TOKEN,
         )
+
+    def open_owned_directory_writer(
+        self, proof: PathProof
+    ) -> Result[OwnedDirectoryWriter]:
+        """Mint atomic write authority from a same-origin existing directory."""
+
+        if not isinstance(proof, PathProof) or proof._origin is not self._origin:
+            return Result.failure(
+                _error(
+                    "path.outside_root",
+                    "The path proof was minted by another path authority.",
+                )
+            )
+        return proof._open_owned_directory_writer()
 
     def prove_descendant(
         self,
