@@ -432,6 +432,94 @@ def test_candidate_policy_cannot_expand_trusted_bundle_authority(
     _assert_failure(result, "package.runner_upgrade_required")
 
 
+def test_candidate_asset_cannot_expand_installed_bundle_read_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zagrosi_forge.install.paths import SourceRoot
+
+    root = _package_factory(tmp_path)
+    plugin = _load_json(root, _MANIFEST)
+    plugin["interface"]["screenshots"].append("./candidate-only/asset.svg")
+    _write_json(root, _MANIFEST, plugin)
+    candidate = root / "candidate-only/asset.svg"
+    candidate.parent.mkdir()
+    candidate.write_bytes(b"ZAGROSI_CANDIDATE_ONLY_ASSET\n")
+    opened: list[str] = []
+    original_open = SourceRoot.open_regular_file
+
+    def observe_open(source: SourceRoot, reference: object):
+        opened.append(_relative_text(reference))
+        return original_open(source, reference)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(SourceRoot, "open_regular_file", observe_open)
+    result = _validate(root)
+
+    _assert_failure(result, "metadata.reference_unsafe")
+    assert "candidate-only/asset.svg" not in opened
+
+
+def test_validated_snapshot_covers_only_installed_bundle_authority(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import validate_reference
+
+    trusted = _trusted()
+    bundle_members = trusted.bundle_member_references
+    validation_only = trusted.bundle_validation_references
+
+    assert bundle_members == tuple(sorted(set(bundle_members)))
+    assert validation_only == tuple(sorted(set(validation_only)))
+    assert set(bundle_members).isdisjoint(validation_only)
+    assert {
+        _MANIFEST,
+        _PROJECT,
+        "LICENSE",
+        "NOTICE.md",
+        "README.md",
+        "scripts/deep_skills.py",
+        "scripts/zagrosi_skills.py",
+        "src/zagrosi_forge/install/metadata.py",
+        "src/zagrosi_forge/_vendor/tomlkit-LICENSE",
+    } <= set(bundle_members)
+    assert {_MARKETPLACE, ".codexignore"} <= set(validation_only)
+
+    root = _package_factory(tmp_path)
+    expected = tuple(sorted({*bundle_members, *validation_only}))
+    for relative in expected:
+        destination = root / relative
+        if destination.exists():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(_PROJECT_ROOT / relative, destination)
+
+    candidate_only = "candidate-only/expand.py"
+    (root / candidate_only).parent.mkdir()
+    (root / candidate_only).write_text(
+        "raise AssertionError('candidate file was opened')\n", encoding="utf-8"
+    )
+
+    package = _validate(root, trusted=trusted).unwrap()
+    try:
+        package_references = tuple(
+            _relative_text(reference) for reference in package.references
+        )
+        snapshot_references = tuple(
+            _relative_text(reference)
+            for reference in package.source_snapshot.references
+        )
+        assert package_references == expected
+        assert snapshot_references == expected
+        assert candidate_only not in package_references
+        candidate_reference = validate_reference(
+            candidate_only, role="candidate-only", limits=LIMIT_POLICY
+        ).unwrap()
+        with pytest.raises(ForgeError) as outside_snapshot:
+            package.source_snapshot.file(candidate_reference)
+        assert outside_snapshot.value.code == "path.outside_root"
+    finally:
+        package.source_snapshot.close()
+
+
 def _schema_accepts(schema: dict[str, Any], value: object) -> bool:
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
@@ -644,7 +732,7 @@ def test_runtime_and_schema_agree_on_skills_and_scripts_profile(tmp_path: Path) 
 @pytest.mark.parametrize(
     ("reference", "accepted"),
     (
-        ("./assets/Poster.svg", True),
+        ("./assets/icon.svg", True),
         ("./assets/CON.svg", False),
         ("./assets/file.", False),
         ("./assets/é.svg", False),

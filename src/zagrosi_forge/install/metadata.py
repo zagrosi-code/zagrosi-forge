@@ -21,6 +21,7 @@ from .contracts import (
     RunnerProvenance,
     ValidationResult,
     canonical_json_bytes,
+    decode_persistent_record,
     parse_release_version,
     require_runner_authority,
 )
@@ -41,7 +42,10 @@ _MARKETPLACE_FILE = ".agents/plugins/marketplace.json"
 _PROJECT_FILE = "pyproject.toml"
 _TRUSTED_AUTHORITY_TOKEN = object()
 _VALIDATED_PACKAGE_TOKEN = object()
+_BUNDLE_POLICY_RESOURCE = "bundle-policy.json"
+_BUNDLE_POLICY_SCHEMA_RESOURCE = "bundle-policy-v1.schema.json"
 _INSTALLED_POLICY_RESOURCES = (
+    _BUNDLE_POLICY_RESOURCE,
     "limit-policy.json",
     "native-isolation-policy.json",
     "native-support-policy.json",
@@ -49,6 +53,8 @@ _INSTALLED_POLICY_RESOURCES = (
     "toolchain-lock.json",
 )
 _INSTALLED_SCHEMA_RESOURCES = (
+    "bundle-manifest-v1.schema.json",
+    _BUNDLE_POLICY_SCHEMA_RESOURCE,
     "limit-policy-v1.schema.json",
     "marketplace-v1.schema.json",
     "native-isolation-policy-v1.schema.json",
@@ -82,41 +88,25 @@ _INSTALLED_AUTHORITY_RESOURCES = (
         "vendor-receipt.json",
     ),
 )
-_TRUSTED_REQUIRED_REGULAR_REFERENCES = (
-    "NOTICE.md",
-    "assets/icon.svg",
-    "assets/readme-hero.svg",
-    "assets/readme-workflow.svg",
-    "scripts/deep_skills.py",
-    "scripts/zagrosi_skills.py",
-    "skills/zagrosi-implement/SKILL.md",
-    "skills/zagrosi-implement/agents/openai.yaml",
-    "skills/zagrosi-implement/references/quality-gates.md",
-    "skills/zagrosi-implement/references/section-update.md",
-    "skills/zagrosi-implement/references/tdd-review-git.md",
-    "skills/zagrosi-plan/SKILL.md",
-    "skills/zagrosi-plan/agents/openai.yaml",
-    "skills/zagrosi-plan/references/depth-standards.md",
-    "skills/zagrosi-plan/references/domain-ai-products.md",
-    "skills/zagrosi-plan/references/domain-auth.md",
-    "skills/zagrosi-plan/references/domain-data-migration.md",
-    "skills/zagrosi-plan/references/domain-frontend.md",
-    "skills/zagrosi-plan/references/domain-infra.md",
-    "skills/zagrosi-plan/references/domain-payments.md",
-    "skills/zagrosi-plan/references/evaluation.md",
-    "skills/zagrosi-plan/references/plan-format.md",
-    "skills/zagrosi-plan/references/quality-gates.md",
-    "skills/zagrosi-plan/references/research.md",
-    "skills/zagrosi-plan/references/review.md",
-    "skills/zagrosi-plan/references/section-format.md",
-    "skills/zagrosi-plan/references/workflow-contract.md",
-    "skills/zagrosi-project/SKILL.md",
-    "skills/zagrosi-project/agents/openai.yaml",
-    "skills/zagrosi-project/references/interview.md",
-    "skills/zagrosi-project/references/manifest-format.md",
-    "skills/zagrosi-project/references/spec-format.md",
-    "skills/zagrosi-project/references/splitting.md",
-    "skills/zagrosi-project/references/workflow-contract.md",
+_BUNDLE_POLICY_FIELDS = frozenset(
+    {
+        "allowed_roots",
+        "archive_profile",
+        "codexignore",
+        "executable_files",
+        "generated_overlays",
+        "limit_policy_version",
+        "limits",
+        "minimum_reader_version",
+        "policy_version",
+        "record_digest",
+        "required_conditions",
+        "required_files",
+        "schema_digest",
+        "schema_version",
+        "validation_only_files",
+        "writer_version",
+    }
 )
 _IDENTIFIER = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -195,6 +185,8 @@ class TrustedPolicySet:
     limits: LimitPolicy
     authority_version: str
     authority_file_digests: Mapping[str, str]
+    bundle_member_references: tuple[str, ...]
+    bundle_validation_references: tuple[str, ...]
     required_regular_references: tuple[str, ...]
     _authority_token: object = field(repr=False, compare=False)
 
@@ -204,6 +196,8 @@ class TrustedPolicySet:
         limits: LimitPolicy,
         authority_version: str,
         authority_file_digests: Mapping[str, str],
+        bundle_member_references: tuple[str, ...],
+        bundle_validation_references: tuple[str, ...],
         required_regular_references: tuple[str, ...],
         _token: object,
     ) -> None:
@@ -214,6 +208,10 @@ class TrustedPolicySet:
         object.__setattr__(self, "limits", limits)
         object.__setattr__(self, "authority_version", authority_version)
         object.__setattr__(self, "authority_file_digests", authority_file_digests)
+        object.__setattr__(self, "bundle_member_references", bundle_member_references)
+        object.__setattr__(
+            self, "bundle_validation_references", bundle_validation_references
+        )
         object.__setattr__(
             self, "required_regular_references", required_regular_references
         )
@@ -224,6 +222,8 @@ class TrustedPolicySet:
         if not isinstance(self.limits, LimitPolicy) or self.authority_version != "1.0":
             raise ValueError("trusted metadata authority is invalid")
         digests = dict(self.authority_file_digests)
+        members = tuple(self.bundle_member_references)
+        validation = tuple(self.bundle_validation_references)
         references = tuple(self.required_regular_references)
         if not digests or any(
             not isinstance(path, str)
@@ -233,20 +233,26 @@ class TrustedPolicySet:
             for path, digest in digests.items()
         ):
             raise ValueError("trusted authority file digest is invalid")
-        if (
-            not references
-            or len(set(references)) != len(references)
-            or any(not _is_safe_reference(path, self.limits) for path in references)
-        ):
+        if any(
+            not group
+            or group != tuple(sorted(set(group)))
+            or any(not _is_safe_reference(path, self.limits) for path in group)
+            for group in (members, validation)
+        ) or set(members).intersection(validation):
+            raise ValueError("trusted bundle reference sets are invalid")
+        expected_references = tuple(sorted({*members, *validation}))
+        if references != expected_references:
             raise ValueError("trusted regular reference set is invalid")
+        if not set(digests).issubset(references):
+            raise ValueError("trusted authority is outside the bundle reference set")
         object.__setattr__(
             self,
             "authority_file_digests",
             MappingProxyType(dict(sorted(digests.items()))),
         )
-        object.__setattr__(
-            self, "required_regular_references", tuple(sorted(references))
-        )
+        object.__setattr__(self, "bundle_member_references", members)
+        object.__setattr__(self, "bundle_validation_references", validation)
+        object.__setattr__(self, "required_regular_references", references)
 
 
 def _installed_resource_bytes(package: str, relative: str) -> bytes:
@@ -256,9 +262,77 @@ def _installed_resource_bytes(package: str, relative: str) -> bytes:
     return resource.read_bytes()
 
 
+def _installed_bundle_references() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    policy_raw = _installed_resource_bytes(
+        "zagrosi_forge.install", _BUNDLE_POLICY_RESOURCE
+    )
+    schema_raw = _installed_resource_bytes(
+        "zagrosi_forge.install", f"schemas/{_BUNDLE_POLICY_SCHEMA_RESOURCE}"
+    )
+    policy = decode_persistent_record(policy_raw)
+    if (
+        set(policy) != _BUNDLE_POLICY_FIELDS
+        or policy.get("schema_version") != "1.0"
+        or policy.get("policy_version") != "1.0"
+        or policy.get("limit_policy_version") != "1.0"
+        or policy.get("schema_digest") != hashlib.sha256(schema_raw).hexdigest()
+    ):
+        raise ForgeError(
+            "policy.record_invalid", 10, "Installed bundle policy is invalid."
+        )
+    members_value = policy.get("required_files")
+    validation_value = policy.get("validation_only_files")
+    if not isinstance(members_value, tuple) or not isinstance(validation_value, tuple):
+        raise ForgeError(
+            "policy.record_invalid", 10, "Installed bundle references are invalid."
+        )
+    members = cast(tuple[str, ...], members_value)
+    validation = cast(tuple[str, ...], validation_value)
+    groups = (members, validation)
+    if (
+        any(
+            not group
+            or any(not isinstance(reference, str) for reference in group)
+            or group != tuple(sorted(set(group)))
+            for group in groups
+        )
+        or set(members).intersection(validation)
+        or len({*members, *validation}) > LIMIT_POLICY.value("bundle_files")
+    ):
+        raise ForgeError(
+            "policy.record_invalid", 10, "Installed bundle references are invalid."
+        )
+    for group in groups:
+        validated = validate_reference_set(
+            group, role="installed-bundle-policy", limits=LIMIT_POLICY
+        )
+        if not validated.is_ok:
+            raise ForgeError(
+                "policy.record_invalid",
+                10,
+                "Installed bundle references are invalid.",
+            )
+    authority_references = {
+        candidate_path
+        for candidate_path, _package, _resource in _INSTALLED_AUTHORITY_RESOURCES
+    }
+    if (
+        not authority_references.issubset({*members, *validation})
+        or not {_PLUGIN_FILE, _PROJECT_FILE}.issubset(members)
+        or _MARKETPLACE_FILE not in validation
+    ):
+        raise ForgeError(
+            "policy.record_invalid",
+            10,
+            "Installed bundle policy omits metadata authority.",
+        )
+    return members, validation
+
+
 def load_installed_trusted_policy_set() -> TrustedPolicySet:
     """Load the fixed metadata authority from the running distribution only."""
 
+    members, validation = _installed_bundle_references()
     digests = {
         candidate_path: hashlib.sha256(
             _installed_resource_bytes(package, resource)
@@ -269,7 +343,9 @@ def load_installed_trusted_policy_set() -> TrustedPolicySet:
         limits=LIMIT_POLICY,
         authority_version="1.0",
         authority_file_digests=digests,
-        required_regular_references=_TRUSTED_REQUIRED_REGULAR_REFERENCES,
+        bundle_member_references=members,
+        bundle_validation_references=validation,
+        required_regular_references=tuple(sorted({*members, *validation})),
         _token=_TRUSTED_AUTHORITY_TOKEN,
     )
 
@@ -981,7 +1057,8 @@ def _snapshot_identity(
     *,
     trusted: TrustedPolicySet,
 ) -> tuple[str | None, list[Finding]]:
-    entries: list[dict[str, object]] = []
+    entry_digests = hashlib.sha256()
+    entry_count = 0
     total = 0
     member_limit = trusted.limits.value("bundle_member_bytes")
     total_limit = trusted.limits.value("bundle_total_bytes")
@@ -1002,14 +1079,19 @@ def _snapshot_identity(
             if total > total_limit:
                 return None, [_finding("metadata.too_large", "metadata:reference")]
             raw = snapshot.read_bytes(reference, limit=member_limit)
-            entries.append(
-                {
-                    "content_digest": hashlib.sha256(raw).hexdigest(),
-                    "identity": opened.identity,
-                    "path": relative,
-                    "size": len(raw),
-                }
+            entry_digests.update(
+                hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "content_digest": hashlib.sha256(raw).hexdigest(),
+                            "identity": opened.identity,
+                            "path": relative,
+                            "size": len(raw),
+                        }
+                    )
+                ).digest()
             )
+            entry_count += 1
     except ForgeError as error:
         code = (
             "metadata.too_large"
@@ -1021,7 +1103,8 @@ def _snapshot_identity(
         return None, [_finding("metadata.reference_type", "metadata:reference")]
     projection = {
         "authority_version": trusted.authority_version,
-        "files": entries,
+        "file_count": entry_count,
+        "file_records_digest": entry_digests.hexdigest(),
         "root_identity": snapshot.root_identity,
     }
     return hashlib.sha256(canonical_json_bytes(projection)).hexdigest(), []
@@ -1171,15 +1254,30 @@ def validate_package(
     assert marketplace is not None
     assert project_version is not None
 
-    references = {
-        _PLUGIN_FILE,
-        _MARKETPLACE_FILE,
-        _PROJECT_FILE,
-        *trusted.authority_file_digests,
-        *trusted.required_regular_references,
-        *plugin.asset_references,
-    }
-    normalized_references = tuple(sorted(references))
+    asset_references = validate_reference_set(
+        plugin.asset_references,
+        role="metadata-assets",
+        limits=trusted.limits,
+    )
+    if not asset_references.is_ok:
+        for opened in bootstrap_opened:
+            _close_capability(opened)
+        _close_capability(source_root)
+        return cast(
+            ValidationResult[ValidatedPackage],
+            _failure((_finding("metadata.reference_unsafe", "metadata:reference"),)),
+        )
+    retained_references = set(trusted.bundle_member_references)
+    if any(relative not in retained_references for relative in plugin.asset_references):
+        for opened in bootstrap_opened:
+            _close_capability(opened)
+        _close_capability(source_root)
+        return cast(
+            ValidationResult[ValidatedPackage],
+            _failure((_finding("metadata.reference_unsafe", "metadata:reference"),)),
+        )
+
+    normalized_references = trusted.required_regular_references
     validated_references = validate_reference_set(
         normalized_references,
         role="metadata-reference",
