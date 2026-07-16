@@ -1151,17 +1151,24 @@ def test_filesystem_policy_has_no_public_bypass_and_excludes_refs() -> None:
 
 
 def _owned_directory_writer(tmp_path: Path):
+    from zagrosi_forge.install.ownership import create_transaction_path
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
     _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
+    relative = _reference("stages/disposable")
+    _private_test_directory(codex_home / "plugins/stages")
     destination = codex_home / "plugins/stages/disposable"
-    destination.mkdir(parents=True, mode=0o700)
+    create_transaction_path(
+        owned,
+        relative,
+        transaction_id="owned-writer",
+    ).unwrap()
     proof = authority.prove_descendant(
         owned,
-        _reference("stages/disposable"),
+        relative,
         expected_depth=2,
     ).unwrap()
     writer = authority.open_owned_directory_writer(proof).unwrap()
