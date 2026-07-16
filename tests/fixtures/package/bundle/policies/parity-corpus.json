@@ -1,0 +1,18 @@
+[
+  {"name":"installed-valid","operation":"identity","valid":true},
+  {"name":"missing-policy-version","operation":"remove","path":["policy_version"],"valid":false},
+  {"name":"unknown-top-level","operation":"set","path":["unexpected"],"value":true,"valid":false},
+  {"name":"required-files-wrong-type","operation":"set","path":["required_files"],"value":"README.md","valid":false},
+  {"name":"required-files-duplicate","operation":"duplicate-first","path":["required_files"],"valid":false},
+  {"name":"validation-path-traversal","operation":"append","path":["validation_only_files"],"value":"../outside","valid":false},
+  {"name":"required-path-reserved-device","operation":"append-sorted","path":["required_files"],"value":"assets/CON.txt","valid":false},
+  {"name":"required-path-trailing-dot","operation":"append-sorted","path":["required_files"],"value":"assets/unsafe.","valid":false},
+  {"name":"required-path-trailing-space","operation":"append-sorted","path":["required_files"],"value":"assets/unsafe ","valid":false},
+  {"name":"required-path-tilde-component","operation":"append-sorted","path":["required_files"],"value":"assets/~unsafe","valid":false},
+  {"name":"required-path-colon","operation":"append-sorted","path":["required_files"],"value":"assets/unsafe:stream","valid":false},
+  {"name":"required-path-component-too-long","operation":"append-sorted","path":["required_files"],"value":"assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","valid":false},
+  {"name":"required-path-too-deep","operation":"append-sorted","path":["required_files"],"value":"assets/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p","valid":false},
+  {"name":"required-path-case-collision","operation":"append-sorted","path":["required_files"],"value":"readme.md","valid":false,"schema_valid":true,"runtime_valid":false},
+  {"name":"required-path-unicode-collision","operation":"append-many-sorted","path":["required_files"],"values":["assets/café.txt","assets/café.txt"],"valid":false,"schema_valid":true,"runtime_valid":false},
+  {"name":"archive-profile-wrong-type","operation":"set","path":["archive_profile"],"value":[],"valid":false}
+]

@@ -76,7 +76,15 @@
     }
   },
   "$defs": {
-    "relativePath": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000-\\u001f\\u007f]+$"}
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "allOf": [
+        {"pattern": "^(?!/)(?!.*\\\\)(?!.*:)(?!.*(?:^|/)~)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)[^/]*[. ](?:/|$))(?!.*(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Ll][Oo][Cc][Kk]\\$|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*|/|$))[^\\u0000-\\u001f\\u007f]+$"},
+        {"pattern": "^[^/]{1,63}(?:/[^/]{1,63}){0,15}$"}
+      ]
+    }
   },
   "additionalProperties": false,
   "x-limit-policy-version": "1.0"
