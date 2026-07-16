@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zagrosi.dev/schemas/bundle-policy-v1",
+  "title": "Zagrosi Forge Bundle Policy v1",
+  "type": "object",
+  "required": ["schema_version", "schema_digest", "writer_version", "minimum_reader_version", "record_digest", "limit_policy_version", "policy_version", "required_files", "validation_only_files", "allowed_roots", "generated_overlays", "executable_files", "limits", "archive_profile", "required_conditions", "codexignore"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "schema_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "writer_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "minimum_reader_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "record_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "limit_policy_version": {"const": "1.0"},
+    "policy_version": {"const": "1.0"},
+    "required_files": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+    "validation_only_files": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+    "allowed_roots": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}},
+    "generated_overlays": {
+      "type": "object",
+      "required": ["plugin_manifest_path", "plugin_version_pointer", "marketplace_manifest_path", "marketplace_source"],
+      "properties": {
+        "plugin_manifest_path": {"const": ".codex-plugin/plugin.json"},
+        "plugin_version_pointer": {"const": "/version"},
+        "marketplace_manifest_path": {"const": ".agents/plugins/marketplace.json"},
+        "marketplace_source": {"const": "./plugins/zagrosi-forge"}
+      },
+      "additionalProperties": false
+    },
+    "executable_files": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+    "limits": {
+      "type": "object",
+      "required": ["files", "member_bytes", "total_bytes", "archive_compressed_bytes", "archive_expanded_bytes", "archive_ratio"],
+      "properties": {
+        "files": {"const": "bundle_files"},
+        "member_bytes": {"const": "bundle_member_bytes"},
+        "total_bytes": {"const": "bundle_total_bytes"},
+        "archive_compressed_bytes": {"const": "archive_compressed_bytes"},
+        "archive_expanded_bytes": {"const": "archive_expanded_bytes"},
+        "archive_ratio": {"const": "archive_ratio"}
+      },
+      "additionalProperties": false
+    },
+    "archive_profile": {
+      "type": "object",
+      "required": ["name", "format", "compression", "compression_level", "timestamp", "create_system"],
+      "properties": {
+        "name": {"const": "plugin-zip-v1"},
+        "format": {"const": "zip"},
+        "compression": {"const": "deflate"},
+        "compression_level": {"const": 9},
+        "timestamp": {"const": "1980-01-01T00:00:00Z"},
+        "create_system": {"const": 3}
+      },
+      "additionalProperties": false
+    },
+    "required_conditions": {
+      "type": "object",
+      "required": ["licenses", "vendor_records", "schemas", "skill_entrypoints"],
+      "properties": {
+        "licenses": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+        "vendor_records": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+        "schemas": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+        "skill_entrypoints": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}}
+      },
+      "additionalProperties": false
+    },
+    "codexignore": {
+      "type": "object",
+      "required": ["path", "sha256", "lines"],
+      "properties": {
+        "path": {"const": ".codexignore"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "lines": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "relativePath": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000-\\u001f\\u007f]+$"}
+  },
+  "additionalProperties": false,
+  "x-limit-policy-version": "1.0"
+}
