@@ -50,6 +50,18 @@ def _runner():
 
 
 def _identity(path: Path) -> tuple[int, int]:
+    if os.name == "nt":
+        import zagrosi_forge.install.paths as paths
+
+        parent = paths._windows_open_path(os.fspath(path.parent))
+        child = 0
+        try:
+            child = paths._windows_open_child(parent, path.name, directory=None)
+            return paths._windows_handle_status(child).identity
+        finally:
+            if child:
+                paths._windows_close(child)
+            paths._windows_close(parent)
     metadata = path.stat(follow_symlinks=False)
     return metadata.st_dev, metadata.st_ino
 
