@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from typing import Any
 
 import pytest
@@ -635,33 +636,53 @@ def test_config_and_planned_paths_reject_absolute_home_rebind(
     _private_test_directory(codex_home)
     (codex_home / "config.toml").write_bytes(b"original")
     authority = PlatformPathAuthority()
-    root = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
-    config = authority.prove_config_path(root).unwrap()
-    planned = authority.plan_owned_path(
-        root, _reference("sources/zagrosi/marketplace"), expected_depth=3
-    ).unwrap()
-    try:
+    rename_denied = False
+    with ExitStack() as stack:
+        root = stack.enter_context(
+            authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
+        )
+        config = stack.enter_context(authority.prove_config_path(root).unwrap())
+        planned = stack.enter_context(
+            authority.plan_owned_path(
+                root, _reference("sources/zagrosi/marketplace"), expected_depth=3
+            ).unwrap()
+        )
         try:
             codex_home.rename(displaced)
         except PermissionError:
-            if os.name == "nt":
-                pytest.fail(
-                    "required Windows home-rebind authority cell was not exercised"
-                )
-            raise
-        _private_test_directory(codex_home)
-        with pytest.raises(Exception) as config_changed:
-            config._native_target()
-        assert getattr(config_changed.value, "code", None) == "path.identity_changed"
-        with pytest.raises(Exception) as planned_changed:
-            planned._config_source_value()
-        assert getattr(planned_changed.value, "code", None) == "path.identity_changed"
-        assert _code(config.revalidate()) == "path.identity_changed"
-        assert _code(planned.revalidate()) == "path.identity_changed"
-    finally:
-        planned.close()
-        config.close()
-        root.close()
+            if os.name != "nt":
+                raise
+            rename_denied = True
+            assert _identity(codex_home) == root.home_identity
+            assert root._validate_live_descriptor()
+            assert root._validate_control_binding()
+            assert config._native_target() == os.fspath(codex_home / "config.toml")
+            assert planned._config_source_value() == os.fspath(
+                codex_home / "plugins/sources/zagrosi/marketplace"
+            )
+            assert config.revalidate().unwrap() is None
+            assert planned.revalidate().unwrap() is None
+            assert codex_home.is_dir()
+            assert not displaced.exists()
+        else:
+            _private_test_directory(codex_home)
+            with pytest.raises(Exception) as config_changed:
+                config._native_target()
+            assert (
+                getattr(config_changed.value, "code", None) == "path.identity_changed"
+            )
+            with pytest.raises(Exception) as planned_changed:
+                planned._config_source_value()
+            assert (
+                getattr(planned_changed.value, "code", None) == "path.identity_changed"
+            )
+            assert _code(config.revalidate()) == "path.identity_changed"
+            assert _code(planned.revalidate()) == "path.identity_changed"
+
+    if rename_denied:
+        codex_home.rename(displaced)
+        assert displaced.is_dir()
+        assert not codex_home.exists()
 
 
 def test_first_root_bootstrap_is_exclusive_restrictive_and_link_safe(
@@ -861,6 +882,7 @@ def test_live_plugins_namespace_rebind_invalidates_root_and_path_proof(
     _private_test_directory(codex_home)
     authority = PlatformPathAuthority()
     owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
+    rename_denied = False
     with owned:
         (codex_home / "plugins/stages").mkdir()
         proof = authority.prove_descendant(
@@ -875,21 +897,30 @@ def test_live_plugins_namespace_rebind_invalidates_root_and_path_proof(
             try:
                 plugins.rename(displaced)
             except PermissionError:
-                if os.name == "nt":
-                    pytest.fail(
-                        "required Windows namespace-rebind authority cell was not "
-                        "exercised"
-                    )
-                raise
-            plugins.mkdir(mode=0o700)
-
-            assert not owned._validate_live_descriptor()
-            assert not owned._validate_control_binding()
-            with pytest.raises(Exception) as changed:
+                if os.name != "nt":
+                    raise
+                rename_denied = True
+                assert _identity(plugins) == owned.identity
+                assert owned._validate_live_descriptor()
+                assert owned._validate_control_binding()
                 proof._require_open()
-            assert getattr(changed.value, "code", None) == "path.identity_changed"
-            assert displaced.is_dir()
-            assert plugins.is_dir()
+                assert plugins.is_dir()
+                assert not displaced.exists()
+            else:
+                plugins.mkdir(mode=0o700)
+
+                assert not owned._validate_live_descriptor()
+                assert not owned._validate_control_binding()
+                with pytest.raises(Exception) as changed:
+                    proof._require_open()
+                assert getattr(changed.value, "code", None) == "path.identity_changed"
+                assert displaced.is_dir()
+                assert plugins.is_dir()
+
+    if rename_denied:
+        plugins.rename(displaced)
+        assert displaced.is_dir()
+        assert not plugins.exists()
 
 
 def test_live_descendant_rebind_invalidates_path_proof(tmp_path: Path) -> None:
