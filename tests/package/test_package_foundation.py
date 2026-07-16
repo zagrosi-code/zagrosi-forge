@@ -298,6 +298,18 @@ def test_clean_archive_builds_wheel_and_sdist_offline(
         assert sdist.name == "zagrosi_forge-0.2.0.tar.gz"
 
 
+def test_sdist_contains_audited_license_notice_and_inventory(
+    built_artifacts: tuple[tuple[Path, Path], tuple[Path, Path]],
+) -> None:
+    expected = {
+        name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
+        for name in ("LICENSE", "NOTICE.md", "component-inventory.json")
+    }
+    for _, sdist in built_artifacts:
+        members = _sdist_members(sdist)
+        assert {name: members.get(name) for name in expected} == expected
+
+
 def test_wheel_imports_trusted_installer_entry_point(
     built_artifacts: tuple[tuple[Path, Path], tuple[Path, Path]],
     tmp_path: Path,

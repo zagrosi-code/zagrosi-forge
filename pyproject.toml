@@ -5,6 +5,7 @@ description = "Zagrosi Forge Codex-native project, planning, and TDD implementat
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "MIT"
+license-files = ["LICENSE", "NOTICE.md"]
 authors = [{ name = "Zagrosi" }]
 
 [project.scripts]
@@ -28,6 +29,7 @@ security = ["plugin-scanner==2.0.274"]
 [tool.uv.build-backend]
 module-name = "zagrosi_forge"
 module-root = "src"
+source-include = ["component-inventory.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
