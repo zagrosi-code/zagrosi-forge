@@ -13,6 +13,38 @@ import pytest
 ROOT = Path(__file__).parents[2]
 
 
+def test_installer_authority_hard_gate_matches_collected_tests() -> None:
+    collected = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/package/test_safe_paths.py",
+            "tests/package/test_ownership_authority.py",
+            "--collect-only",
+            "-q",
+        ],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert collected.returncode == 0, collected.stdout
+    cases = tuple(
+        line
+        for line in collected.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line
+    )
+    assert cases
+
+    workflow = (ROOT / ".github/workflows/installer-spike.yml").read_text(
+        encoding="utf-8"
+    )
+    assert f"$Cases.Count -ne {len(cases)}" in workflow
+    assert f"requires {len(cases)} cases" in workflow
+
+
 def test_toolchain_verifier_runs_before_distribution_install(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(ROOT / "src")
