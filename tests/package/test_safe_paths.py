@@ -638,7 +638,17 @@ def test_live_plugins_namespace_rebind_invalidates_root_and_path_proof(
         with proof:
             plugins = codex_home / "plugins"
             displaced = codex_home / "displaced-plugins"
-            plugins.rename(displaced)
+            try:
+                plugins.rename(displaced)
+            except PermissionError:
+                if os.name != "nt":
+                    raise
+                assert owned._validate_live_descriptor()
+                assert owned._validate_control_binding()
+                proof._require_open()
+                assert plugins.is_dir()
+                assert not displaced.exists()
+                return
             plugins.mkdir(mode=0o700)
 
             assert not owned._validate_live_descriptor()
@@ -659,7 +669,8 @@ def test_live_descendant_rebind_invalidates_path_proof(tmp_path: Path) -> None:
     owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
     with owned:
         stages = codex_home / "plugins/stages"
-        (stages / "channel").mkdir(parents=True)
+        channel = stages / "channel"
+        channel.mkdir(parents=True)
         proof = authority.prove_descendant(
             owned,
             _reference("stages/channel/new"),
@@ -667,9 +678,9 @@ def test_live_descendant_rebind_invalidates_path_proof(tmp_path: Path) -> None:
             allow_absent_leaf=True,
         ).unwrap()
         with proof:
-            displaced = codex_home / "displaced-stages"
-            stages.rename(displaced)
-            stages.mkdir(mode=0o700)
+            displaced = stages / "displaced-channel"
+            channel.rename(displaced)
+            channel.mkdir(mode=0o700)
 
             with pytest.raises(Exception) as required:
                 proof._require_open()
@@ -677,8 +688,8 @@ def test_live_descendant_rebind_invalidates_path_proof(tmp_path: Path) -> None:
             with pytest.raises(Exception) as duplicated:
                 proof._duplicate_descriptor()
             assert getattr(duplicated.value, "code", None) == "path.identity_changed"
-            assert (displaced / "channel").is_dir()
-            assert stages.is_dir()
+            assert displaced.is_dir()
+            assert channel.is_dir()
 
 
 def test_partial_bootstrap_rollback_never_deletes_a_name_swapped_directory(

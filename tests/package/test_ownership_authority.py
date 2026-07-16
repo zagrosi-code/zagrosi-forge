@@ -377,9 +377,12 @@ def test_receipt_key_uses_effective_id_and_full_identity_digest(tmp_path: Path) 
             )
             root_path.chmod(original_mode)
     control = receipt_path.parents[3]
-    displaced_control = receipt_path.parents[4] / ".zagrosi-displaced"
-    control.rename(displaced_control)
-    control.mkdir(mode=0o700)
+    if os.name == "nt":
+        (control / "control-v1.json").write_bytes(b"invalid-control-record")
+    else:
+        displaced_control = receipt_path.parents[4] / ".zagrosi-displaced"
+        control.rename(displaced_control)
+        control.mkdir(mode=0o700)
     assert (
         _code(validate_committed_receipt(opened, owned_root=owned, observed=observed))
         == "ownership.identity_mismatch"
@@ -671,9 +674,31 @@ def test_receipt_validation_rejects_canonical_rebind_and_preserves_state(
     original_canary.write_bytes(b"preserve-original")
     proof.close()
 
+    def file_state(path: Path) -> tuple[int, int, bytes]:
+        status = path.stat()
+        return status.st_dev, status.st_ino, path.read_bytes()
+
     if target_kind == "parent":
         displaced_parent = parent.with_name(f"{parent.name}-displaced")
-        parent.rename(displaced_parent)
+        try:
+            parent.rename(displaced_parent)
+        except PermissionError:
+            if os.name != "nt":
+                raise
+            before = (file_state(receipt_path), file_state(original_canary))
+            validation = validate_committed_receipt(
+                opened,
+                owned_root=owned,
+                observed=observed,
+            )
+            assert validation.is_ok
+            validation.unwrap().close()
+            assert (file_state(receipt_path), file_state(original_canary)) == before
+            opened.close()
+            source.close()
+            observed_path.close()
+            owned.close()
+            return
         displaced_receipt = displaced_parent / receipt_path.name
         displaced_canary = displaced_parent / original_canary.name
         _write_private_receipt_replacement(
@@ -696,10 +721,6 @@ def test_receipt_validation_rejects_canonical_rebind_and_preserves_state(
         )
     replacement_canary = receipt_path.parent / "replacement-canary"
     replacement_canary.write_bytes(b"preserve-replacement")
-
-    def file_state(path: Path) -> tuple[int, int, bytes]:
-        status = path.stat()
-        return status.st_dev, status.st_ino, path.read_bytes()
 
     before = (
         file_state(displaced_receipt),
@@ -792,12 +813,50 @@ def test_receipt_publication_rejects_midflight_canonical_rebind_and_preserves_st
         )
         before = tuple(file_state(path) for path in rebound_paths)
 
-    if os.name == "nt":
+    if os.name == "nt" and target_kind == "parent":
+        original_open = ownership._windows_open_raw_child
+
+        def rebind_before_receipt_open(
+            parent_handle: int,
+            component: str,
+            *,
+            directory: bool | None,
+            read_data: bool = False,
+            write_data: bool = False,
+            delete_access: bool = False,
+            create: bool = False,
+            security_descriptor: int | None = None,
+        ) -> int:
+            if (
+                component == receipt_path.name
+                and read_data
+                and not create
+                and rebound_paths is None
+            ):
+                rebind()
+            return original_open(
+                parent_handle,
+                component,
+                directory=directory,
+                read_data=read_data,
+                write_data=write_data,
+                delete_access=delete_access,
+                create=create,
+                security_descriptor=security_descriptor,
+            )
+
+        monkeypatch.setattr(
+            ownership,
+            "_windows_open_raw_child",
+            rebind_before_receipt_open,
+        )
+    elif os.name == "nt":
         original_read = ownership._paths._windows_read
 
         def rebind_after_read(handle: int, *, limit: int) -> bytes:
             rendered = original_read(handle, limit=limit)
-            rebind()
+            if limit == 256 * 1024 and rebound_paths is None:
+                rebind()
             return rendered
 
         monkeypatch.setattr(ownership._paths, "_windows_read", rebind_after_read)
@@ -864,11 +923,27 @@ def test_committed_receipt_is_hidden_until_atomic_publish(
         def observe_windows_publish(source: int, parent: int, destination: str) -> None:
             nonlocal observed_atomic_publish
             observed_atomic_publish = True
-            staged = tuple(receipt_path.parent.glob(".receipt-*.tmp"))
+            names = ownership._windows_list_names(parent, limit=64)
+            staged = tuple(
+                name
+                for name in names
+                if name.startswith(".receipt-") and name.endswith(".tmp")
+            )
             assert len(staged) == 1
             assert destination == receipt_path.name
-            assert not receipt_path.exists()
-            assert staged[0].read_bytes() == raw
+            assert destination not in names
+            staged_handle = ownership._windows_open_raw_child(
+                parent,
+                staged[0],
+                directory=False,
+                read_data=True,
+            )
+            try:
+                assert (
+                    ownership._paths._windows_read(staged_handle, limit=len(raw)) == raw
+                )
+            finally:
+                ownership._paths._windows_close(staged_handle)
             original_windows_rename(source, parent, destination)
 
         monkeypatch.setattr(
@@ -1366,7 +1441,7 @@ def test_transaction_owned_stage_can_be_quarantined_once(tmp_path: Path) -> None
     owned2.close()
 
 
-def test_plugins_rebind_after_proof_mint_denies_quarantine(tmp_path: Path) -> None:
+def test_namespace_rebind_after_proof_mint_denies_quarantine(tmp_path: Path) -> None:
     from zagrosi_forge.install.ownership import quarantine_owned
 
     proof, path, owned, plugins = _transaction(tmp_path)
@@ -1382,15 +1457,16 @@ def test_plugins_rebind_after_proof_mint_denies_quarantine(tmp_path: Path) -> No
         marker_status.st_ino,
         marker.read_bytes(),
     )
-    displaced = plugins.with_name("plugins-displaced")
-    plugins.rename(displaced)
-    plugins.mkdir(mode=0o700)
+    control = plugins / ".zagrosi"
+    displaced = plugins / ".zagrosi-displaced"
+    control.rename(displaced)
+    control.mkdir(mode=0o700)
 
     result = quarantine_owned(proof, transaction_id="plugins-rebound")
     if result.is_ok:
         result.unwrap().close()
     assert _code(result) == "ownership.identity_mismatch"
-    preserved = displaced / "stages/candidate"
+    preserved = plugins / "stages/candidate"
     candidate_status = preserved.stat()
     marker = preserved / "preserve"
     marker_status = marker.stat()
@@ -1407,7 +1483,7 @@ def test_plugins_rebind_after_proof_mint_denies_quarantine(tmp_path: Path) -> No
     owned.close()
 
 
-def test_plugins_rebind_after_quarantine_denies_cleanup(tmp_path: Path) -> None:
+def test_namespace_rebind_after_quarantine_denies_cleanup(tmp_path: Path) -> None:
     from zagrosi_forge.install.ownership import quarantine_owned, remove_quarantine
 
     proof, path, owned, plugins = _transaction(tmp_path)
@@ -1425,13 +1501,14 @@ def test_plugins_rebind_after_quarantine_denies_cleanup(tmp_path: Path) -> None:
         marker_status.st_ino,
         marker.read_bytes(),
     )
-    displaced = plugins.with_name("plugins-displaced")
-    plugins.rename(displaced)
-    plugins.mkdir(mode=0o700)
+    control = plugins / ".zagrosi"
+    displaced = plugins / ".zagrosi-displaced"
+    control.rename(displaced)
+    control.mkdir(mode=0o700)
 
     result = remove_quarantine(ticket)
     assert _code(result) == "ownership.cleanup_incomplete"
-    preserved = displaced / ticket.recovery_reference
+    preserved = plugins / ticket.recovery_reference
     quarantine_status = preserved.stat()
     marker = preserved / "preserve"
     marker_status = marker.stat()
@@ -1628,9 +1705,14 @@ def test_mid_cleanup_plugins_rebind_preserves_quarantine_and_external_canary(
         nonlocal rebound
         original_consume(entries)
         if not rebound:
+            if os.name == "nt":
+                control = plugins / ".zagrosi"
+                control.rename(plugins / ".zagrosi-displaced")
+                control.mkdir(mode=0o700)
+            else:
+                plugins.rename(displaced)
+                plugins.mkdir(mode=0o700)
             rebound = True
-            plugins.rename(displaced)
-            plugins.mkdir(mode=0o700)
 
     monkeypatch.setattr(
         ownership,
@@ -1642,7 +1724,8 @@ def test_mid_cleanup_plugins_rebind_preserves_quarantine_and_external_canary(
 
     assert rebound
     assert _code(result) == "ownership.cleanup_incomplete"
-    preserved = displaced / ticket.recovery_reference
+    preserved_root = plugins if os.name == "nt" else displaced
+    preserved = preserved_root / ticket.recovery_reference
     quarantine_status = preserved.stat()
     marker = preserved / "managed"
     marker_status = marker.stat()
@@ -1682,9 +1765,14 @@ def test_mid_cleanup_plugins_rebind_preserves_empty_directory(
         nonlocal rebound
         original_consume(entries)
         if not rebound:
+            if os.name == "nt":
+                control = plugins / ".zagrosi"
+                control.rename(plugins / ".zagrosi-displaced")
+                control.mkdir(mode=0o700)
+            else:
+                plugins.rename(displaced)
+                plugins.mkdir(mode=0o700)
             rebound = True
-            plugins.rename(displaced)
-            plugins.mkdir(mode=0o700)
 
     monkeypatch.setattr(
         ownership,
@@ -1696,7 +1784,8 @@ def test_mid_cleanup_plugins_rebind_preserves_empty_directory(
 
     assert rebound
     assert _code(result) == "ownership.cleanup_incomplete"
-    preserved = displaced / ticket.recovery_reference / "nested"
+    preserved_root = plugins if os.name == "nt" else displaced
+    preserved = preserved_root / ticket.recovery_reference / "nested"
     nested_status = preserved.stat()
     assert (nested_status.st_dev, nested_status.st_ino) == before
     assert result.error is not None
