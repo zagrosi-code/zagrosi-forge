@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ctypes
 from _thread import LockType
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 import errno
 import hashlib
@@ -19,11 +19,14 @@ from threading import Lock
 from typing import Mapping, Never, cast
 
 from .contracts import (
+    ActiveInstallRelation,
     ForgeError,
     InstallIdentity,
+    ManagedConfigProjection,
     Result,
     canonical_json_bytes,
     decode_persistent_record,
+    install_identity_digest as _contract_install_identity_digest,
 )
 from . import paths as _paths
 from .paths import OpenedRegularFile, OwnedRoot, PathProof, SafeRelativePath
@@ -34,6 +37,9 @@ RECEIPT_SCHEMA_DIGEST = (
     "4e110c2312c112652913e820c498c35e6c98be371dbf90a20d90e9ab636fb1a5"
 )
 _CAPABILITY_TOKEN = object()
+_OBSERVATION_TOKEN = object()
+_RELATION_TOKEN = object()
+_LEGACY_TOKEN = object()
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _TRANSACTION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _IDENTIFIER = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
@@ -51,6 +57,9 @@ _LEGACY_CATALOG_SCHEMA_DIGEST = (
 )
 _LEGACY_CATALOG_RESOURCE_DIGEST = (
     "45ef63eaafbd03127c7fa9d225c3fd073082999a25ee26484fa30319fb21e992"
+)
+_LEGACY_CATALOG_RECORD_DIGEST = (
+    "e69354c3a3c4bcc9628d271ceaea4a838a51027133b8fc4f1ffcd81c65b7c71a"
 )
 _CLEANUP_MAX_DEPTH = LIMIT_POLICY.value("path_components")
 _CLEANUP_MAX_ENTRIES = LIMIT_POLICY.value("bundle_files")
@@ -589,9 +598,7 @@ def _exclusive_rename(parent: int, source: str, destination: str) -> None:
 def install_identity_digest(identity: InstallIdentity) -> str:
     """Return the full canonical identity digest used by receipt keys."""
 
-    if not isinstance(identity, InstallIdentity):
-        raise TypeError("identity")
-    return hashlib.sha256(canonical_json_bytes(asdict(identity))).hexdigest()
+    return _contract_install_identity_digest(identity)
 
 
 def committed_receipt_reference(
@@ -612,23 +619,454 @@ def committed_receipt_reference(
     ).unwrap()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ObservedGenerationIdentity:
     effective_marketplace_id: str
     root_role: str
     identity: InstallIdentity
     path: PathProof
     manifest_digest: str
+    _binding_digest: str
+    _seal: object
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        effective_marketplace_id: str,
+        root_role: str,
+        identity: InstallIdentity,
+        path: PathProof,
+        manifest_digest: str,
+        _token: object,
+    ) -> None:
+        if _token is not _OBSERVATION_TOKEN:
+            raise TypeError(
+                "ObservedGenerationIdentity is created only by verified observation"
+            )
         if (
-            not self.effective_marketplace_id
-            or self.root_role not in {"source", "cache"}
-            or not isinstance(self.identity, InstallIdentity)
-            or not isinstance(self.path, PathProof)
-            or _DIGEST.fullmatch(self.manifest_digest) is None
+            not effective_marketplace_id
+            or root_role not in {"source", "cache"}
+            or not isinstance(identity, InstallIdentity)
+            or not isinstance(path, PathProof)
+            or _DIGEST.fullmatch(manifest_digest) is None
         ):
             raise ValueError("observed generation identity")
+        object.__setattr__(self, "effective_marketplace_id", effective_marketplace_id)
+        object.__setattr__(self, "root_role", root_role)
+        object.__setattr__(self, "identity", identity)
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "manifest_digest", manifest_digest)
+        object.__setattr__(
+            self,
+            "_binding_digest",
+            _observed_generation_binding_digest(
+                effective_marketplace_id,
+                root_role,
+                identity,
+                path,
+                manifest_digest,
+            ),
+        )
+        object.__setattr__(self, "_seal", _OBSERVATION_TOKEN)
+
+    def __reduce__(self) -> Never:
+        raise TypeError("generation observations are not serializable")
+
+
+def _observed_generation_binding_digest(
+    effective_marketplace_id: str,
+    root_role: str,
+    identity: InstallIdentity,
+    path: PathProof,
+    manifest_digest: str,
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "effective_marketplace_id": effective_marketplace_id,
+                "identity": identity,
+                "manifest_digest": manifest_digest,
+                "path_identity": path.leaf_identity,
+                "path_relative": path.relative.value,
+                "root_identity": path.owned_ancestor_identity,
+                "root_role": root_role,
+            }
+        )
+    ).hexdigest()
+
+
+def _observed_generation_invariants(value: object) -> bool:
+    if type(value) is not ObservedGenerationIdentity:
+        return False
+    observed = value
+    try:
+        return (
+            observed._seal is _OBSERVATION_TOKEN
+            and observed.root_role in {"source", "cache"}
+            and type(observed.identity) is InstallIdentity
+            and isinstance(observed.path, PathProof)
+            and _DIGEST.fullmatch(observed.manifest_digest) is not None
+            and observed._binding_digest
+            == _observed_generation_binding_digest(
+                observed.effective_marketplace_id,
+                observed.root_role,
+                observed.identity,
+                observed.path,
+                observed.manifest_digest,
+            )
+        )
+    except (ForgeError, TypeError, ValueError):
+        return False
+
+
+def observe_generation_identity(
+    *,
+    effective_marketplace_id: str,
+    root_role: str,
+    identity: InstallIdentity,
+    path: PathProof,
+    manifest: OpenedRegularFile,
+) -> Result[ObservedGenerationIdentity]:
+    """Hash the exact already-opened generation manifest and seal its observation."""
+
+    if (
+        not isinstance(path, PathProof)
+        or not isinstance(manifest, OpenedRegularFile)
+        or type(identity) is not InstallIdentity
+        or _IDENTIFIER.fullmatch(effective_marketplace_id) is None
+        or root_role not in {"source", "cache"}
+    ):
+        return Result.failure(
+            _error(
+                "ownership.identity_mismatch",
+                "The generation observation input is invalid.",
+            )
+        )
+    expected_generation = (
+        f"sources/{effective_marketplace_id}/{identity.plugin_id}/"
+        f"{identity.install_version}/marketplace"
+        if root_role == "source"
+        else f"cache/{effective_marketplace_id}/{identity.plugin_id}/"
+        f"{identity.install_version}"
+    )
+    manifest_suffix = (
+        f"plugins/{identity.plugin_id}/.codex-plugin/bundle-manifest.json"
+        if root_role == "source"
+        else ".codex-plugin/bundle-manifest.json"
+    )
+    expected_manifest = f"{expected_generation}/{manifest_suffix}"
+    descriptor = -1
+    try:
+        path_reference = _snapshot_safe_reference(path.relative)
+        manifest_reference = _snapshot_safe_reference(manifest.relative)
+        if (
+            path_reference is None
+            or manifest_reference is None
+            or path_reference.value != expected_generation
+            or manifest_reference.value != expected_manifest
+            or path.leaf_identity is None
+            or manifest.root_identity != path.owned_ancestor_identity
+        ):
+            raise _error(
+                "ownership.identity_mismatch",
+                "The generation observation does not match.",
+            )
+        descriptor = path._duplicate_descriptor()
+        if _native_identity(descriptor) != path.leaf_identity:
+            raise _error(
+                "ownership.identity_mismatch",
+                "The generation observation identity changed.",
+            )
+        raw = manifest.read_bytes(limit=256 * 1024)
+        observed = ObservedGenerationIdentity(
+            effective_marketplace_id=effective_marketplace_id,
+            root_role=root_role,
+            identity=identity,
+            path=path,
+            manifest_digest=hashlib.sha256(raw).hexdigest(),
+            _token=_OBSERVATION_TOKEN,
+        )
+        if not _observed_generation_invariants(observed):
+            raise _error(
+                "ownership.identity_mismatch",
+                "The generation observation identity changed.",
+            )
+        return Result.success(observed)
+    except (ForgeError, OSError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "ownership.identity_mismatch",
+                "The generation cannot be observed safely.",
+            )
+        )
+    finally:
+        if descriptor >= 0:
+            _close_native(descriptor)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ValidatedInstallRelation:
+    """Receipt-derived selected-state authority over two observed generations."""
+
+    _active: ActiveInstallRelation
+    _config_before_snapshot_digest: str
+    _config_after_snapshot_digest: str
+    _source_manifest_digest: str
+    _cache_manifest_digest: str
+    _source_identity: tuple[int, int]
+    _cache_identity: tuple[int, int]
+    _receipt_identity: tuple[int, int]
+    _source_observation: ObservedGenerationIdentity
+    _cache_observation: ObservedGenerationIdentity
+    _binding_digest: str
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        active: ActiveInstallRelation,
+        config_before_snapshot_digest: str,
+        config_after_snapshot_digest: str,
+        source_manifest_digest: str,
+        cache_manifest_digest: str,
+        source_identity: tuple[int, int],
+        cache_identity: tuple[int, int],
+        receipt_identity: tuple[int, int],
+        source_observation: ObservedGenerationIdentity,
+        cache_observation: ObservedGenerationIdentity,
+        _token: object,
+    ) -> None:
+        if _token is not _RELATION_TOKEN:
+            raise TypeError(
+                "ValidatedInstallRelation is created only by receipt validation"
+            )
+        if type(active) is not ActiveInstallRelation:
+            raise ValueError("validated install relation")
+        for digest in (
+            config_before_snapshot_digest,
+            config_after_snapshot_digest,
+            source_manifest_digest,
+            cache_manifest_digest,
+        ):
+            if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
+                raise ValueError("validated install relation")
+        for identity in (source_identity, cache_identity, receipt_identity):
+            if (
+                not isinstance(identity, tuple)
+                or len(identity) != 2
+                or any(type(member) is not int or member < 0 for member in identity)
+            ):
+                raise ValueError("validated install relation")
+        if (
+            not _observed_generation_invariants(source_observation)
+            or not _observed_generation_invariants(cache_observation)
+            or source_observation.root_role != "source"
+            or cache_observation.root_role != "cache"
+            or source_observation.identity != active.identity
+            or cache_observation.identity != active.identity
+            or source_observation.manifest_digest != source_manifest_digest
+            or cache_observation.manifest_digest != cache_manifest_digest
+            or source_observation.path.leaf_identity != source_identity
+            or cache_observation.path.leaf_identity != cache_identity
+        ):
+            raise ValueError("validated install relation")
+        active_copy = _copy_active_install_relation(active)
+        object.__setattr__(self, "_active", active_copy)
+        object.__setattr__(
+            self, "_config_before_snapshot_digest", config_before_snapshot_digest
+        )
+        object.__setattr__(
+            self, "_config_after_snapshot_digest", config_after_snapshot_digest
+        )
+        object.__setattr__(self, "_source_manifest_digest", source_manifest_digest)
+        object.__setattr__(self, "_cache_manifest_digest", cache_manifest_digest)
+        object.__setattr__(self, "_source_identity", source_identity)
+        object.__setattr__(self, "_cache_identity", cache_identity)
+        object.__setattr__(self, "_receipt_identity", receipt_identity)
+        object.__setattr__(self, "_source_observation", source_observation)
+        object.__setattr__(self, "_cache_observation", cache_observation)
+        object.__setattr__(
+            self,
+            "_binding_digest",
+            _validated_relation_binding_digest(
+                active_copy,
+                config_before_snapshot_digest,
+                config_after_snapshot_digest,
+                source_manifest_digest,
+                cache_manifest_digest,
+                source_identity,
+                cache_identity,
+                receipt_identity,
+            ),
+        )
+        object.__setattr__(self, "_seal", _RELATION_TOKEN)
+
+    def _require_valid(self) -> None:
+        try:
+            expected = _validated_relation_binding_digest(
+                self._active,
+                self._config_before_snapshot_digest,
+                self._config_after_snapshot_digest,
+                self._source_manifest_digest,
+                self._cache_manifest_digest,
+                self._source_identity,
+                self._cache_identity,
+                self._receipt_identity,
+            )
+        except (ForgeError, TypeError, ValueError):
+            expected = ""
+        if self._seal is not _RELATION_TOKEN or self._binding_digest != expected:
+            raise _error(
+                "ownership.identity_mismatch",
+                "The validated install relation changed.",
+            )
+        if not (
+            _validated_observation_is_live(
+                self._source_observation,
+                expected_role="source",
+                expected_identity=self._source_identity,
+                expected_manifest=self._source_manifest_digest,
+            )
+            and _validated_observation_is_live(
+                self._cache_observation,
+                expected_role="cache",
+                expected_identity=self._cache_identity,
+                expected_manifest=self._cache_manifest_digest,
+            )
+            and _validated_observation_is_live(
+                self._source_observation,
+                expected_role="source",
+                expected_identity=self._source_identity,
+                expected_manifest=self._source_manifest_digest,
+            )
+        ):
+            raise _error(
+                "ownership.identity_mismatch",
+                "The validated install relation containment changed.",
+            )
+
+    @property
+    def active(self) -> ActiveInstallRelation:
+        self._require_valid()
+        return _copy_active_install_relation(self._active)
+
+    @property
+    def config_before_snapshot_digest(self) -> str:
+        self._require_valid()
+        return self._config_before_snapshot_digest
+
+    @property
+    def config_after_snapshot_digest(self) -> str:
+        self._require_valid()
+        return self._config_after_snapshot_digest
+
+    @property
+    def source_manifest_digest(self) -> str:
+        self._require_valid()
+        return self._source_manifest_digest
+
+    @property
+    def cache_manifest_digest(self) -> str:
+        self._require_valid()
+        return self._cache_manifest_digest
+
+    @property
+    def source_identity(self) -> tuple[int, int]:
+        self._require_valid()
+        return self._source_identity
+
+    @property
+    def cache_identity(self) -> tuple[int, int]:
+        self._require_valid()
+        return self._cache_identity
+
+    @property
+    def receipt_identity(self) -> tuple[int, int]:
+        self._require_valid()
+        return self._receipt_identity
+
+    def __reduce__(self) -> Never:
+        raise TypeError("validated install relations are not serializable")
+
+
+def _copy_active_install_relation(
+    relation: ActiveInstallRelation,
+) -> ActiveInstallRelation:
+    identity = relation.identity
+    identity_copy = InstallIdentity(
+        marketplace_id=identity.marketplace_id,
+        plugin_id=identity.plugin_id,
+        base_version=identity.base_version,
+        install_version=identity.install_version,
+        base_payload_digest=identity.base_payload_digest,
+        rendered_payload_digest=identity.rendered_payload_digest,
+        policy_digest=identity.policy_digest,
+        transformation_profile=identity.transformation_profile,
+        contract_versions=tuple(identity.contract_versions),
+    )
+    return ActiveInstallRelation(
+        effective_marketplace_id=relation.effective_marketplace_id,
+        identity=identity_copy,
+        managed_config_projection=ManagedConfigProjection.v1(
+            effective_marketplace_id=relation.effective_marketplace_id,
+            plugin_id=identity_copy.plugin_id,
+            source_generation=relation.source_generation,
+        ),
+        source_generation=relation.source_generation,
+        cache_generation=relation.cache_generation,
+        committed_receipt_ref=relation.committed_receipt_ref,
+    )
+
+
+def _validated_observation_is_live(
+    observed: ObservedGenerationIdentity,
+    *,
+    expected_role: str,
+    expected_identity: tuple[int, int],
+    expected_manifest: str,
+) -> bool:
+    descriptor = -1
+    try:
+        if (
+            not _observed_generation_invariants(observed)
+            or observed.root_role != expected_role
+            or observed.path.leaf_identity != expected_identity
+            or observed.manifest_digest != expected_manifest
+        ):
+            return False
+        descriptor = observed.path._duplicate_descriptor()
+        return _native_identity(descriptor) == expected_identity
+    except (ForgeError, OSError, TypeError, ValueError):
+        return False
+    finally:
+        if descriptor >= 0:
+            _close_native(descriptor)
+
+
+def _validated_relation_binding_digest(
+    active: ActiveInstallRelation,
+    config_before_snapshot_digest: str,
+    config_after_snapshot_digest: str,
+    source_manifest_digest: str,
+    cache_manifest_digest: str,
+    source_identity: tuple[int, int],
+    cache_identity: tuple[int, int],
+    receipt_identity: tuple[int, int],
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "active": active,
+                "cache_identity": cache_identity,
+                "cache_manifest_digest": cache_manifest_digest,
+                "config_after_snapshot_digest": config_after_snapshot_digest,
+                "config_before_snapshot_digest": config_before_snapshot_digest,
+                "receipt_identity": receipt_identity,
+                "source_identity": source_identity,
+                "source_manifest_digest": source_manifest_digest,
+            }
+        )
+    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -704,10 +1142,109 @@ class TransactionPathClaim:
         raise TypeError("ownership capabilities are not serializable")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
+class LegacyInstallCatalog:
+    """Digest-bound installed authority for inert legacy recognition."""
+
+    marketplace_id: str
+    source_type: str
+    source_leaf: str
+    plugin_key: str
+    cache_pattern: str
+    catalog_digest: str
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        marketplace_id: str,
+        source_type: str,
+        source_leaf: str,
+        plugin_key: str,
+        cache_pattern: str,
+        catalog_digest: str,
+        _token: object,
+    ) -> None:
+        if _token is not _LEGACY_TOKEN:
+            raise TypeError(
+                "LegacyInstallCatalog is loaded only from installed resources"
+            )
+        if (
+            marketplace_id != "zagrosi"
+            or source_type != "local"
+            or source_leaf != _PLUGIN_ID
+            or plugin_key != f"{_PLUGIN_ID}@{marketplace_id}"
+            or cache_pattern != f"cache/{marketplace_id}/{_PLUGIN_ID}/<base-version>"
+            or catalog_digest != _LEGACY_CATALOG_RECORD_DIGEST
+        ):
+            raise ValueError("legacy install catalog")
+        object.__setattr__(self, "marketplace_id", marketplace_id)
+        object.__setattr__(self, "source_type", source_type)
+        object.__setattr__(self, "source_leaf", source_leaf)
+        object.__setattr__(self, "plugin_key", plugin_key)
+        object.__setattr__(self, "cache_pattern", cache_pattern)
+        object.__setattr__(self, "catalog_digest", catalog_digest)
+        object.__setattr__(self, "_seal", _LEGACY_TOKEN)
+
+    def __reduce__(self) -> Never:
+        raise TypeError("legacy install catalogs are not serializable")
+
+
+def _legacy_catalog_invariants(value: object) -> bool:
+    if type(value) is not LegacyInstallCatalog:
+        return False
+    catalog = value
+    return (
+        catalog._seal is _LEGACY_TOKEN
+        and catalog.marketplace_id == "zagrosi"
+        and catalog.source_type == "local"
+        and catalog.source_leaf == _PLUGIN_ID
+        and catalog.plugin_key == f"{_PLUGIN_ID}@zagrosi"
+        and catalog.cache_pattern == f"cache/zagrosi/{_PLUGIN_ID}/<base-version>"
+        and catalog.catalog_digest == _LEGACY_CATALOG_RECORD_DIGEST
+    )
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class LegacyRecognition:
+    """Inert exact-match evidence; never deletion or mutation authority."""
+
     marketplace_id: str
     cache_relative: str
+    base_version: str
+    catalog_digest: str
+    projection_digest: str
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        marketplace_id: str,
+        cache_relative: str,
+        base_version: str,
+        catalog_digest: str,
+        projection_digest: str,
+        _token: object,
+    ) -> None:
+        if _token is not _LEGACY_TOKEN:
+            raise TypeError("LegacyRecognition is created only by the legacy matcher")
+        if (
+            marketplace_id != "zagrosi"
+            or not cache_relative
+            or _RELEASE_VERSION.fullmatch(base_version) is None
+            or _DIGEST.fullmatch(catalog_digest) is None
+            or _DIGEST.fullmatch(projection_digest) is None
+        ):
+            raise ValueError("legacy recognition")
+        object.__setattr__(self, "marketplace_id", marketplace_id)
+        object.__setattr__(self, "cache_relative", cache_relative)
+        object.__setattr__(self, "base_version", base_version)
+        object.__setattr__(self, "catalog_digest", catalog_digest)
+        object.__setattr__(self, "projection_digest", projection_digest)
+        object.__setattr__(self, "_seal", _LEGACY_TOKEN)
+
+    def __reduce__(self) -> Never:
+        raise TypeError("legacy recognitions are not serializable")
 
 
 class OwnershipProof:
@@ -1227,11 +1764,18 @@ class _GenerationRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class _ConfigRecord:
+    before_digest: str
+    after_digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class _DecodedReceipt:
     record: Mapping[str, object]
     identity: InstallIdentity
     source: _GenerationRecord
     cache: _GenerationRecord
+    config: _ConfigRecord
     effective_marketplace_id: str
 
 
@@ -1266,7 +1810,7 @@ def _validate_transaction(value: object) -> None:
         raise ValueError("transaction.lineage")
 
 
-def _validate_config(value: object) -> None:
+def _validate_config(value: object) -> _ConfigRecord:
     record = _exact_mapping(
         value,
         frozenset({"path_id", "before_digest", "after_digest"}),
@@ -1274,8 +1818,10 @@ def _validate_config(value: object) -> None:
     )
     if record["path_id"] != "codex-config":
         raise ValueError("config.path_id")
-    _digest(record["before_digest"], field="config.before_digest")
-    _digest(record["after_digest"], field="config.after_digest")
+    return _ConfigRecord(
+        _digest(record["before_digest"], field="config.before_digest"),
+        _digest(record["after_digest"], field="config.after_digest"),
+    )
 
 
 def _validate_tools(value: object) -> None:
@@ -1365,14 +1911,14 @@ def _decode_committed_receipt(raw: bytes) -> _DecodedReceipt:
     if source.relative_path != expected_source or cache.relative_path != expected_cache:
         raise ValueError("generation.relative_path")
     _validate_transaction(record["transaction"])
-    _validate_config(record["config"])
+    config = _validate_config(record["config"])
     _validate_tools(record["tools"])
     created_at = _string(record["created_at"], field="created_at")
     try:
         datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError as exc:
         raise ValueError("created_at") from exc
-    return _DecodedReceipt(record, identity, source, cache, effective)
+    return _DecodedReceipt(record, identity, source, cache, config, effective)
 
 
 def _private_posix_receipt_parent(descriptor: int, *, device: int) -> bool:
@@ -2077,7 +2623,7 @@ def validate_committed_receipt(
     if (
         not isinstance(receipt, OpenedRegularFile)
         or not isinstance(owned_root, OwnedRoot)
-        or not isinstance(observed, ObservedGenerationIdentity)
+        or not _observed_generation_invariants(observed)
     ):
         return Result.failure(
             _error(
@@ -2262,6 +2808,148 @@ def validate_committed_receipt(
             _close_native(root)
         if namespace is not None:
             namespace.close()
+
+
+def validate_active_install_relation(
+    receipt: OpenedRegularFile,
+    *,
+    owned_root: OwnedRoot,
+    source: ObservedGenerationIdentity,
+    cache: ObservedGenerationIdentity,
+) -> Result[ValidatedInstallRelation]:
+    """Validate one receipt against both live generations and seal its relation."""
+
+    if (
+        not isinstance(receipt, OpenedRegularFile)
+        or not isinstance(owned_root, OwnedRoot)
+        or not _observed_generation_invariants(source)
+        or not _observed_generation_invariants(cache)
+    ):
+        return Result.failure(
+            _error(
+                "ownership.receipt_invalid",
+                "The ownership receipt relation input is invalid.",
+            )
+        )
+    if (
+        source.root_role != "source"
+        or cache.root_role != "cache"
+        or source.effective_marketplace_id != cache.effective_marketplace_id
+        or source.identity != cache.identity
+    ):
+        return Result.failure(
+            _error(
+                "ownership.identity_mismatch",
+                "The ownership receipt relation does not match.",
+            )
+        )
+    source_proof: OwnershipProof | None = None
+    cache_proof: OwnershipProof | None = None
+    final_source_proof: OwnershipProof | None = None
+    final_cache_proof: OwnershipProof | None = None
+    try:
+        source_result = validate_committed_receipt(
+            receipt,
+            owned_root=owned_root,
+            observed=source,
+        )
+        if source_result.error is not None:
+            return Result.failure(source_result.error)
+        source_proof = source_result.unwrap()
+        cache_result = validate_committed_receipt(
+            receipt,
+            owned_root=owned_root,
+            observed=cache,
+        )
+        if cache_result.error is not None:
+            return Result.failure(cache_result.error)
+        cache_proof = cache_result.unwrap()
+        raw = receipt.read_bytes(limit=256 * 1024)
+        decoded = _decode_committed_receipt(raw)
+        final_source_result = validate_committed_receipt(
+            receipt,
+            owned_root=owned_root,
+            observed=source,
+        )
+        if final_source_result.error is not None:
+            return Result.failure(final_source_result.error)
+        final_source_proof = final_source_result.unwrap()
+        final_cache_result = validate_committed_receipt(
+            receipt,
+            owned_root=owned_root,
+            observed=cache,
+        )
+        if final_cache_result.error is not None:
+            return Result.failure(final_cache_result.error)
+        final_cache_proof = final_cache_result.unwrap()
+        if not (
+            _observed_generation_invariants(source)
+            and _observed_generation_invariants(cache)
+        ):
+            return Result.failure(
+                _error(
+                    "ownership.identity_mismatch",
+                    "The ownership receipt relation changed.",
+                )
+            )
+        source_identity = source.path.leaf_identity
+        cache_identity = cache.path.leaf_identity
+        if source_identity is None or cache_identity is None:
+            return Result.failure(
+                _error(
+                    "ownership.identity_mismatch",
+                    "The ownership receipt generation identity does not match.",
+                )
+            )
+        source_generation = decoded.source.relative_path
+        active = ActiveInstallRelation(
+            effective_marketplace_id=decoded.effective_marketplace_id,
+            identity=decoded.identity,
+            managed_config_projection=ManagedConfigProjection.v1(
+                effective_marketplace_id=decoded.effective_marketplace_id,
+                plugin_id=decoded.identity.plugin_id,
+                source_generation=source_generation,
+            ),
+            source_generation=source_generation,
+            cache_generation=decoded.cache.relative_path,
+            committed_receipt_ref=committed_receipt_reference(
+                decoded.effective_marketplace_id,
+                decoded.identity,
+            ).value,
+        )
+        relation = ValidatedInstallRelation(
+            active=active,
+            config_before_snapshot_digest=decoded.config.before_digest,
+            config_after_snapshot_digest=decoded.config.after_digest,
+            source_manifest_digest=decoded.source.manifest_digest,
+            cache_manifest_digest=decoded.cache.manifest_digest,
+            source_identity=source_identity,
+            cache_identity=cache_identity,
+            receipt_identity=receipt.identity,
+            source_observation=source,
+            cache_observation=cache,
+            _token=_RELATION_TOKEN,
+        )
+        relation._require_valid()
+        return Result.success(relation)
+    except ForgeError as exc:
+        return Result.failure(_receipt_failure_from(exc))
+    except (OSError, TypeError, ValueError, KeyError):
+        return Result.failure(
+            _error(
+                "ownership.receipt_invalid",
+                "The ownership receipt relation is invalid.",
+            )
+        )
+    finally:
+        if source_proof is not None:
+            source_proof.close()
+        if cache_proof is not None:
+            cache_proof.close()
+        if final_source_proof is not None:
+            final_source_proof.close()
+        if final_cache_proof is not None:
+            final_cache_proof.close()
 
 
 def _quarantine_target(
@@ -2711,7 +3399,9 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
         namespace.close()
 
 
-def _trusted_legacy_catalog() -> Mapping[str, str] | None:
+def load_legacy_install_catalog() -> Result[LegacyInstallCatalog]:
+    """Load and seal the one installed recognition-only legacy authority."""
+
     try:
         raw = (
             resources.files("zagrosi_forge.install")
@@ -2719,62 +3409,163 @@ def _trusted_legacy_catalog() -> Mapping[str, str] | None:
             .read_bytes()
         )
         if hashlib.sha256(raw).hexdigest() != _LEGACY_CATALOG_RESOURCE_DIGEST:
-            return None
+            raise ValueError("legacy catalog resource digest")
         decoded = decode_persistent_record(raw, reader_version=_WRITER_VERSION)
-    except (ForgeError, OSError):
-        return None
-    expected = {
-        "record_kind": "legacy-install-catalog",
-        "schema_version": "1.0",
-        "schema_digest": _LEGACY_CATALOG_SCHEMA_DIGEST,
-        "writer_version": _WRITER_VERSION,
-        "minimum_reader_version": _WRITER_VERSION,
-        "marketplace_id": "zagrosi",
-        "source_type": "local",
-        "source_leaf": "zagrosi-forge",
-        "plugin_key": "zagrosi-forge@zagrosi",
-        "cache_pattern": "cache/zagrosi/zagrosi-forge/<base-version>",
-        "authority": "recognition-only",
-    }
-    if set(decoded) != {*expected, "record_digest"} or any(
-        decoded.get(key) != value for key, value in expected.items()
+        expected = {
+            "record_kind": "legacy-install-catalog",
+            "schema_version": "1.0",
+            "schema_digest": _LEGACY_CATALOG_SCHEMA_DIGEST,
+            "writer_version": _WRITER_VERSION,
+            "minimum_reader_version": _WRITER_VERSION,
+            "marketplace_id": "zagrosi",
+            "source_type": "local",
+            "source_leaf": "zagrosi-forge",
+            "plugin_key": "zagrosi-forge@zagrosi",
+            "cache_pattern": "cache/zagrosi/zagrosi-forge/<base-version>",
+            "authority": "recognition-only",
+        }
+        if set(decoded) != {*expected, "record_digest"} or any(
+            decoded.get(key) != value for key, value in expected.items()
+        ):
+            raise ValueError("legacy catalog contract")
+        record_digest = decoded.get("record_digest")
+        if not isinstance(record_digest, str):
+            raise ValueError("legacy catalog record digest")
+        return Result.success(
+            LegacyInstallCatalog(
+                marketplace_id=cast(str, decoded["marketplace_id"]),
+                source_type=cast(str, decoded["source_type"]),
+                source_leaf=cast(str, decoded["source_leaf"]),
+                plugin_key=cast(str, decoded["plugin_key"]),
+                cache_pattern=cast(str, decoded["cache_pattern"]),
+                catalog_digest=record_digest,
+                _token=_LEGACY_TOKEN,
+            )
+        )
+    except (ForgeError, OSError, TypeError, ValueError, KeyError):
+        return Result.failure(
+            _error(
+                "ownership.receipt_invalid",
+                "The installed legacy recognition catalog is invalid.",
+            )
+        )
+
+
+def _legacy_checkout_source(source: object, *, expected_leaf: str) -> bool:
+    if (
+        type(source) is not str
+        or not source
+        or len(source.encode("utf-8")) > 4_096
+        or "\0" in source
     ):
-        return None
-    return cast(Mapping[str, str], decoded)
+        return False
+    posix_source = PurePosixPath(source)
+    posix_parts = posix_source.parts
+    posix_match = (
+        source.startswith("/")
+        and not source.startswith("//")
+        and posix_source.is_absolute()
+        and posix_source.name == expected_leaf
+        and posix_source.as_posix() == source
+        and all(part not in {".", ".."} for part in posix_parts)
+    )
+    windows_source = PureWindowsPath(source)
+    windows_parts = windows_source.parts
+    windows_match = (
+        windows_source.is_absolute()
+        and windows_source.name == expected_leaf
+        and str(windows_source) == source
+        and not source.startswith(("\\\\", "//", "\\?\\", "\\.\\"))
+        and all(part not in {".", ".."} for part in windows_parts)
+    )
+    return posix_match or windows_match
+
+
+def match_legacy_install(
+    catalog: LegacyInstallCatalog,
+    *,
+    marketplace_id: str,
+    marketplace_table: Mapping[str, object],
+    plugin_key: str,
+    plugin_table: Mapping[str, object],
+    cache_relative: SafeRelativePath,
+) -> Result[LegacyRecognition | None]:
+    """Match complete relevant tables; near misses remain unmanaged data."""
+
+    if not _legacy_catalog_invariants(catalog):
+        return Result.failure(
+            _error(
+                "ownership.receipt_invalid",
+                "The installed legacy recognition catalog is invalid.",
+            )
+        )
+    cache_reference = _snapshot_safe_reference(cache_relative)
+    if (
+        not isinstance(marketplace_table, Mapping)
+        or not isinstance(plugin_table, Mapping)
+        or set(marketplace_table) != {"source_type", "source"}
+        or set(plugin_table) != {"enabled"}
+        or cache_reference is None
+    ):
+        return Result.success(None)
+    source_type = marketplace_table["source_type"]
+    source = marketplace_table["source"]
+    enabled = plugin_table["enabled"]
+    cache = re.fullmatch(
+        r"cache/zagrosi/zagrosi-forge/((?:0|[1-9][0-9]*)\."
+        r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))",
+        cache_reference.value,
+    )
+    if (
+        type(marketplace_id) is not str
+        or marketplace_id != catalog.marketplace_id
+        or type(source_type) is not str
+        or source_type != catalog.source_type
+        or type(plugin_key) is not str
+        or plugin_key != catalog.plugin_key
+        or type(enabled) is not bool
+        or enabled is not True
+        or not _legacy_checkout_source(source, expected_leaf=catalog.source_leaf)
+        or cache is None
+    ):
+        return Result.success(None)
+    projection = {
+        "cache_relative": cache_reference.value,
+        "marketplaces": {
+            marketplace_id: {"source": source, "source_type": source_type}
+        },
+        "plugins": {plugin_key: {"enabled": enabled}},
+    }
+    return Result.success(
+        LegacyRecognition(
+            marketplace_id=marketplace_id,
+            cache_relative=cache_reference.value,
+            base_version=cache[1],
+            catalog_digest=catalog.catalog_digest,
+            projection_digest=hashlib.sha256(
+                canonical_json_bytes(projection)
+            ).hexdigest(),
+            _token=_LEGACY_TOKEN,
+        )
+    )
 
 
 def recognize_legacy_install(
+    catalog: LegacyInstallCatalog,
     *,
     marketplace_id: str,
-    source_type: str,
-    source: str,
-    enabled_plugin: str,
-    cache_relative: str,
-) -> LegacyRecognition | None:
-    """Recognize the exact legacy layout as inert migration data only."""
+    marketplace_table: Mapping[str, object],
+    plugin_key: str,
+    plugin_table: Mapping[str, object],
+    cache_relative: SafeRelativePath,
+) -> Result[LegacyRecognition | None]:
+    """Compatibility spelling for the exact complete-table matcher."""
 
-    catalog = _trusted_legacy_catalog()
-    if catalog is None:
-        return None
-    cache = re.fullmatch(
-        r"cache/zagrosi/zagrosi-forge/(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)",
-        cache_relative,
+    return match_legacy_install(
+        catalog,
+        marketplace_id=marketplace_id,
+        marketplace_table=marketplace_table,
+        plugin_key=plugin_key,
+        plugin_table=plugin_table,
+        cache_relative=cache_relative,
     )
-    posix_source = PurePosixPath(source)
-    windows_source = PureWindowsPath(source)
-    source_is_checkout = (
-        posix_source.is_absolute() and posix_source.name == catalog["source_leaf"]
-    ) or (
-        windows_source.is_absolute()
-        and windows_source.name == catalog["source_leaf"]
-        and not source.startswith(("\\\\", "//", "\\?\\", "\\.\\"))
-    )
-    if (
-        marketplace_id != catalog["marketplace_id"]
-        or source_type != catalog["source_type"]
-        or enabled_plugin != catalog["plugin_key"]
-        or not source_is_checkout
-        or cache is None
-    ):
-        return None
-    return LegacyRecognition(marketplace_id, cache_relative)

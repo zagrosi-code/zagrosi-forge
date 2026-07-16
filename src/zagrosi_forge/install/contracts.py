@@ -17,6 +17,7 @@ import unicodedata
 
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_IDENTIFIER = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _RELEASE_VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
 _CONTRACT_VERSION = re.compile(r"[a-z][a-z0-9-]*-v(?:0|[1-9][0-9]*)\Z")
 _WINDOWS_RESERVED = frozenset(
@@ -428,34 +429,181 @@ class InstallIdentity:
             raise ValueError("contract_versions")
 
 
+class ManagedConfigValueKind(str, Enum):
+    """Closed value roles for the three Forge-managed TOML nodes."""
+
+    STRING = "string"
+    OWNED_SOURCE = "owned_source"
+    BOOLEAN = "boolean"
+
+
 @dataclass(frozen=True, slots=True)
-class ActiveInstallRelation:
+class ManagedConfigNode:
+    """One typed semantic node; it carries no receipt authority by itself."""
+
+    pointer: tuple[str, str, str]
+    kind: ManagedConfigValueKind
+    value: str | bool
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.pointer, tuple)
+            or len(self.pointer) != 3
+            or any(not isinstance(part, str) or not part for part in self.pointer)
+            or not isinstance(self.kind, ManagedConfigValueKind)
+        ):
+            raise ValueError("managed config node")
+        if self.kind is ManagedConfigValueKind.BOOLEAN:
+            valid_value = type(self.value) is bool
+        else:
+            valid_value = (
+                type(self.value) is str
+                and bool(self.value)
+                and len(self.value.encode("utf-8")) <= 240
+            )
+        if not valid_value:
+            raise ValueError("managed config node")
+
+
+@dataclass(frozen=True, slots=True)
+class ManagedConfigProjection:
+    """The exact logical v1 projection, including an owned source reference."""
+
     effective_marketplace_id: str
     plugin_id: str
-    managed_config_projection: tuple[tuple[str, str], ...]
+    source_generation: str
+    nodes: tuple[ManagedConfigNode, ...]
+
+    @classmethod
+    def v1(
+        cls,
+        *,
+        effective_marketplace_id: str,
+        plugin_id: str,
+        source_generation: str,
+    ) -> ManagedConfigProjection:
+        return cls(
+            effective_marketplace_id=effective_marketplace_id,
+            plugin_id=plugin_id,
+            source_generation=source_generation,
+            nodes=cls._expected_nodes(
+                effective_marketplace_id,
+                plugin_id,
+                source_generation,
+            ),
+        )
+
+    @staticmethod
+    def _expected_nodes(
+        effective_marketplace_id: str,
+        plugin_id: str,
+        source_generation: str,
+    ) -> tuple[ManagedConfigNode, ...]:
+        return (
+            ManagedConfigNode(
+                ("marketplaces", effective_marketplace_id, "source_type"),
+                ManagedConfigValueKind.STRING,
+                "local",
+            ),
+            ManagedConfigNode(
+                ("marketplaces", effective_marketplace_id, "source"),
+                ManagedConfigValueKind.OWNED_SOURCE,
+                source_generation,
+            ),
+            ManagedConfigNode(
+                ("plugins", f"{plugin_id}@{effective_marketplace_id}", "enabled"),
+                ManagedConfigValueKind.BOOLEAN,
+                True,
+            ),
+        )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_generation, str):
+            raise ValueError("managed config projection")
+        source_parts = self.source_generation.split("/")
+        if (
+            not isinstance(self.effective_marketplace_id, str)
+            or _IDENTIFIER.fullmatch(self.effective_marketplace_id) is None
+            or not isinstance(self.plugin_id, str)
+            or _IDENTIFIER.fullmatch(self.plugin_id) is None
+            or len(source_parts) != 5
+            or source_parts[:3]
+            != ["sources", self.effective_marketplace_id, self.plugin_id]
+            or not source_parts[3]
+            or source_parts[4] != "marketplace"
+            or not isinstance(self.nodes, tuple)
+            or any(type(node) is not ManagedConfigNode for node in self.nodes)
+            or self.nodes
+            != self._expected_nodes(
+                self.effective_marketplace_id,
+                self.plugin_id,
+                self.source_generation,
+            )
+        ):
+            raise ValueError("managed config projection")
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveInstallRelation:
+    """Complete selected-state value; receipt validation is a separate seal."""
+
+    effective_marketplace_id: str
+    identity: InstallIdentity
+    managed_config_projection: ManagedConfigProjection
     source_generation: str
     cache_generation: str
-    base_version: str
-    install_version: str
-    base_payload_digest: str
-    rendered_payload_digest: str
     committed_receipt_ref: str
 
     def __post_init__(self) -> None:
-        for name in self.__dataclass_fields__:
-            if not getattr(self, name):
-                raise ValueError(name)
-        for name in ("base_payload_digest", "rendered_payload_digest"):
-            if not _DIGEST.fullmatch(getattr(self, name)):
-                raise ValueError(name)
-        try:
-            parse_release_version(self.base_version)
-        except ValueError as exc:
-            raise ValueError("base_version") from exc
-        if self.install_version != _expected_install_version(
-            self.base_version, self.base_payload_digest
+        if (
+            not isinstance(self.effective_marketplace_id, str)
+            or _IDENTIFIER.fullmatch(self.effective_marketplace_id) is None
+            or type(self.identity) is not InstallIdentity
+            or type(self.managed_config_projection) is not ManagedConfigProjection
         ):
-            raise ValueError("install_version")
+            raise ValueError("active install relation")
+        expected_source = (
+            f"sources/{self.effective_marketplace_id}/{self.identity.plugin_id}/"
+            f"{self.identity.install_version}/marketplace"
+        )
+        expected_cache = (
+            f"cache/{self.effective_marketplace_id}/{self.identity.plugin_id}/"
+            f"{self.identity.install_version}"
+        )
+        expected_receipt = (
+            f".zagrosi/ownership/{self.effective_marketplace_id}/"
+            f"{self.identity.plugin_id}/{install_identity_digest(self.identity)}.json"
+        )
+        projection = self.managed_config_projection
+        if (
+            self.source_generation != expected_source
+            or self.cache_generation != expected_cache
+            or self.committed_receipt_ref != expected_receipt
+            or projection.effective_marketplace_id != self.effective_marketplace_id
+            or projection.plugin_id != self.identity.plugin_id
+            or projection.source_generation != self.source_generation
+        ):
+            raise ValueError("active install relation")
+
+    @property
+    def plugin_id(self) -> str:
+        return self.identity.plugin_id
+
+    @property
+    def base_version(self) -> str:
+        return self.identity.base_version
+
+    @property
+    def install_version(self) -> str:
+        return self.identity.install_version
+
+    @property
+    def base_payload_digest(self) -> str:
+        return self.identity.base_payload_digest
+
+    @property
+    def rendered_payload_digest(self) -> str:
+        return self.identity.rendered_payload_digest
 
 
 class RunnerState(str, Enum):
@@ -635,6 +783,14 @@ def canonical_json_bytes(value: object, *, final_newline: bool = False) -> bytes
             "diagnostic.value_rejected", 10, "Value exceeds the trusted byte limit."
         )
     return result
+
+
+def install_identity_digest(identity: InstallIdentity) -> str:
+    """Return the full canonical digest used by immutable receipt keys."""
+
+    if type(identity) is not InstallIdentity:
+        raise TypeError("identity")
+    return hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
 
 
 def _validate_decoded_bounds(

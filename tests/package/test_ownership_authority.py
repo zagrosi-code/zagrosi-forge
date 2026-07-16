@@ -109,7 +109,25 @@ def _cache_relative(identity: Any) -> str:
     return f"cache/zagrosi/zagrosi-forge/{identity.install_version}"
 
 
-def _receipt(identity: Any, *, relative: str, manifest: str) -> dict[str, object]:
+def _manifest_relative(identity: Any, role: str) -> str:
+    generation = (
+        _source_relative(identity) if role == "source" else _cache_relative(identity)
+    )
+    suffix = (
+        "plugins/zagrosi-forge/.codex-plugin/bundle-manifest.json"
+        if role == "source"
+        else ".codex-plugin/bundle-manifest.json"
+    )
+    return f"{generation}/{suffix}"
+
+
+def _receipt(
+    identity: Any,
+    *,
+    relative: str,
+    manifest: str,
+    cache_manifest: str = "f" * 64,
+) -> dict[str, object]:
     from zagrosi_forge.install.ownership import RECEIPT_SCHEMA_DIGEST
 
     return {
@@ -137,7 +155,7 @@ def _receipt(identity: Any, *, relative: str, manifest: str) -> dict[str, object
         "source": {"relative_path": relative, "manifest_digest": manifest},
         "cache": {
             "relative_path": _cache_relative(identity),
-            "manifest_digest": "f" * 64,
+            "manifest_digest": cache_manifest,
         },
         "config": {
             "path_id": "codex-config",
@@ -227,9 +245,9 @@ def _macos_metadata_commands(
 
 def _receipt_proof(tmp_path: Path):
     from zagrosi_forge.install.ownership import (
-        ObservedGenerationIdentity,
         committed_receipt_reference,
         install_identity_digest,
+        observe_generation_identity,
         publish_committed_receipt,
         validate_committed_receipt,
     )
@@ -239,30 +257,114 @@ def _receipt_proof(tmp_path: Path):
     relative = _source_relative(identity)
     generation = root_path / relative
     generation.mkdir(parents=True, mode=0o700)
-    manifest = "9" * 64
+    manifest_relative = _manifest_relative(identity, "source")
+    manifest_path = root_path / manifest_relative
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(b"source-generation-manifest\n")
     observed_path = authority.prove_descendant(
         owned,
         _reference(relative),
         expected_depth=len(relative.split("/")),
     ).unwrap()
-    observed = ObservedGenerationIdentity(
-        effective_marketplace_id="zagrosi",
-        root_role="source",
-        identity=identity,
-        path=observed_path,
-        manifest_digest=manifest,
-    )
+    with authority.open_source_root(root_path) as manifest_root:
+        with manifest_root.open_regular_file(
+            _reference(manifest_relative)
+        ) as opened_manifest:
+            observed = observe_generation_identity(
+                effective_marketplace_id="zagrosi",
+                root_role="source",
+                identity=identity,
+                path=observed_path,
+                manifest=opened_manifest,
+            ).unwrap()
     receipt_relative = (
         f".zagrosi/ownership/zagrosi/zagrosi-forge/"
         f"{install_identity_digest(identity)}.json"
     )
     receipt_path = root_path / receipt_relative
-    raw = _record_bytes(_receipt(identity, relative=relative, manifest=manifest))
+    raw = _record_bytes(
+        _receipt(identity, relative=relative, manifest=observed.manifest_digest)
+    )
     publish_committed_receipt(owned, raw=raw).unwrap()
     source = authority.open_source_root(root_path)
     opened = source.open_regular_file(committed_receipt_reference("zagrosi", identity))
     result = validate_committed_receipt(opened, owned_root=owned, observed=observed)
     return result, receipt_path, opened, source, observed_path, owned
+
+
+def _receipt_relation(tmp_path: Path):
+    from zagrosi_forge.install.ownership import (
+        committed_receipt_reference,
+        observe_generation_identity,
+        publish_committed_receipt,
+        validate_active_install_relation,
+    )
+
+    authority, owned, root_path = _owned(tmp_path)
+    identity = _install_identity()
+    source_relative = _source_relative(identity)
+    cache_relative = _cache_relative(identity)
+    (root_path / source_relative).mkdir(parents=True, mode=0o700)
+    (root_path / cache_relative).mkdir(parents=True, mode=0o700)
+    source_manifest_relative = _manifest_relative(identity, "source")
+    cache_manifest_relative = _manifest_relative(identity, "cache")
+    source_manifest_path = root_path / source_manifest_relative
+    cache_manifest_path = root_path / cache_manifest_relative
+    source_manifest_path.parent.mkdir(parents=True)
+    cache_manifest_path.parent.mkdir(parents=True)
+    source_manifest_path.write_bytes(b"source-generation-manifest\n")
+    cache_manifest_path.write_bytes(b"cache-generation-manifest\n")
+    source_path = authority.prove_descendant(
+        owned,
+        _reference(source_relative),
+        expected_depth=len(source_relative.split("/")),
+    ).unwrap()
+    cache_path = authority.prove_descendant(
+        owned,
+        _reference(cache_relative),
+        expected_depth=len(cache_relative.split("/")),
+    ).unwrap()
+    with authority.open_source_root(root_path) as manifest_root:
+        with manifest_root.open_regular_file(
+            _reference(source_manifest_relative)
+        ) as opened_source_manifest:
+            source = observe_generation_identity(
+                effective_marketplace_id="zagrosi",
+                root_role="source",
+                identity=identity,
+                path=source_path,
+                manifest=opened_source_manifest,
+            ).unwrap()
+        with manifest_root.open_regular_file(
+            _reference(cache_manifest_relative)
+        ) as opened_cache_manifest:
+            cache = observe_generation_identity(
+                effective_marketplace_id="zagrosi",
+                root_role="cache",
+                identity=identity,
+                path=cache_path,
+                manifest=opened_cache_manifest,
+            ).unwrap()
+    raw = _record_bytes(
+        _receipt(
+            identity,
+            relative=source_relative,
+            manifest=source.manifest_digest,
+            cache_manifest=cache.manifest_digest,
+        )
+    )
+    publish_committed_receipt(owned, raw=raw).unwrap()
+    receipt_root = authority.open_source_root(root_path)
+    opened = receipt_root.open_regular_file(
+        committed_receipt_reference("zagrosi", identity)
+    )
+    result = validate_active_install_relation(
+        opened,
+        owned_root=owned,
+        source=source,
+        cache=cache,
+    )
+    return result, opened, receipt_root, source, cache, source_path, cache_path, owned
 
 
 def _write_private_receipt_replacement(
@@ -1219,26 +1321,234 @@ def test_receipt_schema_digest_and_minimum_reader_are_enforced(tmp_path: Path) -
 
 
 def test_receipt_identity_or_manifest_mismatch_denies_cleanup(tmp_path: Path) -> None:
-    from dataclasses import replace
     from zagrosi_forge.install.ownership import validate_committed_receipt
 
     result, _, opened, source, observed_path, owned = _receipt_proof(tmp_path)
     assert result.is_ok
     proof = result.unwrap()
     proof.close()
-    bad = replace(proof.observed, manifest_digest="8" * 64)
+    observed = proof.observed
+    original_manifest = observed.manifest_digest
+    object.__setattr__(observed, "manifest_digest", "8" * 64)
     assert (
-        _code(validate_committed_receipt(opened, owned_root=owned, observed=bad))
-        == "ownership.manifest_mismatch"
+        _code(validate_committed_receipt(opened, owned_root=owned, observed=observed))
+        == "ownership.receipt_invalid"
     )
-    bad = replace(proof.observed, identity=_install_identity(rendered_digest="7" * 64))
+    object.__setattr__(observed, "manifest_digest", original_manifest)
+    original_identity = observed.identity
+    object.__setattr__(
+        observed, "identity", _install_identity(rendered_digest="7" * 64)
+    )
     assert (
-        _code(validate_committed_receipt(opened, owned_root=owned, observed=bad))
-        == "ownership.identity_mismatch"
+        _code(validate_committed_receipt(opened, owned_root=owned, observed=observed))
+        == "ownership.receipt_invalid"
     )
+    object.__setattr__(observed, "identity", original_identity)
     opened.close()
     source.close()
     observed_path.close()
+    owned.close()
+
+
+def test_observed_generation_identity_cannot_be_forged_from_manifest_digest(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.ownership import (
+        ObservedGenerationIdentity,
+        validate_committed_receipt,
+    )
+
+    result, opened, receipt_root, source, _, source_path, cache_path, owned = (
+        _receipt_relation(tmp_path)
+    )
+    assert result.is_ok
+    with pytest.raises(TypeError, match="created only by verified observation"):
+        ObservedGenerationIdentity(
+            effective_marketplace_id=source.effective_marketplace_id,
+            root_role=source.root_role,
+            identity=source.identity,
+            path=source.path,
+            manifest_digest=source.manifest_digest,
+            _token=object(),
+        )
+    object.__setattr__(source, "manifest_digest", "7" * 64)
+    assert (
+        _code(validate_committed_receipt(opened, owned_root=owned, observed=source))
+        == "ownership.receipt_invalid"
+    )
+    opened.close()
+    receipt_root.close()
+    source_path.close()
+    cache_path.close()
+    owned.close()
+
+
+def test_validated_relation_requires_both_live_generation_roles_and_projects_receipt(
+    tmp_path: Path,
+) -> None:
+    result, opened, receipt_root, source, cache, source_path, cache_path, owned = (
+        _receipt_relation(tmp_path)
+    )
+    validated = result.unwrap()
+    active = validated.active
+    assert active.identity == source.identity == cache.identity
+    assert active.effective_marketplace_id == "zagrosi"
+    assert active.source_generation == source.path.relative.value
+    assert active.cache_generation == cache.path.relative.value
+    assert len(active.managed_config_projection.nodes) == 3
+    assert validated.config_before_snapshot_digest == "0" * 64
+    assert validated.config_after_snapshot_digest == "1" * 64
+    assert validated.source_manifest_digest == source.manifest_digest
+    assert validated.cache_manifest_digest == cache.manifest_digest
+    assert validated.source_identity == source.path.leaf_identity
+    assert validated.cache_identity == cache.path.leaf_identity
+    opened.close()
+    receipt_root.close()
+    source_path.close()
+    cache_path.close()
+    owned.close()
+
+
+def test_relation_revalidates_source_after_final_cache_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    result, opened, receipt_root, source, cache, source_path, cache_path, owned = (
+        _receipt_relation(tmp_path)
+    )
+    assert result.is_ok
+    original_validate = ownership.validate_committed_receipt
+    path_type = type(source.path)
+    original_reopen = path_type._duplicate_descriptor
+    calls = 0
+    source_rebound = False
+
+    def rebind_before_final_cache(
+        receipt: Any,
+        *,
+        owned_root: Any,
+        observed: Any,
+    ):
+        nonlocal calls, source_rebound
+        calls += 1
+        if calls == 4 and observed is cache:
+            source_rebound = True
+        return original_validate(
+            receipt,
+            owned_root=owned_root,
+            observed=observed,
+        )
+
+    def reopen_after_rebind(path: Any) -> int:
+        if source_rebound and path is source.path:
+            raise OSError("source generation rebound")
+        return original_reopen(path)
+
+    monkeypatch.setattr(
+        ownership, "validate_committed_receipt", rebind_before_final_cache
+    )
+    monkeypatch.setattr(path_type, "_duplicate_descriptor", reopen_after_rebind)
+    rejected = ownership.validate_active_install_relation(
+        opened,
+        owned_root=owned,
+        source=source,
+        cache=cache,
+    )
+    assert source_rebound
+    assert _code(rejected) == "ownership.identity_mismatch"
+    opened.close()
+    receipt_root.close()
+    source_path.close()
+    cache_path.close()
+    owned.close()
+
+
+def test_validated_relation_rejects_each_identity_path_manifest_or_role_mismatch(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.ownership import validate_active_install_relation
+
+    result, opened, receipt_root, source, cache, source_path, cache_path, owned = (
+        _receipt_relation(tmp_path)
+    )
+    assert result.is_ok
+    cases = (
+        (source, "root_role", "cache"),
+        (cache, "root_role", "source"),
+        (cache, "manifest_digest", "7" * 64),
+        (cache, "identity", _install_identity(rendered_digest="7" * 64)),
+        (source, "path", cache.path),
+    )
+    for target, field, value in cases:
+        original = getattr(target, field)
+        object.__setattr__(target, field, value)
+        rejected = validate_active_install_relation(
+            opened,
+            owned_root=owned,
+            source=source,
+            cache=cache,
+        )
+        assert _code(rejected) == "ownership.receipt_invalid"
+        object.__setattr__(target, field, original)
+    opened.close()
+    receipt_root.close()
+    source_path.close()
+    cache_path.close()
+    owned.close()
+
+
+def test_validated_relation_is_sealed_read_only_and_not_deletion_authority(
+    tmp_path: Path,
+) -> None:
+    import pickle
+
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.ownership import (
+        ValidatedInstallRelation,
+        prove_transaction_owned,
+    )
+
+    result, opened, receipt_root, source, cache, source_path, cache_path, owned = (
+        _receipt_relation(tmp_path)
+    )
+    validated = result.unwrap()
+    with pytest.raises(TypeError, match="created only by receipt validation"):
+        ValidatedInstallRelation(
+            active=validated.active,
+            config_before_snapshot_digest=validated.config_before_snapshot_digest,
+            config_after_snapshot_digest=validated.config_after_snapshot_digest,
+            source_manifest_digest=validated.source_manifest_digest,
+            cache_manifest_digest=validated.cache_manifest_digest,
+            source_identity=validated.source_identity,
+            cache_identity=validated.cache_identity,
+            receipt_identity=validated.receipt_identity,
+            source_observation=source,
+            cache_observation=cache,
+            _token=object(),
+        )
+    with pytest.raises((AttributeError, TypeError)):
+        validated.active = validated.active  # type: ignore[misc]
+    projected = validated.active
+    object.__setattr__(projected, "source_generation", "sources/retargeted")
+    assert validated.active.source_generation != projected.source_generation
+    with pytest.raises(TypeError, match="not serializable"):
+        pickle.dumps(validated)
+    assert _code(prove_transaction_owned(source_path, claim=validated)) == (
+        "ownership.unowned"
+    )
+    assert _code(prove_transaction_owned(source_path, claim=validated.active)) == (
+        "ownership.unowned"
+    )
+    object.__setattr__(validated, "_config_after_snapshot_digest", "7" * 64)
+    with pytest.raises(ForgeError) as caught:
+        _ = validated.config_after_snapshot_digest
+    assert caught.value.code == "ownership.identity_mismatch"
+    opened.close()
+    receipt_root.close()
+    source_path.close()
+    cache_path.close()
     owned.close()
 
 
@@ -1247,8 +1557,9 @@ def test_recognized_legacy_never_authorizes_old_cache_deletion(
 ) -> None:
     import zagrosi_forge.install.ownership as ownership
     from zagrosi_forge.install.ownership import (
+        load_legacy_install_catalog,
+        match_legacy_install,
         prove_transaction_owned,
-        recognize_legacy_install,
     )
 
     authority, owned, root = _owned(tmp_path)
@@ -1256,35 +1567,176 @@ def test_recognized_legacy_never_authorizes_old_cache_deletion(
     path = authority.prove_descendant(
         owned, _reference("cache/zagrosi/zagrosi-forge/0.2.0"), expected_depth=4
     ).unwrap()
-    legacy = recognize_legacy_install(
+    catalog = load_legacy_install_catalog().unwrap()
+    legacy = match_legacy_install(
+        catalog,
         marketplace_id="zagrosi",
-        source_type="local",
-        source="/checkout/zagrosi-forge",
-        enabled_plugin="zagrosi-forge@zagrosi",
-        cache_relative="cache/zagrosi/zagrosi-forge/0.2.0",
-    )
+        marketplace_table={
+            "source_type": "local",
+            "source": "/checkout/zagrosi-forge",
+        },
+        plugin_key="zagrosi-forge@zagrosi",
+        plugin_table={"enabled": True},
+        cache_relative=_reference("cache/zagrosi/zagrosi-forge/0.2.0"),
+    ).unwrap()
     assert legacy is not None
     assert _code(prove_transaction_owned(path, claim=legacy)) == "ownership.unowned"
-    cases = (
-        {"marketplace_id": "zagrosi-2"},
-        {"source_type": "git"},
-        {"source": "/checkout/not-forge"},
-        {"enabled_plugin": "zagrosi-forge@other"},
-        {"cache_relative": "cache/zagrosi/zagrosi-forge/latest"},
-    )
-    valid = {
-        "marketplace_id": "zagrosi",
-        "source_type": "local",
-        "source": "/checkout/zagrosi-forge",
-        "enabled_plugin": "zagrosi-forge@zagrosi",
-        "cache_relative": "cache/zagrosi/zagrosi-forge/0.2.0",
-    }
-    for change in cases:
-        assert recognize_legacy_install(**(valid | change)) is None
     monkeypatch.setattr(ownership, "_LEGACY_CATALOG_RESOURCE_DIGEST", "0" * 64)
-    assert recognize_legacy_install(**valid) is None
+    rejected = load_legacy_install_catalog()
+    assert _code(rejected) == "ownership.receipt_invalid"
     path.close()
     owned.close()
+
+
+@pytest.mark.parametrize(
+    ("marketplace_id", "marketplace_table", "plugin_key", "plugin_table", "cache"),
+    (
+        (
+            "zagrosi-2",
+            {"source_type": "local", "source": "/checkout/zagrosi-forge"},
+            "zagrosi-forge@zagrosi",
+            {"enabled": True},
+            "cache/zagrosi/zagrosi-forge/0.2.0",
+        ),
+        (
+            "zagrosi",
+            {
+                "source_type": "local",
+                "source": "/checkout/zagrosi-forge",
+                "extra": True,
+            },
+            "zagrosi-forge@zagrosi",
+            {"enabled": True},
+            "cache/zagrosi/zagrosi-forge/0.2.0",
+        ),
+        (
+            "zagrosi",
+            {"source_type": "git", "source": "/checkout/zagrosi-forge"},
+            "zagrosi-forge@zagrosi",
+            {"enabled": True},
+            "cache/zagrosi/zagrosi-forge/0.2.0",
+        ),
+        (
+            "zagrosi",
+            {"source_type": "local", "source": "/checkout/not-forge"},
+            "zagrosi-forge@zagrosi",
+            {"enabled": True},
+            "cache/zagrosi/zagrosi-forge/0.2.0",
+        ),
+        (
+            "zagrosi",
+            {"source_type": "local", "source": "/checkout/zagrosi-forge"},
+            "zagrosi-forge@other",
+            {"enabled": True},
+            "cache/zagrosi/zagrosi-forge/0.2.0",
+        ),
+        (
+            "zagrosi",
+            {"source_type": "local", "source": "/checkout/zagrosi-forge"},
+            "zagrosi-forge@zagrosi",
+            {"enabled": 1},
+            "cache/zagrosi/zagrosi-forge/0.2.0",
+        ),
+        (
+            "zagrosi",
+            {"source_type": "local", "source": "/checkout/zagrosi-forge"},
+            "zagrosi-forge@zagrosi",
+            {"enabled": True, "extra": False},
+            "cache/zagrosi/zagrosi-forge/0.2.0",
+        ),
+        (
+            "zagrosi",
+            {"source_type": "local", "source": "/checkout/zagrosi-forge"},
+            "zagrosi-forge@zagrosi",
+            {"enabled": True},
+            "cache/zagrosi/zagrosi-forge/latest",
+        ),
+    ),
+)
+def test_legacy_matcher_requires_complete_exact_tables_and_builtin_types(
+    marketplace_id: str,
+    marketplace_table: dict[str, object],
+    plugin_key: str,
+    plugin_table: dict[str, object],
+    cache: str,
+) -> None:
+    from zagrosi_forge.install.ownership import (
+        load_legacy_install_catalog,
+        match_legacy_install,
+    )
+
+    catalog = load_legacy_install_catalog().unwrap()
+    matched = match_legacy_install(
+        catalog,
+        marketplace_id=marketplace_id,
+        marketplace_table=marketplace_table,
+        plugin_key=plugin_key,
+        plugin_table=plugin_table,
+        cache_relative=_reference(cache),
+    )
+    assert matched.is_ok
+    assert matched.unwrap() is None
+
+
+def test_legacy_catalog_and_recognition_are_sealed_and_projection_digest_bound() -> (
+    None
+):
+    import pickle
+
+    from zagrosi_forge.install.ownership import (
+        LegacyInstallCatalog,
+        load_legacy_install_catalog,
+        match_legacy_install,
+    )
+
+    catalog = load_legacy_install_catalog().unwrap()
+    with pytest.raises(TypeError, match="loaded only from installed resources"):
+        LegacyInstallCatalog(
+            marketplace_id=catalog.marketplace_id,
+            source_type=catalog.source_type,
+            source_leaf=catalog.source_leaf,
+            plugin_key=catalog.plugin_key,
+            cache_pattern=catalog.cache_pattern,
+            catalog_digest=catalog.catalog_digest,
+            _token=object(),
+        )
+    with pytest.raises(AttributeError):
+        catalog.marketplace_id = "other"  # type: ignore[misc]
+    with pytest.raises(TypeError, match="not serializable"):
+        pickle.dumps(catalog)
+    matched = match_legacy_install(
+        catalog,
+        marketplace_id="zagrosi",
+        marketplace_table={
+            "source_type": "local",
+            "source": "/checkout/zagrosi-forge",
+        },
+        plugin_key="zagrosi-forge@zagrosi",
+        plugin_table={"enabled": True},
+        cache_relative=_reference("cache/zagrosi/zagrosi-forge/0.2.0"),
+    ).unwrap()
+    assert matched is not None
+    assert len(matched.catalog_digest) == 64
+    assert len(matched.projection_digest) == 64
+    assert matched.base_version == "0.2.0"
+    assert "/checkout" not in repr(matched)
+    with pytest.raises(TypeError, match="not serializable"):
+        pickle.dumps(matched)
+
+    tampered = load_legacy_install_catalog().unwrap()
+    object.__setattr__(tampered, "source_leaf", "other")
+    rejected = match_legacy_install(
+        tampered,
+        marketplace_id="zagrosi",
+        marketplace_table={
+            "source_type": "local",
+            "source": "/checkout/zagrosi-forge",
+        },
+        plugin_key="zagrosi-forge@zagrosi",
+        plugin_table={"enabled": True},
+        cache_relative=_reference("cache/zagrosi/zagrosi-forge/0.2.0"),
+    )
+    assert _code(rejected) == "ownership.receipt_invalid"
 
 
 def _transaction(tmp_path: Path, *, transaction_id: str = "tx-one"):

@@ -606,25 +606,38 @@ def test_forge_error_contract_is_read_only_but_traceback_compatible() -> None:
 
 
 def test_active_install_relation_requires_every_identity_member() -> None:
-    from zagrosi_forge.install.contracts import ActiveInstallRelation
+    from zagrosi_forge.install.contracts import (
+        ActiveInstallRelation,
+        ManagedConfigProjection,
+        install_identity_digest,
+    )
 
+    identity = _identity()
+    source = (
+        f"sources/zagrosi/{identity.plugin_id}/{identity.install_version}/marketplace"
+    )
     values = {
         "effective_marketplace_id": "zagrosi",
-        "plugin_id": "zagrosi-forge",
-        "managed_config_projection": (("source_type", "local"),),
-        "source_generation": "source:generation-a",
-        "cache_generation": "cache:generation-a",
-        "base_version": "0.2.0",
-        "install_version": "0.2.0+codex.local-" + "a" * 32,
-        "base_payload_digest": "a" * 64,
-        "rendered_payload_digest": "b" * 64,
-        "committed_receipt_ref": "receipt:" + "c" * 64,
+        "identity": identity,
+        "managed_config_projection": ManagedConfigProjection.v1(
+            effective_marketplace_id="zagrosi",
+            plugin_id=identity.plugin_id,
+            source_generation=source,
+        ),
+        "source_generation": source,
+        "cache_generation": (
+            f"cache/zagrosi/{identity.plugin_id}/{identity.install_version}"
+        ),
+        "committed_receipt_ref": (
+            f".zagrosi/ownership/zagrosi/{identity.plugin_id}/"
+            f"{install_identity_digest(identity)}.json"
+        ),
     }
     ActiveInstallRelation(**values)
     for field in values:
         partial = dict(values)
-        partial[field] = "" if isinstance(partial[field], str) else ()
-        with pytest.raises(ValueError, match=field):
+        del partial[field]
+        with pytest.raises(TypeError):
             ActiveInstallRelation(**partial)
 
 
@@ -777,3 +790,118 @@ def test_persistent_decode_bounds_and_recursively_freezes() -> None:
     with pytest.raises(ForgeError) as caught:
         decode_persistent_record(recursively_hostile)
     assert caught.value.code == "record.limit_exceeded"
+
+
+def test_managed_config_projection_requires_exact_three_typed_nodes() -> None:
+    from dataclasses import replace
+
+    from zagrosi_forge.install.contracts import (
+        ManagedConfigNode,
+        ManagedConfigProjection,
+        ManagedConfigValueKind,
+    )
+
+    source = "sources/zagrosi/zagrosi-forge/0.2.0/marketplace"
+    projection = ManagedConfigProjection.v1(
+        effective_marketplace_id="zagrosi",
+        plugin_id="zagrosi-forge",
+        source_generation=source,
+    )
+    assert projection.nodes == (
+        ManagedConfigNode(
+            ("marketplaces", "zagrosi", "source_type"),
+            ManagedConfigValueKind.STRING,
+            "local",
+        ),
+        ManagedConfigNode(
+            ("marketplaces", "zagrosi", "source"),
+            ManagedConfigValueKind.OWNED_SOURCE,
+            source,
+        ),
+        ManagedConfigNode(
+            ("plugins", "zagrosi-forge@zagrosi", "enabled"),
+            ManagedConfigValueKind.BOOLEAN,
+            True,
+        ),
+    )
+
+    for nodes in (
+        projection.nodes[:-1],
+        (*projection.nodes, projection.nodes[-1]),
+        (
+            replace(projection.nodes[0], value="git"),
+            *projection.nodes[1:],
+        ),
+        (
+            projection.nodes[0],
+            replace(projection.nodes[1], value="sources/elsewhere"),
+            projection.nodes[2],
+        ),
+        (
+            *projection.nodes[:2],
+            replace(projection.nodes[2], value=False),
+        ),
+    ):
+        with pytest.raises(ValueError, match="managed config projection"):
+            replace(projection, nodes=nodes)
+
+    with pytest.raises(ValueError, match="managed config node"):
+        ManagedConfigNode(
+            ("plugins", "zagrosi-forge@zagrosi", "enabled"),
+            ManagedConfigValueKind.BOOLEAN,
+            "true",
+        )
+
+
+def test_active_relation_binds_complete_identity_paths_projection_and_receipt() -> None:
+    from dataclasses import replace
+
+    from zagrosi_forge.install.contracts import (
+        ActiveInstallRelation,
+        ManagedConfigProjection,
+        install_identity_digest,
+    )
+
+    identity = _identity()
+    effective = "zagrosi"
+    source = f"sources/{effective}/{identity.plugin_id}/{identity.install_version}/marketplace"
+    cache = f"cache/{effective}/{identity.plugin_id}/{identity.install_version}"
+    receipt = (
+        f".zagrosi/ownership/{effective}/{identity.plugin_id}/"
+        f"{install_identity_digest(identity)}.json"
+    )
+    relation = ActiveInstallRelation(
+        effective_marketplace_id=effective,
+        identity=identity,
+        managed_config_projection=ManagedConfigProjection.v1(
+            effective_marketplace_id=effective,
+            plugin_id=identity.plugin_id,
+            source_generation=source,
+        ),
+        source_generation=source,
+        cache_generation=cache,
+        committed_receipt_ref=receipt,
+    )
+    assert relation.plugin_id == identity.plugin_id
+    assert relation.base_version == identity.base_version
+    assert relation.install_version == identity.install_version
+    assert relation.base_payload_digest == identity.base_payload_digest
+    assert relation.rendered_payload_digest == identity.rendered_payload_digest
+
+    invalid_changes = (
+        {"effective_marketplace_id": "other"},
+        {"source_generation": source + "-other"},
+        {"cache_generation": cache + "-other"},
+        {"committed_receipt_ref": receipt.replace(".json", "-other.json")},
+        {
+            "managed_config_projection": ManagedConfigProjection.v1(
+                effective_marketplace_id="other",
+                plugin_id=identity.plugin_id,
+                source_generation=source.replace("sources/zagrosi/", "sources/other/"),
+            )
+        },
+        {"identity": _identity(rendered_digest="7" * 64)},
+    )
+    for change in invalid_changes:
+        with pytest.raises(ValueError, match="active install relation"):
+            replace(relation, **change)
