@@ -932,18 +932,9 @@ def test_committed_receipt_is_hidden_until_atomic_publish(
             assert len(staged) == 1
             assert destination == receipt_path.name
             assert destination not in names
-            staged_handle = ownership._windows_open_raw_child(
-                parent,
-                staged[0],
-                directory=False,
-                read_data=True,
-            )
-            try:
-                assert (
-                    ownership._paths._windows_read(staged_handle, limit=len(raw)) == raw
-                )
-            finally:
-                ownership._paths._windows_close(staged_handle)
+            staged_status = ownership._paths._windows_handle_status(source)
+            assert not staged_status.is_directory
+            assert staged_status.size == len(raw)
             original_windows_rename(source, parent, destination)
 
         monkeypatch.setattr(
