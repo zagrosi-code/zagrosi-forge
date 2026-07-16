@@ -280,6 +280,59 @@ def test_bundle_contracts_are_canonical_immutable_and_bounded() -> None:
             replace(manifest, **changed)
 
 
+def test_bundle_manifest_serialization_scales_to_bundle_limit() -> None:
+    import json
+
+    from zagrosi_forge.install.contracts import (
+        BundleEntry,
+        BundleManifest,
+        canonical_json_bytes,
+    )
+
+    entries = tuple(
+        BundleEntry(
+            path=f"assets/member-{index:04d}.bin",
+            file_type="regular",
+            mode=0o644,
+            size=1,
+            sha256=f"{index % 16:x}" * 64,
+        )
+        for index in range(1_024)
+    )
+    manifest = BundleManifest(
+        schema_version="1.0",
+        base_version="0.2.0",
+        policy_digest="a" * 64,
+        entries=entries,
+        aggregate_size=len(entries),
+        payload_digest="b" * 64,
+        builder_version="0.2.0",
+        normalization_profile="bundle-v1",
+    )
+
+    assert len(json.loads(canonical_json_bytes(manifest))["entries"]) == 1_024
+    with pytest.raises(ValueError):
+        BundleManifest(
+            schema_version="1.0",
+            base_version="0.2.0",
+            policy_digest="a" * 64,
+            entries=entries
+            + (
+                BundleEntry(
+                    path="assets/member-over-limit.bin",
+                    file_type="regular",
+                    mode=0o644,
+                    size=1,
+                    sha256="f" * 64,
+                ),
+            ),
+            aggregate_size=len(entries) + 1,
+            payload_digest="b" * 64,
+            builder_version="0.2.0",
+            normalization_profile="bundle-v1",
+        )
+
+
 def test_validation_result_is_closed_sorted_and_unwraps() -> None:
     from zagrosi_forge.install.contracts import (
         Finding,

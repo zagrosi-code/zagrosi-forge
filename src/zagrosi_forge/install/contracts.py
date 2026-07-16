@@ -27,6 +27,8 @@ _WINDOWS_RESERVED = frozenset(
 _MAX_CANONICAL_DEPTH = 32
 _MAX_RECORD_BYTES = 256 * 1024
 _MAX_JSON_MEMBERS = 512
+_MAX_BUNDLE_ENTRIES = 1_024
+_MAX_BUNDLE_JSON_MEMBERS = 6 * _MAX_BUNDLE_ENTRIES + 16
 _MAX_FINDING_TEXT_BYTES = 4_096
 _MAX_FINDING_KEY_BYTES = 128
 T = TypeVar("T")
@@ -352,6 +354,7 @@ class BundleManifest:
         if (
             not isinstance(self.entries, tuple)
             or not self.entries
+            or len(self.entries) > _MAX_BUNDLE_ENTRIES
             or any(type(entry) is not BundleEntry for entry in self.entries)
         ):
             raise ValueError("entries")
@@ -531,9 +534,11 @@ def require_runner_authority(
         )
 
 
-def _consume_members(members: list[int], amount: int, *, record: bool) -> None:
+def _consume_members(
+    members: list[int], amount: int, *, record: bool, limit: int = _MAX_JSON_MEMBERS
+) -> None:
     members[0] += amount
-    if members[0] > _MAX_JSON_MEMBERS:
+    if members[0] > limit:
         if record:
             raise ForgeError(
                 "record.limit_exceeded",
@@ -546,7 +551,11 @@ def _consume_members(members: list[int], amount: int, *, record: bool) -> None:
 
 
 def _canonical_value(
-    value: object, *, depth: int = 0, members: list[int] | None = None
+    value: object,
+    *,
+    depth: int = 0,
+    members: list[int] | None = None,
+    max_members: int = _MAX_JSON_MEMBERS,
 ) -> object:
     if members is None:
         members = [0]
@@ -563,7 +572,12 @@ def _canonical_value(
             )
         return value
     if isinstance(value, Enum):
-        return _canonical_value(value.value, depth=depth, members=members)
+        return _canonical_value(
+            value.value,
+            depth=depth,
+            members=members,
+            max_members=max_members,
+        )
     if is_dataclass(value) and not isinstance(value, type):
         value = {field.name: getattr(value, field.name) for field in fields(value)}
     if isinstance(value, Mapping):
@@ -571,15 +585,26 @@ def _canonical_value(
             raise ForgeError(
                 "diagnostic.value_rejected", 10, "Object keys must be strings."
             )
-        _consume_members(members, len(value), record=False)
+        _consume_members(members, len(value), record=False, limit=max_members)
         return {
-            key: _canonical_value(item, depth=depth + 1, members=members)
+            key: _canonical_value(
+                item,
+                depth=depth + 1,
+                members=members,
+                max_members=max_members,
+            )
             for key, item in sorted(value.items())
         }
     if isinstance(value, (list, tuple)):
-        _consume_members(members, len(value), record=False)
+        _consume_members(members, len(value), record=False, limit=max_members)
         return [
-            _canonical_value(item, depth=depth + 1, members=members) for item in value
+            _canonical_value(
+                item,
+                depth=depth + 1,
+                members=members,
+                max_members=max_members,
+            )
+            for item in value
         ]
     raise ForgeError("diagnostic.value_rejected", 10, "Unsupported value type.")
 
@@ -588,8 +613,13 @@ def canonical_json_bytes(value: object, *, final_newline: bool = False) -> bytes
     """Serialize a bounded JSON value in the one canonical Forge representation."""
 
     try:
+        max_members = (
+            _MAX_BUNDLE_JSON_MEMBERS
+            if isinstance(value, BundleManifest)
+            else _MAX_JSON_MEMBERS
+        )
         rendered = json.dumps(
-            _canonical_value(value),
+            _canonical_value(value, max_members=max_members),
             allow_nan=False,
             ensure_ascii=False,
             separators=(",", ":"),
