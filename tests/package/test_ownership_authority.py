@@ -918,25 +918,60 @@ def test_committed_receipt_is_hidden_until_atomic_publish(
     observed_atomic_publish = False
 
     if os.name == "nt":
+        staged_leaf: str | None = None
+        staged_handle = 0
+        staged_parent = 0
+        original_open = ownership._windows_open_raw_child
         original_windows_rename = ownership._windows_rename_handle
+
+        def observe_windows_open(
+            parent: int,
+            component: str,
+            *,
+            directory: bool | None,
+            read_data: bool = False,
+            write_data: bool = False,
+            delete_access: bool = False,
+            create: bool = False,
+            security_descriptor: int | None = None,
+        ) -> int:
+            nonlocal staged_handle, staged_leaf, staged_parent
+            handle = original_open(
+                parent,
+                component,
+                directory=directory,
+                read_data=read_data,
+                write_data=write_data,
+                delete_access=delete_access,
+                create=create,
+                security_descriptor=security_descriptor,
+            )
+            if create:
+                staged_handle = handle
+                staged_leaf = component
+                staged_parent = parent
+            return handle
 
         def observe_windows_publish(source: int, parent: int, destination: str) -> None:
             nonlocal observed_atomic_publish
             observed_atomic_publish = True
-            names = ownership._windows_list_names(parent, limit=64)
-            staged = tuple(
-                name
-                for name in names
-                if name.startswith(".receipt-") and name.endswith(".tmp")
-            )
-            assert len(staged) == 1
+            assert staged_leaf is not None
+            assert staged_leaf.startswith(".receipt-")
+            assert staged_leaf.endswith(".tmp")
+            assert staged_leaf != destination
+            assert source == staged_handle
+            assert parent == staged_parent
             assert destination == receipt_path.name
-            assert destination not in names
             staged_status = ownership._paths._windows_handle_status(source)
             assert not staged_status.is_directory
             assert staged_status.size == len(raw)
             original_windows_rename(source, parent, destination)
 
+        monkeypatch.setattr(
+            ownership,
+            "_windows_open_raw_child",
+            observe_windows_open,
+        )
         monkeypatch.setattr(
             ownership, "_windows_rename_handle", observe_windows_publish
         )
