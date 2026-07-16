@@ -914,7 +914,7 @@ def _windows_supported_filesystem(name: str, *, drive_type: int) -> bool:
 
 
 def _open_windows_directory_path(
-    raw_path: os.PathLike[str],
+    raw_path: os.PathLike[str] | str,
 ) -> tuple[int, tuple[FileIdentity, ...]]:
     raw = os.fspath(raw_path)
     if not isinstance(raw, str) or not raw or "\0" in raw:
@@ -1488,7 +1488,9 @@ def _open_directory_component(
         ) from None
 
 
-def _path_components(raw_path: os.PathLike[str]) -> tuple[bool, tuple[str, ...]]:
+def _path_components(
+    raw_path: os.PathLike[str] | str,
+) -> tuple[bool, tuple[str, ...]]:
     raw = os.fspath(raw_path)
     if not isinstance(raw, str) or not raw or "\0" in raw:
         raise _error("path.outside_root", "The root path is invalid.")
@@ -1503,7 +1505,7 @@ def _path_components(raw_path: os.PathLike[str]) -> tuple[bool, tuple[str, ...]]
 
 
 def _open_directory_path(
-    raw_path: os.PathLike[str],
+    raw_path: os.PathLike[str] | str,
 ) -> tuple[int, tuple[FileIdentity, ...]]:
     if os.name != "posix":
         raise _error(
@@ -1525,6 +1527,57 @@ def _open_directory_path(
     except BaseException:
         os.close(current)
         raise
+
+
+def _canonical_native_directory(raw_path: os.PathLike[str] | str) -> str:
+    """Retain one private lexical spelling already proven by native traversal."""
+
+    raw = os.fspath(raw_path)
+    if not isinstance(raw, str) or not raw or "\0" in raw:
+        raise _error("path.outside_root", "The root path is invalid.")
+    if os.name == "nt":
+        return os.fspath(PureWindowsPath(os.path.abspath(raw)))
+    _absolute, components = _path_components(raw_path)
+    return os.path.join(os.sep, *components)
+
+
+def _absolute_home_binding_is_valid(
+    native_home: str,
+    ancestry: tuple[FileIdentity, ...],
+    home_identity: FileIdentity,
+    filesystem_guard: FilesystemGuard,
+    *,
+    windows: bool,
+) -> bool:
+    """Reopen the selected Codex home and compare its complete ancestry."""
+
+    descriptor = 0 if windows else -1
+    try:
+        if windows:
+            descriptor, observed = _open_windows_directory_path(native_home)
+            windows_status = _windows_handle_status(descriptor)
+            return (
+                observed == ancestry
+                and windows_status.identity == home_identity
+                and filesystem_guard(descriptor)
+                and _windows_private_directory(descriptor, exact=False)
+            )
+        descriptor, observed = _open_directory_path(native_home)
+        posix_status = os.fstat(descriptor)
+        return (
+            observed == ancestry
+            and _identity(posix_status) == home_identity
+            and filesystem_guard(descriptor)
+            and _private_directory(descriptor, posix_status, exact=False)
+        )
+    except (ForgeError, OSError, ValueError):
+        return False
+    finally:
+        if windows:
+            if descriptor:
+                _windows_close(descriptor)
+        elif descriptor >= 0:
+            os.close(descriptor)
 
 
 def _descriptor_xattr_names(descriptor: int) -> tuple[bytes, ...]:
@@ -2607,6 +2660,7 @@ class OwnedRoot:
         "_filesystem_guard",
         "_home_descriptor",
         "_home_identity",
+        "_home_native",
         "_identity",
         "_origin",
     )
@@ -2619,6 +2673,7 @@ class OwnedRoot:
         identity: FileIdentity,
         control_identity: FileIdentity,
         home_identity: FileIdentity,
+        home_native: str,
         ancestry: tuple[FileIdentity, ...],
         created: bool,
         filesystem_guard: FilesystemGuard,
@@ -2634,6 +2689,7 @@ class OwnedRoot:
         self._identity = identity
         self._control_identity = control_identity
         self._home_identity = home_identity
+        self._home_native = home_native
         self._absolute_ancestry = ancestry
         self._created = created
         self._filesystem_guard = filesystem_guard
@@ -3517,6 +3573,323 @@ class _WindowsPathProof(PathProof):
             self._closed = True
 
 
+class ConfigPathProof:
+    """Live authority over the fixed config.toml sibling of plugins/."""
+
+    __slots__ = (
+        "_closed",
+        "_filesystem_guard",
+        "_home_ancestry",
+        "_home_descriptor",
+        "_home_identity",
+        "_home_native",
+        "_leaf",
+        "_namespace",
+        "_origin",
+        "_windows",
+    )
+
+    def __init__(
+        self,
+        home_descriptor: int,
+        home_identity: FileIdentity,
+        home_native: str,
+        home_ancestry: tuple[FileIdentity, ...],
+        leaf: OpenedRegularFile | None,
+        namespace: _NamespaceCapability,
+        filesystem_guard: FilesystemGuard,
+        origin: _AuthorityOrigin,
+        *,
+        windows: bool,
+        _token: object,
+    ) -> None:
+        if _token is not _CAPABILITY_TOKEN or type(origin) is not _AuthorityOrigin:
+            raise TypeError("ConfigPathProof is created only by PlatformPathAuthority")
+        self._home_descriptor = home_descriptor
+        self._home_identity = home_identity
+        self._home_native = home_native
+        self._home_ancestry = home_ancestry
+        self._leaf = leaf
+        self._namespace = namespace
+        self._filesystem_guard = filesystem_guard
+        self._origin = origin
+        self._windows = windows
+        self._closed = False
+
+    @property
+    def parent_identity(self) -> FileIdentity:
+        return self._home_identity
+
+    @property
+    def leaf_exists(self) -> bool:
+        return self._leaf is not None
+
+    @property
+    def leaf_identity(self) -> FileIdentity | None:
+        return None if self._leaf is None else self._leaf.identity
+
+    def _require_current(self) -> None:
+        reopened = 0 if self._windows else -1
+        try:
+            if (
+                self._closed
+                or not self._namespace._validate_namespace_binding()
+                or not _absolute_home_binding_is_valid(
+                    self._home_native,
+                    self._home_ancestry,
+                    self._home_identity,
+                    self._filesystem_guard,
+                    windows=self._windows,
+                )
+            ):
+                raise OSError(errno.ESTALE, "config parent authority changed")
+
+            if self._windows:
+                windows_parent_status = _windows_handle_status(self._home_descriptor)
+                if (
+                    windows_parent_status.identity != self._home_identity
+                    or not windows_parent_status.is_directory
+                    or windows_parent_status.is_reparse
+                    or not self._filesystem_guard(self._home_descriptor)
+                    or not _windows_private_directory(
+                        self._home_descriptor, exact=False
+                    )
+                ):
+                    raise OSError(errno.ESTALE, "config parent identity changed")
+                try:
+                    reopened = _windows_open_child(
+                        self._home_descriptor,
+                        "config.toml",
+                        directory=False,
+                        read_data=True,
+                    )
+                except OSError as exc:
+                    missing = isinstance(exc, FileNotFoundError) or getattr(
+                        exc, "winerror", None
+                    ) in {2, 3}
+                    if missing and self._leaf is None:
+                        reopened = 0
+                    else:
+                        raise
+                if reopened:
+                    windows_leaf_status = _windows_handle_status(reopened)
+                    if self._leaf is None:
+                        raise OSError(errno.ESTALE, "config appeared after snapshot")
+                    expected = self._leaf
+                    assert isinstance(expected, _WindowsOpenedRegularFile)
+                    expected._require_windows_unchanged()
+                    if (
+                        windows_leaf_status.identity != expected.identity
+                        or windows_leaf_status.is_directory
+                        or windows_leaf_status.is_reparse
+                        or windows_leaf_status.link_count != 1
+                        or windows_leaf_status.fingerprint != expected._fingerprint
+                        or not self._filesystem_guard(reopened)
+                    ):
+                        raise OSError(errno.ESTALE, "config leaf identity changed")
+            else:
+                posix_parent_status = os.fstat(self._home_descriptor)
+                if (
+                    _identity(posix_parent_status) != self._home_identity
+                    or not self._filesystem_guard(self._home_descriptor)
+                    or not _private_directory(
+                        self._home_descriptor, posix_parent_status, exact=False
+                    )
+                ):
+                    raise OSError(errno.ESTALE, "config parent identity changed")
+                try:
+                    reopened = os.open(
+                        "config.toml",
+                        _posix_file_flags(),
+                        dir_fd=self._home_descriptor,
+                    )
+                except FileNotFoundError:
+                    if self._leaf is not None:
+                        raise
+                    reopened = -1
+                if reopened >= 0:
+                    posix_leaf_status = os.fstat(reopened)
+                    if self._leaf is None:
+                        raise OSError(errno.ESTALE, "config appeared after snapshot")
+                    expected = self._leaf
+                    expected_status = expected._require_unchanged()
+                    if (
+                        _identity(posix_leaf_status) != expected.identity
+                        or not stat.S_ISREG(posix_leaf_status.st_mode)
+                        or posix_leaf_status.st_nlink != 1
+                        or _posix_status_fingerprint(posix_leaf_status)
+                        != _posix_status_fingerprint(expected_status)
+                        or not self._filesystem_guard(reopened)
+                    ):
+                        raise OSError(errno.ESTALE, "config leaf identity changed")
+
+            if (
+                not self._namespace._validate_namespace_binding()
+                or not _absolute_home_binding_is_valid(
+                    self._home_native,
+                    self._home_ancestry,
+                    self._home_identity,
+                    self._filesystem_guard,
+                    windows=self._windows,
+                )
+            ):
+                raise OSError(errno.ESTALE, "config namespace changed")
+        except (ForgeError, OSError, ValueError, AssertionError):
+            raise _error(
+                "path.identity_changed", "The config path identity changed."
+            ) from None
+        finally:
+            if self._windows:
+                if reopened:
+                    _windows_close(reopened)
+            elif reopened >= 0:
+                os.close(reopened)
+
+    def revalidate(self) -> Result[None]:
+        try:
+            self._require_current()
+        except ForgeError as exc:
+            return Result.rejected(exc)
+        return Result.accepted(None)
+
+    def open_leaf(self) -> OpenedRegularFile | None:
+        self._require_current()
+        return None if self._leaf is None else self._leaf._clone()
+
+    def _duplicate_parent_descriptor(self) -> int:
+        self._require_current()
+        if self._windows:
+            return _windows_duplicate(self._home_descriptor)
+        return os.dup(self._home_descriptor)
+
+    def _native_target(self) -> str:
+        self._require_current()
+        return os.path.join(self._home_native, "config.toml")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        if self._leaf is not None:
+            self._leaf.close()
+        if self._windows:
+            _windows_close(self._home_descriptor)
+        else:
+            os.close(self._home_descriptor)
+        self._namespace.close()
+        self._closed = True
+
+    def __enter__(self) -> ConfigPathProof:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __reduce__(self) -> Never:
+        raise TypeError("filesystem capabilities are not serializable")
+
+
+class PlannedOwnedPath:
+    """Plan-only source reference beneath the authenticated plugins root."""
+
+    __slots__ = (
+        "_closed",
+        "_expected_depth",
+        "_filesystem_guard",
+        "_home_ancestry",
+        "_home_identity",
+        "_home_native",
+        "_native_source",
+        "_namespace",
+        "_origin",
+        "_relative",
+        "_root_identity",
+        "_windows",
+    )
+
+    def __init__(
+        self,
+        relative: SafeRelativePath,
+        expected_depth: int,
+        root_identity: FileIdentity,
+        home_identity: FileIdentity,
+        home_native: str,
+        home_ancestry: tuple[FileIdentity, ...],
+        namespace: _NamespaceCapability,
+        filesystem_guard: FilesystemGuard,
+        origin: _AuthorityOrigin,
+        *,
+        windows: bool,
+        _token: object,
+    ) -> None:
+        if _token is not _CAPABILITY_TOKEN or type(origin) is not _AuthorityOrigin:
+            raise TypeError("PlannedOwnedPath is created only by PlatformPathAuthority")
+        self._relative = relative
+        self._expected_depth = expected_depth
+        self._root_identity = root_identity
+        self._home_identity = home_identity
+        self._home_native = home_native
+        self._home_ancestry = home_ancestry
+        self._native_source = os.path.join(home_native, "plugins", *relative.components)
+        self._namespace = namespace
+        self._filesystem_guard = filesystem_guard
+        self._origin = origin
+        self._windows = windows
+        self._closed = False
+
+    @property
+    def relative(self) -> SafeRelativePath:
+        return self._relative
+
+    @property
+    def root_identity(self) -> FileIdentity:
+        return self._root_identity
+
+    @property
+    def expected_depth(self) -> int:
+        return self._expected_depth
+
+    def _require_current(self) -> None:
+        if (
+            self._closed
+            or not _safe_reference_invariants(self._relative)
+            or len(self._relative.components) != self._expected_depth
+            or not self._namespace._validate_namespace_binding()
+            or not _absolute_home_binding_is_valid(
+                self._home_native,
+                self._home_ancestry,
+                self._home_identity,
+                self._filesystem_guard,
+                windows=self._windows,
+            )
+        ):
+            raise _error("path.identity_changed", "The planned path identity changed.")
+
+    def revalidate(self) -> Result[None]:
+        try:
+            self._require_current()
+        except ForgeError as exc:
+            return Result.rejected(exc)
+        return Result.accepted(None)
+
+    def _config_source_value(self) -> str:
+        self._require_current()
+        return self._native_source
+
+    def close(self) -> None:
+        if not self._closed:
+            self._namespace.close()
+            self._closed = True
+
+    def __enter__(self) -> PlannedOwnedPath:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __reduce__(self) -> Never:
+        raise TypeError("filesystem capabilities are not serializable")
+
+
 class OwnedDirectoryWriter:
     """Sealed handle-relative authority for atomic regular-file publication."""
 
@@ -3998,6 +4371,221 @@ class PlatformPathAuthority:
             )
         return proof._open_owned_directory_writer()
 
+    def plan_owned_path(
+        self,
+        root: OwnedRoot,
+        relative: SafeRelativePath,
+        *,
+        expected_depth: int,
+    ) -> Result[PlannedOwnedPath]:
+        """Mint a non-mutating planned source beneath the owned plugins root."""
+
+        if not isinstance(root, OwnedRoot) or root._origin is not self._origin:
+            return Result.rejected(
+                _error(
+                    "path.outside_root",
+                    "The owned root was minted by another path authority.",
+                )
+            )
+        if (
+            not _safe_reference_invariants(relative)
+            or isinstance(expected_depth, bool)
+            or expected_depth < 1
+            or len(relative.components) != expected_depth
+        ):
+            return Result.rejected(
+                _error("path.depth", "The planned path depth does not match authority.")
+            )
+        windows = os.name == "nt"
+        if windows != isinstance(root, _WindowsOwnedRoot):
+            return Result.rejected(
+                _error("path.outside_root", "The owned-root platform is invalid.")
+            )
+        namespace: _NamespaceCapability | None = None
+        try:
+            root._require_open()
+            namespace = root._duplicate_namespace_capability()
+            planned = PlannedOwnedPath(
+                relative,
+                expected_depth,
+                root.identity,
+                root.home_identity,
+                root._home_native,
+                root.absolute_ancestry[:-1],
+                namespace,
+                self._filesystem_guard,
+                self._origin,
+                windows=windows,
+                _token=_CAPABILITY_TOKEN,
+            )
+            namespace = None
+            try:
+                planned._require_current()
+            except BaseException:
+                planned.close()
+                raise
+            return Result.accepted(planned)
+        except ForgeError as exc:
+            return Result.rejected(exc)
+        finally:
+            if namespace is not None:
+                namespace.close()
+
+    def prove_config_path(self, root: OwnedRoot) -> Result[ConfigPathProof]:
+        """Prove the fixed config.toml sibling without accepting a raw path."""
+
+        if not isinstance(root, OwnedRoot) or root._origin is not self._origin:
+            return Result.rejected(
+                _error(
+                    "path.outside_root",
+                    "The owned root was minted by another path authority.",
+                )
+            )
+        windows = os.name == "nt"
+        if windows != isinstance(root, _WindowsOwnedRoot):
+            return Result.rejected(
+                _error("path.outside_root", "The owned-root platform is invalid.")
+            )
+        home = 0 if windows else -1
+        raw_leaf = 0 if windows else -1
+        leaf: OpenedRegularFile | None = None
+        namespace: _NamespaceCapability | None = None
+        try:
+            root._require_open()
+            home = root._duplicate_home_descriptor()
+            namespace = root._duplicate_namespace_capability()
+            reference = validate_reference(
+                "config.toml", role="codex-config", limits=LIMIT_POLICY
+            ).unwrap()
+            if windows:
+                try:
+                    raw_leaf = _windows_open_child(
+                        home,
+                        "config.toml",
+                        directory=False,
+                        read_data=True,
+                    )
+                except OSError as exc:
+                    missing = isinstance(exc, FileNotFoundError) or getattr(
+                        exc, "winerror", None
+                    ) in {2, 3}
+                    if not missing:
+                        raise
+                if raw_leaf:
+                    windows_leaf_status = _windows_handle_status(raw_leaf)
+                    if (
+                        windows_leaf_status.is_directory
+                        or windows_leaf_status.is_reparse
+                        or windows_leaf_status.link_count != 1
+                    ):
+                        code = (
+                            "path.hardlink"
+                            if windows_leaf_status.link_count != 1
+                            else "path.outside_root"
+                        )
+                        raise _error(
+                            code, "The config leaf is not a safe regular file."
+                        )
+                    if windows_leaf_status.identity[0] != root.home_identity[
+                        0
+                    ] or not self._filesystem_guard(raw_leaf):
+                        raise _error(
+                            "path.unsupported_filesystem",
+                            "The config filesystem is not supported.",
+                        )
+                    leaf = _WindowsOpenedRegularFile(
+                        raw_leaf,
+                        reference,
+                        windows_leaf_status,
+                        root.home_identity,
+                        root.home_identity,
+                        self._origin,
+                        _token=_CAPABILITY_TOKEN,
+                    )
+                    raw_leaf = 0
+            else:
+                try:
+                    raw_leaf = os.open("config.toml", _posix_file_flags(), dir_fd=home)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        raise _classify_component(
+                            home, "config.toml", linked_code="path.linked_leaf"
+                        ) from None
+                    raise
+                if raw_leaf >= 0:
+                    posix_leaf_status = os.fstat(raw_leaf)
+                    if not stat.S_ISREG(posix_leaf_status.st_mode):
+                        raise _error(
+                            "path.outside_root",
+                            "The config leaf is not a regular file.",
+                        )
+                    if posix_leaf_status.st_nlink != 1:
+                        raise _error(
+                            "path.hardlink", "Hard-linked config files are not allowed."
+                        )
+                    if posix_leaf_status.st_dev != root.home_identity[
+                        0
+                    ] or not self._filesystem_guard(raw_leaf):
+                        raise _error(
+                            "path.unsupported_filesystem",
+                            "The config filesystem is not supported.",
+                        )
+                    leaf = OpenedRegularFile(
+                        raw_leaf,
+                        reference,
+                        posix_leaf_status,
+                        root.home_identity,
+                        root.home_identity,
+                        self._origin,
+                        _token=_CAPABILITY_TOKEN,
+                    )
+                    raw_leaf = -1
+
+            proof = ConfigPathProof(
+                home,
+                root.home_identity,
+                root._home_native,
+                root.absolute_ancestry[:-1],
+                leaf,
+                namespace,
+                self._filesystem_guard,
+                self._origin,
+                windows=windows,
+                _token=_CAPABILITY_TOKEN,
+            )
+            home = 0 if windows else -1
+            leaf = None
+            namespace = None
+            try:
+                proof._require_current()
+            except BaseException:
+                proof.close()
+                raise
+            return Result.accepted(proof)
+        except ForgeError as exc:
+            return Result.rejected(exc)
+        except OSError:
+            return Result.rejected(
+                _error("path.outside_root", "The config path cannot be opened safely.")
+            )
+        finally:
+            if leaf is not None:
+                leaf.close()
+            if namespace is not None:
+                namespace.close()
+            if windows:
+                if raw_leaf:
+                    _windows_close(raw_leaf)
+                if home:
+                    _windows_close(home)
+            else:
+                if raw_leaf >= 0:
+                    os.close(raw_leaf)
+                if home >= 0:
+                    os.close(home)
+
     def prove_descendant(
         self,
         root: OwnedRoot,
@@ -4433,6 +5021,7 @@ class PlatformPathAuthority:
                 plugin_identity,
                 zagrosi_identity,
                 _identity(home_status),
+                _canonical_native_directory(codex_home),
                 (*ancestry, plugin_identity),
                 created_zagrosi,
                 self._filesystem_guard,
@@ -4609,6 +5198,7 @@ class PlatformPathAuthority:
                 plugin_status.identity,
                 control_status.identity,
                 ancestry[-1],
+                _canonical_native_directory(codex_home),
                 (*ancestry, plugin_status.identity),
                 created_zagrosi,
                 self._filesystem_guard,

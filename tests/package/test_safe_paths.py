@@ -442,6 +442,228 @@ def test_nonexistent_descendant_has_expected_depth_and_owned_ancestor(
         )
 
 
+def test_planned_owned_path_accepts_missing_tail_without_creating_it(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import PlannedOwnedPath, PlatformPathAuthority
+
+    codex_home = tmp_path / "codex-home"
+    _private_test_directory(codex_home)
+    authority = PlatformPathAuthority()
+    with authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap() as root:
+        relative = _reference("sources/zagrosi/zagrosi-forge/1.0.0/marketplace")
+        with pytest.raises(TypeError, match="created only by PlatformPathAuthority"):
+            PlannedOwnedPath(
+                relative,
+                5,
+                (0, 0),
+                (0, 0),
+                "private",
+                (),
+                object(),  # type: ignore[arg-type]
+                lambda _descriptor: True,
+                object(),  # type: ignore[arg-type]
+                windows=os.name == "nt",
+                _token=object(),
+            )
+        planned = authority.plan_owned_path(root, relative, expected_depth=5).unwrap()
+        with planned:
+            assert planned.relative is relative
+            assert planned.root_identity == root.identity
+            assert planned.expected_depth == 5
+            assert planned.revalidate().unwrap() is None
+            assert planned._config_source_value() == os.fspath(
+                codex_home / "plugins" / Path(relative.value)
+            )
+            assert str(codex_home) not in repr(planned)
+            with pytest.raises(TypeError):
+                planned.__reduce__()
+        assert _code(planned.revalidate()) == "path.identity_changed"
+    assert not (codex_home / "plugins/sources").exists()
+
+
+def test_planned_owned_path_rejects_wrong_depth_mutation_and_foreign_root(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    codex_home = tmp_path / "codex-home"
+    _private_test_directory(codex_home)
+    first = PlatformPathAuthority()
+    second = PlatformPathAuthority()
+    with first.bootstrap_forge_root(codex_home, runner=_runner()).unwrap() as root:
+        relative = _reference("sources/zagrosi/marketplace")
+        assert (
+            _code(first.plan_owned_path(root, relative, expected_depth=2))
+            == "path.depth"
+        )
+        assert (
+            _code(second.plan_owned_path(root, relative, expected_depth=3))
+            == "path.outside_root"
+        )
+        object.__setattr__(relative, "components", ("..", "outside", "canary"))
+        assert (
+            _code(first.plan_owned_path(root, relative, expected_depth=3))
+            == "path.depth"
+        )
+
+
+def test_config_path_proof_distinguishes_absence_from_empty_regular_file(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import ConfigPathProof, PlatformPathAuthority
+
+    codex_home = tmp_path / "codex-home"
+    _private_test_directory(codex_home)
+    authority = PlatformPathAuthority()
+    with authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap() as root:
+        with pytest.raises(TypeError, match="created only by PlatformPathAuthority"):
+            ConfigPathProof(
+                0,
+                (0, 0),
+                "private",
+                (),
+                None,
+                object(),  # type: ignore[arg-type]
+                lambda _descriptor: True,
+                object(),  # type: ignore[arg-type]
+                windows=os.name == "nt",
+                _token=object(),
+            )
+        assert (
+            _code(PlatformPathAuthority().prove_config_path(root))
+            == "path.outside_root"
+        )
+        absent = authority.prove_config_path(root).unwrap()
+        with absent:
+            assert absent.parent_identity == root.home_identity
+            assert not absent.leaf_exists
+            assert absent.leaf_identity is None
+            assert absent.open_leaf() is None
+            assert absent.revalidate().unwrap() is None
+
+        config = codex_home / "config.toml"
+        config.write_bytes(b"")
+        present = authority.prove_config_path(root).unwrap()
+        with present:
+            assert present.leaf_exists
+            assert present.leaf_identity == _identity(config)
+            opened = present.open_leaf()
+            assert opened is not None
+            with opened:
+                assert opened.read_bytes(limit=1) == b""
+            assert str(codex_home) not in repr(present)
+            with pytest.raises(TypeError):
+                present.__reduce__()
+
+
+def test_config_path_proof_rejects_link_reparse_directory_and_hardlink(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+
+    directory_home = tmp_path / "directory-home"
+    _private_test_directory(directory_home)
+    with authority.bootstrap_forge_root(
+        directory_home, runner=_runner()
+    ).unwrap() as root:
+        (directory_home / "config.toml").mkdir()
+        assert _code(authority.prove_config_path(root)) == "path.outside_root"
+
+    hardlink_home = tmp_path / "hardlink-home"
+    _private_test_directory(hardlink_home)
+    external = tmp_path / "external-config"
+    external.write_bytes(b"external")
+    with authority.bootstrap_forge_root(
+        hardlink_home, runner=_runner()
+    ).unwrap() as root:
+        os.link(external, hardlink_home / "config.toml")
+        assert _code(authority.prove_config_path(root)) == "path.hardlink"
+
+    linked_home = tmp_path / "linked-home"
+    _private_test_directory(linked_home)
+    linked_target = tmp_path / "linked-target"
+    linked_target.mkdir()
+    with authority.bootstrap_forge_root(linked_home, runner=_runner()).unwrap() as root:
+        _directory_link(linked_target, linked_home / "config.toml")
+        assert _code(authority.prove_config_path(root)) in {
+            "path.linked_leaf",
+            "path.reparse_point",
+            "path.outside_root",
+        }
+
+
+def test_same_byte_config_replacement_and_absence_creation_invalidate_proof(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    codex_home = tmp_path / "codex-home"
+    _private_test_directory(codex_home)
+    authority = PlatformPathAuthority()
+    with authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap() as root:
+        config = codex_home / "config.toml"
+        absent = authority.prove_config_path(root).unwrap()
+        config.write_bytes(b"same")
+        try:
+            assert _code(absent.revalidate()) == "path.identity_changed"
+        finally:
+            absent.close()
+
+        present = authority.prove_config_path(root).unwrap()
+        displaced = codex_home / "displaced.toml"
+        config.rename(displaced)
+        config.write_bytes(b"same")
+        try:
+            assert _code(present.revalidate()) == "path.identity_changed"
+            with pytest.raises(Exception) as changed:
+                present.open_leaf()
+            assert getattr(changed.value, "code", None) == "path.identity_changed"
+        finally:
+            present.close()
+
+
+def test_config_and_planned_paths_reject_absolute_home_rebind(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    codex_home = tmp_path / "codex-home"
+    displaced = tmp_path / "displaced-home"
+    _private_test_directory(codex_home)
+    (codex_home / "config.toml").write_bytes(b"original")
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
+    config = authority.prove_config_path(root).unwrap()
+    planned = authority.plan_owned_path(
+        root, _reference("sources/zagrosi/marketplace"), expected_depth=3
+    ).unwrap()
+    try:
+        try:
+            codex_home.rename(displaced)
+        except PermissionError:
+            if os.name == "nt":
+                pytest.fail(
+                    "required Windows home-rebind authority cell was not exercised"
+                )
+            raise
+        _private_test_directory(codex_home)
+        with pytest.raises(Exception) as config_changed:
+            config._native_target()
+        assert getattr(config_changed.value, "code", None) == "path.identity_changed"
+        with pytest.raises(Exception) as planned_changed:
+            planned._config_source_value()
+        assert getattr(planned_changed.value, "code", None) == "path.identity_changed"
+        assert _code(config.revalidate()) == "path.identity_changed"
+        assert _code(planned.revalidate()) == "path.identity_changed"
+    finally:
+        planned.close()
+        config.close()
+        root.close()
+
+
 def test_first_root_bootstrap_is_exclusive_restrictive_and_link_safe(
     tmp_path: Path,
 ) -> None:
@@ -653,14 +875,12 @@ def test_live_plugins_namespace_rebind_invalidates_root_and_path_proof(
             try:
                 plugins.rename(displaced)
             except PermissionError:
-                if os.name != "nt":
-                    raise
-                assert owned._validate_live_descriptor()
-                assert owned._validate_control_binding()
-                proof._require_open()
-                assert plugins.is_dir()
-                assert not displaced.exists()
-                return
+                if os.name == "nt":
+                    pytest.fail(
+                        "required Windows namespace-rebind authority cell was not "
+                        "exercised"
+                    )
+                raise
             plugins.mkdir(mode=0o700)
 
             assert not owned._validate_live_descriptor()
