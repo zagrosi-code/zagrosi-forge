@@ -566,6 +566,34 @@ jobs:
             throw "Codex hard gate requires exactly 6 passed tests and zero failures, errors, or skips"
           }
 
+      - name: Prove native config metadata boundaries
+        id: config-metadata-tests
+        if: always() && steps.acquire.outcome == 'success' && steps.sync.outcome == 'success'
+        shell: pwsh
+        env:
+          MATRIX_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $EvidenceRoot = Join-Path $env:RUNNER_TEMP "zagrosi-evidence"
+          New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+          $Junit = Join-Path $EvidenceRoot "raw-config-metadata.xml"
+          $Selector = "unsupported_xattr_or_native_windows_dacl_stops_before_snapshot or native_macos_acl_or_flags_stop_before_snapshot or windows_preparation_cleanup_rejects_hardlinked_stage"
+          & $env:ZAGROSI_UV_BIN run --locked --no-sync python -m pytest tests/install/test_codex_config.py -k $Selector --tb=short --junitxml $Junit
+          $TestExit = $LASTEXITCODE
+          if ($TestExit -ne 0) { exit $TestExit }
+          [xml] $Document = Get-Content -LiteralPath $Junit -Raw
+          $Cases = @($Document.SelectNodes("//testcase"))
+          $Failures = @($Document.SelectNodes("//testcase/failure | //testcase/error"))
+          $Skips = @($Document.SelectNodes("//testcase/skipped"))
+          $ExpectedSkips = switch ($env:MATRIX_PLATFORM) {
+            "linux-x86_64" { 3 }
+            "windows-x86_64" { 2 }
+            default { 1 }
+          }
+          if ($Cases.Count -ne 4 -or $Failures.Count -ne 0 -or $Skips.Count -ne $ExpectedSkips) {
+            throw "config metadata hard gate requires 4 cases, zero failures/errors, and $ExpectedSkips platform skips"
+          }
+
       - name: Sanitize and summarize evidence
         if: always()
         shell: pwsh
@@ -575,6 +603,7 @@ jobs:
           PLATFORM_OUTCOME: ${{ steps.platform-tests.outcome }}
           AUTHORITY_OUTCOME: ${{ steps.authority-tests.outcome }}
           CODEX_OUTCOME: ${{ steps.codex-tests.outcome }}
+          CONFIG_METADATA_OUTCOME: ${{ steps.config-metadata-tests.outcome }}
           MATRIX_OS: ${{ matrix.os }}
           MATRIX_PLATFORM: ${{ matrix.platform }}
           MATRIX_PYTHON: ${{ matrix.python-version }}
@@ -636,6 +665,7 @@ jobs:
           Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-platform.xml") (Join-Path $EvidenceRoot "junit-platform.xml")
           Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-authority.xml") (Join-Path $EvidenceRoot "junit-authority.xml")
           Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-codex.xml") (Join-Path $EvidenceRoot "junit-codex.xml")
+          Write-SanitizedJunit (Join-Path $EvidenceRoot "raw-config-metadata.xml") (Join-Path $EvidenceRoot "junit-config-metadata.xml")
 
           function File-Digest([string] $Path) {
             if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
@@ -675,6 +705,7 @@ jobs:
               native_primitives = $env:PLATFORM_OUTCOME
               installer_authority = $env:AUTHORITY_OUTCOME
               codex_cachebuster = $env:CODEX_OUTCOME
+              config_metadata = $env:CONFIG_METADATA_OUTCOME
             }
           }
           $EvidencePath = Join-Path $EvidenceRoot "evidence.json"
@@ -695,6 +726,7 @@ jobs:
             ${{ runner.temp }}/zagrosi-evidence/junit-platform.xml
             ${{ runner.temp }}/zagrosi-evidence/junit-authority.xml
             ${{ runner.temp }}/zagrosi-evidence/junit-codex.xml
+            ${{ runner.temp }}/zagrosi-evidence/junit-config-metadata.xml
           if-no-files-found: error
           retention-days: 7
           compression-level: 9

@@ -45,6 +45,49 @@ def test_installer_authority_hard_gate_matches_collected_tests() -> None:
     assert f"requires {len(cases)} cases" in workflow
 
 
+def test_config_metadata_hard_gate_matches_collected_tests() -> None:
+    selector = (
+        "unsupported_xattr_or_native_windows_dacl_stops_before_snapshot or "
+        "native_macos_acl_or_flags_stop_before_snapshot or "
+        "windows_preparation_cleanup_rejects_hardlinked_stage"
+    )
+    collected = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/install/test_codex_config.py",
+            "-k",
+            selector,
+            "--collect-only",
+            "-q",
+        ],
+        cwd=ROOT,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert collected.returncode == 0, collected.stdout
+    cases = tuple(
+        line
+        for line in collected.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line
+    )
+    assert len(cases) == 4
+
+    workflow = (ROOT / ".github/workflows/installer-spike.yml").read_text(
+        encoding="utf-8"
+    )
+    assert f'$Selector = "{selector}"' in workflow
+    assert f"$Cases.Count -ne {len(cases)}" in workflow
+    assert f"requires {len(cases)} cases" in workflow
+    assert '"linux-x86_64" { 3 }' in workflow
+    assert '"windows-x86_64" { 2 }' in workflow
+    assert "junit-config-metadata.xml" in workflow
+    assert "CONFIG_METADATA_OUTCOME" in workflow
+
+
 def test_toolchain_verifier_runs_before_distribution_install(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(ROOT / "src")
