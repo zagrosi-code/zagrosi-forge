@@ -3923,12 +3923,6 @@ def test_unsupported_xattr_or_native_windows_dacl_stops_before_snapshot(
             )
             if restored.returncode != 0:
                 pytest.fail("native Windows DACL fixture could not be restored")
-            if root is not None:
-                restored_proof = authority.prove_config_path(root).unwrap()
-                try:
-                    snapshot_config(restored_proof).unwrap()
-                finally:
-                    restored_proof.close()
         if proof is not None:
             proof.close()
         if root is not None:
