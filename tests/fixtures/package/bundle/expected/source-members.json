@@ -295,14 +295,24 @@
     "size": 127905
   },
   {
+    "path": "src/zagrosi_forge/install/atomic_file.py",
+    "sha256": "5d2f2e7b46f35479c26312b62913ccf8369af1bd94c7b730626ed224e3634f77",
+    "size": 108528
+  },
+  {
     "path": "src/zagrosi_forge/install/bundle-policy.json",
-    "sha256": "4e08c6c1fcd74fe1b30703c9862572dbd6fb3cba54c9592caae1b15da4724515",
-    "size": 6497
+    "sha256": "6675e7ae0566a0ba7c401cb1cf3f7b3b5a7afca4aed467b2ac1ab913e869d883",
+    "size": 6614
   },
   {
     "path": "src/zagrosi_forge/install/bundle.py",
     "sha256": "d08634be41bbe9e1c7116dc26b3e4f96984546a84f5ff549f541cb3e6fe82344",
     "size": 73061
+  },
+  {
+    "path": "src/zagrosi_forge/install/config.py",
+    "sha256": "98a8d51342d907f7868217de68d1219bb7180d1daf79df24d02427dd93045fec",
+    "size": 64714
   },
   {
     "path": "src/zagrosi_forge/install/contracts.py",
@@ -323,6 +333,11 @@
     "path": "src/zagrosi_forge/install/limit-policy.json",
     "sha256": "eeddb9b692b240aeb6ddd071af82655f3b916d313f97872afa3972c42c925931",
     "size": 1317
+  },
+  {
+    "path": "src/zagrosi_forge/install/lock.py",
+    "sha256": "79df4c505d72bcf44ee47ff1410a6f298504cde43a5d7b2ee234c21a84c0ace6",
+    "size": 11648
   },
   {
     "path": "src/zagrosi_forge/install/metadata.py",

@@ -320,6 +320,11 @@ def test_positive_policy_includes_exact_required_runtime_members() -> None:
     assert "src/zagrosi_forge/_vendor/vendor-receipt.json" in policy.required_files
     assert "src/zagrosi_forge/_vendor/tomlkit-LICENSE" in policy.required_files
     assert "src/zagrosi_forge/install/bundle-policy.json" in policy.required_files
+    runtime_modules = {
+        path.relative_to(_PROJECT_ROOT).as_posix()
+        for path in (_PROJECT_ROOT / "src/zagrosi_forge/install").rglob("*.py")
+    }
+    assert runtime_modules <= set(policy.required_files)
 
 
 def test_valid_fixture_projection_is_complete_and_content_addressed() -> None:
