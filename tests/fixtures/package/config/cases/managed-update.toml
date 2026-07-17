@@ -1,0 +1,19 @@
+# protected update fixture
+theme = "dark"
+
+[marketplaces.unrelated]
+source_type = "git"
+source = "https://example.invalid/user-marketplace"
+
+[marketplaces.zagrosi]
+source_type = "local"
+source = "${SOURCE}"
+# preserve managed-adjacent user comment
+user_note = "do not move"
+
+[plugins."other@unrelated"]
+enabled = false
+
+[plugins."zagrosi-forge@zagrosi"]
+enabled = true
+user_flag = 17

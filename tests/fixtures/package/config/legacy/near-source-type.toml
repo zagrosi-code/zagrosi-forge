@@ -1,0 +1,6 @@
+[marketplaces.zagrosi]
+source_type = "git"
+source = "${CHECKOUT}"
+
+[plugins."zagrosi-forge@zagrosi"]
+enabled = true

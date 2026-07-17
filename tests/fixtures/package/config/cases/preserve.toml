@@ -1,0 +1,7 @@
+# protected leading comment
+theme = "dark"
+secret_token = "CANARY-DO-NOT-LEAK"
+
+[user]
+name = "Ada"
+note = "preserve exactly"
