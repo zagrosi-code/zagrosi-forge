@@ -296,8 +296,8 @@
   },
   {
     "path": "src/zagrosi_forge/install/atomic_file.py",
-    "sha256": "5d2f2e7b46f35479c26312b62913ccf8369af1bd94c7b730626ed224e3634f77",
-    "size": 108528
+    "sha256": "7e7f7ffd6e31ee2f4f65988200e78c7b0e8f5f356b0e9ade0a01ff359ecd4a08",
+    "size": 197061
   },
   {
     "path": "src/zagrosi_forge/install/bundle-policy.json",

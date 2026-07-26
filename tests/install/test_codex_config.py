@@ -6,9 +6,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
+import time
 from typing import Any, Iterator
 
 import pytest
@@ -358,6 +360,15 @@ def _code(result: Any) -> str:
     assert result.error is not None
     assert result.error.exit_category == 13
     return result.error.code
+
+
+def _commit_acknowledged(prepared: Any, *, expected: Any) -> Any:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    acknowledged = atomic_file.acknowledge_config_preparation(prepared)
+    if not acknowledged.is_ok:
+        return acknowledged
+    return atomic_file.commit_atomic_candidate(prepared, expected=expected)
 
 
 def test_fixture_path_substitutions_are_valid_toml_on_windows() -> None:
@@ -2143,7 +2154,6 @@ def test_postreplace_classifier_requires_exact_sealed_evidence(tmp_path: Path) -
         begin_config_transaction,
         classify_config_after_replace,
         cleanup_config_recovery,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
         promote_config_backup,
     )
@@ -2166,7 +2176,7 @@ def test_postreplace_classifier_requires_exact_sealed_evidence(tmp_path: Path) -
             candidate,
             begin_config_transaction("tx-exact-classifier"),
         ).unwrap()
-        committed = commit_atomic_candidate(prepared, expected=snapshot).unwrap()
+        committed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
         assert (
             classify_config_after_replace(committed).unwrap()
             is ConfigCommitState.CANDIDATE
@@ -2210,7 +2220,6 @@ def test_atomic_candidate_uses_same_directory_restrictive_exclusive_file(
         ConfigCommitState,
         begin_config_transaction,
         cleanup_config_recovery,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
         promote_config_backup,
     )
@@ -2239,7 +2248,7 @@ def test_atomic_candidate_uses_same_directory_restrictive_exclusive_file(
             if os.name != "nt":
                 assert stat.S_IMODE(candidate_path.stat().st_mode) == 0o600
                 assert stat.S_IMODE(snapshot_path.stat().st_mode) == 0o600
-            committed = commit_atomic_candidate(prepared, expected=snapshot).unwrap()
+            committed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             assert committed.state is ConfigCommitState.CANDIDATE
             assert committed.durability_confirmed
             descriptor = committed.recovery_descriptor
@@ -2250,6 +2259,1522 @@ def test_atomic_candidate_uses_same_directory_restrictive_exclusive_file(
             cleanup_config_recovery(committed).unwrap()
             assert not snapshot_path.exists()
         assert (home / "config.toml").is_file()
+
+
+def test_config_recovery_descriptor_roundtrips_and_reopens_after_restart(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        candidate = _atomic_inputs(snapshot, identity, source)
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            candidate,
+            atomic_file.begin_config_transaction("tx-reopen-success"),
+        ).unwrap()
+        atomic_file.acknowledge_config_preparation(prepared).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        record = json.loads(json.dumps(committed.recovery_descriptor.to_record()))
+        prepared.close()
+
+        decoded = atomic_file.decode_config_recovery_descriptor(record).unwrap()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        try:
+            reopened = atomic_file.reopen_config_recovery(
+                fresh_proof,
+                decoded,
+            ).unwrap()
+            assert (
+                atomic_file.classify_reopened_config_recovery(reopened).unwrap()
+                is atomic_file.ConfigCommitState.CANDIDATE
+            )
+            assert (
+                _code(atomic_file.cleanup_reopened_config_recovery(decoded))
+                == "config.external_change"
+            )
+            atomic_file.cleanup_reopened_config_recovery(reopened).unwrap()
+        finally:
+            fresh_proof.close()
+        assert (home / "config.toml").is_file()
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX nonblocking FIFO contract")
+def test_reopened_classifier_rejects_nonregular_config_without_blocking(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-fifo"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        descriptor = committed.recovery_descriptor
+        prepared.close()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        reopened = atomic_file.reopen_config_recovery(
+            fresh_proof,
+            atomic_file.decode_config_recovery_descriptor(
+                descriptor.to_record()
+            ).unwrap(),
+        ).unwrap()
+        config = home / "config.toml"
+        retained = home / "candidate-retained.toml"
+        config.rename(retained)
+        os.mkfifo(config, 0o600)
+        child = os.fork()
+        waited = False
+        try:
+            if child == 0:
+                try:
+                    observed = atomic_file.classify_reopened_config_recovery(reopened)
+                    accepted = observed.is_ok and (
+                        observed.unwrap() is atomic_file.ConfigCommitState.THIRD_PARTY
+                    )
+                    os._exit(0 if accepted else 1)
+                except BaseException:
+                    os._exit(2)
+            deadline = time.monotonic() + 2.0
+            status = 0
+            while time.monotonic() < deadline:
+                process, status = os.waitpid(child, os.WNOHANG)
+                if process == child:
+                    waited = True
+                    break
+                time.sleep(0.01)
+            if not waited:
+                os.kill(child, signal.SIGKILL)
+                os.waitpid(child, 0)
+                waited = True
+                pytest.fail("reopened config classification blocked on a FIFO")
+            assert os.waitstatus_to_exitcode(status) == 0
+        finally:
+            if child != 0 and not waited:
+                os.kill(child, signal.SIGKILL)
+                os.waitpid(child, 0)
+            config.unlink()
+            retained.rename(config)
+        atomic_file.cleanup_reopened_config_recovery(reopened).unwrap()
+        fresh_proof.close()
+
+
+def test_reopened_classifier_revalidates_current_config_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-current-race"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        descriptor = committed.recovery_descriptor
+        prepared.close()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        reopened = atomic_file.reopen_config_recovery(
+            fresh_proof,
+            atomic_file.decode_config_recovery_descriptor(
+                descriptor.to_record()
+            ).unwrap(),
+        ).unwrap()
+        original_read = atomic_file._recovery_descriptor_bytes
+        retained = home / "candidate-retained.toml"
+        swapped = False
+
+        def swap_current_after_open(opened: int) -> bytes:
+            nonlocal swapped
+            observed = original_read(opened)
+            if not swapped:
+                (home / "config.toml").rename(retained)
+                _write_private_test_file(
+                    home,
+                    "config.toml",
+                    b"third_party = true\n",
+                )
+                swapped = True
+            return observed
+
+        monkeypatch.setattr(
+            atomic_file,
+            "_recovery_descriptor_bytes",
+            swap_current_after_open,
+        )
+        assert (
+            atomic_file.classify_reopened_config_recovery(reopened).unwrap()
+            is atomic_file.ConfigCommitState.THIRD_PARTY
+        )
+        assert (
+            _code(atomic_file.cleanup_reopened_config_recovery(reopened))
+            == "config.commit_ambiguous"
+        )
+        assert (home / descriptor.snapshot_reference).is_file()
+        (home / "config.toml").unlink()
+        retained.rename(home / "config.toml")
+        atomic_file.cleanup_reopened_config_recovery(reopened).unwrap()
+        fresh_proof.close()
+
+
+def test_reopened_classifier_revalidates_observed_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    with _config_context(tmp_path, None) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-absence-race"),
+        ).unwrap()
+        descriptor = prepared.recovery_descriptor
+        prepared._retain()
+        prepared.close()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        reopened = atomic_file.reopen_config_recovery(
+            fresh_proof,
+            atomic_file.decode_config_recovery_descriptor(
+                descriptor.to_record()
+            ).unwrap(),
+        ).unwrap()
+        original_open = atomic_file._open_recovery_name
+        injected = False
+
+        def create_after_absence(
+            parent: int,
+            name: str,
+            *,
+            delete: bool = False,
+        ) -> int:
+            nonlocal injected
+            opened = original_open(parent, name, delete=delete)
+            if (
+                name == atomic_file._CONFIG_NAME
+                and not injected
+                and not atomic_file._descriptor_is_open(opened)
+            ):
+                _write_private_test_file(
+                    home,
+                    "config.toml",
+                    b"third_party = true\n",
+                )
+                injected = True
+            return opened
+
+        monkeypatch.setattr(atomic_file, "_open_recovery_name", create_after_absence)
+        assert (
+            atomic_file.classify_reopened_config_recovery(reopened).unwrap()
+            is atomic_file.ConfigCommitState.THIRD_PARTY
+        )
+        assert (
+            _code(atomic_file.rollback_reopened_config_recovery(reopened))
+            == "config.commit_ambiguous"
+        )
+        assert (home / descriptor.candidate_reference).is_file()
+        (home / "config.toml").unlink()
+        atomic_file.rollback_reopened_config_recovery(reopened).unwrap()
+        fresh_proof.close()
+
+
+def test_recovery_decoder_rejects_old_or_tampered_records(tmp_path: Path) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        _root,
+        _authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-decode"),
+        ).unwrap()
+        record = prepared.recovery_descriptor.to_record()
+        legacy = dict(record)
+        legacy.pop("descriptor_version")
+        assert (
+            _code(atomic_file.decode_config_recovery_descriptor(legacy))
+            == "config.external_change"
+        )
+        tampered = dict(record)
+        tampered["candidate_byte_digest"] = "0" * 64
+        assert (
+            _code(atomic_file.decode_config_recovery_descriptor(tampered))
+            == "config.external_change"
+        )
+        assert os.fspath(tmp_path) not in repr(record)
+        prepared.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-persistent-backup",
+        "reused-stage-identity",
+        "reused-stage-metadata",
+        "reused-backup-identity",
+        "reused-backup-metadata",
+        "absent-before-with-mode",
+        "absent-before-with-displaced",
+        "before-reuses-candidate-identity",
+    ),
+)
+def test_recovery_decoder_rejects_recomputed_impossible_stage_records(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        _root,
+        _authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(
+                snapshot,
+                identity,
+                source,
+                persistent_backup=True,
+            ),
+            atomic_file.begin_config_transaction(f"tx-impossible-{mutation}"),
+        ).unwrap()
+        record = prepared.recovery_descriptor.to_record()
+        if mutation == "missing-persistent-backup":
+            record["backup_identity"] = None
+            record["backup_stage_metadata_digest"] = None
+        elif mutation == "reused-stage-identity":
+            record["candidate_identity"] = record["snapshot_identity"]
+        elif mutation == "reused-stage-metadata":
+            record["candidate_stage_metadata_digest"] = record[
+                "snapshot_stage_metadata_digest"
+            ]
+        elif mutation == "reused-backup-identity":
+            record["backup_identity"] = record["snapshot_identity"]
+        elif mutation == "reused-backup-metadata":
+            record["backup_stage_metadata_digest"] = record[
+                "snapshot_stage_metadata_digest"
+            ]
+        elif mutation == "absent-before-with-mode":
+            record["before_identity"] = None
+            record["before_mode"] = 0o600
+        elif mutation == "absent-before-with-displaced":
+            record["before_identity"] = None
+            record["before_mode"] = None
+            record["displaced_identity"] = (101, 202)
+        else:
+            record["before_identity"] = record["candidate_identity"]
+        domain = dict(record)
+        domain.pop("descriptor_digest")
+        record["descriptor_digest"] = hashlib.sha256(
+            canonical_json_bytes(domain)
+        ).hexdigest()
+
+        assert (
+            _code(atomic_file.decode_config_recovery_descriptor(record))
+            == "config.external_change"
+        )
+        prepared.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX quarantine recovery contract")
+def test_reopened_cleanup_resumes_deterministic_quarantine(tmp_path: Path) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-quarantine"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        descriptor = committed.recovery_descriptor
+        prepared.close()
+        quarantine = home / atomic_file._cleanup_reference(
+            descriptor.snapshot_reference
+        )
+        (home / descriptor.snapshot_reference).rename(quarantine)
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        try:
+            reopened = atomic_file.reopen_config_recovery(
+                fresh_proof,
+                atomic_file.decode_config_recovery_descriptor(
+                    descriptor.to_record()
+                ).unwrap(),
+            ).unwrap()
+            atomic_file.cleanup_reopened_config_recovery(reopened).unwrap()
+        finally:
+            fresh_proof.close()
+        assert not quarantine.exists()
+
+
+def test_reopened_cleanup_closes_source_when_quarantine_open_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-close-on-open-fault"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        descriptor = committed.recovery_descriptor
+        prepared.close()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        reopened = atomic_file.reopen_config_recovery(
+            fresh_proof,
+            atomic_file.decode_config_recovery_descriptor(
+                descriptor.to_record()
+            ).unwrap(),
+        ).unwrap()
+        original_open = atomic_file._open_recovery_name
+        original_close = atomic_file._close_descriptor
+        quarantine = atomic_file._cleanup_reference(descriptor.snapshot_reference)
+        opened_source = 0 if os.name == "nt" else -1
+        source_opened = False
+        source_closed = False
+
+        def fail_quarantine_open(
+            parent: int,
+            name: str,
+            *,
+            delete: bool = False,
+        ) -> int:
+            nonlocal opened_source, source_opened
+            if name == quarantine:
+                raise OSError("injected quarantine open failure")
+            opened = original_open(parent, name, delete=delete)
+            if name == descriptor.snapshot_reference:
+                opened_source = opened
+                source_opened = True
+            return opened
+
+        def track_close(opened: int) -> None:
+            nonlocal source_closed
+            if source_opened and opened == opened_source:
+                source_closed = True
+            original_close(opened)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(atomic_file, "_open_recovery_name", fail_quarantine_open)
+            scoped.setattr(atomic_file, "_close_descriptor", track_close)
+            assert (
+                _code(atomic_file.cleanup_reopened_config_recovery(reopened))
+                == "config.commit_ambiguous"
+            )
+        if not source_closed:
+            original_close(opened_source)
+        assert source_closed
+        atomic_file.cleanup_reopened_config_recovery(reopened).unwrap()
+        fresh_proof.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX identity substitution fixture")
+def test_reopen_rejects_and_preserves_replaced_recovery_stage(tmp_path: Path) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-tamper"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        descriptor = committed.recovery_descriptor
+        prepared.close()
+        stage = home / descriptor.snapshot_reference
+        retained = home / "third-party-retained.snapshot"
+        stage.rename(retained)
+        stage.write_bytes(raw)
+        stage.chmod(0o600)
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        try:
+            result = atomic_file.reopen_config_recovery(
+                fresh_proof,
+                atomic_file.decode_config_recovery_descriptor(
+                    descriptor.to_record()
+                ).unwrap(),
+            )
+            assert _code(result) == "config.external_change"
+        finally:
+            fresh_proof.close()
+        assert retained.read_bytes() == raw
+        assert stage.read_bytes() == raw
+
+
+def test_reopened_recovery_rolls_back_exact_before_state(tmp_path: Path) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-rollback"),
+        ).unwrap()
+        record = prepared.recovery_descriptor.to_record()
+        atomic_file.acknowledge_config_preparation(prepared).unwrap()
+        prepared._retain()
+        prepared.close()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        try:
+            reopened = atomic_file.reopen_config_recovery(
+                fresh_proof,
+                atomic_file.decode_config_recovery_descriptor(record).unwrap(),
+            ).unwrap()
+            assert (
+                atomic_file.classify_reopened_config_recovery(reopened).unwrap()
+                is atomic_file.ConfigCommitState.BEFORE
+            )
+            atomic_file.rollback_reopened_config_recovery(reopened).unwrap()
+        finally:
+            fresh_proof.close()
+        assert (home / "config.toml").read_bytes() == raw
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX candidate mode transition fixture")
+def test_reopen_accepts_candidate_metadata_applied_before_replace(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw, mode=0o644) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-reopen-metadata-transition"),
+        ).unwrap()
+        descriptor = prepared.recovery_descriptor
+        atomic_file._apply_candidate_metadata(prepared)
+        prepared._retain()
+        prepared.close()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        try:
+            reopened = atomic_file.reopen_config_recovery(
+                fresh_proof,
+                atomic_file.decode_config_recovery_descriptor(
+                    descriptor.to_record()
+                ).unwrap(),
+            ).unwrap()
+            assert (
+                atomic_file.classify_reopened_config_recovery(reopened).unwrap()
+                is atomic_file.ConfigCommitState.BEFORE
+            )
+            atomic_file.rollback_reopened_config_recovery(reopened).unwrap()
+        finally:
+            fresh_proof.close()
+
+
+def test_reopened_recovery_promotes_exact_persistent_backup(tmp_path: Path) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source, persistent_backup=True),
+            atomic_file.begin_config_transaction("tx-reopen-backup"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        record = committed.recovery_descriptor.to_record()
+        prepared.close()
+        decoded = atomic_file.decode_config_recovery_descriptor(record).unwrap()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        try:
+            reopened = atomic_file.reopen_config_recovery(
+                fresh_proof,
+                decoded,
+            ).unwrap()
+            backup = atomic_file.promote_reopened_config_backup(reopened).unwrap()
+            assert backup is not None
+            assert (home / backup.relative_path).read_bytes() == raw
+            atomic_file.cleanup_reopened_config_recovery(reopened).unwrap()
+        finally:
+            fresh_proof.close()
+
+
+def test_reopened_backup_retry_syncs_already_promoted_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        root,
+        authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source, persistent_backup=True),
+            atomic_file.begin_config_transaction("tx-reopen-backup-sync"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        descriptor = committed.recovery_descriptor
+        prepared.close()
+        fresh_proof = authority.prove_config_path(root).unwrap()
+        reopened = atomic_file.reopen_config_recovery(
+            fresh_proof,
+            atomic_file.decode_config_recovery_descriptor(
+                descriptor.to_record()
+            ).unwrap(),
+        ).unwrap()
+        try:
+            if os.name == "nt":
+                original_rename = atomic_file._paths._windows_rename_handle
+
+                def rename_then_fail(
+                    opened: int,
+                    parent: int,
+                    destination: str,
+                ) -> None:
+                    original_rename(opened, parent, destination)
+                    raise OSError("injected post-rename failure")
+
+                target = atomic_file._paths
+                attribute = "_windows_rename_handle"
+            else:
+                original_rename = atomic_file._paths._exclusive_posix_rename
+
+                def rename_then_fail(
+                    parent: int,
+                    source_name: str,
+                    destination: str,
+                ) -> None:
+                    original_rename(parent, source_name, destination)
+                    raise OSError("injected post-rename failure")
+
+                target = atomic_file._paths
+                attribute = "_exclusive_posix_rename"
+            with monkeypatch.context() as scoped:
+                scoped.setattr(target, attribute, rename_then_fail)
+                assert (
+                    _code(atomic_file.promote_reopened_config_backup(reopened))
+                    == "config.commit_ambiguous"
+                )
+            assert (home / descriptor.backup_reference).is_file()
+            synced: list[int] = []
+            with monkeypatch.context() as scoped:
+                scoped.setattr(
+                    atomic_file,
+                    "_sync_parent",
+                    lambda parent: synced.append(parent),
+                )
+                atomic_file.promote_reopened_config_backup(reopened).unwrap()
+            assert len(synced) == 1
+            atomic_file.cleanup_reopened_config_recovery(reopened).unwrap()
+        finally:
+            reopened.close()
+            fresh_proof.close()
+
+
+def _write_spawned_config_recovery_fixture(
+    workspace: str,
+    record_path: str,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(Path(workspace), raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        _root,
+        _authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-spawned-reopen"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        Path(record_path).write_text(
+            json.dumps(committed.recovery_descriptor.to_record()),
+            encoding="utf-8",
+        )
+        prepared.close()
+
+
+def test_spawned_process_death_reopens_committed_config_recovery(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "spawned-recovery"
+    workspace.mkdir()
+    record_path = workspace / "recovery.json"
+    command = (
+        "import runpy,sys; "
+        "module=runpy.run_path(sys.argv[1]); "
+        "module['_write_spawned_config_recovery_fixture'](sys.argv[2],sys.argv[3])"
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            command,
+            os.fspath(Path(__file__).resolve()),
+            os.fspath(workspace),
+            os.fspath(record_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(
+        workspace / "codex-home",
+        runner=_runner(),
+    ).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        descriptor = atomic_file.decode_config_recovery_descriptor(
+            json.loads(record_path.read_text(encoding="utf-8"))
+        ).unwrap()
+        reopened = atomic_file.reopen_config_recovery(proof, descriptor).unwrap()
+        assert (
+            atomic_file.classify_reopened_config_recovery(reopened).unwrap()
+            is atomic_file.ConfigCommitState.CANDIDATE
+        )
+        atomic_file.cleanup_reopened_config_recovery(reopened).unwrap()
+    finally:
+        proof.close()
+        root.close()
+
+
+def _kill_after_fsynced_preparation_stage(
+    workspace: str,
+    barrier: str,
+    persistent_backup: bool,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(Path(workspace), raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        _root,
+        _authority,
+    ):
+        original_populate = atomic_file._populate_stage
+        stage_roles = (
+            ("snapshot", "backup", "candidate")
+            if persistent_backup
+            else ("snapshot", "candidate")
+        )
+        calls = 0
+
+        def populate_then_exit(descriptor: int, staged: bytes, *, mode: int) -> None:
+            nonlocal calls
+            original_populate(descriptor, staged, mode=mode)
+            role = stage_roles[calls]
+            calls += 1
+            if role == barrier:
+                os._exit(91)
+
+        if barrier != "prepared-return":
+            setattr(atomic_file, "_populate_stage", populate_then_exit)
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(
+                snapshot,
+                identity,
+                source,
+                persistent_backup=persistent_backup,
+            ),
+            atomic_file.begin_config_transaction(f"tx-kill-{barrier}"),
+        ).unwrap()
+        if barrier == "prepared-return":
+            os._exit(91)
+        prepared.close()
+        os._exit(92)
+
+
+def _run_fsynced_preparation_death(
+    workspace: Path,
+    *,
+    barrier: str,
+    persistent_backup: bool,
+) -> subprocess.CompletedProcess[str]:
+    command = (
+        "import runpy,sys; "
+        "module=runpy.run_path(sys.argv[1]); "
+        "module['_kill_after_fsynced_preparation_stage']"
+        "(sys.argv[2],sys.argv[3],sys.argv[4]=='true')"
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            command,
+            os.fspath(Path(__file__).resolve()),
+            os.fspath(workspace),
+            barrier,
+            str(persistent_backup).lower(),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _kill_during_preparation_checkpoint_rotation(workspace: str) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(Path(workspace), raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        _root,
+        _authority,
+    ):
+        original_unlink = atomic_file._unlink_owned
+
+        def exit_before_old_authority_unlink(
+            parent: int,
+            name: str,
+            descriptor: int,
+            expected_identity: tuple[int, int],
+            *,
+            allow_moved: bool = False,
+        ) -> bool:
+            if name.endswith(".snapshot.authority"):
+                os._exit(93)
+            return original_unlink(
+                parent,
+                name,
+                descriptor,
+                expected_identity,
+                allow_moved=allow_moved,
+            )
+
+        setattr(atomic_file, "_unlink_owned", exit_before_old_authority_unlink)
+        atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-kill-authority-rotation"),
+        ).unwrap()
+        os._exit(94)
+
+
+def _run_checkpoint_rotation_death(
+    workspace: Path,
+) -> subprocess.CompletedProcess[str]:
+    command = (
+        "import runpy,sys; "
+        "module=runpy.run_path(sys.argv[1]); "
+        "module['_kill_during_preparation_checkpoint_rotation'](sys.argv[2])"
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            command,
+            os.fspath(Path(__file__).resolve()),
+            os.fspath(workspace),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def _exit_during_live_preparation_cleanup(workspace: str) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(Path(workspace), raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        _root,
+        _authority,
+    ):
+        original_unlink = atomic_file._unlink_owned
+
+        def fail_readiness(_prepared: Any) -> None:
+            raise atomic_file._error(
+                "config.external_change",
+                "Injected final readiness failure.",
+            )
+
+        def exit_after_snapshot_unlink(
+            parent: int,
+            name: str,
+            descriptor: int,
+            expected_identity: tuple[int, int],
+            *,
+            allow_moved: bool = False,
+        ) -> bool:
+            removed = original_unlink(
+                parent,
+                name,
+                descriptor,
+                expected_identity,
+                allow_moved=allow_moved,
+            )
+            if removed and name.endswith(".snapshot"):
+                os._exit(95)
+            return removed
+
+        setattr(atomic_file.PreparedAtomicFile, "_require_ready", fail_readiness)
+        setattr(atomic_file, "_unlink_owned", exit_after_snapshot_unlink)
+        atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-live-cleanup-death"),
+        ).unwrap()
+        os._exit(96)
+
+
+@pytest.mark.parametrize(
+    ("barrier", "persistent_backup"),
+    (
+        ("snapshot", False),
+        ("backup", True),
+        ("candidate", False),
+        ("prepared-return", False),
+    ),
+)
+def test_fsynced_stage_process_death_uses_only_precrash_recovery_record(
+    tmp_path: Path,
+    barrier: str,
+    persistent_backup: bool,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / f"kill-{barrier}"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier=barrier,
+        persistent_backup=persistent_backup,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    records = tuple(home.glob(".zagrosi-config-tx-*.authority"))
+    assert len(records) == 1
+    decoded = tuple(
+        atomic_file.decode_config_preparation_recovery_descriptor(
+            json.loads(record.read_text(encoding="utf-8"))
+        ).unwrap()
+        for record in records
+    )
+    descriptor = max(decoded, key=lambda item: len(item.stages))
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        atomic_file.cleanup_restarted_config_preparation(
+            proof,
+            descriptor,
+        ).unwrap()
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
+        assert (home / "config.toml").read_bytes() == _fixture("cases/preserve.toml")
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_restarted_preparation_cleanup_prevalidates_every_stage(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "prevalidate-all-stages"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier="prepared-return",
+        persistent_backup=True,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    authority_path = next(home.glob(".zagrosi-config-tx-*.authority"))
+    descriptor = atomic_file.decode_config_preparation_recovery_descriptor(
+        json.loads(authority_path.read_text(encoding="utf-8"))
+    ).unwrap()
+    candidate_reference = descriptor.stages[-1][1]
+    candidate_path = home / candidate_reference
+    retained_candidate = home / "retained-candidate"
+    candidate_path.rename(retained_candidate)
+    unknown = _write_private_test_file(home, candidate_reference, b"unknown-candidate")
+    stage_paths = tuple(
+        home / reference for _role, reference, _identity in descriptor.stages
+    )
+
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        observed = atomic_file.cleanup_restarted_config_preparation(proof, descriptor)
+        assert _code(observed) == "config.external_change"
+        assert all(path.exists() for path in stage_paths[:-1])
+        assert unknown.read_bytes() == b"unknown-candidate"
+        assert retained_candidate.is_file()
+        assert authority_path.is_file()
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_restarted_preparation_cleanup_revalidates_each_stage_during_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "revalidate-stages"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier="prepared-return",
+        persistent_backup=False,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    authority_path = next(home.glob(".zagrosi-config-tx-*.authority"))
+    descriptor = atomic_file.decode_config_preparation_recovery_descriptor(
+        json.loads(authority_path.read_text(encoding="utf-8"))
+    ).unwrap()
+    identities = {
+        identity
+        for _role, _reference, identity in descriptor.stages
+        if identity is not None
+    }
+    validations = {identity: 0 for identity in identities}
+    original_require = atomic_file._require_private_preparation_file
+
+    def count_validation(opened: int, identity: tuple[int, int]) -> None:
+        original_require(opened, identity)
+        if identity in validations:
+            validations[identity] += 1
+
+    monkeypatch.setattr(
+        atomic_file,
+        "_require_private_preparation_file",
+        count_validation,
+    )
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        atomic_file.cleanup_restarted_config_preparation(proof, descriptor).unwrap()
+        assert validations
+        assert all(count >= 2 for count in validations.values())
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_restarted_preparation_cleanup_fsyncs_stages_before_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "cleanup-sync-order"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier="prepared-return",
+        persistent_backup=False,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    authority_path = next(home.glob(".zagrosi-config-tx-*.authority"))
+    descriptor = atomic_file.decode_config_preparation_recovery_descriptor(
+        json.loads(authority_path.read_text(encoding="utf-8"))
+    ).unwrap()
+    events: list[str] = []
+    original_unlink = atomic_file._unlink_owned
+    original_sync = atomic_file._sync_parent
+
+    def record_unlink(
+        parent: int,
+        name: str,
+        opened: int,
+        identity: tuple[int, int],
+        *,
+        allow_moved: bool = False,
+    ) -> bool:
+        events.append(f"unlink:{name}")
+        return original_unlink(
+            parent,
+            name,
+            opened,
+            identity,
+            allow_moved=allow_moved,
+        )
+
+    def record_sync(parent: int) -> None:
+        events.append("sync")
+        original_sync(parent)
+
+    monkeypatch.setattr(atomic_file, "_unlink_owned", record_unlink)
+    monkeypatch.setattr(atomic_file, "_sync_parent", record_sync)
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        atomic_file.cleanup_restarted_config_preparation(proof, descriptor).unwrap()
+        syncs = [index for index, event in enumerate(events) if event == "sync"]
+        stage_unlinks = [
+            index
+            for index, event in enumerate(events)
+            if any(
+                event == f"unlink:{reference}"
+                for _role, reference, _identity in descriptor.stages
+            )
+        ]
+        authority_unlink = events.index(f"unlink:{descriptor.authority_reference}")
+        assert len(syncs) == 2
+        assert max(stage_unlinks) < syncs[0] < authority_unlink < syncs[1]
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_checkpoint_rotation_process_death_reconciles_superseded_authority(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "authority-rotation-death"
+    workspace.mkdir()
+    completed = _run_checkpoint_rotation_death(workspace)
+    assert completed.returncode == 93, completed.stderr
+    home = workspace / "codex-home"
+    records = tuple(home.glob(".zagrosi-config-tx-*.authority"))
+    assert len(records) == 2
+    decoded = tuple(
+        atomic_file.decode_config_preparation_recovery_descriptor(
+            json.loads(record.read_text(encoding="utf-8"))
+        ).unwrap()
+        for record in records
+    )
+    descriptor = max(decoded, key=lambda item: len(item.stages))
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        atomic_file.cleanup_restarted_config_preparation(proof, descriptor).unwrap()
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_restarted_cleanup_rejects_unbound_self_consistent_predecessor(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "forged-predecessor"
+    workspace.mkdir()
+    completed = _run_checkpoint_rotation_death(workspace)
+    assert completed.returncode == 93, completed.stderr
+    home = workspace / "codex-home"
+    records = tuple(home.glob(".zagrosi-config-tx-*.authority"))
+    decoded = tuple(
+        atomic_file.decode_config_preparation_recovery_descriptor(
+            json.loads(record.read_text(encoding="utf-8"))
+        ).unwrap()
+        for record in records
+    )
+    newest = max(decoded, key=lambda item: len(item.stages))
+    predecessor = min(decoded, key=lambda item: len(item.stages))
+    assert predecessor.authority_reference is not None
+    predecessor_path = home / predecessor.authority_reference
+    retained_predecessor = home / "retained-predecessor"
+    predecessor_path.rename(retained_predecessor)
+    forged_path = _write_private_test_file(home, predecessor.authority_reference, b"")
+    status = forged_path.stat(follow_symlinks=False)
+    forged_identity = (status.st_dev, status.st_ino)
+    forged = atomic_file.ConfigPreparationRecoveryDescriptor(
+        transaction_digest=newest.transaction_digest,
+        parent_identity=newest.parent_identity,
+        authority_reference=predecessor.authority_reference,
+        authority_identity=forged_identity,
+        stages=newest.stages[:1],
+        _token=atomic_file._PREPARATION_DESCRIPTOR_TOKEN,
+    )
+    forged_path.write_bytes(canonical_json_bytes(forged.to_record()))
+    if os.name != "nt":
+        forged_path.chmod(0o600)
+    stage_paths = tuple(
+        home / reference for _role, reference, _identity in newest.stages
+    )
+    newest_path = home / str(newest.authority_reference)
+
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        observed = atomic_file.cleanup_restarted_config_preparation(proof, newest)
+        assert _code(observed) == "config.external_change"
+        assert all(path.is_file() for path in stage_paths)
+        assert forged_path.is_file()
+        assert retained_predecessor.is_file()
+        assert newest_path.is_file()
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_prepared_close_prevalidates_candidate_before_deleting_recovery(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.contracts import ForgeError
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        _root,
+        _authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-close-prevalidation"),
+        ).unwrap()
+        snapshot_path = home / prepared.snapshot_reference
+        candidate_path = home / prepared.candidate_reference
+        retained_candidate = home / "retained-close-candidate"
+        candidate_path.rename(retained_candidate)
+        unknown = _write_private_test_file(
+            home,
+            prepared.candidate_reference,
+            b"unknown-close-candidate",
+        )
+        authority_path = next(home.glob(".zagrosi-config-tx-*.authority"))
+
+        with pytest.raises(ForgeError) as raised:
+            prepared.close()
+        assert raised.value.code == "config.commit_ambiguous"
+        assert snapshot_path.is_file()
+        assert retained_candidate.is_file()
+        assert unknown.read_bytes() == b"unknown-close-candidate"
+        assert authority_path.is_file()
+
+
+def test_commit_requires_successful_preparation_acknowledgment(tmp_path: Path) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        _root,
+        _authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-commit-requires-ack"),
+        ).unwrap()
+        assert (
+            _code(atomic_file.commit_atomic_candidate(prepared, expected=snapshot))
+            == "config.commit_ambiguous"
+        )
+        assert (home / "config.toml").read_bytes() == raw
+        atomic_file.acknowledge_config_preparation(prepared).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        atomic_file.cleanup_config_recovery(committed).unwrap()
+
+
+@pytest.mark.parametrize("boundary", ("close-before", "close-after", "sync"))
+def test_preparation_acknowledgment_is_retry_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        _root,
+        _authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction(f"tx-ack-retry-{boundary}"),
+        ).unwrap()
+        original_close = atomic_file._close_descriptor
+        original_sync = atomic_file._sync_parent
+        injected = False
+
+        def fail_close(descriptor: int) -> None:
+            nonlocal injected
+            if (
+                descriptor == prepared._preparation_authority_descriptor
+                and not injected
+            ):
+                injected = True
+                if boundary == "close-after":
+                    original_close(descriptor)
+                raise OSError("injected authority close ambiguity")
+            original_close(descriptor)
+
+        def fail_sync(parent: int) -> None:
+            nonlocal injected
+            if not injected:
+                injected = True
+                raise OSError("injected authority sync ambiguity")
+            original_sync(parent)
+
+        if boundary == "sync":
+            monkeypatch.setattr(atomic_file, "_sync_parent", fail_sync)
+        else:
+            monkeypatch.setattr(atomic_file, "_close_descriptor", fail_close)
+        first = atomic_file.acknowledge_config_preparation(prepared)
+        if not first.is_ok:
+            assert _code(first) == "config.commit_ambiguous"
+        monkeypatch.setattr(atomic_file, "_close_descriptor", original_close)
+        monkeypatch.setattr(atomic_file, "_sync_parent", original_sync)
+        atomic_file.acknowledge_config_preparation(prepared).unwrap()
+        prepared.close()
+
+
+def test_preparation_authority_releases_only_after_explicit_acknowledgment(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        _root,
+        _authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-explicit-preparation-ack"),
+        ).unwrap()
+        assert len(tuple(home.glob(".zagrosi-config-tx-*.authority"))) == 1
+        journal = tmp_path / "prepared-record.json"
+        journal.write_bytes(
+            canonical_json_bytes(prepared.recovery_descriptor.to_record())
+        )
+        with journal.open("rb") as descriptor:
+            os.fsync(descriptor.fileno())
+
+        assert (
+            atomic_file.acknowledge_config_preparation(prepared).unwrap()
+            == prepared.recovery_descriptor
+        )
+        assert not tuple(home.glob(".zagrosi-config-tx-*.authority"))
+        assert (home / prepared.snapshot_reference).is_file()
+        assert (home / prepared.candidate_reference).is_file()
+        prepared.close()
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
 
 
 def test_private_snapshot_exclusive_open_collision_preserves_unknown_file(
@@ -2385,7 +3910,7 @@ def test_candidate_metadata_apply_failure_preserves_original(
                     OSError("injected metadata application failure")
                 ),
             )
-            committed = atomic_file.commit_atomic_candidate(
+            committed = _commit_acknowledged(
                 prepared,
                 expected=snapshot,
             ).unwrap()
@@ -2424,9 +3949,7 @@ def test_replace_failure_preserves_original_or_classifies_actual_candidate(
                 "_atomic_replace",
                 lambda _prepared: (_ for _ in ()).throw(OSError("replace")),
             )
-            result = atomic_file.commit_atomic_candidate(
-                prepared, expected=snapshot
-            ).unwrap()
+            result = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             assert result.state is atomic_file.ConfigCommitState.BEFORE
             assert result.error_code == "config.atomic_write_failed"
             assert (home / "config.toml").read_bytes() == raw
@@ -2463,7 +3986,7 @@ def test_fault_after_candidate_publication_is_never_clean_success(
 
         with prepared:
             monkeypatch.setattr(atomic_file, "_atomic_replace", replace_then_fail)
-            committed = atomic_file.commit_atomic_candidate(
+            committed = _commit_acknowledged(
                 prepared,
                 expected=snapshot,
             ).unwrap()
@@ -2524,7 +4047,7 @@ def test_post_replace_digest_or_identity_corruption_is_third_party_conflict(
                 "_atomic_replace",
                 replace_then_corrupt,
             )
-            committed = atomic_file.commit_atomic_candidate(
+            committed = _commit_acknowledged(
                 prepared,
                 expected=snapshot,
             ).unwrap()
@@ -2581,7 +4104,7 @@ def test_intervening_config_value_is_never_lost_by_replace(
                 "_atomic_replace",
                 replace_after_intervening_write,
             )
-            committed = atomic_file.commit_atomic_candidate(
+            committed = _commit_acknowledged(
                 prepared,
                 expected=snapshot,
             ).unwrap()
@@ -2631,7 +4154,7 @@ def test_post_replace_metadata_drift_is_not_clean_success(
 
         with prepared:
             monkeypatch.setattr(atomic_file, "_atomic_replace", replace_then_weaken)
-            committed = atomic_file.commit_atomic_candidate(
+            committed = _commit_acknowledged(
                 prepared,
                 expected=snapshot,
             ).unwrap()
@@ -2678,7 +4201,7 @@ def test_post_replace_parent_security_drift_is_not_clean_success(
                     "_atomic_replace",
                     replace_then_weaken_parent,
                 )
-                result = atomic_file.commit_atomic_candidate(
+                result = _commit_acknowledged(
                     prepared,
                     expected=snapshot,
                 )
@@ -2721,9 +4244,7 @@ def test_partial_replace_third_party_retains_all_recovery_evidence(
 
         with prepared:
             monkeypatch.setattr(atomic_file, "_atomic_replace", write_third_then_fail)
-            committed = atomic_file.commit_atomic_candidate(
-                prepared, expected=snapshot
-            ).unwrap()
+            committed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             assert committed.state is atomic_file.ConfigCommitState.THIRD_PARTY
             assert committed.error_code == "config.commit_ambiguous"
             assert _code(atomic_file.cleanup_config_recovery(committed)) == (
@@ -2763,9 +4284,7 @@ def test_failed_commit_never_publishes_persistent_backup(
             "_atomic_replace",
             lambda _prepared: (_ for _ in ()).throw(OSError("replace")),
         )
-        observed = atomic_file.commit_atomic_candidate(
-            prepared, expected=snapshot
-        ).unwrap()
+        observed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
         assert observed.state is atomic_file.ConfigCommitState.BEFORE
         assert not final_backup.exists()
         atomic_file.rollback_config_recovery(observed).unwrap()
@@ -2794,15 +4313,14 @@ def test_parent_directory_sync_failure_has_platform_specific_safe_result(
             candidate,
             atomic_file.begin_config_transaction("tx-parent-sync"),
         ).unwrap()
+        atomic_file.acknowledge_config_preparation(prepared).unwrap()
         with prepared:
             monkeypatch.setattr(
                 atomic_file,
                 "_sync_parent",
                 lambda _descriptor: (_ for _ in ()).throw(OSError("dir fsync")),
             )
-            result = atomic_file.commit_atomic_candidate(
-                prepared, expected=snapshot
-            ).unwrap()
+            result = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             assert result.state is atomic_file.ConfigCommitState.CANDIDATE
             assert not result.durability_confirmed
             assert result.error_code == "config.commit_ambiguous"
@@ -2832,7 +4350,7 @@ def test_snapshot_cleanup_fault_is_reported_and_retryable(
             candidate,
             atomic_file.begin_config_transaction("tx-cleanup-retry"),
         ).unwrap()
-        committed = atomic_file.commit_atomic_candidate(
+        committed = _commit_acknowledged(
             prepared,
             expected=snapshot,
         ).unwrap()
@@ -2890,11 +4408,12 @@ def test_cleanup_quarantines_before_validating_a_mutable_name(
             candidate,
             atomic_file.begin_config_transaction("tx-cleanup-race"),
         ).unwrap()
-        committed = atomic_file.commit_atomic_candidate(
+        committed = _commit_acknowledged(
             prepared,
             expected=snapshot,
         ).unwrap()
         retained = home / ".expected-private-snapshot"
+        quarantine = home / atomic_file._cleanup_reference(committed.snapshot_reference)
         original_rename = atomic_file._paths._exclusive_posix_rename
         swapped = False
 
@@ -2916,8 +4435,91 @@ def test_cleanup_quarantines_before_validating_a_mutable_name(
                 "config.commit_ambiguous"
             )
         assert swapped
-        assert (home / committed.snapshot_reference).read_bytes() == b"third-party"
-        (home / committed.snapshot_reference).unlink()
+        assert not (home / committed.snapshot_reference).exists()
+        assert quarantine.read_bytes() == b"third-party"
+        quarantine.unlink()
+        retained.rename(home / committed.snapshot_reference)
+        atomic_file.cleanup_config_recovery(committed).unwrap()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO substitution fixture")
+def test_cleanup_reopens_swapped_fifo_nonblocking_and_preserves_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        _root,
+        _authority,
+    ):
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(snapshot, identity, source),
+            atomic_file.begin_config_transaction("tx-cleanup-fifo-swap"),
+        ).unwrap()
+        committed = _commit_acknowledged(
+            prepared,
+            expected=snapshot,
+        ).unwrap()
+        retained = home / ".expected-private-fifo-snapshot"
+        quarantine_reference = atomic_file._cleanup_reference(
+            committed.snapshot_reference
+        )
+        quarantine = home / quarantine_reference
+        original_rename = atomic_file._paths._exclusive_posix_rename
+        original_open = atomic_file.os.open
+        swapped = False
+        reopened_nonblocking = False
+
+        def swap_fifo_before_quarantine(
+            parent: int,
+            source_name: str,
+            target: str,
+        ) -> None:
+            nonlocal swapped
+            if not swapped and source_name == committed.snapshot_reference:
+                (home / source_name).rename(retained)
+                os.mkfifo(home / source_name, mode=0o600)
+                swapped = True
+            original_rename(parent, source_name, target)
+
+        def require_nonblocking_quarantine_open(
+            path: str | bytes,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            nonlocal reopened_nonblocking
+            if path == quarantine_reference:
+                assert flags & os.O_NONBLOCK
+                reopened_nonblocking = True
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                atomic_file._paths,
+                "_exclusive_posix_rename",
+                swap_fifo_before_quarantine,
+            )
+            scoped.setattr(atomic_file.os, "open", require_nonblocking_quarantine_open)
+            assert _code(atomic_file.cleanup_config_recovery(committed)) == (
+                "config.commit_ambiguous"
+            )
+        assert swapped
+        assert reopened_nonblocking
+        assert not (home / committed.snapshot_reference).exists()
+        assert stat.S_ISFIFO(quarantine.lstat().st_mode)
+        assert retained.read_bytes() == raw
+        quarantine.unlink()
         retained.rename(home / committed.snapshot_reference)
         atomic_file.cleanup_config_recovery(committed).unwrap()
 
@@ -2995,7 +4597,6 @@ def test_staged_config_bytes_are_revalidated_before_replace(
 ) -> None:
     from zagrosi_forge.install.atomic_file import (
         begin_config_transaction,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
     )
 
@@ -3032,7 +4633,7 @@ def test_staged_config_bytes_are_revalidated_before_replace(
             staged.write_bytes(b"corrupt-stage")
             if os.name != "nt":
                 staged.chmod(0o600)
-            result = commit_atomic_candidate(prepared, expected=snapshot)
+            result = _commit_acknowledged(prepared, expected=snapshot)
             assert _code(result) == "config.external_change"
             assert (home / "config.toml").read_bytes() == raw
 
@@ -3045,7 +4646,6 @@ def test_staged_supported_metadata_change_is_not_normalized_away(
 
     from zagrosi_forge.install.atomic_file import (
         begin_config_transaction,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
     )
 
@@ -3078,7 +4678,7 @@ def test_staged_supported_metadata_change_is_not_normalized_away(
                 b"tampered-after-prepare",
             )
             assert (
-                _code(commit_atomic_candidate(prepared, expected=snapshot))
+                _code(_commit_acknowledged(prepared, expected=snapshot))
                 == "config.external_change"
             )
             assert (home / "config.toml").read_bytes() == raw
@@ -3203,6 +4803,112 @@ def test_failed_preparation_cleanup_fault_is_reported_as_ambiguous(
             == records[0]
         )
         assert not retained[0].exists()
+
+
+def test_failed_preparation_cleanup_preserves_newest_authority_on_unlink_ambiguity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        home,
+        _root,
+        _authority,
+    ):
+        original_unlink = atomic_file._unlink_owned
+
+        def fail_readiness(_prepared: Any) -> None:
+            raise atomic_file._error(
+                "config.external_change",
+                "Injected final readiness failure.",
+            )
+
+        def retain_candidate(
+            parent: int,
+            name: str,
+            descriptor: int,
+            stage_identity: tuple[int, int],
+            *,
+            allow_moved: bool = False,
+        ) -> bool:
+            if name.endswith(".candidate"):
+                return False
+            return original_unlink(
+                parent,
+                name,
+                descriptor,
+                stage_identity,
+                allow_moved=allow_moved,
+            )
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(
+                atomic_file.PreparedAtomicFile,
+                "_require_ready",
+                fail_readiness,
+            )
+            scoped.setattr(atomic_file, "_unlink_owned", retain_candidate)
+            result = atomic_file.prepare_atomic_candidate(
+                proof,
+                snapshot,
+                _atomic_inputs(snapshot, identity, source),
+                atomic_file.begin_config_transaction("tx-live-cleanup-ambiguity"),
+            )
+        assert _code(result) == "config.commit_ambiguous"
+        assert isinstance(result.error, atomic_file.ConfigPreparationError)
+        assert any(item.name.endswith(".candidate") for item in home.iterdir())
+        assert len(tuple(home.glob(".zagrosi-config-tx-*.authority"))) == 1
+        atomic_file.cleanup_config_preparation(result.error).unwrap()
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
+
+
+def test_live_preparation_cleanup_process_death_retains_restart_authority(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "live-cleanup-death"
+    workspace.mkdir()
+    command = (
+        "import runpy,sys; "
+        "module=runpy.run_path(sys.argv[1]); "
+        "module['_exit_during_live_preparation_cleanup'](sys.argv[2])"
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            command,
+            os.fspath(Path(__file__).resolve()),
+            os.fspath(workspace),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 95, completed.stderr
+    home = workspace / "codex-home"
+    authority_path = next(home.glob(".zagrosi-config-tx-*.authority"))
+    descriptor = atomic_file.decode_config_preparation_recovery_descriptor(
+        json.loads(authority_path.read_text(encoding="utf-8"))
+    ).unwrap()
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        atomic_file.cleanup_restarted_config_preparation(proof, descriptor).unwrap()
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
+    finally:
+        proof.close()
+        root.close()
 
 
 def test_stage_write_failure_with_cleanup_fault_returns_recovery_capability(
@@ -3354,9 +5060,10 @@ def test_persistent_preparation_cleanup_sync_failure_retains_parent_recovery(
             )
         assert _code(result) == "config.commit_ambiguous"
         assert isinstance(result.error, atomic_file.ConfigPreparationError)
+        assert len(tuple(home.glob(".zagrosi-config-tx-*.authority"))) == 1
+        atomic_file.cleanup_config_preparation(result.error).unwrap()
+        atomic_file.cleanup_config_preparation(result.error).unwrap()
         assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
-        atomic_file.cleanup_config_preparation(result.error).unwrap()
-        atomic_file.cleanup_config_preparation(result.error).unwrap()
         assert (home / "config.toml").read_bytes() == raw
 
 
@@ -3483,7 +5190,6 @@ def test_commit_result_mutation_is_rejected_at_access_boundary(
     from zagrosi_forge.install.atomic_file import (
         ConfigCommitState,
         begin_config_transaction,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
     )
     from zagrosi_forge.install.contracts import ForgeError
@@ -3505,7 +5211,7 @@ def test_commit_result_mutation_is_rejected_at_access_boundary(
             begin_config_transaction("tx-mutated-result"),
         ).unwrap()
         with prepared:
-            committed = commit_atomic_candidate(prepared, expected=snapshot).unwrap()
+            committed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             object.__setattr__(
                 committed,
                 "_state",
@@ -3522,7 +5228,6 @@ def test_candidate_is_private_while_staged_and_preserves_supported_mode(
     from zagrosi_forge.install.atomic_file import (
         begin_config_transaction,
         cleanup_config_recovery,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
         promote_config_backup,
     )
@@ -3550,7 +5255,7 @@ def test_candidate_is_private_while_staged_and_preserves_supported_mode(
                     stat.S_IMODE((home / prepared.candidate_reference).stat().st_mode)
                     == 0o600
                 )
-            committed = commit_atomic_candidate(prepared, expected=snapshot).unwrap()
+            committed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             assert promote_config_backup(committed).unwrap() is None
             cleanup_config_recovery(committed).unwrap()
         if os.name != "nt":
@@ -3567,7 +5272,6 @@ def test_windows_supported_dacl_and_attributes_are_preserved_exactly(
     from zagrosi_forge.install.atomic_file import (
         begin_config_transaction,
         cleanup_config_recovery,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
         promote_config_backup,
     )
@@ -3591,7 +5295,7 @@ def test_windows_supported_dacl_and_attributes_are_preserved_exactly(
             begin_config_transaction("tx-windows-metadata"),
         ).unwrap()
         with prepared:
-            committed = commit_atomic_candidate(prepared, expected=snapshot).unwrap()
+            committed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             descriptor = paths._windows_open_child(
                 prepared._parent_descriptor,
                 "config.toml",
@@ -3615,7 +5319,6 @@ def test_posix_supported_xattr_is_preserved_by_atomic_replace(tmp_path: Path) ->
     from zagrosi_forge.install.atomic_file import (
         begin_config_transaction,
         cleanup_config_recovery,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
         promote_config_backup,
     )
@@ -3639,7 +5342,7 @@ def test_posix_supported_xattr_is_preserved_by_atomic_replace(tmp_path: Path) ->
             begin_config_transaction("tx-preserve-xattr"),
         ).unwrap()
         with prepared:
-            committed = commit_atomic_candidate(prepared, expected=snapshot).unwrap()
+            committed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             assert promote_config_backup(committed).unwrap() is None
             cleanup_config_recovery(committed).unwrap()
         assert _get_test_xattr(home / "config.toml", name) == b"preserve-me"
@@ -3651,7 +5354,6 @@ def test_backup_record_binds_original_identity_and_exclusive_path(
     from zagrosi_forge.install.atomic_file import (
         begin_config_transaction,
         cleanup_config_recovery,
-        commit_atomic_candidate,
         prepare_atomic_candidate,
         promote_config_backup,
     )
@@ -3677,7 +5379,7 @@ def test_backup_record_binds_original_identity_and_exclusive_path(
             assert prepared.backup_record is None
             final_backup = home / begin_config_transaction("tx-backup").backup_reference
             assert not final_backup.exists()
-            committed = commit_atomic_candidate(prepared, expected=snapshot).unwrap()
+            committed = _commit_acknowledged(prepared, expected=snapshot).unwrap()
             assert committed.backup_record is None
             assert _code(cleanup_config_recovery(committed)) == (
                 "config.commit_ambiguous"
@@ -3716,7 +5418,7 @@ def test_backup_promotion_is_retryable_after_rename_before_state_mark(
             atomic_file.begin_config_transaction("tx-backup-rename-fault"),
         ).unwrap()
         with prepared:
-            committed = atomic_file.commit_atomic_candidate(
+            committed = _commit_acknowledged(
                 prepared,
                 expected=snapshot,
             ).unwrap()

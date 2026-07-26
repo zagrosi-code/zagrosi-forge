@@ -8,7 +8,6 @@ from enum import Enum
 import errno
 import hashlib
 import os
-import secrets
 import stat
 import sys
 from threading import Lock, RLock
@@ -18,8 +17,10 @@ from typing import Never
 from . import ownership as _ownership
 from . import paths as _paths
 from .config import (
+    CONFIG_METADATA_POLICY,
     ConfigCandidate,
     ConfigSnapshot,
+    WindowsAuthorizationProjection,
     _candidate_bytes,
     _descriptor_xattrs,
     _snapshot_bytes,
@@ -28,7 +29,7 @@ from .config import (
 )
 from .contracts import ForgeError, Result, canonical_json_bytes
 from .paths import ConfigPathProof, FileIdentity
-from .policies import RECOVERY_RETENTION_POLICY
+from .policies import LIMIT_POLICY, RECOVERY_RETENTION_POLICY
 
 
 _TRANSACTION_TOKEN = object()
@@ -37,11 +38,15 @@ _PREPARATION_RECOVERY_TOKEN = object()
 _PREPARATION_DESCRIPTOR_TOKEN = object()
 _BACKUP_TOKEN = object()
 _RECOVERY_DESCRIPTOR_TOKEN = object()
+_REOPENED_RECOVERY_TOKEN = object()
 _COMMIT_TOKEN = object()
 _CONFIG_NAME = "config.toml"
 _PRIVATE_PREFIX = ".zagrosi-config-tx-"
 _BACKUP_PREFIX = ".zagrosi-config-backup-"
 _MAX_TRANSACTION_BYTES = 256
+_PREPARATION_DESCRIPTOR_VERSION = "1.1"
+_RECOVERY_DESCRIPTOR_VERSION = "1.0"
+_RECOVERY_PLATFORM = "windows" if os.name == "nt" else "posix"
 
 
 def _error(code: str, message: str) -> ForgeError:
@@ -183,8 +188,13 @@ def begin_config_transaction(transaction_id: str) -> ConfigTransaction:
 class ConfigPreparationRecoveryDescriptor:
     """Secret-free evidence for private stages retained after preparation failure."""
 
+    descriptor_version: str
+    platform: str
     transaction_digest: str
     parent_identity: FileIdentity
+    authority_reference: str | None
+    authority_identity: FileIdentity | None
+    predecessor_authorities: tuple[tuple[str, FileIdentity, str], ...]
     stages: tuple[tuple[str, str, FileIdentity | None], ...]
     _binding_digest: str
     _seal: object
@@ -194,6 +204,9 @@ class ConfigPreparationRecoveryDescriptor:
         *,
         transaction_digest: str,
         parent_identity: FileIdentity,
+        authority_reference: str | None,
+        authority_identity: FileIdentity | None,
+        predecessor_authorities: tuple[tuple[str, FileIdentity, str], ...] = (),
         stages: tuple[tuple[str, str, FileIdentity | None], ...],
         _token: object,
     ) -> None:
@@ -206,22 +219,84 @@ class ConfigPreparationRecoveryDescriptor:
             )
             or not _valid_file_identity(parent_identity)
             or type(stages) is not tuple
+            or (authority_reference is None) != (authority_identity is None)
+            or type(predecessor_authorities) is not tuple
+            or (
+                authority_identity is not None
+                and not _valid_file_identity(authority_identity)
+            )
         ):
             raise TypeError("invalid config preparation recovery descriptor")
+        tag = transaction_digest[:24]
+        roles: list[str] = []
+        identities: list[FileIdentity] = []
         for role, reference, identity in stages:
             if (
                 role not in {"backup", "candidate", "snapshot"}
                 or type(reference) is not str
-                or not reference.startswith(_PRIVATE_PREFIX)
-                or reference in {".", ".."}
-                or "/" in reference
-                or "\\" in reference
-                or "\0" in reference
+                or reference != f"{_PRIVATE_PREFIX}{tag}.{role}"
                 or (identity is not None and not _valid_file_identity(identity))
+                or role in roles
             ):
                 raise TypeError("invalid retained config preparation stage")
+            roles.append(role)
+            if identity is not None:
+                identities.append(identity)
+        if (
+            roles
+            not in (
+                [],
+                ["snapshot"],
+                ["snapshot", "backup"],
+                ["snapshot", "candidate"],
+                ["snapshot", "backup", "candidate"],
+            )
+            or len(set(identities)) != len(identities)
+            or (
+                authority_reference is not None
+                and (
+                    not roles
+                    or any(identity is None for _role, _reference, identity in stages)
+                    or authority_reference
+                    != f"{_PRIVATE_PREFIX}{tag}.{roles[-1]}.authority"
+                    or authority_identity in identities
+                )
+            )
+        ):
+            raise TypeError("invalid retained config preparation stage")
+        expected_predecessor_references = (
+            tuple(f"{_PRIVATE_PREFIX}{tag}.{role}.authority" for role in roles[:-1])
+            if authority_reference is not None
+            else ()
+        )
+        predecessor_identities: list[FileIdentity] = []
+        predecessor_references: list[str] = []
+        for reference, identity, record_digest in predecessor_authorities:
+            if (
+                type(reference) is not str
+                or not _valid_file_identity(identity)
+                or not _valid_digest(record_digest)
+            ):
+                raise TypeError("invalid config preparation predecessor authority")
+            predecessor_references.append(reference)
+            predecessor_identities.append(identity)
+        if (
+            tuple(predecessor_references) != expected_predecessor_references
+            or len(set(predecessor_identities)) != len(predecessor_identities)
+            or any(identity in identities for identity in predecessor_identities)
+            or (
+                authority_identity is not None
+                and authority_identity in predecessor_identities
+            )
+        ):
+            raise TypeError("invalid config preparation predecessor authority")
         domain = {
+            "authority_identity": authority_identity,
+            "authority_reference": authority_reference,
+            "descriptor_version": _PREPARATION_DESCRIPTOR_VERSION,
             "parent_identity": parent_identity,
+            "platform": _RECOVERY_PLATFORM,
+            "predecessor_authorities": predecessor_authorities,
             "stages": stages,
             "transaction_digest": transaction_digest,
         }
@@ -235,7 +310,12 @@ class ConfigPreparationRecoveryDescriptor:
 
     def _domain(self) -> dict[str, object]:
         return {
+            "authority_identity": self.authority_identity,
+            "authority_reference": self.authority_reference,
+            "descriptor_version": self.descriptor_version,
             "parent_identity": self.parent_identity,
+            "platform": self.platform,
+            "predecessor_authorities": self.predecessor_authorities,
             "stages": self.stages,
             "transaction_digest": self.transaction_digest,
         }
@@ -251,17 +331,44 @@ class ConfigPreparationRecoveryDescriptor:
         if (
             self._seal is not _PREPARATION_DESCRIPTOR_TOKEN
             or self._binding_digest != expected
+            or self.descriptor_version != _PREPARATION_DESCRIPTOR_VERSION
+            or self.platform != _RECOVERY_PLATFORM
         ):
             raise _error(
                 "config.external_change",
                 "Config preparation recovery descriptor changed.",
             )
 
+    def _require_durable(self) -> None:
+        self._require_valid()
+        if (
+            self.authority_reference is None
+            or self.authority_identity is None
+            or not self.stages
+            or any(identity is None for _role, _reference, identity in self.stages)
+        ):
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery record is incomplete.",
+            )
+
     def to_record(self) -> dict[str, object]:
         self._require_valid()
         return {
+            "authority_identity": self.authority_identity,
+            "authority_reference": self.authority_reference,
             "descriptor_digest": self._binding_digest,
+            "descriptor_version": self.descriptor_version,
             "parent_identity": self.parent_identity,
+            "platform": self.platform,
+            "predecessor_authorities": tuple(
+                {
+                    "identity": identity,
+                    "record_digest": record_digest,
+                    "reference": reference,
+                }
+                for reference, identity, record_digest in self.predecessor_authorities
+            ),
             "stages": tuple(
                 {"identity": identity, "reference": reference, "role": role}
                 for role, reference, identity in self.stages
@@ -283,6 +390,16 @@ class _PreparationStageCapability:
     closed: bool = False
 
 
+@dataclass(slots=True)
+class _PreparationAuthorityCapability:
+    reference: str
+    descriptor: int
+    identity: FileIdentity
+    record_digest: str | None = None
+    removed: bool = False
+    closed: bool = False
+
+
 class ConfigPreparationRecovery:
     """Live handle authority for retrying incomplete preparation cleanup."""
 
@@ -290,6 +407,7 @@ class ConfigPreparationRecovery:
         "_binding_digest",
         "_closed",
         "_descriptor",
+        "_authorities",
         "_lock",
         "_parent_descriptor",
         "_parent_identity",
@@ -315,6 +433,7 @@ class ConfigPreparationRecovery:
         self._parent_descriptor = parent_descriptor
         self._parent_identity = parent_identity
         self._stages = stages
+        self._authorities: tuple[_PreparationAuthorityCapability, ...] = ()
         self._closed = False
         self._seal = _PREPARATION_RECOVERY_TOKEN
         self._lock = RLock()
@@ -370,10 +489,95 @@ class ConfigPreparationRecovery:
             stage.identity = identity
             self._rebind(refresh_descriptor=True)
 
+    def _checkpoint_stage_authority(self, *, role: str) -> None:
+        """Durably bind an exact empty stage before any secret bytes enter it."""
+
+        with self._lock:
+            self._require_bound()
+            if (
+                self._closed
+                or not self._stages
+                or self._stages[-1].role != role
+                or self._stages[-1].identity is None
+            ):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation checkpoint authority is invalid.",
+                )
+            reference = (
+                f"{_PRIVATE_PREFIX}{self._transaction_digest[:24]}.{role}.authority"
+            )
+            descriptor = _create_stage(self._parent_descriptor, reference)
+            authority = _PreparationAuthorityCapability(
+                reference=reference,
+                descriptor=descriptor,
+                identity=_identity_from_descriptor(descriptor),
+            )
+            self._authorities = (*self._authorities, authority)
+            self._rebind(refresh_descriptor=True)
+            authority_raw = canonical_json_bytes(self._descriptor.to_record())
+            _populate_preparation_authority(
+                descriptor,
+                authority_raw,
+            )
+            authority.record_digest = hashlib.sha256(authority_raw).hexdigest()
+            self._rebind()
+            _sync_parent(self._parent_descriptor)
+            for previous in self._authorities[:-1]:
+                if previous.removed:
+                    continue
+                if not _unlink_owned(
+                    self._parent_descriptor,
+                    previous.reference,
+                    previous.descriptor,
+                    previous.identity,
+                ):
+                    raise _error(
+                        "config.commit_ambiguous",
+                        "Config preparation checkpoint rotation is ambiguous.",
+                    )
+                previous.removed = True
+                self._rebind()
+                _close_descriptor(previous.descriptor)
+                previous.closed = True
+                self._rebind()
+            _sync_parent(self._parent_descriptor)
+            self._require_valid()
+
     def _make_descriptor(self) -> ConfigPreparationRecoveryDescriptor:
+        authority = None
+        if self._authorities and self._stages:
+            latest = self._authorities[-1]
+            expected = (
+                f"{_PRIVATE_PREFIX}{self._transaction_digest[:24]}."
+                f"{self._stages[-1].role}.authority"
+            )
+            if latest.reference == expected:
+                authority = latest
+        predecessors = (
+            tuple(
+                (
+                    predecessor.reference,
+                    predecessor.identity,
+                    predecessor.record_digest,
+                )
+                for predecessor in self._authorities[:-1]
+                if predecessor.record_digest is not None
+            )
+            if authority is not None
+            else ()
+        )
+        if authority is not None and len(predecessors) != len(self._authorities) - 1:
+            raise _error(
+                "config.external_change",
+                "Config preparation predecessor authority is incomplete.",
+            )
         return ConfigPreparationRecoveryDescriptor(
             transaction_digest=self._transaction_digest,
             parent_identity=self._parent_identity,
+            authority_reference=(None if authority is None else authority.reference),
+            authority_identity=(None if authority is None else authority.identity),
+            predecessor_authorities=predecessors,
             stages=tuple(
                 (stage.role, stage.reference, stage.identity) for stage in self._stages
             ),
@@ -385,6 +589,17 @@ class ConfigPreparationRecovery:
             "closed": self._closed,
             "descriptor_binding": self._descriptor._binding_digest,
             "parent_descriptor": self._parent_descriptor,
+            "authorities": tuple(
+                (
+                    authority.reference,
+                    authority.descriptor,
+                    authority.identity,
+                    authority.record_digest,
+                    authority.removed,
+                    authority.closed,
+                )
+                for authority in self._authorities
+            ),
             "stages": tuple(
                 (
                     stage.role,
@@ -458,12 +673,17 @@ class ConfigPreparationRecovery:
                 or _identity_from_descriptor(stage.descriptor) == stage.identity
                 for stage in self._stages
             )
+            valid_authorities = all(
+                authority.closed
+                or _identity_from_descriptor(authority.descriptor) == authority.identity
+                for authority in self._authorities
+            )
         except (AttributeError, ForgeError, OSError, TypeError, ValueError):
             raise _error(
                 "config.external_change",
                 "Config preparation recovery authority changed.",
             ) from None
-        if not valid_parent or not valid_stages:
+        if not valid_parent or not valid_stages or not valid_authorities:
             raise _error(
                 "config.external_change",
                 "Config preparation recovery authority changed.",
@@ -483,45 +703,158 @@ class ConfigPreparationRecovery:
         self._require_valid()
         if self._closed:
             return self._descriptor
+
         for stage in self._stages:
-            if stage.closed:
-                continue
-            if stage.removed:
-                try:
-                    _close_descriptor(stage.descriptor)
-                except OSError:
-                    continue
-                stage.closed = True
-                self._rebind()
-                continue
             if stage.identity is None:
                 try:
                     stage.identity = _identity_from_descriptor(stage.descriptor)
                 except OSError:
-                    continue
+                    raise _error(
+                        "config.commit_ambiguous",
+                        "Config preparation stage identity is ambiguous.",
+                    ) from None
                 self._rebind(refresh_descriptor=True)
+
+        # Validate the entire live cleanup set before the first namespace change.
+        if any(
+            not stage.removed
+            and (
+                stage.identity is None
+                or not _owned_cleanup_member_is_valid(
+                    self._parent_descriptor,
+                    stage.reference,
+                    stage.descriptor,
+                    stage.identity,
+                )
+            )
+            for stage in self._stages
+        ) or any(
+            not authority.removed
+            and not _preparation_authority_capability_is_valid(
+                self._parent_descriptor,
+                authority,
+            )
+            for authority in self._authorities
+        ):
+            raise _error(
+                "config.commit_ambiguous",
+                "Config preparation recovery cleanup set changed.",
+            )
+
+        # Delete stages first, revalidating each exact binding at mutation time.
+        for stage in self._stages:
+            if stage.removed:
+                continue
+            assert stage.identity is not None
+            if not _owned_cleanup_member_is_valid(
+                self._parent_descriptor,
+                stage.reference,
+                stage.descriptor,
+                stage.identity,
+            ):
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config preparation stage cleanup changed.",
+                )
             if not _unlink_owned(
                 self._parent_descriptor,
                 stage.reference,
                 stage.descriptor,
                 stage.identity,
             ):
-                continue
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config preparation stage cleanup remains ambiguous.",
+                )
             stage.removed = True
             self._rebind()
+
+        if not all(stage.removed for stage in self._stages):
+            raise _error(
+                "config.commit_ambiguous",
+                "Config preparation stage cleanup remains incomplete.",
+            )
+        try:
+            _sync_parent(self._parent_descriptor)
+        except OSError:
+            raise _error(
+                "config.commit_ambiguous",
+                "Config preparation stage cleanup durability is ambiguous.",
+            ) from None
+
+        # Older checkpoints are removed first. The newest authority therefore
+        # remains durable until every stage deletion has been synchronized.
+        for authority in self._authorities:
+            if authority.removed:
+                continue
+            if not _preparation_authority_capability_is_valid(
+                self._parent_descriptor,
+                authority,
+            ):
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config preparation authority cleanup changed.",
+                )
+            if not _unlink_owned(
+                self._parent_descriptor,
+                authority.reference,
+                authority.descriptor,
+                authority.identity,
+            ):
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config preparation authority cleanup remains ambiguous.",
+                )
+            authority.removed = True
+            self._rebind()
+
+        if not all(authority.removed for authority in self._authorities):
+            raise _error(
+                "config.commit_ambiguous",
+                "Config preparation authority cleanup remains incomplete.",
+            )
+        try:
+            _sync_parent(self._parent_descriptor)
+        except OSError:
+            raise _error(
+                "config.commit_ambiguous",
+                "Config preparation authority durability is ambiguous.",
+            ) from None
+
+        close_ok = True
+        for stage in self._stages:
+            if stage.closed:
+                continue
             try:
                 _close_descriptor(stage.descriptor)
             except OSError:
+                close_ok = False
                 continue
             stage.closed = True
             self._rebind()
-        if not all(stage.removed and stage.closed for stage in self._stages):
+        for authority in self._authorities:
+            if authority.closed:
+                continue
+            try:
+                _close_descriptor(authority.descriptor)
+            except OSError:
+                close_ok = False
+                continue
+            authority.closed = True
+            self._rebind()
+        if (
+            not close_ok
+            or not all(stage.removed and stage.closed for stage in self._stages)
+            or not all(
+                authority.removed and authority.closed
+                for authority in self._authorities
+            )
+        ):
             raise _error(
                 "config.commit_ambiguous",
                 "Config preparation recovery cleanup remains ambiguous.",
             )
         try:
-            _sync_parent(self._parent_descriptor)
             _close_descriptor(self._parent_descriptor)
         except OSError:
             raise _error(
@@ -532,6 +865,45 @@ class ConfigPreparationRecovery:
         self._parent_descriptor = 0 if os.name == "nt" else -1
         self._rebind()
         return self._descriptor
+
+    def _current_persistent_authority(
+        self,
+    ) -> tuple[
+        ConfigPreparationRecoveryDescriptor,
+        _PreparationAuthorityCapability,
+    ]:
+        with self._lock:
+            self._require_valid()
+            if (
+                not self._authorities
+                or self._authorities[-1].removed
+                or self._authorities[-1].closed
+            ):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation checkpoint authority is unavailable.",
+                )
+            self._descriptor._require_durable()
+            return self._descriptor, self._authorities[-1]
+
+    def _transfer_persistent_authority(
+        self,
+        authority: _PreparationAuthorityCapability,
+    ) -> None:
+        with self._lock:
+            self._require_valid()
+            if (
+                not self._authorities
+                or self._authorities[-1] is not authority
+                or authority.removed
+                or authority.closed
+            ):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation checkpoint transfer is invalid.",
+                )
+            self._authorities = self._authorities[:-1]
+            self._rebind(refresh_descriptor=True)
 
     def __repr__(self) -> str:
         return (
@@ -614,6 +986,373 @@ def cleanup_config_preparation(
         )
 
 
+def decode_config_preparation_recovery_descriptor(
+    record: object,
+) -> Result[ConfigPreparationRecoveryDescriptor]:
+    """Decode a durable, secret-free pre-mutation preparation checkpoint."""
+
+    try:
+        if type(record) is not dict:
+            raise TypeError("preparation recovery record must be an exact mapping")
+        expected_keys = {
+            "authority_identity",
+            "authority_reference",
+            "descriptor_digest",
+            "descriptor_version",
+            "parent_identity",
+            "platform",
+            "predecessor_authorities",
+            "stages",
+            "transaction_digest",
+        }
+        if (
+            set(record) != expected_keys
+            or len(canonical_json_bytes(record))
+            > LIMIT_POLICY.value("json_record_bytes")
+            or record["descriptor_version"] != _PREPARATION_DESCRIPTOR_VERSION
+            or record["platform"] != _RECOVERY_PLATFORM
+            or type(record["predecessor_authorities"]) is not list
+            or type(record["stages"]) is not list
+        ):
+            raise TypeError("preparation recovery record is unsupported")
+        decoded_predecessors: list[tuple[str, FileIdentity, str]] = []
+        for item in record["predecessor_authorities"]:
+            if type(item) is not dict or set(item) != {
+                "identity",
+                "record_digest",
+                "reference",
+            }:
+                raise TypeError("preparation predecessor authority is invalid")
+            identity = _decode_identity(item["identity"])
+            if identity is None:
+                raise TypeError("preparation predecessor identity is absent")
+            decoded_predecessors.append(
+                (
+                    item["reference"],
+                    identity,
+                    item["record_digest"],
+                )
+            )
+        decoded_stages: list[tuple[str, str, FileIdentity | None]] = []
+        for item in record["stages"]:
+            if type(item) is not dict or set(item) != {
+                "identity",
+                "reference",
+                "role",
+            }:
+                raise TypeError("preparation recovery stage is invalid")
+            decoded_stages.append(
+                (
+                    item["role"],
+                    item["reference"],
+                    _decode_identity(item["identity"], optional=True),
+                )
+            )
+        parent_identity = _decode_identity(record["parent_identity"])
+        authority_identity = _decode_identity(
+            record["authority_identity"],
+            optional=True,
+        )
+        if parent_identity is None:
+            raise TypeError("preparation recovery parent identity is absent")
+        descriptor = ConfigPreparationRecoveryDescriptor(
+            transaction_digest=record["transaction_digest"],
+            parent_identity=parent_identity,
+            authority_reference=record["authority_reference"],
+            authority_identity=authority_identity,
+            predecessor_authorities=tuple(decoded_predecessors),
+            stages=tuple(decoded_stages),
+            _token=_PREPARATION_DESCRIPTOR_TOKEN,
+        )
+        if (
+            not _valid_digest(record["descriptor_digest"])
+            or descriptor._binding_digest != record["descriptor_digest"]
+        ):
+            raise TypeError("preparation recovery record digest changed")
+        descriptor._require_durable()
+        return Result.success(descriptor)
+    except (ForgeError, KeyError, OverflowError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "config.external_change",
+                "Config preparation recovery descriptor could not be decoded.",
+            )
+        )
+
+
+def _open_preparation_cleanup_name(
+    parent: int,
+    reference: str,
+) -> tuple[int, int]:
+    source = _open_recovery_name(parent, reference, delete=True)
+    quarantined = _open_recovery_name(
+        parent,
+        _cleanup_reference(reference),
+        delete=True,
+    )
+    if _descriptor_is_open(source) and _descriptor_is_open(quarantined):
+        _close_descriptor(source)
+        _close_descriptor(quarantined)
+        raise _error(
+            "config.external_change",
+            "Config preparation recovery cleanup name is occupied.",
+        )
+    return source, quarantined
+
+
+def _preparation_authority_reference(transaction_digest: str, role: str) -> str:
+    return f"{_PRIVATE_PREFIX}{transaction_digest[:24]}.{role}.authority"
+
+
+def _require_private_preparation_file(
+    descriptor: int,
+    identity: FileIdentity,
+) -> None:
+    if _identity_from_descriptor(descriptor) != identity:
+        raise _error(
+            "config.external_change",
+            "Config preparation recovery identity changed.",
+        )
+    try:
+        if os.name == "nt":
+            if _private_windows_file(descriptor) != identity:
+                raise OSError(errno.ESTALE, "preparation identity changed")
+        elif _private_posix_file(descriptor, mode=0o600) != identity:
+            raise OSError(errno.ESTALE, "preparation identity changed")
+    except OSError:
+        raise _error(
+            "config.external_change",
+            "Config preparation recovery metadata changed.",
+        ) from None
+
+
+def _require_preparation_cleanup_binding(
+    parent: int,
+    reference: str,
+    identity: FileIdentity,
+    source: int,
+    quarantined: int,
+) -> int:
+    opened = source if _descriptor_is_open(source) else quarantined
+    if not _descriptor_is_open(opened):
+        raise _error(
+            "config.external_change",
+            "Config preparation recovery file is absent.",
+        )
+    _require_private_preparation_file(opened, identity)
+    bound_reference = (
+        reference if _descriptor_is_open(source) else _cleanup_reference(reference)
+    )
+    if not _name_binds(parent, bound_reference, identity):
+        raise _error(
+            "config.external_change",
+            "Config preparation recovery namespace changed.",
+        )
+    return opened
+
+
+def cleanup_restarted_config_preparation(
+    path: ConfigPathProof,
+    descriptor: ConfigPreparationRecoveryDescriptor,
+) -> Result[ConfigPreparationRecoveryDescriptor]:
+    """Delete only stages bound before a terminated secret-bearing write."""
+
+    parent = 0 if os.name == "nt" else -1
+    stage_handles: list[tuple[str, FileIdentity, int, int]] = []
+    authority_handles: list[tuple[str, FileIdentity, int, int, str]] = []
+    try:
+        if (
+            type(path) is not ConfigPathProof
+            or type(descriptor) is not ConfigPreparationRecoveryDescriptor
+        ):
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery input is invalid.",
+            )
+        descriptor._require_durable()
+        path._require_current()
+        parent = path._duplicate_parent_descriptor()
+        if _identity_from_descriptor(parent) != descriptor.parent_identity:
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery parent changed.",
+            )
+        assert descriptor.authority_reference is not None
+        assert descriptor.authority_identity is not None
+        for _role, reference, identity in descriptor.stages:
+            assert identity is not None
+            source, quarantined = _open_preparation_cleanup_name(parent, reference)
+            opened = source if _descriptor_is_open(source) else quarantined
+            if _descriptor_is_open(opened):
+                stage_handles.append((reference, identity, source, quarantined))
+            else:
+                _close_descriptor(source)
+                if quarantined != source:
+                    _close_descriptor(quarantined)
+        expected_authorities = tuple(
+            _preparation_authority_reference(descriptor.transaction_digest, role)
+            for role, _reference, _identity in descriptor.stages
+        )
+        predecessor_authorities = {
+            reference: (identity, record_digest)
+            for reference, identity, record_digest in descriptor.predecessor_authorities
+        }
+        latest_authority_present = False
+        for role in ("snapshot", "backup", "candidate"):
+            reference = _preparation_authority_reference(
+                descriptor.transaction_digest,
+                role,
+            )
+            source, quarantined = _open_preparation_cleanup_name(parent, reference)
+            opened = source if _descriptor_is_open(source) else quarantined
+            if not _descriptor_is_open(opened):
+                _close_descriptor(source)
+                if quarantined != source:
+                    _close_descriptor(quarantined)
+                continue
+            if reference not in expected_authorities:
+                _close_descriptor(source)
+                if quarantined != source:
+                    _close_descriptor(quarantined)
+                raise _error(
+                    "config.external_change",
+                    "Config preparation checkpoint set changed.",
+                )
+            if reference == descriptor.authority_reference:
+                authority_identity = descriptor.authority_identity
+                expected_digest = hashlib.sha256(
+                    canonical_json_bytes(descriptor.to_record())
+                ).hexdigest()
+                latest_authority_present = True
+            else:
+                predecessor = predecessor_authorities.get(reference)
+                if predecessor is None:
+                    _close_descriptor(source)
+                    if quarantined != source:
+                        _close_descriptor(quarantined)
+                    raise _error(
+                        "config.external_change",
+                        "Config preparation predecessor authority is unbound.",
+                    )
+                authority_identity, expected_digest = predecessor
+            authority_handles.append(
+                (
+                    reference,
+                    authority_identity,
+                    source,
+                    quarantined,
+                    expected_digest,
+                )
+            )
+        if not latest_authority_present:
+            if stage_handles or authority_handles:
+                raise _error(
+                    "config.external_change",
+                    "Config preparation recovery authority is absent.",
+                )
+            return Result.success(descriptor)
+
+        # Validate the complete recovery set before deleting any member.
+        for (
+            reference,
+            identity,
+            source,
+            quarantined,
+            expected_digest,
+        ) in authority_handles:
+            opened = _require_preparation_cleanup_binding(
+                parent,
+                reference,
+                identity,
+                source,
+                quarantined,
+            )
+            if (
+                hashlib.sha256(_recovery_descriptor_bytes(opened)).hexdigest()
+                != expected_digest
+            ):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation recovery authority changed.",
+                )
+        for reference, identity, source, quarantined in stage_handles:
+            _require_preparation_cleanup_binding(
+                parent,
+                reference,
+                identity,
+                source,
+                quarantined,
+            )
+
+        # Revalidate each exact stage at its mutation boundary.
+        for reference, identity, source, quarantined in stage_handles:
+            opened = _require_preparation_cleanup_binding(
+                parent,
+                reference,
+                identity,
+                source,
+                quarantined,
+            )
+            if not _unlink_owned(parent, reference, opened, identity):
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config preparation stage cleanup is ambiguous.",
+                )
+        _sync_parent(parent)
+
+        # Remove superseded checkpoints first so the newest complete authority
+        # remains restartable until the final unlink.
+        for (
+            reference,
+            identity,
+            source,
+            quarantined,
+            expected_digest,
+        ) in authority_handles:
+            opened = _require_preparation_cleanup_binding(
+                parent,
+                reference,
+                identity,
+                source,
+                quarantined,
+            )
+            if (
+                hashlib.sha256(_recovery_descriptor_bytes(opened)).hexdigest()
+                != expected_digest
+            ):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation recovery authority changed.",
+                )
+            if not _unlink_owned(parent, reference, opened, identity):
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config preparation authority cleanup is ambiguous.",
+                )
+        _sync_parent(parent)
+        path._require_current()
+        return Result.success(descriptor)
+    except ForgeError as exc:
+        return Result.failure(exc)
+    except (AssertionError, OSError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "config.commit_ambiguous",
+                "Config preparation recovery cleanup is ambiguous.",
+            )
+        )
+    finally:
+        for _reference, _identity, source, quarantined in stage_handles:
+            _close_descriptor(source)
+            if quarantined != source:
+                _close_descriptor(quarantined)
+        for _reference, _identity, source, quarantined, _expected in authority_handles:
+            _close_descriptor(source)
+            if quarantined != source:
+                _close_descriptor(quarantined)
+        _close_descriptor(parent)
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class BackupRecord:
     transaction_digest: str
@@ -674,10 +1413,91 @@ class BackupRecord:
         raise TypeError("config backup records are not serializable")
 
 
+def _valid_digest(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _valid_target_metadata(
+    *,
+    posix_mode: object,
+    posix_xattrs: object,
+    windows_attributes: object,
+    windows_authorization: object,
+) -> bool:
+    if _RECOVERY_PLATFORM == "posix":
+        if (
+            type(posix_mode) is not int
+            or posix_mode not in {0o600, 0o644}
+            or type(posix_xattrs) is not tuple
+            or windows_attributes is not None
+            or windows_authorization is not None
+        ):
+            return False
+        previous = ""
+        for item in posix_xattrs:
+            if (
+                type(item) is not tuple
+                or len(item) != 2
+                or type(item[0]) is not str
+                or not item[0]
+                or item[0] <= previous
+                or len(item[0].encode("ascii", errors="ignore")) != len(item[0])
+                or not _valid_digest(item[1])
+            ):
+                return False
+            previous = item[0]
+        return True
+    if (
+        posix_mode is not None
+        or posix_xattrs != ()
+        or type(windows_attributes) is not int
+        or windows_attributes < 0
+        or type(windows_authorization) is not tuple
+        or len(windows_authorization) != 4
+    ):
+        return False
+    owner, group, control, aces = windows_authorization
+    return (
+        all(type(value) is str and value for value in (owner, group, control))
+        and type(aces) is tuple
+        and all(
+            type(ace) is tuple
+            and len(ace) == 6
+            and all(type(value) is str for value in ace)
+            for ace in aces
+        )
+    )
+
+
+def _target_metadata_domain(
+    *,
+    posix_mode: int | None,
+    posix_xattrs: tuple[tuple[str, str], ...],
+    windows_attributes: int | None,
+    windows_authorization: WindowsAuthorizationProjection | None,
+) -> dict[str, object]:
+    return {
+        "platform": _RECOVERY_PLATFORM,
+        "posix_mode": posix_mode,
+        "posix_xattrs": posix_xattrs,
+        "windows_attributes": windows_attributes,
+        "windows_authorization": windows_authorization,
+    }
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class ConfigRecoveryDescriptor:
     """Secret-free, journal-safe identity for retained config recovery files."""
 
+    descriptor_version: str
+    platform: str
+    limit_policy_version: str
+    metadata_policy_version: str
+    retention_policy_version: str
     transaction_digest: str
     parent_identity: tuple[int, int]
     snapshot_reference: str
@@ -696,6 +1516,14 @@ class ConfigRecoveryDescriptor:
     candidate_byte_digest: str
     metadata_fingerprint: str
     persistent_backup: bool
+    target_posix_mode: int | None
+    target_posix_xattrs: tuple[tuple[str, str], ...]
+    target_windows_attributes: int | None
+    target_windows_authorization: WindowsAuthorizationProjection | None
+    target_metadata_digest: str
+    snapshot_stage_metadata_digest: str
+    candidate_stage_metadata_digest: str
+    backup_stage_metadata_digest: str | None
     _binding_digest: str
     _seal: object
 
@@ -720,11 +1548,105 @@ class ConfigRecoveryDescriptor:
         candidate_byte_digest: str,
         metadata_fingerprint: str,
         persistent_backup: bool,
+        target_posix_mode: int | None,
+        target_posix_xattrs: tuple[tuple[str, str], ...],
+        target_windows_attributes: int | None,
+        target_windows_authorization: WindowsAuthorizationProjection | None,
+        snapshot_stage_metadata_digest: str,
+        candidate_stage_metadata_digest: str,
+        backup_stage_metadata_digest: str | None,
         _token: object,
     ) -> None:
-        if _token is not _RECOVERY_DESCRIPTOR_TOKEN:
+        tag = transaction_digest[:24] if type(transaction_digest) is str else ""
+        expected_candidate = f"{_PRIVATE_PREFIX}{tag}.candidate"
+        expected_displaced = (
+            f"{_PRIVATE_PREFIX}{tag}.displaced"
+            if _RECOVERY_PLATFORM == "windows"
+            else expected_candidate
+        )
+        if (
+            _token is not _RECOVERY_DESCRIPTOR_TOKEN
+            or not _valid_digest(transaction_digest)
+            or not _valid_file_identity(parent_identity)
+            or not _valid_file_identity(snapshot_identity)
+            or not _valid_file_identity(candidate_identity)
+            or (
+                displaced_identity is not None
+                and not _valid_file_identity(displaced_identity)
+            )
+            or (
+                backup_identity is not None
+                and not _valid_file_identity(backup_identity)
+            )
+            or (
+                before_identity is not None
+                and not _valid_file_identity(before_identity)
+            )
+            or snapshot_reference != f"{_PRIVATE_PREFIX}{tag}.snapshot"
+            or candidate_reference != expected_candidate
+            or displaced_reference != expected_displaced
+            or backup_stage_reference != f"{_PRIVATE_PREFIX}{tag}.backup"
+            or backup_reference != f"{_BACKUP_PREFIX}{tag}.toml"
+            or not _valid_digest(before_snapshot_digest)
+            or not _valid_digest(before_byte_digest)
+            or (
+                before_mode is not None
+                and (type(before_mode) is not int or before_mode not in {0o600, 0o644})
+            )
+            or (before_identity is None and before_mode is not None)
+            or (before_identity is None and displaced_identity is not None)
+            or before_identity == candidate_identity
+            or not _valid_digest(candidate_byte_digest)
+            or not _valid_digest(metadata_fingerprint)
+            or type(persistent_backup) is not bool
+            or persistent_backup != (backup_identity is not None)
+            or len(
+                {
+                    snapshot_identity,
+                    candidate_identity,
+                    *(() if backup_identity is None else (backup_identity,)),
+                }
+            )
+            != (2 if backup_identity is None else 3)
+            or not _valid_digest(snapshot_stage_metadata_digest)
+            or not _valid_digest(candidate_stage_metadata_digest)
+            or (
+                backup_stage_metadata_digest is not None
+                and not _valid_digest(backup_stage_metadata_digest)
+            )
+            or (backup_identity is None) != (backup_stage_metadata_digest is None)
+            or len(
+                {
+                    snapshot_stage_metadata_digest,
+                    candidate_stage_metadata_digest,
+                    *(
+                        ()
+                        if backup_stage_metadata_digest is None
+                        else (backup_stage_metadata_digest,)
+                    ),
+                }
+            )
+            != (2 if backup_stage_metadata_digest is None else 3)
+            or not _valid_target_metadata(
+                posix_mode=target_posix_mode,
+                posix_xattrs=target_posix_xattrs,
+                windows_attributes=target_windows_attributes,
+                windows_authorization=target_windows_authorization,
+            )
+        ):
             raise TypeError("ConfigRecoveryDescriptor is created only by preparation")
+        target_metadata_digest = hashlib.sha256(
+            canonical_json_bytes(
+                _target_metadata_domain(
+                    posix_mode=target_posix_mode,
+                    posix_xattrs=target_posix_xattrs,
+                    windows_attributes=target_windows_attributes,
+                    windows_authorization=target_windows_authorization,
+                )
+            )
+        ).hexdigest()
         domain = {
+            "backup_stage_metadata_digest": backup_stage_metadata_digest,
             "backup_identity": backup_identity,
             "backup_reference": backup_reference,
             "backup_stage_reference": backup_stage_reference,
@@ -735,13 +1657,25 @@ class ConfigRecoveryDescriptor:
             "candidate_byte_digest": candidate_byte_digest,
             "candidate_identity": candidate_identity,
             "candidate_reference": candidate_reference,
+            "candidate_stage_metadata_digest": candidate_stage_metadata_digest,
+            "descriptor_version": _RECOVERY_DESCRIPTOR_VERSION,
             "displaced_identity": displaced_identity,
             "displaced_reference": displaced_reference,
+            "limit_policy_version": LIMIT_POLICY.version,
             "metadata_fingerprint": metadata_fingerprint,
+            "metadata_policy_version": CONFIG_METADATA_POLICY.version,
             "parent_identity": parent_identity,
             "persistent_backup": persistent_backup,
+            "platform": _RECOVERY_PLATFORM,
+            "retention_policy_version": RECOVERY_RETENTION_POLICY.version,
             "snapshot_identity": snapshot_identity,
             "snapshot_reference": snapshot_reference,
+            "snapshot_stage_metadata_digest": snapshot_stage_metadata_digest,
+            "target_metadata_digest": target_metadata_digest,
+            "target_posix_mode": target_posix_mode,
+            "target_posix_xattrs": target_posix_xattrs,
+            "target_windows_attributes": target_windows_attributes,
+            "target_windows_authorization": target_windows_authorization,
             "transaction_digest": transaction_digest,
         }
         binding = hashlib.sha256(canonical_json_bytes(domain)).hexdigest()
@@ -754,6 +1688,7 @@ class ConfigRecoveryDescriptor:
 
     def _domain(self) -> dict[str, object]:
         return {
+            "backup_stage_metadata_digest": self.backup_stage_metadata_digest,
             "backup_identity": self.backup_identity,
             "backup_reference": self.backup_reference,
             "backup_stage_reference": self.backup_stage_reference,
@@ -764,13 +1699,25 @@ class ConfigRecoveryDescriptor:
             "candidate_byte_digest": self.candidate_byte_digest,
             "candidate_identity": self.candidate_identity,
             "candidate_reference": self.candidate_reference,
+            "candidate_stage_metadata_digest": self.candidate_stage_metadata_digest,
+            "descriptor_version": self.descriptor_version,
             "displaced_identity": self.displaced_identity,
             "displaced_reference": self.displaced_reference,
+            "limit_policy_version": self.limit_policy_version,
             "metadata_fingerprint": self.metadata_fingerprint,
+            "metadata_policy_version": self.metadata_policy_version,
             "parent_identity": self.parent_identity,
             "persistent_backup": self.persistent_backup,
+            "platform": self.platform,
+            "retention_policy_version": self.retention_policy_version,
             "snapshot_identity": self.snapshot_identity,
             "snapshot_reference": self.snapshot_reference,
+            "snapshot_stage_metadata_digest": self.snapshot_stage_metadata_digest,
+            "target_metadata_digest": self.target_metadata_digest,
+            "target_posix_mode": self.target_posix_mode,
+            "target_posix_xattrs": self.target_posix_xattrs,
+            "target_windows_attributes": self.target_windows_attributes,
+            "target_windows_authorization": self.target_windows_authorization,
             "transaction_digest": self.transaction_digest,
         }
 
@@ -784,6 +1731,22 @@ class ConfigRecoveryDescriptor:
         if (
             self._seal is not _RECOVERY_DESCRIPTOR_TOKEN
             or self._binding_digest != expected
+            or self.descriptor_version != _RECOVERY_DESCRIPTOR_VERSION
+            or self.platform != _RECOVERY_PLATFORM
+            or self.limit_policy_version != LIMIT_POLICY.version
+            or self.metadata_policy_version != CONFIG_METADATA_POLICY.version
+            or self.retention_policy_version != RECOVERY_RETENTION_POLICY.version
+            or self.target_metadata_digest
+            != hashlib.sha256(
+                canonical_json_bytes(
+                    _target_metadata_domain(
+                        posix_mode=self.target_posix_mode,
+                        posix_xattrs=self.target_posix_xattrs,
+                        windows_attributes=self.target_windows_attributes,
+                        windows_authorization=self.target_windows_authorization,
+                    )
+                )
+            ).hexdigest()
         ):
             raise _error(
                 "config.external_change", "Config recovery descriptor changed."
@@ -792,6 +1755,172 @@ class ConfigRecoveryDescriptor:
     def to_record(self) -> dict[str, object]:
         self._require_valid()
         return {**self._domain(), "descriptor_digest": self._binding_digest}
+
+    def __reduce__(self) -> Never:
+        raise TypeError("config recovery descriptors are not serializable")
+
+
+def _decode_identity(value: object, *, optional: bool = False) -> FileIdentity | None:
+    if optional and value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or type(value) not in {list, tuple}
+        or len(value) != 2
+    ):
+        raise TypeError("invalid recovery identity")
+    identity = (value[0], value[1])
+    if not _valid_file_identity(identity):
+        raise TypeError("invalid recovery identity")
+    return identity
+
+
+def _decode_posix_xattrs(value: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, (list, tuple)) or type(value) not in {list, tuple}:
+        raise TypeError("invalid recovery xattrs")
+    decoded: list[tuple[str, str]] = []
+    for item in value:
+        if (
+            not isinstance(item, (list, tuple))
+            or type(item) not in {list, tuple}
+            or len(item) != 2
+        ):
+            raise TypeError("invalid recovery xattr")
+        decoded.append((item[0], item[1]))
+    return tuple(decoded)
+
+
+def _decode_windows_authorization(
+    value: object,
+) -> WindowsAuthorizationProjection | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or type(value) not in {list, tuple}
+        or len(value) != 4
+    ):
+        raise TypeError("invalid recovery authorization")
+    aces = value[3]
+    if not isinstance(aces, (list, tuple)) or type(aces) not in {list, tuple}:
+        raise TypeError("invalid recovery authorization")
+    decoded_aces: list[tuple[str, ...]] = []
+    for ace in aces:
+        if not isinstance(ace, (list, tuple)) or type(ace) not in {list, tuple}:
+            raise TypeError("invalid recovery authorization")
+        decoded_aces.append(tuple(ace))
+    return (value[0], value[1], value[2], tuple(decoded_aces))
+
+
+def decode_config_recovery_descriptor(
+    record: object,
+) -> Result[ConfigRecoveryDescriptor]:
+    """Strictly decode inert journal data into sealed recovery evidence."""
+
+    try:
+        if type(record) is not dict:
+            raise TypeError("recovery record must be an exact mapping")
+        expected_keys = {
+            "backup_identity",
+            "backup_reference",
+            "backup_stage_metadata_digest",
+            "backup_stage_reference",
+            "before_byte_digest",
+            "before_identity",
+            "before_mode",
+            "before_snapshot_digest",
+            "candidate_byte_digest",
+            "candidate_identity",
+            "candidate_reference",
+            "candidate_stage_metadata_digest",
+            "descriptor_digest",
+            "descriptor_version",
+            "displaced_identity",
+            "displaced_reference",
+            "limit_policy_version",
+            "metadata_fingerprint",
+            "metadata_policy_version",
+            "parent_identity",
+            "persistent_backup",
+            "platform",
+            "retention_policy_version",
+            "snapshot_identity",
+            "snapshot_reference",
+            "snapshot_stage_metadata_digest",
+            "target_metadata_digest",
+            "target_posix_mode",
+            "target_posix_xattrs",
+            "target_windows_attributes",
+            "target_windows_authorization",
+            "transaction_digest",
+        }
+        if set(record) != expected_keys:
+            raise TypeError("recovery record fields are incomplete")
+        if (
+            len(canonical_json_bytes(record)) > LIMIT_POLICY.value("json_record_bytes")
+            or record["descriptor_version"] != _RECOVERY_DESCRIPTOR_VERSION
+            or record["platform"] != _RECOVERY_PLATFORM
+            or record["limit_policy_version"] != LIMIT_POLICY.version
+            or record["metadata_policy_version"] != CONFIG_METADATA_POLICY.version
+            or record["retention_policy_version"] != RECOVERY_RETENTION_POLICY.version
+        ):
+            raise TypeError("recovery record authority is unsupported")
+        parent_identity = _decode_identity(record["parent_identity"])
+        snapshot_identity = _decode_identity(record["snapshot_identity"])
+        candidate_identity = _decode_identity(record["candidate_identity"])
+        if (
+            parent_identity is None
+            or snapshot_identity is None
+            or candidate_identity is None
+        ):
+            raise TypeError("required recovery identity is absent")
+        descriptor = ConfigRecoveryDescriptor(
+            transaction_digest=record["transaction_digest"],
+            parent_identity=parent_identity,
+            snapshot_reference=record["snapshot_reference"],
+            snapshot_identity=snapshot_identity,
+            candidate_reference=record["candidate_reference"],
+            candidate_identity=candidate_identity,
+            displaced_reference=record["displaced_reference"],
+            displaced_identity=_decode_identity(
+                record["displaced_identity"], optional=True
+            ),
+            backup_stage_reference=record["backup_stage_reference"],
+            backup_reference=record["backup_reference"],
+            backup_identity=_decode_identity(record["backup_identity"], optional=True),
+            before_identity=_decode_identity(record["before_identity"], optional=True),
+            before_snapshot_digest=record["before_snapshot_digest"],
+            before_byte_digest=record["before_byte_digest"],
+            before_mode=record["before_mode"],
+            candidate_byte_digest=record["candidate_byte_digest"],
+            metadata_fingerprint=record["metadata_fingerprint"],
+            persistent_backup=record["persistent_backup"],
+            target_posix_mode=record["target_posix_mode"],
+            target_posix_xattrs=_decode_posix_xattrs(record["target_posix_xattrs"]),
+            target_windows_attributes=record["target_windows_attributes"],
+            target_windows_authorization=_decode_windows_authorization(
+                record["target_windows_authorization"]
+            ),
+            snapshot_stage_metadata_digest=record["snapshot_stage_metadata_digest"],
+            candidate_stage_metadata_digest=record["candidate_stage_metadata_digest"],
+            backup_stage_metadata_digest=record["backup_stage_metadata_digest"],
+            _token=_RECOVERY_DESCRIPTOR_TOKEN,
+        )
+        if (
+            not _valid_digest(record["descriptor_digest"])
+            or descriptor._binding_digest != record["descriptor_digest"]
+            or descriptor.target_metadata_digest != record["target_metadata_digest"]
+        ):
+            raise TypeError("recovery record digest changed")
+        descriptor._require_valid()
+        return Result.success(descriptor)
+    except (ForgeError, KeyError, OverflowError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "config.external_change",
+                "Config recovery descriptor could not be decoded.",
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -1238,24 +2367,28 @@ def _unlink_owned(
         except OSError:
             return False
         return True
+    quarantine = _cleanup_reference(name)
     if not _name_exists(parent, name):
-        try:
-            return allow_moved or os.fstat(descriptor).st_nlink == 0
-        except OSError:
+        if allow_moved:
+            return True
+        if not _name_binds(parent, quarantine, identity):
+            try:
+                return os.fstat(descriptor).st_nlink == 0
+            except OSError:
+                return False
+    else:
+        if not _name_binds(parent, name, identity) or _name_exists(parent, quarantine):
             return False
-    if not _name_binds(parent, name, identity):
-        return False
-    quarantine = f"{_PRIVATE_PREFIX}cleanup-{secrets.token_hex(16)}"
-    try:
-        _paths._exclusive_posix_rename(parent, name, quarantine)
-    except (ForgeError, OSError, ValueError):
-        return False
+        try:
+            _paths._exclusive_posix_rename(parent, name, quarantine)
+        except (ForgeError, OSError, ValueError):
+            return False
     opened = -1
     exact = False
     try:
         opened = os.open(
             quarantine,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
             dir_fd=parent,
         )
         status = os.fstat(opened)
@@ -1273,11 +2406,55 @@ def _unlink_owned(
         pass
     finally:
         _close_descriptor(opened)
-    try:
-        _paths._exclusive_posix_rename(parent, quarantine, name)
-    except (ForgeError, OSError, ValueError):
-        return False
     return False
+
+
+def _owned_cleanup_member_is_valid(
+    parent: int,
+    name: str,
+    descriptor: int,
+    identity: FileIdentity,
+    *,
+    allow_moved: bool = False,
+) -> bool:
+    try:
+        if (
+            not _descriptor_is_open(descriptor)
+            or _identity_from_descriptor(descriptor) != identity
+        ):
+            return False
+    except OSError:
+        return False
+    if allow_moved and not _name_exists(parent, name):
+        return True
+    source_binds = _name_binds(parent, name, identity)
+    quarantine_binds = _name_binds(parent, _cleanup_reference(name), identity)
+    return source_binds != quarantine_binds
+
+
+def _preparation_authority_capability_is_valid(
+    parent: int,
+    authority: _PreparationAuthorityCapability,
+) -> bool:
+    if not _owned_cleanup_member_is_valid(
+        parent,
+        authority.reference,
+        authority.descriptor,
+        authority.identity,
+    ):
+        return False
+    if authority.record_digest is None:
+        # Population failed before this live capability became durable
+        # checkpoint authority. Its exact exclusive handle still authorizes
+        # cleanup, but it can never be exported for restart.
+        return True
+    try:
+        return (
+            hashlib.sha256(_recovery_descriptor_bytes(authority.descriptor)).hexdigest()
+            == authority.record_digest
+        )
+    except OSError:
+        return False
 
 
 def _close_descriptor(descriptor: int) -> None:
@@ -1399,6 +2576,7 @@ class PreparedAtomicFile:
         "_candidate_descriptor",
         "_candidate_identity",
         "_candidate_published",
+        "_candidate_removed",
         "_closed",
         "_commit_attempted",
         "_displaced_descriptor",
@@ -1407,6 +2585,13 @@ class PreparedAtomicFile:
         "_displaced_removed",
         "_parent_descriptor",
         "_path",
+        "_preparation_acknowledged",
+        "_preparation_authority_descriptor",
+        "_preparation_authority_closed",
+        "_preparation_authority_identity",
+        "_preparation_authority_reference",
+        "_preparation_authority_removed",
+        "_preparation_descriptor",
         "_recovery_descriptor",
         "_retain_recovery",
         "_replace_conflict",
@@ -1445,6 +2630,10 @@ class PreparedAtomicFile:
         candidate_reference: str,
         backup_stage_reference: str,
         backup_reference: str,
+        preparation_descriptor: ConfigPreparationRecoveryDescriptor,
+        preparation_authority_descriptor: int,
+        preparation_authority_identity: FileIdentity,
+        preparation_authority_reference: str,
         _token: object,
     ) -> None:
         if _token is not _PREPARED_TOKEN:
@@ -1470,12 +2659,20 @@ class PreparedAtomicFile:
         self._snapshot = snapshot
         self._candidate = candidate
         self._parent_descriptor = parent_descriptor
+        self._preparation_descriptor = preparation_descriptor
+        self._preparation_authority_descriptor = preparation_authority_descriptor
+        self._preparation_authority_identity = preparation_authority_identity
+        self._preparation_authority_reference = preparation_authority_reference
+        self._preparation_authority_removed = False
+        self._preparation_authority_closed = False
+        self._preparation_acknowledged = False
         self._snapshot_descriptor = snapshot_descriptor
         self._snapshot_identity = snapshot_identity
         self._snapshot_removed = False
         self._candidate_descriptor = candidate_descriptor
         self._candidate_identity = candidate_identity
         self._candidate_published = False
+        self._candidate_removed = False
         self._backup_descriptor = backup_descriptor
         self._snapshot_stage_metadata = _stage_metadata_digest(snapshot_descriptor)
         self._candidate_stage_metadata = _stage_metadata_digest(candidate_descriptor)
@@ -1525,6 +2722,16 @@ class PreparedAtomicFile:
             candidate_byte_digest=candidate.byte_digest,
             metadata_fingerprint=snapshot.metadata_fingerprint,
             persistent_backup=candidate.persistent_backup,
+            target_posix_mode=(None if os.name == "nt" else self._target_mode),
+            target_posix_xattrs=tuple(
+                (name.decode("ascii"), hashlib.sha256(value).hexdigest())
+                for name, value in self._target_posix_xattrs
+            ),
+            target_windows_attributes=self._target_windows_attributes,
+            target_windows_authorization=self._target_windows_authorization,
+            snapshot_stage_metadata_digest=self._snapshot_stage_metadata,
+            candidate_stage_metadata_digest=self._candidate_stage_metadata,
+            backup_stage_metadata_digest=self._backup_stage_metadata,
             _token=_RECOVERY_DESCRIPTOR_TOKEN,
         )
         self._binding_digest = hashlib.sha256(
@@ -1564,10 +2771,17 @@ class PreparedAtomicFile:
             "candidate_digest": self._candidate.byte_digest,
             "candidate_identity": self._candidate_identity,
             "candidate_reference": self.candidate_reference,
+            "candidate_removed": self._candidate_removed,
             "candidate_stage_metadata": self._candidate_stage_metadata,
             "displaced_identity": self._displaced_identity,
             "displaced_reference": self._displaced_reference,
             "parent_identity": self._snapshot.parent_identity,
+            "preparation_acknowledged": self._preparation_acknowledged,
+            "preparation_authority_closed": self._preparation_authority_closed,
+            "preparation_authority_identity": self._preparation_authority_identity,
+            "preparation_authority_reference": self._preparation_authority_reference,
+            "preparation_authority_removed": self._preparation_authority_removed,
+            "preparation_descriptor_binding": self._preparation_descriptor._binding_digest,
             "recovery_descriptor_binding": self._recovery_descriptor._binding_digest,
             "snapshot_digest": self._snapshot.snapshot_digest,
             "snapshot_identity": self._snapshot_identity,
@@ -1582,6 +2796,86 @@ class PreparedAtomicFile:
             "target_windows_authorization": self._target_windows_authorization,
             "transaction_digest": self.transaction_digest,
         }
+
+    def _preparation_authority_is_valid(self) -> bool:
+        try:
+            self._preparation_descriptor._require_durable()
+            expected_stages = (
+                (
+                    "snapshot",
+                    self.snapshot_reference,
+                    self._snapshot_identity,
+                ),
+                *(
+                    ()
+                    if self._backup_identity is None
+                    else (
+                        (
+                            "backup",
+                            self._backup_stage_reference,
+                            self._backup_identity,
+                        ),
+                    )
+                ),
+                (
+                    "candidate",
+                    self.candidate_reference,
+                    self._candidate_identity,
+                ),
+            )
+            if (
+                self._preparation_descriptor.transaction_digest
+                != self.transaction_digest
+                or self._preparation_descriptor.parent_identity
+                != self._snapshot.parent_identity
+                or self._preparation_descriptor.stages != expected_stages
+                or self._preparation_descriptor.authority_reference
+                != self._preparation_authority_reference
+                or self._preparation_descriptor.authority_identity
+                != self._preparation_authority_identity
+            ):
+                return False
+            if self._preparation_acknowledged and not (
+                self._preparation_authority_removed
+                and self._preparation_authority_closed
+            ):
+                return False
+            if self._preparation_authority_closed:
+                return self._preparation_authority_removed and not _descriptor_is_open(
+                    self._preparation_authority_descriptor
+                )
+            if not _descriptor_is_open(self._preparation_authority_descriptor):
+                return False
+            if self._preparation_authority_removed:
+                return (
+                    _identity_from_descriptor(self._preparation_authority_descriptor)
+                    == self._preparation_authority_identity
+                    and not _name_binds(
+                        self._parent_descriptor,
+                        self._preparation_authority_reference,
+                        self._preparation_authority_identity,
+                    )
+                    and not _name_binds(
+                        self._parent_descriptor,
+                        _cleanup_reference(self._preparation_authority_reference),
+                        self._preparation_authority_identity,
+                    )
+                )
+            return (
+                _identity_from_descriptor(self._preparation_authority_descriptor)
+                == self._preparation_authority_identity
+                and _name_binds(
+                    self._parent_descriptor,
+                    self._preparation_authority_reference,
+                    self._preparation_authority_identity,
+                )
+                and _descriptor_bytes_match(
+                    self._preparation_authority_descriptor,
+                    canonical_json_bytes(self._preparation_descriptor.to_record()),
+                )
+            )
+        except (ForgeError, OSError, TypeError, ValueError):
+            return False
 
     def _bind_displaced(
         self,
@@ -1614,6 +2908,16 @@ class PreparedAtomicFile:
             candidate_byte_digest=self._candidate.byte_digest,
             metadata_fingerprint=self._snapshot.metadata_fingerprint,
             persistent_backup=self._candidate.persistent_backup,
+            target_posix_mode=(None if os.name == "nt" else self._target_mode),
+            target_posix_xattrs=tuple(
+                (name.decode("ascii"), hashlib.sha256(value).hexdigest())
+                for name, value in self._target_posix_xattrs
+            ),
+            target_windows_attributes=self._target_windows_attributes,
+            target_windows_authorization=self._target_windows_authorization,
+            snapshot_stage_metadata_digest=self._snapshot_stage_metadata,
+            candidate_stage_metadata_digest=self._candidate_stage_metadata,
+            backup_stage_metadata_digest=self._backup_stage_metadata,
             _token=_RECOVERY_DESCRIPTOR_TOKEN,
         )
         self._binding_digest = hashlib.sha256(
@@ -1633,6 +2937,7 @@ class PreparedAtomicFile:
             if (
                 self._binding_digest != expected
                 or self._candidate.snapshot_digest != self._snapshot.snapshot_digest
+                or not self._preparation_authority_is_valid()
             ):
                 raise AttributeError
             _require_parent_authority(self)
@@ -1652,6 +2957,7 @@ class PreparedAtomicFile:
         if (
             self._binding_digest != expected
             or self._candidate.snapshot_digest != self._snapshot.snapshot_digest
+            or not self._preparation_authority_is_valid()
             or _identity_from_descriptor(self._parent_descriptor)
             != self._snapshot.parent_identity
             or _identity_from_descriptor(self._snapshot_descriptor)
@@ -1759,6 +3065,7 @@ class PreparedAtomicFile:
         )
         if (
             self._binding_digest != expected
+            or not self._preparation_authority_is_valid()
             or _identity_from_descriptor(self._parent_descriptor)
             != self._snapshot.parent_identity
             or _identity_from_descriptor(self._snapshot_descriptor)
@@ -1864,6 +3171,88 @@ class PreparedAtomicFile:
     def _retain(self) -> None:
         self._retain_recovery = True
 
+    def _refresh_binding(self) -> None:
+        self._binding_digest = hashlib.sha256(
+            canonical_json_bytes(self._domain())
+        ).hexdigest()
+
+    def _mark_preparation_authority_closed(self) -> None:
+        self._preparation_authority_closed = True
+        self._preparation_authority_descriptor = 0 if os.name == "nt" else -1
+        self._refresh_binding()
+
+    def _close_removed_preparation_authority(self) -> None:
+        if self._preparation_authority_closed:
+            return
+        if not self._preparation_authority_removed:
+            raise _error(
+                "config.external_change",
+                "Config preparation checkpoint is not removed.",
+            )
+        try:
+            if (
+                _identity_from_descriptor(self._preparation_authority_descriptor)
+                != self._preparation_authority_identity
+            ):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation checkpoint descriptor changed.",
+                )
+        except OSError:
+            self._mark_preparation_authority_closed()
+            return
+        try:
+            _close_descriptor(self._preparation_authority_descriptor)
+        except OSError:
+            try:
+                still_open = (
+                    _identity_from_descriptor(self._preparation_authority_descriptor)
+                    == self._preparation_authority_identity
+                )
+            except OSError:
+                still_open = False
+            if still_open:
+                raise
+        self._mark_preparation_authority_closed()
+
+    def _acknowledge_preparation(self) -> ConfigRecoveryDescriptor:
+        self._require_ready()
+        if self._preparation_acknowledged:
+            return self.recovery_descriptor
+        if not self._preparation_authority_removed:
+            if not _unlink_owned(
+                self._parent_descriptor,
+                self._preparation_authority_reference,
+                self._preparation_authority_descriptor,
+                self._preparation_authority_identity,
+            ):
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config preparation checkpoint cleanup is ambiguous.",
+                )
+            self._preparation_authority_removed = True
+            self._refresh_binding()
+        self._close_removed_preparation_authority()
+        try:
+            _sync_parent(self._parent_descriptor)
+        except OSError:
+            raise _error(
+                "config.commit_ambiguous",
+                "Config preparation checkpoint durability is ambiguous.",
+            ) from None
+        self._preparation_acknowledged = True
+        self._refresh_binding()
+        self._require_ready()
+        return self.recovery_descriptor
+
+    def _require_acknowledged(self) -> None:
+        self._require_ready()
+        if not self._preparation_acknowledged:
+            raise _error(
+                "config.commit_ambiguous",
+                "Config preparation must be durably acknowledged before commit.",
+            )
+
     def _mark_backup_promoted(self) -> None:
         if self._backup_identity is None or self._backup_promoted:
             return
@@ -1897,81 +3286,171 @@ class PreparedAtomicFile:
                     "config.commit_ambiguous",
                     "Displaced config evidence must be retained.",
                 )
+
+            cleanup_members: list[tuple[str, str, int, FileIdentity, bool]] = []
             if (
                 self._displaced_identity is not None
                 and self._displaced_reference == self.candidate_reference
+                and not self._displaced_removed
             ):
-                candidate_removed = _unlink_owned(
-                    self._parent_descriptor,
-                    self._displaced_reference,
-                    self._displaced_descriptor,
-                    self._displaced_identity,
+                cleanup_members.append(
+                    (
+                        "displaced",
+                        self._displaced_reference,
+                        self._displaced_descriptor,
+                        self._displaced_identity,
+                        False,
+                    )
                 )
-                if candidate_removed:
-                    self._displaced_removed = True
-            else:
-                candidate_removed = _unlink_owned(
-                    self._parent_descriptor,
-                    self.candidate_reference,
-                    self._candidate_descriptor,
-                    self._candidate_identity,
-                    allow_moved=self._candidate_published,
+            elif not self._candidate_removed:
+                cleanup_members.append(
+                    (
+                        "candidate",
+                        self.candidate_reference,
+                        self._candidate_descriptor,
+                        self._candidate_identity,
+                        self._candidate_published,
+                    )
                 )
-            snapshot_removed = _unlink_owned(
-                self._parent_descriptor,
-                self.snapshot_reference,
-                self._snapshot_descriptor,
-                self._snapshot_identity,
-            )
-            if snapshot_removed:
-                self._snapshot_removed = True
-            removed = [candidate_removed, snapshot_removed]
+            if not self._snapshot_removed:
+                cleanup_members.append(
+                    (
+                        "snapshot",
+                        self.snapshot_reference,
+                        self._snapshot_descriptor,
+                        self._snapshot_identity,
+                        False,
+                    )
+                )
             if (
                 self._displaced_identity is not None
                 and self._displaced_reference != self.candidate_reference
+                and not self._displaced_removed
             ):
-                displaced_removed = _unlink_owned(
-                    self._parent_descriptor,
-                    self._displaced_reference,
-                    self._displaced_descriptor,
-                    self._displaced_identity,
+                cleanup_members.append(
+                    (
+                        "displaced",
+                        self._displaced_reference,
+                        self._displaced_descriptor,
+                        self._displaced_identity,
+                        False,
+                    )
                 )
-                if displaced_removed:
-                    self._displaced_removed = True
-                removed.append(displaced_removed)
             if (
                 self._backup_identity is not None
                 and _descriptor_is_open(self._backup_descriptor)
                 and not self._backup_promoted
+                and not self._backup_removed
             ):
-                backup_removed = _unlink_owned(
-                    self._parent_descriptor,
-                    self._backup_stage_reference,
-                    self._backup_descriptor,
-                    self._backup_identity,
+                cleanup_members.append(
+                    (
+                        "backup",
+                        self._backup_stage_reference,
+                        self._backup_descriptor,
+                        self._backup_identity,
+                        False,
+                    )
                 )
-                if backup_removed:
-                    self._backup_removed = True
-                removed.append(backup_removed)
-            if not all(removed):
+
+            # Validate every stage and the newest authority before deleting any
+            # member. This prevents a later name mismatch from orphaning secrets.
+            if any(
+                not _owned_cleanup_member_is_valid(
+                    self._parent_descriptor,
+                    reference,
+                    descriptor,
+                    identity,
+                    allow_moved=allow_moved,
+                )
+                for _role, reference, descriptor, identity, allow_moved in cleanup_members
+            ) or (
+                not self._preparation_authority_removed
+                and not self._preparation_authority_is_valid()
+            ):
                 self._retain_recovery = True
                 raise _error(
                     "config.commit_ambiguous",
-                    "Config recovery cleanup did not remove every owned stage.",
+                    "Config recovery cleanup set changed.",
                 )
+
+            for role, reference, descriptor, identity, allow_moved in cleanup_members:
+                if not _owned_cleanup_member_is_valid(
+                    self._parent_descriptor,
+                    reference,
+                    descriptor,
+                    identity,
+                    allow_moved=allow_moved,
+                ) or not _unlink_owned(
+                    self._parent_descriptor,
+                    reference,
+                    descriptor,
+                    identity,
+                    allow_moved=allow_moved,
+                ):
+                    self._retain_recovery = True
+                    raise _error(
+                        "config.commit_ambiguous",
+                        "Config recovery stage cleanup is ambiguous.",
+                    )
+                if role == "candidate":
+                    self._candidate_removed = True
+                    self._refresh_binding()
+                elif role == "snapshot":
+                    self._snapshot_removed = True
+                elif role == "displaced":
+                    self._displaced_removed = True
+                else:
+                    self._backup_removed = True
+
             try:
                 _sync_parent(self._parent_descriptor)
             except OSError:
                 self._retain_recovery = True
                 raise _error(
                     "config.commit_ambiguous",
-                    "Config recovery cleanup durability is ambiguous.",
+                    "Config recovery stage cleanup durability is ambiguous.",
                 ) from None
+
+            authority_deleted = False
+            if not self._preparation_authority_removed:
+                if not self._preparation_authority_is_valid() or not _unlink_owned(
+                    self._parent_descriptor,
+                    self._preparation_authority_reference,
+                    self._preparation_authority_descriptor,
+                    self._preparation_authority_identity,
+                ):
+                    self._retain_recovery = True
+                    raise _error(
+                        "config.commit_ambiguous",
+                        "Config preparation authority cleanup is ambiguous.",
+                    )
+                self._preparation_authority_removed = True
+                authority_deleted = True
+                self._refresh_binding()
+                try:
+                    self._close_removed_preparation_authority()
+                except OSError:
+                    self._retain_recovery = True
+            if authority_deleted:
+                try:
+                    _sync_parent(self._parent_descriptor)
+                except OSError:
+                    self._retain_recovery = True
+                    raise _error(
+                        "config.commit_ambiguous",
+                        "Config preparation authority durability is ambiguous.",
+                    ) from None
+            if self._retain_recovery:
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config preparation authority close is ambiguous.",
+                )
         for descriptor in (
             self._candidate_descriptor,
             self._snapshot_descriptor,
             self._backup_descriptor,
             self._displaced_descriptor,
+            self._preparation_authority_descriptor,
             self._parent_descriptor,
         ):
             _close_descriptor(descriptor)
@@ -2036,6 +3515,22 @@ def _populate_stage(descriptor: int, raw: bytes, *, mode: int) -> None:
         _populate_windows_stage(descriptor, raw)
         return
     _populate_posix_stage(descriptor, raw, mode=mode)
+
+
+def _populate_preparation_authority(descriptor: int, raw: bytes) -> None:
+    if len(raw) > LIMIT_POLICY.value("json_record_bytes"):
+        raise OSError(errno.EFBIG, "config preparation record exceeds limit")
+    if os.name == "nt":
+        _populate_windows_stage(descriptor, raw)
+        observed = _paths._windows_read(descriptor, limit=len(raw))
+    else:
+        _write_all(descriptor, raw)
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+        _private_posix_file(descriptor, mode=0o600)
+        observed = _read_posix(descriptor, len(raw))
+    if observed != raw:
+        raise OSError(errno.ESTALE, "config preparation record changed")
 
 
 def prepare_atomic_candidate(
@@ -2115,6 +3610,7 @@ def prepare_atomic_candidate(
             snapshot_stage,
             snapshot_identity,
         )
+        preparation_recovery._checkpoint_stage_authority(role="snapshot")
         _populate_stage(snapshot_descriptor, before_raw, mode=0o600)
         if candidate.persistent_backup:
             backup_descriptor, backup_stage = preparation_recovery._create_owned_stage(
@@ -2126,6 +3622,7 @@ def prepare_atomic_candidate(
                 backup_stage,
                 backup_identity,
             )
+            preparation_recovery._checkpoint_stage_authority(role="backup")
             _populate_stage(backup_descriptor, before_raw, mode=0o600)
         candidate_descriptor, candidate_stage = (
             preparation_recovery._create_owned_stage(
@@ -2138,6 +3635,7 @@ def prepare_atomic_candidate(
             candidate_stage,
             candidate_identity,
         )
+        preparation_recovery._checkpoint_stage_authority(role="candidate")
         _populate_stage(
             candidate_descriptor,
             _candidate_bytes(candidate),
@@ -2149,6 +3647,10 @@ def prepare_atomic_candidate(
         _sync_parent(parent)
         if snapshot_identity is None or candidate_identity is None:
             raise OSError(errno.ESTALE, "config staging identity unavailable")
+        (
+            preparation_descriptor,
+            preparation_authority,
+        ) = preparation_recovery._current_persistent_authority()
         prepared = PreparedAtomicFile(
             path=path,
             snapshot=snapshot,
@@ -2165,9 +3667,16 @@ def prepare_atomic_candidate(
             candidate_reference=candidate_reference,
             backup_stage_reference=backup_stage_reference,
             backup_reference=backup_reference,
+            preparation_descriptor=preparation_descriptor,
+            preparation_authority_descriptor=preparation_authority.descriptor,
+            preparation_authority_identity=preparation_authority.identity,
+            preparation_authority_reference=preparation_authority.reference,
             _token=_PREPARED_TOKEN,
         )
         prepared._require_ready()
+        preparation_recovery._transfer_persistent_authority(
+            preparation_authority,
+        )
         parent = 0 if os.name == "nt" else -1
         snapshot_descriptor = 0 if os.name == "nt" else -1
         candidate_descriptor = 0 if os.name == "nt" else -1
@@ -2216,6 +3725,29 @@ def prepare_atomic_candidate(
     if failure is None:
         failure = _error("config.atomic_write_failed", "Atomic config staging failed.")
     return Result.failure(failure)
+
+
+def acknowledge_config_preparation(
+    prepared: PreparedAtomicFile,
+) -> Result[ConfigRecoveryDescriptor]:
+    """Release pre-crash authority only after its prepared record is durable."""
+
+    try:
+        if type(prepared) is not PreparedAtomicFile:
+            raise _error(
+                "config.external_change",
+                "Config preparation acknowledgment is invalid.",
+            )
+        return Result.success(prepared._acknowledge_preparation())
+    except ForgeError as exc:
+        return Result.failure(exc)
+    except (OSError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "config.commit_ambiguous",
+                "Config preparation acknowledgment is ambiguous.",
+            )
+        )
 
 
 def _windows_replace_handle(source: int, parent: int, destination: str) -> None:
@@ -2790,7 +4322,7 @@ def commit_atomic_candidate(
             or type(expected) is not ConfigSnapshot
         ):
             raise _error("config.external_change", "Atomic commit input is invalid.")
-        prepared._require_ready()
+        prepared._require_acknowledged()
         expected._require_valid()
         if expected.snapshot_digest != prepared._snapshot.snapshot_digest:
             raise _error("config.external_change", "Atomic commit snapshot is stale.")
@@ -2999,4 +4531,718 @@ def classify_config_after_replace(
             _error(
                 "config.external_change", "Post-replace config cannot be classified."
             )
+        )
+
+
+def _cleanup_reference(reference: str) -> str:
+    return (
+        f"{_PRIVATE_PREFIX}cleanup-"
+        f"{hashlib.sha256(reference.encode('utf-8')).hexdigest()[:24]}"
+    )
+
+
+def _open_recovery_name(parent: int, name: str, *, delete: bool = False) -> int:
+    if os.name == "nt":
+        try:
+            return _paths._windows_open_child(
+                parent,
+                name,
+                directory=False,
+                read_data=True,
+                delete_access=delete,
+            )
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError) or getattr(exc, "winerror", None) in {
+                2,
+                3,
+            }:
+                return 0
+            raise
+    try:
+        return os.open(
+            name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent,
+        )
+    except FileNotFoundError:
+        return -1
+
+
+def _recovery_name_binds_identity(
+    parent: int,
+    name: str,
+    identity: FileIdentity,
+) -> bool:
+    if os.name == "nt":
+        return _name_binds(parent, name, identity)
+    try:
+        status = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        return (status.st_dev, status.st_ino) == identity
+    except OSError:
+        return False
+
+
+def _recovery_descriptor_bytes(descriptor: int) -> bytes:
+    limit = LIMIT_POLICY.value("toml_bytes")
+    if os.name == "nt":
+        status = _paths._windows_handle_status(descriptor)
+        if status.size > limit:
+            raise OSError(errno.EFBIG, "config recovery file exceeds limit")
+        raw = _paths._windows_read(descriptor, limit=limit)
+        if len(raw) != status.size:
+            raise OSError(errno.ESTALE, "config recovery file changed")
+        return raw
+    return _read_posix(descriptor, limit)
+
+
+def _target_metadata_matches_descriptor(
+    descriptor: int,
+    recovery: ConfigRecoveryDescriptor,
+) -> bool:
+    try:
+        if os.name == "nt":
+            _private_windows_file(descriptor)
+            attributes, authorization = _windows_metadata_projection(descriptor)
+            domain = _target_metadata_domain(
+                posix_mode=None,
+                posix_xattrs=(),
+                windows_attributes=attributes,
+                windows_authorization=authorization,
+            )
+        else:
+            status = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(status.st_mode)
+                or status.st_uid != os.geteuid()
+                or status.st_gid != os.getegid()
+                or status.st_nlink != 1
+                or bool(getattr(status, "st_flags", 0))
+                or not _paths._posix_security_metadata_supported(descriptor, status)
+            ):
+                return False
+            domain = _target_metadata_domain(
+                posix_mode=stat.S_IMODE(status.st_mode),
+                posix_xattrs=tuple(
+                    (name.decode("ascii"), hashlib.sha256(value).hexdigest())
+                    for name, value in _descriptor_xattrs(descriptor)
+                ),
+                windows_attributes=None,
+                windows_authorization=None,
+            )
+        return (
+            hashlib.sha256(canonical_json_bytes(domain)).hexdigest()
+            == recovery.target_metadata_digest
+        )
+    except (ForgeError, OSError, TypeError, UnicodeDecodeError, ValueError):
+        return False
+
+
+def _recovery_descriptor_is_regular(descriptor: int) -> bool:
+    if os.name == "nt":
+        status = _paths._windows_handle_status(descriptor)
+        return not status.is_directory and not status.is_reparse
+    return stat.S_ISREG(os.fstat(descriptor).st_mode)
+
+
+def _validate_recovery_file(
+    descriptor: int,
+    recovery: ConfigRecoveryDescriptor,
+    identity: FileIdentity,
+) -> None:
+    if (
+        not _recovery_descriptor_is_regular(descriptor)
+        or _identity_from_descriptor(descriptor) != identity
+    ):
+        raise _error("config.external_change", "Config recovery identity changed.")
+    raw_digest = hashlib.sha256(_recovery_descriptor_bytes(descriptor)).hexdigest()
+    expected_metadata: str | None
+    if identity == recovery.snapshot_identity:
+        expected_digest = recovery.before_byte_digest
+        expected_metadata = recovery.snapshot_stage_metadata_digest
+        target_metadata = False
+        candidate_metadata_transition = False
+    elif identity == recovery.candidate_identity:
+        expected_digest = recovery.candidate_byte_digest
+        expected_metadata = recovery.candidate_stage_metadata_digest
+        target_metadata = False
+        candidate_metadata_transition = True
+    elif recovery.backup_identity is not None and identity == recovery.backup_identity:
+        expected_digest = recovery.before_byte_digest
+        expected_metadata = recovery.backup_stage_metadata_digest
+        target_metadata = False
+        candidate_metadata_transition = False
+    elif identity in {recovery.before_identity, recovery.displaced_identity}:
+        expected_digest = recovery.before_byte_digest
+        expected_metadata = None
+        target_metadata = True
+        candidate_metadata_transition = False
+    else:
+        raise _error("config.external_change", "Config recovery identity is unknown.")
+    if raw_digest != expected_digest:
+        raise _error("config.external_change", "Config recovery bytes changed.")
+    if target_metadata:
+        if not _target_metadata_matches_descriptor(descriptor, recovery):
+            raise _error("config.external_change", "Config recovery metadata changed.")
+    elif expected_metadata is None or (
+        _stage_metadata_digest(descriptor) != expected_metadata
+        and not (
+            candidate_metadata_transition
+            and _target_metadata_matches_descriptor(descriptor, recovery)
+        )
+    ):
+        raise _error("config.external_change", "Config recovery metadata changed.")
+
+
+def _reopened_parent_is_valid(recovery: ReopenedConfigRecovery) -> bool:
+    path = recovery._path
+    if (
+        type(path) is not ConfigPathProof
+        or path._closed
+        or not path._namespace._validate_namespace_binding()
+        or not _paths._absolute_home_binding_is_valid(
+            path._home_native,
+            path._home_ancestry,
+            path._home_identity,
+            path._filesystem_guard,
+            windows=path._windows,
+        )
+    ):
+        return False
+    if _identity_from_descriptor(recovery._parent_descriptor) != (
+        recovery._descriptor.parent_identity
+    ):
+        return False
+    if os.name == "nt":
+        windows_status = _paths._windows_handle_status(recovery._parent_descriptor)
+        return (
+            windows_status.identity == recovery._descriptor.parent_identity
+            and windows_status.is_directory
+            and not windows_status.is_reparse
+            and path._filesystem_guard(recovery._parent_descriptor)
+            and _paths._windows_private_directory(
+                recovery._parent_descriptor,
+                exact=False,
+            )
+        )
+    posix_status = os.fstat(recovery._parent_descriptor)
+    return (
+        (posix_status.st_dev, posix_status.st_ino)
+        == recovery._descriptor.parent_identity
+        and path._filesystem_guard(recovery._parent_descriptor)
+        and _paths._private_directory(
+            recovery._parent_descriptor,
+            posix_status,
+            exact=False,
+        )
+    )
+
+
+class ReopenedConfigRecovery:
+    """Restart-safe capability rebound to one exact Codex-home proof."""
+
+    __slots__ = (
+        "_binding_digest",
+        "_closed",
+        "_descriptor",
+        "_lock",
+        "_parent_descriptor",
+        "_path",
+        "_seal",
+    )
+
+    def __init__(
+        self,
+        *,
+        path: ConfigPathProof,
+        descriptor: ConfigRecoveryDescriptor,
+        parent_descriptor: int,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _REOPENED_RECOVERY_TOKEN
+            or type(path) is not ConfigPathProof
+            or type(descriptor) is not ConfigRecoveryDescriptor
+            or not _descriptor_is_open(parent_descriptor)
+        ):
+            raise TypeError("invalid reopened config recovery")
+        self._path = path
+        self._descriptor = descriptor
+        self._parent_descriptor = parent_descriptor
+        self._closed = False
+        self._lock = RLock()
+        self._seal = _REOPENED_RECOVERY_TOKEN
+        self._binding_digest = hashlib.sha256(
+            canonical_json_bytes(self._domain())
+        ).hexdigest()
+        self._require_open()
+
+    def _domain(self) -> dict[str, object]:
+        return {
+            "closed": self._closed,
+            "descriptor_binding": self._descriptor._binding_digest,
+            "parent_descriptor": self._parent_descriptor,
+            "path_identity": id(self._path),
+        }
+
+    def _rebind(self) -> None:
+        self._binding_digest = hashlib.sha256(
+            canonical_json_bytes(self._domain())
+        ).hexdigest()
+
+    def _require_open(self) -> None:
+        try:
+            self._descriptor._require_valid()
+            expected = hashlib.sha256(canonical_json_bytes(self._domain())).hexdigest()
+            if (
+                self._closed
+                or self._seal is not _REOPENED_RECOVERY_TOKEN
+                or self._binding_digest != expected
+                or not _reopened_parent_is_valid(self)
+            ):
+                raise OSError(errno.ESTALE, "reopened recovery changed")
+        except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+            raise _error(
+                "config.external_change", "Reopened config recovery changed."
+            ) from None
+
+    @property
+    def recovery_descriptor(self) -> ConfigRecoveryDescriptor:
+        with self._lock:
+            self._require_open()
+            return self._descriptor
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            _close_descriptor(self._parent_descriptor)
+            self._parent_descriptor = 0 if os.name == "nt" else -1
+            self._closed = True
+            self._rebind()
+
+    def __enter__(self) -> ReopenedConfigRecovery:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __reduce__(self) -> Never:
+        raise TypeError("reopened config recovery capabilities are not serializable")
+
+
+def _expected_recovery_names(
+    descriptor: ConfigRecoveryDescriptor,
+) -> dict[str, set[FileIdentity]]:
+    expected: dict[str, set[FileIdentity]] = {}
+
+    def add(reference: str, identity: FileIdentity | None) -> None:
+        if identity is not None:
+            expected.setdefault(reference, set()).add(identity)
+
+    add(descriptor.snapshot_reference, descriptor.snapshot_identity)
+    add(descriptor.candidate_reference, descriptor.candidate_identity)
+    add(
+        descriptor.displaced_reference,
+        descriptor.displaced_identity or descriptor.before_identity,
+    )
+    add(descriptor.backup_stage_reference, descriptor.backup_identity)
+    add(descriptor.backup_reference, descriptor.backup_identity)
+    for reference, identities in tuple(expected.items()):
+        expected.setdefault(_cleanup_reference(reference), set()).update(identities)
+    return expected
+
+
+def _validate_reopened_names(
+    parent: int,
+    descriptor: ConfigRecoveryDescriptor,
+) -> None:
+    for reference, identities in _expected_recovery_names(descriptor).items():
+        opened = _open_recovery_name(parent, reference)
+        if not _descriptor_is_open(opened):
+            continue
+        try:
+            identity = _identity_from_descriptor(opened)
+            if identity not in identities:
+                raise _error(
+                    "config.external_change", "Config recovery name was replaced."
+                )
+            _validate_recovery_file(opened, descriptor, identity)
+        finally:
+            _close_descriptor(opened)
+
+
+def reopen_config_recovery(
+    path: ConfigPathProof,
+    descriptor: ConfigRecoveryDescriptor,
+) -> Result[ReopenedConfigRecovery]:
+    """Bind decoded recovery evidence to the currently proven Codex home."""
+
+    parent = 0 if os.name == "nt" else -1
+    try:
+        if (
+            type(path) is not ConfigPathProof
+            or type(descriptor) is not ConfigRecoveryDescriptor
+        ):
+            raise _error("config.external_change", "Config recovery input is invalid.")
+        descriptor._require_valid()
+        path._require_current()
+        if path.parent_identity != descriptor.parent_identity:
+            raise _error("config.external_change", "Config recovery parent changed.")
+        parent = path._duplicate_parent_descriptor()
+        _validate_reopened_names(parent, descriptor)
+        reopened = ReopenedConfigRecovery(
+            path=path,
+            descriptor=descriptor,
+            parent_descriptor=parent,
+            _token=_REOPENED_RECOVERY_TOKEN,
+        )
+        parent = 0 if os.name == "nt" else -1
+        return Result.success(reopened)
+    except (ForgeError, OSError, OverflowError, TypeError, ValueError):
+        return Result.failure(
+            _error("config.external_change", "Config recovery could not be reopened.")
+        )
+    finally:
+        _close_descriptor(parent)
+
+
+def _read_reopened_current(
+    recovery: ReopenedConfigRecovery,
+) -> tuple[ConfigCommitState, FileIdentity | None]:
+    descriptor = recovery._descriptor
+    last_identity: FileIdentity | None = None
+    for _attempt in range(3):
+        recovery._require_open()
+        opened = _open_recovery_name(recovery._parent_descriptor, _CONFIG_NAME)
+        if not _descriptor_is_open(opened):
+            recovery._require_open()
+            if not _name_exists(recovery._parent_descriptor, _CONFIG_NAME):
+                recovery._require_open()
+                return ConfigCommitState.ABSENT, None
+            continue
+        try:
+            identity = _identity_from_descriptor(opened)
+            last_identity = identity
+            expected_identity = identity in {
+                descriptor.candidate_identity,
+                descriptor.before_identity,
+            }
+            regular = _recovery_descriptor_is_regular(opened)
+            byte_digest = ""
+            metadata_matches = False
+            if expected_identity and regular:
+                byte_digest = hashlib.sha256(
+                    _recovery_descriptor_bytes(opened)
+                ).hexdigest()
+                metadata_matches = _target_metadata_matches_descriptor(
+                    opened,
+                    descriptor,
+                )
+            recovery._require_open()
+            if not _recovery_name_binds_identity(
+                recovery._parent_descriptor,
+                _CONFIG_NAME,
+                identity,
+            ):
+                continue
+            if (
+                identity == descriptor.candidate_identity
+                and byte_digest == descriptor.candidate_byte_digest
+                and metadata_matches
+            ):
+                return ConfigCommitState.CANDIDATE, identity
+            if (
+                descriptor.before_identity is not None
+                and identity == descriptor.before_identity
+                and byte_digest == descriptor.before_byte_digest
+                and metadata_matches
+            ):
+                return ConfigCommitState.BEFORE, identity
+            return ConfigCommitState.THIRD_PARTY, identity
+        finally:
+            _close_descriptor(opened)
+    return ConfigCommitState.THIRD_PARTY, last_identity
+
+
+def classify_reopened_config_recovery(
+    recovery: ReopenedConfigRecovery,
+) -> Result[ConfigCommitState]:
+    """Classify config state through a restart-safe recovery capability."""
+
+    try:
+        if type(recovery) is not ReopenedConfigRecovery:
+            raise _error("config.external_change", "Config recovery input is invalid.")
+        with recovery._lock:
+            state, _identity = _read_reopened_current(recovery)
+            return Result.success(state)
+    except (ForgeError, OSError, TypeError, ValueError):
+        return Result.failure(
+            _error("config.external_change", "Reopened config cannot be classified.")
+        )
+
+
+def _delete_reopened_stage(
+    recovery: ReopenedConfigRecovery,
+    reference: str,
+    identity: FileIdentity | None,
+) -> None:
+    if identity is None:
+        return
+    quarantine = _cleanup_reference(reference)
+    source = 0 if os.name == "nt" else -1
+    quarantined = 0 if os.name == "nt" else -1
+    try:
+        source = _open_recovery_name(
+            recovery._parent_descriptor,
+            reference,
+            delete=True,
+        )
+        quarantined = _open_recovery_name(
+            recovery._parent_descriptor,
+            quarantine,
+            delete=True,
+        )
+        if _descriptor_is_open(source) and _descriptor_is_open(quarantined):
+            raise _error(
+                "config.external_change", "Config recovery cleanup name is occupied."
+            )
+        opened = source if _descriptor_is_open(source) else quarantined
+        if not _descriptor_is_open(opened):
+            return
+        _validate_recovery_file(opened, recovery._descriptor, identity)
+        if not _unlink_owned(
+            recovery._parent_descriptor,
+            reference,
+            opened,
+            identity,
+        ):
+            raise _error(
+                "config.commit_ambiguous", "Config recovery cleanup is ambiguous."
+            )
+    finally:
+        _close_descriptor(source)
+        if quarantined != source:
+            _close_descriptor(quarantined)
+
+
+def promote_reopened_config_backup(
+    recovery: ReopenedConfigRecovery,
+) -> Result[BackupRecord | None]:
+    """Promote an exact retained backup after process restart."""
+
+    try:
+        if type(recovery) is not ReopenedConfigRecovery:
+            raise _error("config.external_change", "Config recovery input is invalid.")
+        with recovery._lock:
+            recovery._require_open()
+            descriptor = recovery._descriptor
+            state, identity = _read_reopened_current(recovery)
+            if state is not ConfigCommitState.CANDIDATE or identity != (
+                descriptor.candidate_identity
+            ):
+                raise _error(
+                    "config.commit_ambiguous", "Committed config identity changed."
+                )
+            if descriptor.backup_identity is None:
+                return Result.success(None)
+            final = _open_recovery_name(
+                recovery._parent_descriptor,
+                descriptor.backup_reference,
+            )
+            try:
+                if _descriptor_is_open(final):
+                    _validate_recovery_file(
+                        final,
+                        descriptor,
+                        descriptor.backup_identity,
+                    )
+                else:
+                    stage = _open_recovery_name(
+                        recovery._parent_descriptor,
+                        descriptor.backup_stage_reference,
+                        delete=True,
+                    )
+                    try:
+                        if not _descriptor_is_open(stage):
+                            raise _error(
+                                "config.external_change",
+                                "Config backup stage is absent.",
+                            )
+                        _validate_recovery_file(
+                            stage,
+                            descriptor,
+                            descriptor.backup_identity,
+                        )
+                        if os.name == "nt":
+                            _paths._windows_rename_handle(
+                                stage,
+                                recovery._parent_descriptor,
+                                descriptor.backup_reference,
+                            )
+                        else:
+                            _paths._exclusive_posix_rename(
+                                recovery._parent_descriptor,
+                                descriptor.backup_stage_reference,
+                                descriptor.backup_reference,
+                            )
+                    finally:
+                        _close_descriptor(stage)
+            finally:
+                _close_descriptor(final)
+            verified = _open_recovery_name(
+                recovery._parent_descriptor,
+                descriptor.backup_reference,
+            )
+            try:
+                if not _descriptor_is_open(verified):
+                    raise _error(
+                        "config.commit_ambiguous",
+                        "Config backup promotion is incomplete.",
+                    )
+                _validate_recovery_file(
+                    verified,
+                    descriptor,
+                    descriptor.backup_identity,
+                )
+            finally:
+                _close_descriptor(verified)
+            _sync_parent(recovery._parent_descriptor)
+            state, identity = _read_reopened_current(recovery)
+            if state is not ConfigCommitState.CANDIDATE or identity != (
+                descriptor.candidate_identity
+            ):
+                raise _error(
+                    "config.commit_ambiguous", "Committed config identity changed."
+                )
+            record = BackupRecord(
+                transaction_digest=descriptor.transaction_digest,
+                relative_path=descriptor.backup_reference,
+                backup_identity=descriptor.backup_identity,
+                original_identity=descriptor.before_identity,
+                original_digest=descriptor.before_byte_digest,
+                metadata_fingerprint=descriptor.metadata_fingerprint,
+                _token=_BACKUP_TOKEN,
+            )
+            record._require_valid()
+            return Result.success(record)
+    except FileExistsError:
+        return Result.failure(
+            _error(
+                "config.backup_policy_exceeded",
+                "Config backup destination is occupied.",
+            )
+        )
+    except ForgeError as exc:
+        return Result.failure(exc)
+    except (OSError, TypeError, ValueError):
+        return Result.failure(
+            _error("config.commit_ambiguous", "Config backup promotion is ambiguous.")
+        )
+
+
+def cleanup_reopened_config_recovery(
+    recovery: ReopenedConfigRecovery,
+) -> Result[ConfigRecoveryDescriptor]:
+    """Remove exact private evidence after a restarted candidate commit."""
+
+    try:
+        if type(recovery) is not ReopenedConfigRecovery:
+            raise _error("config.external_change", "Config recovery input is invalid.")
+        with recovery._lock:
+            recovery._require_open()
+            descriptor = recovery._descriptor
+            state, identity = _read_reopened_current(recovery)
+            if state is not ConfigCommitState.CANDIDATE or identity != (
+                descriptor.candidate_identity
+            ):
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config recovery cleanup is not authorized.",
+                )
+            if descriptor.backup_identity is not None:
+                backup = _open_recovery_name(
+                    recovery._parent_descriptor,
+                    descriptor.backup_reference,
+                )
+                try:
+                    if not _descriptor_is_open(backup):
+                        raise _error(
+                            "config.commit_ambiguous",
+                            "Config backup promotion is incomplete.",
+                        )
+                    _validate_recovery_file(
+                        backup,
+                        descriptor,
+                        descriptor.backup_identity,
+                    )
+                finally:
+                    _close_descriptor(backup)
+            _delete_reopened_stage(
+                recovery,
+                descriptor.snapshot_reference,
+                descriptor.snapshot_identity,
+            )
+            _delete_reopened_stage(
+                recovery,
+                descriptor.displaced_reference,
+                descriptor.displaced_identity or descriptor.before_identity,
+            )
+            _sync_parent(recovery._parent_descriptor)
+            result = descriptor
+            recovery.close()
+            return Result.success(result)
+    except ForgeError as exc:
+        return Result.failure(exc)
+    except (OSError, TypeError, ValueError):
+        return Result.failure(
+            _error("config.commit_ambiguous", "Config recovery cleanup is ambiguous.")
+        )
+
+
+def rollback_reopened_config_recovery(
+    recovery: ReopenedConfigRecovery,
+) -> Result[ConfigRecoveryDescriptor]:
+    """Remove exact private stages after a restarted before-state result."""
+
+    try:
+        if type(recovery) is not ReopenedConfigRecovery:
+            raise _error("config.external_change", "Config recovery input is invalid.")
+        with recovery._lock:
+            recovery._require_open()
+            descriptor = recovery._descriptor
+            state, identity = _read_reopened_current(recovery)
+            expected = (
+                ConfigCommitState.BEFORE
+                if descriptor.before_identity is not None
+                else ConfigCommitState.ABSENT
+            )
+            if state is not expected or identity != descriptor.before_identity:
+                raise _error(
+                    "config.commit_ambiguous",
+                    "Config rollback cleanup is not authorized.",
+                )
+            _delete_reopened_stage(
+                recovery,
+                descriptor.snapshot_reference,
+                descriptor.snapshot_identity,
+            )
+            _delete_reopened_stage(
+                recovery,
+                descriptor.candidate_reference,
+                descriptor.candidate_identity,
+            )
+            _delete_reopened_stage(
+                recovery,
+                descriptor.backup_stage_reference,
+                descriptor.backup_identity,
+            )
+            _sync_parent(recovery._parent_descriptor)
+            result = descriptor
+            recovery.close()
+            return Result.success(result)
+    except ForgeError as exc:
+        return Result.failure(exc)
+    except (OSError, TypeError, ValueError):
+        return Result.failure(
+            _error("config.commit_ambiguous", "Config rollback cleanup is ambiguous.")
         )
