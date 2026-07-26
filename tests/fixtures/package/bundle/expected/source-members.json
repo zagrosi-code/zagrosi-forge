@@ -381,8 +381,8 @@
   },
   {
     "path": "src/zagrosi_forge/install/recovery.py",
-    "sha256": "ded08efe8e694a95b323d2e8933296a033d2d3f4a79bbe73bbd440172a77f049",
-    "size": 33630
+    "sha256": "eab52906a51ed04aca65d0415235021b634c341fd727fc6f4143ebdd3ae9faf3",
+    "size": 46943
   },
   {
     "path": "src/zagrosi_forge/install/schemas/bundle-manifest-v1.schema.json",

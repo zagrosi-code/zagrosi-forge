@@ -7,11 +7,19 @@ from enum import Enum
 import hashlib
 import hmac
 import re
+from threading import Lock
 from typing import NamedTuple, Never
 import unicodedata
+from weakref import finalize, WeakKeyDictionary, WeakSet
 
 from .config import snapshot_config
-from .contracts import ForgeError, canonical_json_bytes
+from .contracts import (
+    ForgeError,
+    RunnerOperation,
+    RunnerProvenance,
+    canonical_json_bytes,
+    require_runner_authority,
+)
 from .journal import (
     JOURNAL_STATE_MACHINE_VERSION,
     JournalConfigIdentity,
@@ -20,6 +28,7 @@ from .journal import (
     RollbackAction,
     load_pending,
 )
+from .lock import HeldInstallLock, acquire_install_lock
 from .paths import OwnedRoot, PlatformPathAuthority
 from .policies import LIMIT_POLICY
 
@@ -27,6 +36,7 @@ from .policies import LIMIT_POLICY
 RECOVERY_POLICY_VERSION = "1.0"
 _SNAPSHOT_TOKEN = object()
 _PLAN_TOKEN = object()
+_LOCKED_PLAN_TOKEN = object()
 _LIVE_OBSERVATION_TOKEN = object()
 _TRANSACTION_ID = re.compile(r"tx-[0-9a-f]{32}\Z")
 _ROLLBACK_STATES = frozenset(
@@ -965,3 +975,407 @@ def observe_recovery_snapshot(
         _inventory_digest=final_inventory_digest,
         _observation_token=_LIVE_OBSERVATION_TOKEN,
     )
+
+
+def _reproduce_locked_plan(
+    expected: RecoveryPlan,
+    *,
+    authority: PlatformPathAuthority,
+    owned_root: OwnedRoot,
+) -> RecoveryPlan:
+    expected._require_valid()
+    observed = observe_recovery_snapshot(
+        authority=authority,
+        owned_root=owned_root,
+    )
+    reproduced = plan_recovery(observed)
+    reproduced._require_valid()
+    expected._require_valid()
+    if not hmac.compare_digest(expected.plan_digest, reproduced.plan_digest):
+        raise _plan_changed()
+    return reproduced
+
+
+class _LockedRecoveryLease:
+    """Registry-retained originals for one locked recovery authority."""
+
+    _authority: PlatformPathAuthority
+    _binding_digest: str
+    _closed: bool
+    _guard: Lock
+    _held_lock: HeldInstallLock
+    _object_identities: tuple[int, int, int, int, int]
+    _owned_root: OwnedRoot
+    _plan: RecoveryPlan
+    _runner: RunnerProvenance
+
+    __slots__ = (
+        "_authority",
+        "_binding_digest",
+        "_closed",
+        "_guard",
+        "_held_lock",
+        "_object_identities",
+        "_owned_root",
+        "_plan",
+        "_runner",
+    )
+
+    def __init__(
+        self,
+        *,
+        plan: RecoveryPlan,
+        authority: PlatformPathAuthority,
+        owned_root: OwnedRoot,
+        runner: RunnerProvenance,
+        held_lock: HeldInstallLock,
+    ) -> None:
+        object.__setattr__(self, "_plan", plan)
+        object.__setattr__(self, "_authority", authority)
+        object.__setattr__(self, "_owned_root", owned_root)
+        object.__setattr__(self, "_runner", runner)
+        object.__setattr__(self, "_held_lock", held_lock)
+        object.__setattr__(self, "_closed", False)
+        object.__setattr__(self, "_guard", Lock())
+        object.__setattr__(
+            self,
+            "_object_identities",
+            (
+                id(plan),
+                id(authority),
+                id(owned_root),
+                id(runner),
+                id(held_lock),
+            ),
+        )
+        object.__setattr__(self, "_binding_digest", self._current_binding_digest())
+        with self._guard:
+            self.require_open_locked()
+
+    @property
+    def guard(self) -> Lock:
+        return self._guard
+
+    @property
+    def plan(self) -> RecoveryPlan:
+        return self._plan
+
+    @property
+    def authority(self) -> PlatformPathAuthority:
+        return self._authority
+
+    @property
+    def owned_root(self) -> OwnedRoot:
+        return self._owned_root
+
+    @property
+    def closed(self) -> bool:
+        with self._guard:
+            return self._closed
+
+    def _current_binding_digest(self) -> str:
+        projection = {
+            "authority_origin": id(self._authority._origin),
+            "held_home_identity": self._held_lock.codex_home_identity,
+            "owned_root": {
+                "control_identity": self._owned_root.control_identity,
+                "home_identity": self._owned_root.home_identity,
+                "identity": self._owned_root.identity,
+                "origin": id(self._owned_root._origin),
+            },
+            "plan_digest": self._plan.plan_digest,
+            "runner": {
+                "artifact_digest": self._runner.artifact_digest,
+                "origin": self._runner.origin,
+                "policy_digest": self._runner.policy_digest,
+                "runner_version": self._runner.runner_version,
+                "state": self._runner.state.value,
+                "verification_authority": self._runner.verification_authority,
+            },
+        }
+        return hashlib.sha256(canonical_json_bytes(projection)).hexdigest()
+
+    def require_open_locked(self) -> None:
+        try:
+            if (
+                self._closed
+                or type(self._plan) is not RecoveryPlan
+                or not _matching_path_authority(
+                    self._authority,
+                    self._owned_root,
+                )
+                or type(self._runner) is not RunnerProvenance
+                or type(self._held_lock) is not HeldInstallLock
+                or self._held_lock._released
+                or self._held_lock.codex_home_identity != self._owned_root.home_identity
+                or self._object_identities
+                != (
+                    id(self._plan),
+                    id(self._authority),
+                    id(self._owned_root),
+                    id(self._runner),
+                    id(self._held_lock),
+                )
+            ):
+                raise ValueError
+            self._plan._require_valid()
+            self._runner.__post_init__()
+            require_runner_authority(self._runner, RunnerOperation.RECOVER)
+            self._owned_root._require_open()
+            current_binding = self._current_binding_digest()
+            if not hmac.compare_digest(self._binding_digest, current_binding):
+                raise ValueError
+        except (AttributeError, ForgeError, TypeError, ValueError):
+            raise _plan_changed(
+                "Locked recovery authority is closed or changed."
+            ) from None
+
+    def reproduce(self) -> RecoveryPlan:
+        with self._guard:
+            self.require_open_locked()
+            reproduced = _reproduce_locked_plan(
+                self._plan,
+                authority=self._authority,
+                owned_root=self._owned_root,
+            )
+            self.require_open_locked()
+            return reproduced
+
+    def release(self) -> None:
+        with self._guard:
+            if self._closed:
+                return
+            try:
+                self._held_lock.release()
+            except BaseException:
+                if self._held_lock._released:
+                    object.__setattr__(self, "_closed", True)
+                raise
+            if not self._held_lock._released:
+                raise _plan_changed("The recovery lock was not released.")
+            else:
+                object.__setattr__(self, "_closed", True)
+
+
+class LockedRecoveryPlan:
+    """Read-only handle for a registry-retained locked recovery lease."""
+
+    __slots__ = ("__weakref__",)
+
+    def __init__(
+        self,
+        *,
+        plan: RecoveryPlan,
+        authority: PlatformPathAuthority,
+        owned_root: OwnedRoot,
+        runner: RunnerProvenance,
+        held_lock: HeldInstallLock,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _LOCKED_PLAN_TOKEN
+            or type(plan) is not RecoveryPlan
+            or not _matching_path_authority(authority, owned_root)
+            or type(runner) is not RunnerProvenance
+            or type(held_lock) is not HeldInstallLock
+            or held_lock.codex_home_identity != owned_root.home_identity
+        ):
+            raise TypeError("LockedRecoveryPlan is created only by lock_recovery_plan")
+        plan._require_valid()
+        runner.__post_init__()
+        require_runner_authority(runner, RunnerOperation.RECOVER)
+        lease = _LockedRecoveryLease(
+            plan=plan,
+            authority=authority,
+            owned_root=owned_root,
+            runner=runner,
+            held_lock=held_lock,
+        )
+        _register_locked_lease(self, lease)
+
+    def _require_open(self) -> _LockedRecoveryLease:
+        lease = _active_locked_lease(self)
+        with lease.guard:
+            lease.require_open_locked()
+        return lease
+
+    @property
+    def plan(self) -> RecoveryPlan:
+        """Return the diagnostic plan; effect methods must revalidate internally."""
+
+        lease = self._require_open()
+        return lease.plan
+
+    @property
+    def closed(self) -> bool:
+        lease = _locked_lease_for_close(self)
+        return lease is None or lease.closed
+
+    def revalidate(self) -> RecoveryPlan:
+        """Reload under the held lock and require the exact same pure plan digest."""
+
+        return _active_locked_lease(self).reproduce()
+
+    def close(self) -> None:
+        lease = _locked_lease_for_close(self)
+        if lease is None:
+            return
+        try:
+            lease.release()
+        finally:
+            if lease.closed:
+                _retire_locked_lease(self, lease)
+
+    def __enter__(self) -> LockedRecoveryPlan:
+        self._require_open()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise AttributeError("locked recovery plans are read-only")
+
+    def __delattr__(self, _name: str) -> Never:
+        raise AttributeError("locked recovery plans are read-only")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("locked recovery plans are not serializable")
+
+
+_LOCKED_RECOVERY_LEASES: WeakKeyDictionary[
+    LockedRecoveryPlan,
+    _LockedRecoveryLease,
+] = WeakKeyDictionary()
+_LOCKED_RECOVERY_FINALIZERS: WeakKeyDictionary[
+    LockedRecoveryPlan,
+    finalize[[_LockedRecoveryLease], LockedRecoveryPlan],
+] = WeakKeyDictionary()
+_CLOSED_LOCKED_RECOVERY_PLANS: WeakSet[LockedRecoveryPlan] = WeakSet()
+_ABANDONED_LOCKED_RECOVERY_LEASES: set[_LockedRecoveryLease] = set()
+_LOCKED_RECOVERY_LEASES_GUARD = Lock()
+
+
+def _release_abandoned_locked_lease(lease: _LockedRecoveryLease) -> None:
+    for _attempt in range(2):
+        try:
+            lease.release()
+            return
+        except BaseException:
+            if lease.closed:
+                return
+    with _LOCKED_RECOVERY_LEASES_GUARD:
+        _ABANDONED_LOCKED_RECOVERY_LEASES.add(lease)
+
+
+def _retry_abandoned_locked_leases() -> None:
+    with _LOCKED_RECOVERY_LEASES_GUARD:
+        abandoned = tuple(_ABANDONED_LOCKED_RECOVERY_LEASES)
+    for lease in abandoned:
+        try:
+            lease.release()
+        except BaseException:
+            continue
+        if lease.closed:
+            with _LOCKED_RECOVERY_LEASES_GUARD:
+                _ABANDONED_LOCKED_RECOVERY_LEASES.discard(lease)
+
+
+def _register_locked_lease(
+    locked: LockedRecoveryPlan,
+    lease: _LockedRecoveryLease,
+) -> None:
+    with _LOCKED_RECOVERY_LEASES_GUARD:
+        if locked in _LOCKED_RECOVERY_LEASES or locked in _CLOSED_LOCKED_RECOVERY_PLANS:
+            raise TypeError("locked recovery plan already registered")
+        _LOCKED_RECOVERY_LEASES[locked] = lease
+        _LOCKED_RECOVERY_FINALIZERS[locked] = finalize(
+            locked,
+            _release_abandoned_locked_lease,
+            lease,
+        )
+
+
+def _active_locked_lease(locked: LockedRecoveryPlan) -> _LockedRecoveryLease:
+    with _LOCKED_RECOVERY_LEASES_GUARD:
+        lease = _LOCKED_RECOVERY_LEASES.get(locked)
+    if lease is None:
+        raise _plan_changed("Locked recovery authority is closed or changed.")
+    return lease
+
+
+def _locked_lease_for_close(
+    locked: LockedRecoveryPlan,
+) -> _LockedRecoveryLease | None:
+    with _LOCKED_RECOVERY_LEASES_GUARD:
+        lease = _LOCKED_RECOVERY_LEASES.get(locked)
+        if lease is None and locked not in _CLOSED_LOCKED_RECOVERY_PLANS:
+            raise _plan_changed("Locked recovery authority is closed or changed.")
+    return lease
+
+
+def _retire_locked_lease(
+    locked: LockedRecoveryPlan,
+    lease: _LockedRecoveryLease,
+) -> None:
+    with _LOCKED_RECOVERY_LEASES_GUARD:
+        if _LOCKED_RECOVERY_LEASES.get(locked) is lease:
+            del _LOCKED_RECOVERY_LEASES[locked]
+        finalizer = _LOCKED_RECOVERY_FINALIZERS.pop(locked, None)
+        if finalizer is not None:
+            finalizer.detach()
+        _CLOSED_LOCKED_RECOVERY_PLANS.add(locked)
+
+
+def lock_recovery_plan(
+    plan: RecoveryPlan,
+    *,
+    authority: PlatformPathAuthority,
+    owned_root: OwnedRoot,
+    runner: RunnerProvenance,
+    timeout_seconds: float | int | None = None,
+) -> LockedRecoveryPlan:
+    """Acquire the home lock, reload live evidence, and reproduce one pure plan."""
+
+    if (
+        type(plan) is not RecoveryPlan
+        or not _matching_path_authority(authority, owned_root)
+        or type(runner) is not RunnerProvenance
+    ):
+        raise TypeError(
+            "lock_recovery_plan requires sealed recovery authority and "
+            "matching path authority"
+        )
+    plan._require_valid()
+    runner.__post_init__()
+    require_runner_authority(runner, RunnerOperation.RECOVER)
+    _retry_abandoned_locked_leases()
+    held = acquire_install_lock(
+        owned_root,
+        timeout_seconds=timeout_seconds,
+    )
+    locked: LockedRecoveryPlan | None = None
+    try:
+        if held.codex_home_identity != owned_root.home_identity:
+            raise _plan_changed("The recovery lock identity changed.")
+        reproduced = _reproduce_locked_plan(
+            plan,
+            authority=authority,
+            owned_root=owned_root,
+        )
+        locked = LockedRecoveryPlan(
+            plan=reproduced,
+            authority=authority,
+            owned_root=owned_root,
+            runner=runner,
+            held_lock=held,
+            _token=_LOCKED_PLAN_TOKEN,
+        )
+        locked.revalidate()
+        return locked
+    except BaseException:
+        if locked is not None:
+            locked.close()
+        else:
+            held.release()
+        raise

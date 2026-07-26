@@ -2916,6 +2916,55 @@ def test_recovery_observation_rejects_loaded_journal_access_digest_tampering(
         owned.close()
 
 
+def test_locked_recovery_rejects_structural_snapshot_without_live_inventory(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.lock import acquire_install_lock
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        RecoverySnapshot,
+        lock_recovery_plan,
+        observe_current_config_identity,
+        plan_recovery,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        structural = plan_recovery(
+            RecoverySnapshot(
+                journals=(store.load(),),
+                current_config=current,
+            )
+        )
+
+        with pytest.raises(ForgeError) as changed:
+            lock_recovery_plan(
+                structural,
+                authority=authority,
+                owned_root=owned,
+                runner=_runner(),
+                timeout_seconds=0.1,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+        with acquire_install_lock(owned, timeout_seconds=0.1):
+            pass
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
 def test_live_recovery_snapshot_rejects_inventory_digest_tampering(
     tmp_path: Path,
 ) -> None:
@@ -2949,6 +2998,391 @@ def test_live_recovery_snapshot_rejects_inventory_digest_tampering(
         finally:
             object.__setattr__(snapshot, "_inventory_digest", original)
         snapshot._require_valid()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_reloads_and_reproduces_the_exact_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    acquired = []
+    observed_while_held = []
+    real_acquire = recovery.acquire_install_lock
+    real_observe = recovery.observe_recovery_snapshot
+
+    def record_acquire(*args, **kwargs):
+        held = real_acquire(*args, **kwargs)
+        acquired.append(held)
+        return held
+
+    def record_observation(*args, **kwargs):
+        assert acquired
+        assert not acquired[-1]._released
+        observed_while_held.append(True)
+        return real_observe(*args, **kwargs)
+
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        monkeypatch.setattr(recovery, "acquire_install_lock", record_acquire)
+        monkeypatch.setattr(recovery, "observe_recovery_snapshot", record_observation)
+
+        with recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        ) as locked:
+            assert locked.plan == plan
+            assert locked.revalidate() == plan
+            assert not locked.closed
+
+        assert acquired[-1]._released
+        assert observed_while_held
+        assert locked.closed
+        with pytest.raises(ForgeError, match="closed"):
+            locked.revalidate()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_releases_lock_when_second_reproduction_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.lock import acquire_install_lock
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    observation_count = 0
+    real_observe = recovery.observe_recovery_snapshot
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+
+        def fail_second_observation(*args, **kwargs):
+            nonlocal observation_count
+            observation_count += 1
+            if observation_count == 2:
+                raise recovery._plan_changed("Injected second reproduction failure.")
+            return real_observe(*args, **kwargs)
+
+        monkeypatch.setattr(
+            recovery,
+            "observe_recovery_snapshot",
+            fail_second_observation,
+        )
+        with pytest.raises(ForgeError) as changed:
+            recovery.lock_recovery_plan(
+                plan,
+                authority=authority,
+                owned_root=owned,
+                runner=_runner(),
+                timeout_seconds=0.1,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+        assert observation_count == 2
+        with acquire_install_lock(owned, timeout_seconds=0.1):
+            pass
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_rejects_stale_config_before_returning_authority(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.lock import acquire_install_lock
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        lock_recovery_plan,
+        observe_current_config_identity,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        _write_private_file(tmp_path / "codex-home", "config.toml", b"# changed\n")
+
+        with pytest.raises(ForgeError) as changed:
+            lock_recovery_plan(
+                plan,
+                authority=authority,
+                owned_root=owned,
+                runner=_runner(),
+                timeout_seconds=0.1,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+        with acquire_install_lock(owned, timeout_seconds=0.1):
+            pass
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_rejects_same_byte_config_replacement(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.lock import acquire_install_lock
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        lock_recovery_plan,
+        observe_current_config_identity,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    home = tmp_path / "codex-home"
+    raw = b"# stable config bytes\n"
+    try:
+        config = _write_private_file(home, "config.toml", raw)
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        replacement = _write_private_file(home, "config.replacement", raw)
+        os.replace(replacement, config)
+        replaced = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        assert replaced.byte_digest == current.byte_digest
+        assert replaced.leaf_identity != current.leaf_identity
+
+        with pytest.raises(ForgeError) as changed:
+            lock_recovery_plan(
+                plan,
+                authority=authority,
+                owned_root=owned,
+                runner=_runner(),
+                timeout_seconds=0.1,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+        with acquire_install_lock(owned, timeout_seconds=0.1):
+            pass
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_revalidation_detects_change_while_lock_is_held(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        lock_recovery_plan,
+        observe_current_config_identity,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+
+        with lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        ) as locked:
+            _write_private_file(
+                tmp_path / "codex-home",
+                "config.toml",
+                b"# changed while locked\n",
+            )
+            with pytest.raises(ForgeError) as changed:
+                locked.revalidate()
+            assert changed.value.code == "transaction.plan_changed"
+            assert not locked.closed
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_rejects_untrusted_runner_before_lock_creation(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError, RunnerState
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        lock_recovery_plan,
+        observe_current_config_identity,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    lock_path = tmp_path / "codex-home" / "plugins" / ".zagrosi" / "install.lock"
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        runner = replace(_runner(), state=RunnerState.UNVERIFIED_SELF_ROOT)
+
+        with pytest.raises(ForgeError) as untrusted:
+            lock_recovery_plan(
+                plan,
+                authority=authority,
+                owned_root=owned,
+                runner=runner,
+                timeout_seconds=0.1,
+            )
+        assert untrusted.value.code == "runner.untrusted"
+        assert not lock_path.exists()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_rejects_mismatched_authority_before_lock_creation(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        lock_recovery_plan,
+        observe_current_config_identity,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    lock_path = tmp_path / "codex-home" / "plugins" / ".zagrosi" / "install.lock"
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+
+        with pytest.raises(TypeError, match="matching path authority"):
+            lock_recovery_plan(
+                plan,
+                authority=PlatformPathAuthority(),
+                owned_root=owned,
+                runner=_runner(),
+                timeout_seconds=0.1,
+            )
+        assert not lock_path.exists()
     finally:
         store.close()
         proof.close()
