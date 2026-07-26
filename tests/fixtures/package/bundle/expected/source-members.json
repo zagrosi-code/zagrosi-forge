@@ -301,8 +301,8 @@
   },
   {
     "path": "src/zagrosi_forge/install/bundle-policy.json",
-    "sha256": "6675e7ae0566a0ba7c401cb1cf3f7b3b5a7afca4aed467b2ac1ab913e869d883",
-    "size": 6614
+    "sha256": "5abad1c30163f182c3756b047f9c010a5d5a895245ea0746392baa800dce05a0",
+    "size": 6795
   },
   {
     "path": "src/zagrosi_forge/install/bundle.py",
@@ -323,6 +323,11 @@
     "path": "src/zagrosi_forge/install/diagnostics.py",
     "sha256": "f709c8824ab4e69dc846daeae188f617a8ce0d19e93e7500cb973717b7bdd036",
     "size": 9402
+  },
+  {
+    "path": "src/zagrosi_forge/install/journal.py",
+    "sha256": "d4198690407cb0e29052f54fcc31be1f54834d021163827b74dd3a9517b147f2",
+    "size": 72383
   },
   {
     "path": "src/zagrosi_forge/install/legacy-install-catalog.json",
@@ -423,6 +428,11 @@
     "path": "src/zagrosi_forge/install/schemas/toolchain-lock-v1.schema.json",
     "sha256": "606ca57ef9cd17dd6227fe9100dc6ed666a45138c1d3f1bd326ed11342bf463f",
     "size": 817
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/transaction-journal-v1.schema.json",
+    "sha256": "a9e78030123ef3ff1c9b8940c526245252f5b0c857ad76a0910bd2f08616cde6",
+    "size": 19868
   },
   {
     "path": "src/zagrosi_forge/install/schemas/vendor-receipt-v1.schema.json",

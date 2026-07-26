@@ -2200,6 +2200,82 @@ def test_postreplace_classifier_requires_exact_sealed_evidence(tmp_path: Path) -
         cleanup_config_recovery(committed).unwrap()
 
 
+def test_real_atomic_commit_yields_distinct_journal_observation(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.atomic_file import (
+        ConfigCommitState,
+        begin_config_transaction,
+        cleanup_config_recovery,
+        prepare_atomic_candidate,
+    )
+    from zagrosi_forge.install.config import snapshot_config
+    from zagrosi_forge.install.journal import (
+        JournalConfigIdentity,
+        _config_result_matches,
+    )
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        before,
+        identity,
+        source,
+        proof,
+        _home,
+        root,
+        authority,
+    ):
+        candidate = _atomic_inputs(before, identity, source)
+        atomic = prepare_atomic_candidate(
+            proof,
+            before,
+            candidate,
+            begin_config_transaction("tx-journal-result"),
+        ).unwrap()
+        committed = _commit_acknowledged(atomic, expected=before).unwrap()
+        try:
+            assert committed.state is ConfigCommitState.CANDIDATE
+            fresh = authority.prove_config_path(root).unwrap()
+            try:
+                after = snapshot_config(fresh).unwrap()
+            finally:
+                fresh.close()
+
+            descriptor = committed.recovery_descriptor
+            planned = JournalConfigIdentity(
+                parent_identity=before.parent_identity,
+                leaf_identity=None,
+                byte_digest=candidate.byte_digest,
+                semantic_digest=candidate.semantic_digest,
+                metadata_fingerprint=candidate.metadata_fingerprint,
+                snapshot_digest=candidate.snapshot_digest,
+                target_metadata_digest=descriptor.target_metadata_digest,
+            )
+            observed = JournalConfigIdentity(
+                parent_identity=after.parent_identity,
+                leaf_identity=after.leaf_identity,
+                byte_digest=after.byte_digest,
+                semantic_digest=after.semantic_digest,
+                metadata_fingerprint=after.metadata_fingerprint,
+                snapshot_digest=after.snapshot_digest,
+                target_metadata_digest=descriptor.target_metadata_digest,
+            )
+
+            assert committed.installed_identity == committed.candidate_identity
+            assert committed.installed_identity == after.leaf_identity
+            assert before.leaf_identity != after.leaf_identity
+            assert before.metadata_fingerprint != after.metadata_fingerprint
+            assert before.snapshot_digest != after.snapshot_digest
+            assert candidate.snapshot_digest == before.snapshot_digest
+            assert _config_result_matches(
+                planned,
+                descriptor.to_record(),
+                observed,
+            )
+        finally:
+            cleanup_config_recovery(committed).unwrap()
+
+
 def test_postreplace_classifier_rejects_unsealed_evidence(tmp_path: Path) -> None:
     from zagrosi_forge.install.atomic_file import classify_config_after_replace
 
