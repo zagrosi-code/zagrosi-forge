@@ -40,6 +40,26 @@ def _private_directory(path: Path) -> None:
         paths._windows_close(parent)
 
 
+def _write_private_file(directory: Path, name: str, raw: bytes) -> Path:
+    path = directory / name
+    if os.name != "nt":
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return path
+    import zagrosi_forge.install.paths as paths
+
+    parent = paths._windows_open_path(os.fspath(directory))
+    descriptor = 0
+    try:
+        descriptor = paths._windows_create_private_file(parent, name)
+        paths._windows_write(descriptor, raw)
+    finally:
+        if descriptor:
+            paths._windows_close(descriptor)
+        paths._windows_close(parent)
+    return path
+
+
 def _reference(raw: str):
     from zagrosi_forge.install.paths import validate_reference
     from zagrosi_forge.install.policies import LIMIT_POLICY
@@ -611,6 +631,7 @@ def test_quarantined_journal_reopens_read_only_without_mutation(tmp_path: Path) 
         JournalState,
         JournalStore,
         JournalTransition,
+        load_pending,
     )
     from zagrosi_forge.install.ownership import (
         open_transaction_journal_access,
@@ -675,6 +696,11 @@ def test_quarantined_journal_reopens_read_only_without_mutation(tmp_path: Path) 
             )
             == before
         )
+        reopened_store.close()
+        reopened_store = None
+        loaded = load_pending(owned)
+        assert len(loaded) == 1
+        assert loaded[0].head == head
     finally:
         if reopened_store is not None:
             reopened_store.close()
@@ -1634,26 +1660,81 @@ def test_impossible_transition_and_broken_digest_chain_preserve_all(
         owned.close()
 
 
-def test_journal_limit_plus_one_preserves_every_path_and_blocks_loading(
+def test_pending_loader_rejects_caller_supplied_store_capabilities(
     tmp_path: Path,
 ) -> None:
-    from zagrosi_forge.install.contracts import ForgeError
     from zagrosi_forge.install.journal import load_pending
-    from zagrosi_forge.install.policies import LIMIT_POLICY
 
     store, proof, owned, directory, binding = _store(tmp_path)
     try:
         store.create_prepared(_prepared(binding))
         before = tuple((path.name, path.read_bytes()) for path in directory.iterdir())
-        stores = (store,) * (LIMIT_POLICY.value("journal_records") + 1)
-        with pytest.raises(ForgeError) as raised:
-            load_pending(stores)
-        assert raised.value.code == "journal.limit_exceeded"
-        assert raised.value.exit_category == 14
+        with pytest.raises(TypeError, match="OwnedRoot"):
+            load_pending((store,))
         assert (
             tuple((path.name, path.read_bytes()) for path in directory.iterdir())
             == before
         )
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_pending_loader_discovers_live_journal_through_read_only_authority(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import load_pending
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        expected = store.create_prepared(_prepared(binding))
+        store.close()
+        loaded = load_pending(owned)
+        assert len(loaded) == 1
+        assert loaded[0].records[-1].transaction_id == binding.transaction_id
+        assert loaded[0].head.record_digest == expected.record_digest
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_pending_loader_rechecks_journal_contents_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import JournalStore, load_pending
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    canonical = directory / "journal-00000000.json"
+    displaced = directory / "displaced-journal.json"
+    try:
+        store.create_prepared(_prepared(binding))
+        store.close()
+        original = JournalStore._load_with_observations
+        calls = 0
+
+        def load_then_inject(selected: JournalStore):
+            nonlocal calls
+            calls += 1
+            loaded = original(selected)
+            if calls == 2:
+                canonical.rename(displaced)
+                _write_private_file(directory, canonical.name, b"{}\n")
+            return loaded
+
+        monkeypatch.setattr(
+            JournalStore,
+            "_load_with_observations",
+            load_then_inject,
+        )
+        with pytest.raises(ForgeError) as raised:
+            load_pending(owned)
+        assert raised.value.code == "journal.corrupt"
+        assert canonical.read_bytes() == b"{}\n"
+        assert displaced.is_file()
     finally:
         store.close()
         proof.close()

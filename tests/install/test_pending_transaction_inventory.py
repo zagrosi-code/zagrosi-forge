@@ -165,6 +165,41 @@ def test_pending_inventory_discovers_distinct_live_roots_sorted_without_path_sca
         owned.close()
 
 
+def test_pending_inventory_limit_plus_one_counts_real_roots_before_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import JournalStore, load_pending
+    from zagrosi_forge.install.policies import LIMIT_POLICY
+
+    home, owned = _owned_root(tmp_path)
+    limit = LIMIT_POLICY.value("journal_records")
+    transaction_ids = tuple(f"tx-{index:032x}" for index in range(limit + 1))
+    created = _create_transactions(owned, transaction_ids)
+    assert len({item.binding.transaction_identity for item in created}) == limit + 1
+    assert len({item.binding.claim_identity for item in created}) == limit + 1
+    plugins = home / "plugins"
+    before = _tree_snapshot(plugins)
+
+    def reject_journal_load(_store: JournalStore):
+        raise AssertionError("journal contents loaded before the root-count gate")
+
+    monkeypatch.setattr(
+        JournalStore,
+        "_load_with_observations",
+        reject_journal_load,
+    )
+    try:
+        with pytest.raises(ForgeError) as raised:
+            load_pending(owned)
+        assert raised.value.code == "journal.limit_exceeded"
+        assert raised.value.exit_category == 14
+        assert _tree_snapshot(plugins) == before
+    finally:
+        owned.close()
+
+
 def test_pending_inventory_rechecks_names_after_enumeration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

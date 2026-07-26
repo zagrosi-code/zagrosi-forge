@@ -30,6 +30,7 @@ from .policies import LIMIT_POLICY
 
 if TYPE_CHECKING:
     from .atomic_file import ConfigRecoveryDescriptor
+    from .ownership import PendingTransactionObservation
 
 
 JOURNAL_SCHEMA_DIGEST = (
@@ -1142,6 +1143,15 @@ def _windows_record_unchanged(
     return before.identity == after.identity and before.fingerprint == after.fingerprint
 
 
+@dataclass(frozen=True, slots=True)
+class _JournalRecordObservation:
+    name: str
+    identity: FileIdentity
+    fingerprint: tuple[int, ...]
+    raw_digest: str
+    raw_size: int
+
+
 def _prepared_from_record(record: Mapping[str, object]) -> PreparedTransaction:
     receipt = record["prepared_receipt"]
     if not isinstance(receipt, Mapping) or not receipt:
@@ -1513,7 +1523,10 @@ class JournalStore:
         self._require_open()
         return tuple(name for _index, name in selected)
 
-    def _read_posix(self, name: str) -> bytes:
+    def _read_posix(
+        self,
+        name: str,
+    ) -> tuple[bytes, _JournalRecordObservation]:
         descriptor = -1
         try:
             descriptor = os.open(
@@ -1565,12 +1578,30 @@ class JournalStore:
             )
             if not stable or len(raw) != before.st_size or len(raw) > limit:
                 raise OSError(errno.ESTALE, "journal record changed")
-            return raw
+            fingerprint = (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_nlink,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            return raw, _JournalRecordObservation(
+                name=name,
+                identity=(after.st_dev, after.st_ino),
+                fingerprint=fingerprint,
+                raw_digest=hashlib.sha256(raw).hexdigest(),
+                raw_size=len(raw),
+            )
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
 
-    def _read_windows(self, name: str) -> bytes:
+    def _read_windows(
+        self,
+        name: str,
+    ) -> tuple[bytes, _JournalRecordObservation]:
         handle = 0
         try:
             handle = _paths._windows_open_child(
@@ -1605,32 +1636,73 @@ class JournalStore:
                 or not _paths._windows_private_authorization(handle, exact=True)
             ):
                 raise OSError(errno.ESTALE, "journal record changed")
-            return raw
+            return raw, _JournalRecordObservation(
+                name=name,
+                identity=after.identity,
+                fingerprint=after.fingerprint,
+                raw_digest=hashlib.sha256(raw).hexdigest(),
+                raw_size=len(raw),
+            )
         finally:
             if handle:
                 _paths._windows_close(handle)
 
-    def _read_records(self) -> tuple[JournalRecord, ...]:
+    def _read_record(
+        self,
+        name: str,
+    ) -> tuple[bytes, _JournalRecordObservation]:
+        try:
+            return (
+                self._read_windows(name) if os.name == "nt" else self._read_posix(name)
+            )
+        except ForgeError as exc:
+            if exc.code.startswith("journal."):
+                raise
+            raise _corrupt(
+                "A transaction journal record is not a safe regular file."
+            ) from None
+        except (OSError, ValueError):
+            raise _corrupt(
+                "A transaction journal record is not a safe regular file."
+            ) from None
+
+    def _read_record_set(
+        self,
+    ) -> tuple[
+        tuple[bytes, ...],
+        tuple[_JournalRecordObservation, ...],
+    ]:
         names = self._journal_names()
+        captured = tuple(self._read_record(name) for name in names)
+        if self._journal_names() != names:
+            raise _corrupt("The transaction journal changed while loading.")
+        confirmed = tuple(self._read_record(name) for name in names)
+        captured_observations = tuple(observation for _raw, observation in captured)
+        confirmed_observations = tuple(observation for _raw, observation in confirmed)
+        if confirmed_observations != captured_observations:
+            raise _corrupt("A transaction journal record changed while loading.")
+        self._require_open()
+        return (
+            tuple(raw for raw, _observation in confirmed),
+            confirmed_observations,
+        )
+
+    def _journal_record_observations(
+        self,
+    ) -> tuple[_JournalRecordObservation, ...]:
+        _raw, observations = self._read_record_set()
+        return observations
+
+    def _read_records(
+        self,
+    ) -> tuple[
+        tuple[JournalRecord, ...],
+        tuple[_JournalRecordObservation, ...],
+    ]:
+        raw_records, observations = self._read_record_set()
         records: list[JournalRecord] = []
         total = 0
-        for name in names:
-            try:
-                raw = (
-                    self._read_windows(name)
-                    if os.name == "nt"
-                    else self._read_posix(name)
-                )
-            except ForgeError as exc:
-                if exc.code.startswith("journal."):
-                    raise
-                raise _corrupt(
-                    "A transaction journal record is not a safe regular file."
-                ) from None
-            except (OSError, ValueError):
-                raise _corrupt(
-                    "A transaction journal record is not a safe regular file."
-                ) from None
+        for raw in raw_records:
             total += len(raw)
             if total > LIMIT_POLICY.value("journal_total_bytes"):
                 raise _limit()
@@ -1639,7 +1711,7 @@ class JournalStore:
         if rendered and not _records_form_chain(rendered):
             raise _corrupt("The transaction journal chain is invalid.")
         self._require_open()
-        return rendered
+        return rendered, observations
 
     def _head(self, record: JournalRecord) -> JournalHead:
         return JournalHead(
@@ -1650,10 +1722,10 @@ class JournalStore:
             _token=_HEAD_TOKEN,
         )
 
-    def load(self) -> LoadedJournal:
-        """Load and validate every immutable record without changing the directory."""
-
-        records = self._read_records()
+    def _load_with_observations(
+        self,
+    ) -> tuple[LoadedJournal, tuple[_JournalRecordObservation, ...]]:
+        records, observations = self._read_records()
         if not records:
             raise _corrupt("The transaction journal is missing its prepared record.")
         loaded = LoadedJournal(
@@ -1662,6 +1734,12 @@ class JournalStore:
             byte_size=sum(record.raw_size for record in records),
         )
         self._require_open()
+        return loaded, observations
+
+    def load(self) -> LoadedJournal:
+        """Load and validate every immutable record without changing the directory."""
+
+        loaded, _observations = self._load_with_observations()
         return loaded
 
     def _validate_prepared_binding(self, prepared: PreparedTransaction) -> None:
@@ -1735,7 +1813,8 @@ class JournalStore:
         if prepared.verification_evidence_digest is not None:
             raise _corrupt("PREPARED cannot contain verification evidence.")
         self._validate_prepared_binding(prepared)
-        if self._read_records():
+        records, _observations = self._read_records()
+        if records:
             raise _corrupt("The transaction journal already exists.")
         record = _record_projection(
             prepared,
@@ -1908,23 +1987,61 @@ class JournalStore:
         raise TypeError("journal stores are not serializable")
 
 
-def load_pending(stores: tuple[JournalStore, ...]) -> tuple[LoadedJournal, ...]:
-    """Load a bounded set of already capability-bound pending journals."""
+def _load_observed_pending(
+    root: _paths.OwnedRoot,
+    observations: tuple[PendingTransactionObservation, ...],
+) -> tuple[LoadedJournal, ...]:
+    from . import ownership as _ownership
 
-    if type(stores) is not tuple or any(
-        type(store) is not JournalStore for store in stores
-    ):
-        raise TypeError("load_pending requires JournalStore capabilities")
-    if len(stores) > LIMIT_POLICY.value("journal_records"):
-        raise _limit()
-    if len({store._binding_digest for store in stores}) != len(stores):
-        raise _corrupt("The pending transaction set contains duplicate authority.")
     loaded: list[LoadedJournal] = []
     total = 0
-    for store in stores:
-        journal = store.load()
-        total += journal.byte_size
-        if total > LIMIT_POLICY.value("journal_total_bytes"):
-            raise _limit()
-        loaded.append(journal)
+    for observation in observations:
+        access_result = _ownership.open_pending_transaction_journal_access(
+            root,
+            observation,
+        )
+        if not access_result.is_ok:
+            raise _corrupt("A pending transaction journal identity changed.")
+        access = access_result.unwrap()
+        store: JournalStore | None = None
+        try:
+            store = JournalStore(access)
+            before = store._journal_record_observations()
+            journal, during = store._load_with_observations()
+            after = store._journal_record_observations()
+            if before != during or during != after:
+                raise _corrupt("A pending transaction journal changed after loading.")
+            total += journal.byte_size
+            if total > LIMIT_POLICY.value("journal_total_bytes"):
+                raise _limit()
+            loaded.append(journal)
+        finally:
+            if store is not None:
+                store.close()
+            else:
+                access.close()
     return tuple(loaded)
+
+
+def load_pending(root: object) -> tuple[LoadedJournal, ...]:
+    """Discover and twice-observe every pending journal without effects."""
+
+    from . import ownership as _ownership
+
+    if not isinstance(root, _paths.OwnedRoot):
+        raise TypeError("load_pending requires an OwnedRoot capability")
+    discovered = _ownership.discover_pending_transactions(root)
+    if not discovered.is_ok:
+        raise _corrupt("The pending transaction inventory is not trusted.")
+    observations = discovered.unwrap()
+    if len(observations) > LIMIT_POLICY.value("journal_records"):
+        raise _limit()
+    loaded = _load_observed_pending(root, observations)
+    confirmed = _ownership.discover_pending_transactions(root)
+    if not confirmed.is_ok or confirmed.unwrap() != observations:
+        raise _corrupt("The pending transaction inventory changed while loading.")
+    reloaded = _load_observed_pending(root, observations)
+    final = _ownership.discover_pending_transactions(root)
+    if reloaded != loaded or not final.is_ok or final.unwrap() != observations:
+        raise _corrupt("The pending transaction evidence changed while loading.")
+    return loaded
