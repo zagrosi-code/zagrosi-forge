@@ -7,6 +7,7 @@ from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
 import errno
 import hashlib
+import hmac
 from importlib import resources
 import json
 import math
@@ -49,7 +50,9 @@ _IDENTIFIER = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _ROLE = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 _ZERO_DIGEST = "0" * 64
+_RECORD_TOKEN = object()
 _HEAD_TOKEN = object()
+_LOADED_TOKEN = object()
 _STORE_TOKEN = object()
 
 
@@ -548,7 +551,7 @@ class JournalTransition:
             self.config_recovery._require_valid()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class JournalRecord:
     state: JournalState
     sequence: int
@@ -556,12 +559,74 @@ class JournalRecord:
     record_digest: str
     transaction_id: str
     plan_digest: str
+    prepared: PreparedTransaction
     identities: tuple[JournalPathIdentity, ...]
     verification_evidence_digest: str | None
     config_recovery: Mapping[str, object] | None
     committed_config: JournalConfigIdentity | None
     record: Mapping[str, object]
     raw_size: int
+    _binding_digest: str
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        state: JournalState,
+        sequence: int,
+        previous_record_digest: str,
+        record_digest: str,
+        transaction_id: str,
+        plan_digest: str,
+        prepared: PreparedTransaction,
+        identities: tuple[JournalPathIdentity, ...],
+        verification_evidence_digest: str | None,
+        config_recovery: Mapping[str, object] | None,
+        committed_config: JournalConfigIdentity | None,
+        record: Mapping[str, object],
+        raw_size: int,
+        _token: object,
+    ) -> None:
+        if _token is not _RECORD_TOKEN:
+            raise TypeError("journal records are loaded only by JournalStore")
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "sequence", sequence)
+        object.__setattr__(self, "previous_record_digest", previous_record_digest)
+        object.__setattr__(self, "record_digest", record_digest)
+        object.__setattr__(self, "transaction_id", transaction_id)
+        object.__setattr__(self, "plan_digest", plan_digest)
+        object.__setattr__(self, "prepared", prepared)
+        object.__setattr__(self, "identities", identities)
+        object.__setattr__(
+            self,
+            "verification_evidence_digest",
+            verification_evidence_digest,
+        )
+        object.__setattr__(self, "config_recovery", config_recovery)
+        object.__setattr__(self, "committed_config", committed_config)
+        object.__setattr__(self, "record", record)
+        object.__setattr__(self, "raw_size", raw_size)
+        _require_journal_record(self)
+        object.__setattr__(
+            self,
+            "_binding_digest",
+            _journal_record_binding_digest(self),
+        )
+        object.__setattr__(self, "_seal", _RECORD_TOKEN)
+        self._require_valid()
+
+    def _require_valid(self) -> None:
+        try:
+            _require_journal_record(self)
+            expected = _journal_record_binding_digest(self)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise TypeError("journal record authority changed") from None
+        if (
+            self._seal is not _RECORD_TOKEN
+            or not _valid_digest(self._binding_digest)
+            or not hmac.compare_digest(self._binding_digest, expected)
+        ):
+            raise TypeError("journal record authority changed")
 
     def __reduce__(self) -> Never:
         raise TypeError("journal evidence is not serializable")
@@ -601,25 +666,62 @@ class JournalHead:
         object.__setattr__(self, "record_digest", record_digest)
         object.__setattr__(self, "_seal", _HEAD_TOKEN)
 
+    def _require_valid(self) -> None:
+        if (
+            self._seal is not _HEAD_TOKEN
+            or not _valid_digest(self.transaction_binding_digest)
+            or type(self.sequence) is not int
+            or self.sequence < 0
+            or not isinstance(self.state, JournalState)
+            or not _valid_digest(self.record_digest)
+        ):
+            raise TypeError("journal head authority changed")
+
     def __reduce__(self) -> Never:
         raise TypeError("journal heads are not serializable")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class LoadedJournal:
     head: JournalHead
     records: tuple[JournalRecord, ...]
     byte_size: int
+    _binding_digest: str
+    _seal: object
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        head: JournalHead,
+        records: tuple[JournalRecord, ...],
+        byte_size: int,
+        _token: object,
+    ) -> None:
+        if _token is not _LOADED_TOKEN:
+            raise TypeError("journal evidence is loaded only by JournalStore")
+        object.__setattr__(self, "head", head)
+        object.__setattr__(self, "records", records)
+        object.__setattr__(self, "byte_size", byte_size)
+        object.__setattr__(
+            self,
+            "_binding_digest",
+            _loaded_journal_binding_digest(self),
+        )
+        object.__setattr__(self, "_seal", _LOADED_TOKEN)
+        self._require_valid()
+
+    def _require_valid(self) -> None:
+        try:
+            _require_loaded_journal(self)
+            expected = _loaded_journal_binding_digest(self)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise TypeError("loaded journal authority changed") from None
         if (
-            type(self.head) is not JournalHead
-            or type(self.records) is not tuple
-            or not self.records
-            or self.records[-1].record_digest != self.head.record_digest
-            or self.byte_size != sum(record.raw_size for record in self.records)
+            self._seal is not _LOADED_TOKEN
+            or not _valid_digest(self._binding_digest)
+            or not hmac.compare_digest(self._binding_digest, expected)
         ):
-            raise ValueError("loaded journal")
+            raise TypeError("loaded journal authority changed")
 
     def __reduce__(self) -> Never:
         raise TypeError("journal evidence is not serializable")
@@ -745,6 +847,174 @@ def _prepared_projection(value: PreparedTransaction) -> Mapping[str, object]:
         ),
         "verification_evidence_digest": value.verification_evidence_digest,
     }
+
+
+def _journal_record_binding_projection(
+    value: JournalRecord,
+) -> Mapping[str, object]:
+    return {
+        "committed_config": (
+            None
+            if value.committed_config is None
+            else _config_projection(value.committed_config)
+        ),
+        "config_recovery": value.config_recovery,
+        "identities": tuple(_path_projection(item) for item in value.identities),
+        "plan_digest": value.plan_digest,
+        "prepared": _prepared_projection(value.prepared),
+        "previous_record_digest": value.previous_record_digest,
+        "raw_size": value.raw_size,
+        "record": value.record,
+        "record_digest": value.record_digest,
+        "sequence": value.sequence,
+        "state": value.state.value,
+        "transaction_id": value.transaction_id,
+        "verification_evidence_digest": value.verification_evidence_digest,
+    }
+
+
+def _journal_record_binding_digest(value: JournalRecord) -> str:
+    return hashlib.sha256(
+        _render(_journal_record_binding_projection(value), final_newline=False)
+    ).hexdigest()
+
+
+def _require_journal_record(value: JournalRecord) -> None:
+    if (
+        type(value.state) is not JournalState
+        or type(value.sequence) is not int
+        or value.sequence < 0
+        or not _valid_digest(value.previous_record_digest)
+        or not _valid_digest(value.record_digest)
+        or type(value.transaction_id) is not str
+        or _TRANSACTION_ID.fullmatch(value.transaction_id) is None
+        or not _valid_digest(value.plan_digest)
+        or type(value.prepared) is not PreparedTransaction
+        or type(value.identities) is not tuple
+        or any(type(item) is not JournalPathIdentity for item in value.identities)
+        or not _valid_digest(value.verification_evidence_digest, optional=True)
+        or (
+            value.config_recovery is not None
+            and type(value.config_recovery) is not MappingProxyType
+        )
+        or (
+            value.committed_config is not None
+            and type(value.committed_config) is not JournalConfigIdentity
+        )
+        or type(value.record) is not MappingProxyType
+        or set(value.record) != _RECORD_KEYS
+        or type(value.raw_size) is not int
+        or value.raw_size <= 0
+        or value.raw_size > LIMIT_POLICY.value("journal_record_bytes")
+    ):
+        raise TypeError("journal record evidence")
+
+    raw = _render(value.record, final_newline=True)
+    if value.raw_size != len(raw):
+        raise ValueError("journal record size")
+    digest_input = dict(value.record)
+    embedded_digest = digest_input.pop("record_digest")
+    if (
+        embedded_digest != value.record_digest
+        or hashlib.sha256(_render(digest_input, final_newline=False)).hexdigest()
+        != value.record_digest
+    ):
+        raise ValueError("journal record digest")
+
+    prepared = _prepared_from_record(value.record)
+    prepared_projection = _json_value(_prepared_projection(prepared))
+    if (
+        _json_value(_prepared_projection(value.prepared)) != prepared_projection
+        or {
+            key: _json_value(value.record[key])
+            for key in _prepared_projection(prepared)
+        }
+        != prepared_projection
+        or value.transaction_id != prepared.transaction_id
+        or value.plan_digest != prepared.plan_digest
+        or value.identities != prepared.identities
+        or value.verification_evidence_digest != prepared.verification_evidence_digest
+        or value.state.value != value.record["state"]
+        or value.sequence != value.record["sequence"]
+        or value.previous_record_digest != value.record["previous_record_digest"]
+    ):
+        raise ValueError("journal prepared evidence")
+
+    config_recovery_value = value.record["config_recovery"]
+    config_recovery = _decode_config_recovery(
+        (None if config_recovery_value is None else _json_value(config_recovery_value)),
+        prepared=prepared,
+        transaction_digest=prepared.config_transaction_digest,
+    )
+    committed_value = value.record["committed_config"]
+    committed_config = (
+        None if committed_value is None else _parse_config(committed_value)
+    )
+    if _json_value(value.config_recovery) != _json_value(config_recovery) or (
+        None
+        if value.committed_config is None
+        else _json_value(_config_projection(value.committed_config))
+    ) != (
+        None
+        if committed_config is None
+        else _json_value(_config_projection(committed_config))
+    ):
+        raise ValueError("journal transition evidence")
+
+
+def _loaded_journal_binding_projection(
+    value: LoadedJournal,
+) -> Mapping[str, object]:
+    return {
+        "byte_size": value.byte_size,
+        "head": {
+            "record_digest": value.head.record_digest,
+            "sequence": value.head.sequence,
+            "state": value.head.state.value,
+            "transaction_binding_digest": value.head.transaction_binding_digest,
+        },
+        "record_binding_digests": tuple(
+            record._binding_digest for record in value.records
+        ),
+    }
+
+
+def _loaded_journal_binding_digest(value: LoadedJournal) -> str:
+    return hashlib.sha256(
+        _render(_loaded_journal_binding_projection(value), final_newline=False)
+    ).hexdigest()
+
+
+def _require_loaded_journal(value: LoadedJournal) -> None:
+    if (
+        type(value.head) is not JournalHead
+        or type(value.records) is not tuple
+        or not value.records
+        or any(type(record) is not JournalRecord for record in value.records)
+        or type(value.byte_size) is not int
+        or value.byte_size <= 0
+        or value.byte_size > LIMIT_POLICY.value("journal_total_bytes")
+    ):
+        raise TypeError("loaded journal evidence")
+    value.head._require_valid()
+    for record in value.records:
+        record._require_valid()
+    if not _records_form_chain(value.records):
+        raise ValueError("loaded journal chain")
+    last = value.records[-1]
+    binding = value.records[0].record["transaction_binding"]
+    binding_digest = hashlib.sha256(_render(binding, final_newline=False)).hexdigest()
+    if (
+        value.byte_size != sum(record.raw_size for record in value.records)
+        or value.head.sequence != last.sequence
+        or value.head.state is not last.state
+        or value.head.record_digest != last.record_digest
+        or not hmac.compare_digest(
+            value.head.transaction_binding_digest,
+            binding_digest,
+        )
+    ):
+        raise ValueError("loaded journal head")
 
 
 def _record_projection(
@@ -1287,12 +1557,14 @@ def _decode_record(
             record_digest=record_digest,
             transaction_id=prepared.transaction_id,
             plan_digest=prepared.plan_digest,
+            prepared=prepared,
             identities=prepared.identities,
             verification_evidence_digest=prepared.verification_evidence_digest,
             config_recovery=config_recovery,
             committed_config=committed_config,
             record=cast(Mapping[str, object], _freeze(record)),
             raw_size=len(raw),
+            _token=_RECORD_TOKEN,
         )
     except ForgeError as exc:
         if exc.code.startswith("journal."):
@@ -1732,6 +2004,7 @@ class JournalStore:
             head=self._head(records[-1]),
             records=records,
             byte_size=sum(record.raw_size for record in records),
+            _token=_LOADED_TOKEN,
         )
         self._require_open()
         return loaded, observations

@@ -326,8 +326,8 @@
   },
   {
     "path": "src/zagrosi_forge/install/journal.py",
-    "sha256": "87e142ef2c486c7729424cb1ff197b98c86d17798d61c5070bfef7c424327305",
-    "size": 76603
+    "sha256": "24f5475b9c0c35e4863a16e85306c7ca039991c7d425172edb20a6e1c6b649af",
+    "size": 87083
   },
   {
     "path": "src/zagrosi_forge/install/legacy-install-catalog.json",

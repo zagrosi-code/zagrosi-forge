@@ -1700,6 +1700,51 @@ def test_pending_loader_discovers_live_journal_through_read_only_authority(
         owned.close()
 
 
+def test_loaded_journal_rejects_forged_decoded_rollback_authority(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import RollbackAction, TransactionOwnedPath
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        journal = store.load()
+        record = journal.records[-1]
+        foreign_path = TransactionOwnedPath(
+            role="foreign-generation",
+            relative_path="foreign/unrecorded-generation",
+            expected_identity=(99, 100),
+        )
+        foreign_action = RollbackAction(
+            action="quarantine-if-owned",
+            relative_path=foreign_path.relative_path,
+            expected_identity=foreign_path.expected_identity,
+        )
+        forged = replace(
+            prepared,
+            transaction_owned_paths=prepared.transaction_owned_paths + (foreign_path,),
+            rollback_actions=prepared.rollback_actions + (foreign_action,),
+        )
+
+        with pytest.raises(TypeError):
+            replace(record, prepared=forged)
+        with pytest.raises(TypeError):
+            replace(journal, records=journal.records)
+
+        object.__setattr__(record, "prepared", forged)
+        try:
+            with pytest.raises(TypeError, match="authority changed"):
+                journal._require_valid()
+        finally:
+            object.__setattr__(record, "prepared", prepared)
+        journal._require_valid()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
 def test_pending_loader_rechecks_journal_contents_before_return(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
