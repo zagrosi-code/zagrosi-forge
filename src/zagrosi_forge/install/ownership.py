@@ -7,6 +7,7 @@ from _thread import LockType
 from dataclasses import dataclass
 from datetime import datetime
 import errno
+from enum import Enum
 import hashlib
 from importlib import resources
 import os
@@ -16,7 +17,7 @@ import secrets
 import stat
 import sys
 from threading import Lock
-from typing import Mapping, Never, cast
+from typing import Callable, Mapping, Never, cast
 
 from .contracts import (
     ActiveInstallRelation,
@@ -63,6 +64,33 @@ _LEGACY_CATALOG_RECORD_DIGEST = (
 )
 _CLEANUP_MAX_DEPTH = LIMIT_POLICY.value("path_components")
 _CLEANUP_MAX_ENTRIES = LIMIT_POLICY.value("bundle_files")
+_PERSISTENT_TRANSACTION = re.compile(r"tx-[0-9a-f]{32}\Z")
+_TRANSACTION_STAGE = re.compile(r"\.root-[0-9a-f]{32}\.tmp\Z")
+_TRANSACTION_PENDING_CLAIM = re.compile(r"\.claim-[0-9a-f]{32}\.tmp\Z")
+_TRANSACTION_DELETE = re.compile(r"\.delete-[0-9a-f]{32}\.tmp\Z")
+_TRANSACTION_STORE_COMPONENT = "transactions"
+_TRANSACTION_CLAIMS_COMPONENT = "claims"
+_TRANSACTION_STORE_CONTROL = "control-v1.json"
+_TRANSACTION_RECORD_LIMIT = 8 * 1024
+_TRANSACTION_STORE_SCHEMA_DIGEST = (
+    "fc1809f697c590f522f0fe9b6281d81123f7193a59cf1a209547cfe7fb908d5b"
+)
+_TRANSACTION_BINDING_SCHEMA_DIGEST = (
+    "57dfa73352f792d8e0c2775d5248d802eb25c0ea0ee4bf83a6e67632feed13a6"
+)
+_TRANSACTION_CREATE_RESERVATION_SCHEMA_DIGEST = (
+    "066d3ae25970752d495aca2d6d6a2e9ca21fa0a547e2afae0cd317b04e7978c0"
+)
+_TRANSACTION_CREATE_INTENT_SCHEMA_DIGEST = (
+    "5024b0824c133f903d71082fbf0ca640ba06ff370dfdd1ab2507259760de614f"
+)
+_TRANSACTION_CLEANUP_SCHEMA_DIGEST = (
+    "348e089f2bc194332ea8e2189a1847efa01502293b497688e9759ccc0c8d1664"
+)
+_PERSISTENT_BINDING_TOKEN = object()
+_PERSISTENT_ROOT_TOKEN = object()
+_REBOUND_TRANSACTION_TOKEN = object()
+_TRANSACTION_JOURNAL_ACCESS_TOKEN = object()
 
 
 def _error(code: str, message: str, *, recovery: tuple[str, ...] = ()) -> ForgeError:
@@ -377,6 +405,26 @@ def _windows_write_all(handle: int, raw: bytes) -> None:
         offset += int(written.value)
 
 
+def _windows_replace_bytes(handle: int, raw: bytes) -> None:
+    from ctypes import wintypes
+
+    kernel32 = _paths._windows_dll("kernel32")
+    kernel32.SetFilePointerEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
+    ]
+    kernel32.SetFilePointerEx.restype = wintypes.BOOL
+    if not kernel32.SetFilePointerEx(handle, 0, None, 0):
+        raise _paths._windows_error(_paths._windows_last_error())
+    kernel32.SetEndOfFile.argtypes = [wintypes.HANDLE]
+    kernel32.SetEndOfFile.restype = wintypes.BOOL
+    if not kernel32.SetEndOfFile(handle):
+        raise _paths._windows_error(_paths._windows_last_error())
+    _paths._windows_write(handle, raw)
+
+
 def _windows_flush(handle: int) -> None:
     from ctypes import wintypes
 
@@ -385,6 +433,68 @@ def _windows_flush(handle: int) -> None:
     kernel32.FlushFileBuffers.restype = wintypes.BOOL
     if not kernel32.FlushFileBuffers(handle):
         raise _paths._windows_error(_paths._windows_last_error())
+
+
+def _windows_flush_directory_binding(
+    parent: int,
+    component: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    """Flush one exact private directory through a write-capable handle."""
+
+    handle = 0
+    try:
+        handle = _windows_open_raw_child(
+            parent,
+            component,
+            directory=True,
+            write_data=True,
+        )
+        before = _paths._windows_handle_status(handle)
+        if (
+            before.identity != expected_identity
+            or before.is_reparse
+            or not _paths._windows_private_directory(handle, exact=True)
+        ):
+            raise OSError(errno.ESTALE, "Windows durability binding changed")
+        _windows_flush(handle)
+        after = _paths._windows_handle_status(handle)
+        if (
+            after.identity != before.identity
+            or after.is_reparse
+            or not _paths._windows_private_directory(handle, exact=True)
+        ):
+            raise OSError(errno.ESTALE, "Windows durability binding changed")
+    finally:
+        if handle:
+            _paths._windows_close(handle)
+
+
+def _durable_windows_file_rename(
+    source: int,
+    parent: int,
+    destination: str,
+    *,
+    after_rename: Callable[[], None] | None = None,
+) -> None:
+    """Publish a file name, expose commit state, then flush the renamed file."""
+
+    _paths._windows_rename_handle(source, parent, destination)
+    if after_rename is not None:
+        after_rename()
+    _windows_flush(source)
+
+
+def _durable_windows_directory_rename(
+    source: int,
+    parent: int,
+    destination: str,
+    expected_identity: tuple[int, int],
+) -> None:
+    """Publish and flush one exact directory namespace binding."""
+
+    _paths._windows_rename_handle(source, parent, destination)
+    _windows_flush_directory_binding(parent, destination, expected_identity)
 
 
 def _windows_private_file(handle: int) -> bool:
@@ -1073,12 +1183,132 @@ def _validated_relation_binding_digest(
 class _TransactionObservation:
     path: PathProof
     transaction_id: str
+    persistent_binding: PersistentTransactionBinding | None = None
+
+
+def _file_identity_invariants(value: object) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and all(
+            isinstance(component, int)
+            and not isinstance(component, bool)
+            and component >= 0
+            for component in value
+        )
+    )
+
+
+def _persistent_transaction_references(transaction_id: str) -> tuple[str, str, str]:
+    if _PERSISTENT_TRANSACTION.fullmatch(transaction_id) is None:
+        raise ValueError("persistent transaction id")
+    root = f".zagrosi/{_TRANSACTION_STORE_COMPONENT}/{transaction_id}"
+    components = tuple(root.split("/"))
+    _destination, quarantine = _quarantine_target(
+        _SafeReferenceSnapshot(root, components, root.casefold()), transaction_id
+    )
+    claim = (
+        f".zagrosi/{_TRANSACTION_STORE_COMPONENT}/"
+        f"{_TRANSACTION_CLAIMS_COMPONENT}/{transaction_id}.json"
+    )
+    return root, quarantine, claim
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PersistentTransactionBinding:
+    """Persistent data projection; never deletion authority by itself."""
+
+    transaction_id: str
+    root_relative: str
+    quarantine_relative: str
+    claim_relative: str
+    plugins_identity: tuple[int, int]
+    control_identity: tuple[int, int]
+    store_identity: tuple[int, int]
+    claims_identity: tuple[int, int]
+    transaction_identity: tuple[int, int]
+    claim_identity: tuple[int, int]
+    claim_digest: str
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        transaction_id: str,
+        root_relative: str,
+        quarantine_relative: str,
+        claim_relative: str,
+        plugins_identity: tuple[int, int],
+        control_identity: tuple[int, int],
+        store_identity: tuple[int, int],
+        claims_identity: tuple[int, int],
+        transaction_identity: tuple[int, int],
+        claim_identity: tuple[int, int],
+        claim_digest: str,
+        _token: object,
+    ) -> None:
+        expected_root, expected_quarantine, expected_claim = (
+            _persistent_transaction_references(transaction_id)
+        )
+        identities = (
+            plugins_identity,
+            control_identity,
+            store_identity,
+            claims_identity,
+            transaction_identity,
+            claim_identity,
+        )
+        if (
+            _token is not _PERSISTENT_BINDING_TOKEN
+            or root_relative != expected_root
+            or quarantine_relative != expected_quarantine
+            or claim_relative != expected_claim
+            or not all(_file_identity_invariants(identity) for identity in identities)
+            or _DIGEST.fullmatch(claim_digest) is None
+        ):
+            raise TypeError(
+                "persistent transaction bindings are loaded only by ownership authority"
+            )
+        object.__setattr__(self, "transaction_id", transaction_id)
+        object.__setattr__(self, "root_relative", root_relative)
+        object.__setattr__(self, "quarantine_relative", quarantine_relative)
+        object.__setattr__(self, "claim_relative", claim_relative)
+        object.__setattr__(self, "plugins_identity", plugins_identity)
+        object.__setattr__(self, "control_identity", control_identity)
+        object.__setattr__(self, "store_identity", store_identity)
+        object.__setattr__(self, "claims_identity", claims_identity)
+        object.__setattr__(self, "transaction_identity", transaction_identity)
+        object.__setattr__(self, "claim_identity", claim_identity)
+        object.__setattr__(self, "claim_digest", claim_digest)
+        object.__setattr__(self, "_seal", _PERSISTENT_BINDING_TOKEN)
+
+    def canonical_projection(self) -> Mapping[str, object]:
+        return {
+            "claim_digest": self.claim_digest,
+            "claim_identity": self.claim_identity,
+            "claim_relative": self.claim_relative,
+            "claims_identity": self.claims_identity,
+            "control_identity": self.control_identity,
+            "plugins_identity": self.plugins_identity,
+            "quarantine_relative": self.quarantine_relative,
+            "root_relative": self.root_relative,
+            "store_identity": self.store_identity,
+            "transaction_id": self.transaction_id,
+            "transaction_identity": self.transaction_identity,
+        }
+
+
+class TransactionLocation(str, Enum):
+    LIVE = "live"
+    QUARANTINED = "quarantined"
+    REMOVED = "removed"
 
 
 class TransactionPathClaim:
     _consumed: bool
     _identity: tuple[int, int]
     _lock: LockType
+    _persistent_binding: PersistentTransactionBinding | None
     _relative: SafeRelativePath
     _root_identity: tuple[int, int]
     _transaction_id: str
@@ -1087,6 +1317,7 @@ class TransactionPathClaim:
         "_consumed",
         "_identity",
         "_lock",
+        "_persistent_binding",
         "_relative",
         "_root_identity",
         "_transaction_id",
@@ -1099,9 +1330,19 @@ class TransactionPathClaim:
         root_identity: tuple[int, int],
         identity: tuple[int, int],
         *,
+        persistent_binding: PersistentTransactionBinding | None = None,
         _token: object,
     ) -> None:
-        if _token is not _CAPABILITY_TOKEN:
+        if _token is not _CAPABILITY_TOKEN or (
+            persistent_binding is not None
+            and (
+                not _persistent_binding_invariants(persistent_binding)
+                or persistent_binding.transaction_id != transaction_id
+                or persistent_binding.root_relative != relative.value
+                or persistent_binding.plugins_identity != root_identity
+                or persistent_binding.transaction_identity != identity
+            )
+        ):
             raise TypeError(
                 "TransactionPathClaim is created only by exclusive creation"
             )
@@ -1109,6 +1350,7 @@ class TransactionPathClaim:
         object.__setattr__(self, "_relative", relative)
         object.__setattr__(self, "_root_identity", root_identity)
         object.__setattr__(self, "_identity", identity)
+        object.__setattr__(self, "_persistent_binding", persistent_binding)
         object.__setattr__(self, "_consumed", False)
         object.__setattr__(self, "_lock", Lock())
 
@@ -1137,6 +1379,38 @@ class TransactionPathClaim:
 
     def __setattr__(self, _name: str, _value: object) -> Never:
         raise AttributeError("transaction ownership claims are read-only")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("ownership capabilities are not serializable")
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PersistentTransactionRoot:
+    binding: PersistentTransactionBinding
+    claim: TransactionPathClaim
+
+    def __init__(
+        self,
+        binding: PersistentTransactionBinding,
+        claim: TransactionPathClaim,
+        *,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _PERSISTENT_ROOT_TOKEN
+            or not _persistent_binding_invariants(binding)
+            or not isinstance(claim, TransactionPathClaim)
+            or claim.transaction_id != binding.transaction_id
+            or claim.relative.value != binding.root_relative
+            or claim.root_identity != binding.plugins_identity
+            or claim.identity != binding.transaction_identity
+            or claim._persistent_binding != binding
+        ):
+            raise TypeError(
+                "persistent transaction roots are created only by ownership authority"
+            )
+        object.__setattr__(self, "binding", binding)
+        object.__setattr__(self, "claim", claim)
 
     def __reduce__(self) -> Never:
         raise TypeError("ownership capabilities are not serializable")
@@ -1360,6 +1634,7 @@ class OwnershipProof:
 
 
 class QuarantineTicket:
+    _binding: PersistentTransactionBinding | None
     _closed: bool
     _identity: tuple[int, int]
     _lock: LockType
@@ -1370,6 +1645,7 @@ class QuarantineTicket:
     _used: bool
 
     __slots__ = (
+        "_binding",
         "_closed",
         "_identity",
         "_lock",
@@ -1388,10 +1664,23 @@ class QuarantineTicket:
         identity: tuple[int, int],
         root_identity: tuple[int, int],
         *,
+        binding: PersistentTransactionBinding | None = None,
         _token: object,
     ) -> None:
-        if _token is not _CAPABILITY_TOKEN:
+        if _token is not _CAPABILITY_TOKEN or (
+            binding is not None
+            and (
+                not _persistent_binding_invariants(binding)
+                or not _persistent_cleanup_reference_is_valid(
+                    binding,
+                    recovery_reference,
+                )
+                or binding.transaction_identity != identity
+                or binding.plugins_identity != root_identity
+            )
+        ):
             raise TypeError("QuarantineTicket is created only by quarantine_owned")
+        object.__setattr__(self, "_binding", binding)
         object.__setattr__(self, "_root", root_descriptor)
         object.__setattr__(self, "_namespace", namespace)
         object.__setattr__(self, "_recovery_reference", recovery_reference)
@@ -1451,6 +1740,66 @@ class QuarantineTicket:
         raise TypeError("ownership capabilities are not serializable")
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class ReboundTransaction:
+    location: TransactionLocation
+    binding: PersistentTransactionBinding
+    claim: TransactionPathClaim | None
+    ticket: QuarantineTicket | None
+
+    def __init__(
+        self,
+        *,
+        location: TransactionLocation,
+        binding: PersistentTransactionBinding,
+        claim: TransactionPathClaim | None,
+        ticket: QuarantineTicket | None,
+        _token: object,
+    ) -> None:
+        valid_payload = (
+            (
+                location is TransactionLocation.LIVE
+                and isinstance(claim, TransactionPathClaim)
+                and ticket is None
+            )
+            or (
+                location is TransactionLocation.QUARANTINED
+                and claim is None
+                and isinstance(ticket, QuarantineTicket)
+            )
+            or (
+                location is TransactionLocation.REMOVED
+                and claim is None
+                and ticket is None
+            )
+        )
+        if (
+            _token is not _REBOUND_TRANSACTION_TOKEN
+            or not _persistent_binding_invariants(binding)
+            or not valid_payload
+        ):
+            raise TypeError(
+                "rebound transactions are created only by ownership authority"
+            )
+        object.__setattr__(self, "location", location)
+        object.__setattr__(self, "binding", binding)
+        object.__setattr__(self, "claim", claim)
+        object.__setattr__(self, "ticket", ticket)
+
+    def close(self) -> None:
+        if self.ticket is not None:
+            self.ticket.close()
+
+    def __enter__(self) -> ReboundTransaction:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __reduce__(self) -> Never:
+        raise TypeError("ownership capabilities are not serializable")
+
+
 @dataclass(frozen=True, slots=True)
 class CleanupResult:
     removed: bool
@@ -1461,6 +1810,3425 @@ class CleanupResult:
 class ReceiptPublication:
     reference: SafeRelativePath
     created: bool
+
+
+@dataclass(slots=True)
+class _TransactionStore:
+    control: int
+    store: int
+    claims: int
+    plugins_identity: tuple[int, int]
+    control_identity: tuple[int, int]
+    store_identity: tuple[int, int]
+    claims_identity: tuple[int, int]
+    windows: bool
+
+    def close(self) -> None:
+        close = _paths._windows_close if self.windows else os.close
+        empty = 0 if self.windows else -1
+        for name in ("claims", "store", "control"):
+            descriptor = cast(int, getattr(self, name))
+            if descriptor != empty:
+                close(descriptor)
+                setattr(self, name, empty)
+
+
+def _transaction_store_namespace_is_valid(store: _TransactionStore) -> bool:
+    if store.windows:
+        return _paths._windows_namespace_binds(
+            store.control,
+            _TRANSACTION_STORE_COMPONENT,
+            store.store_identity,
+        ) and _paths._windows_namespace_binds(
+            store.store,
+            _TRANSACTION_CLAIMS_COMPONENT,
+            store.claims_identity,
+        )
+    return _paths._posix_namespace_binds(
+        store.control,
+        _TRANSACTION_STORE_COMPONENT,
+        store.store_identity,
+    ) and _paths._posix_namespace_binds(
+        store.store,
+        _TRANSACTION_CLAIMS_COMPONENT,
+        store.claims_identity,
+    )
+
+
+def _private_record_name_binds(
+    parent: int,
+    component: str,
+    expected_identity: tuple[int, int],
+    *,
+    expected_raw: bytes,
+    windows: bool,
+) -> bool:
+    try:
+        if windows:
+            observed_raw, observed_identity = _read_windows_private_record(
+                parent,
+                component,
+                volume=expected_identity[0],
+            )
+        else:
+            observed_raw, observed_identity = _read_posix_private_record(
+                parent,
+                component,
+                device=expected_identity[0],
+            )
+        return observed_identity == expected_identity and observed_raw == expected_raw
+    except (ForgeError, OSError):
+        return False
+
+
+def _transaction_store_record_bytes(
+    *,
+    plugins_identity: tuple[int, int],
+    control_identity: tuple[int, int],
+    store_identity: tuple[int, int],
+    claims_identity: tuple[int, int],
+) -> bytes:
+    body: dict[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "claims_identity": claims_identity,
+        "control_identity": control_identity,
+        "minimum_reader_version": _WRITER_VERSION,
+        "plugins_identity": plugins_identity,
+        "record_kind": "persistent-transaction-store",
+        "schema_digest": _TRANSACTION_STORE_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "store_identity": store_identity,
+        "writer_version": _WRITER_VERSION,
+    }
+    body["record_digest"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    return canonical_json_bytes(body, final_newline=True)
+
+
+def _valid_transaction_store_record(
+    raw: bytes,
+    *,
+    plugins_identity: tuple[int, int],
+    control_identity: tuple[int, int],
+    store_identity: tuple[int, int],
+    claims_identity: tuple[int, int],
+) -> bool:
+    try:
+        decode_persistent_record(raw, supported_major=1, reader_version=_WRITER_VERSION)
+    except ForgeError:
+        return False
+    return raw == _transaction_store_record_bytes(
+        plugins_identity=plugins_identity,
+        control_identity=control_identity,
+        store_identity=store_identity,
+        claims_identity=claims_identity,
+    )
+
+
+def _transaction_creation_intent_component(transaction_id: str) -> str:
+    if _PERSISTENT_TRANSACTION.fullmatch(transaction_id) is None:
+        raise ValueError("persistent transaction id")
+    return f".{transaction_id}.create.json"
+
+
+def _transaction_creation_reservation_component(transaction_id: str) -> str:
+    if _PERSISTENT_TRANSACTION.fullmatch(transaction_id) is None:
+        raise ValueError("persistent transaction id")
+    return f".{transaction_id}.reserve.json"
+
+
+def _transaction_cleanup_component(transaction_id: str, *, complete: bool) -> str:
+    if _PERSISTENT_TRANSACTION.fullmatch(transaction_id) is None:
+        raise ValueError("persistent transaction id")
+    suffix = "removed" if complete else "removing"
+    return f"{transaction_id}.{suffix}.json"
+
+
+def _persistent_cleanup_reference_is_valid(
+    binding: PersistentTransactionBinding,
+    reference: str,
+) -> bool:
+    if reference == binding.quarantine_relative:
+        return True
+    parent, separator, component = reference.rpartition("/")
+    quarantine_parent, _, _quarantine_component = (
+        binding.quarantine_relative.rpartition("/")
+    )
+    return (
+        separator == "/"
+        and parent == quarantine_parent
+        and _TRANSACTION_DELETE.fullmatch(component) is not None
+    )
+
+
+def _persistent_delete_reference(
+    binding: PersistentTransactionBinding,
+    delete_component: str,
+) -> str:
+    if _TRANSACTION_DELETE.fullmatch(delete_component) is None:
+        raise ValueError("persistent transaction delete component")
+    parent, separator, _component = binding.quarantine_relative.rpartition("/")
+    if separator != "/":
+        raise ValueError("persistent transaction quarantine reference")
+    return f"{parent}/{delete_component}"
+
+
+@dataclass(frozen=True, slots=True)
+class _TransactionCreationReservation:
+    component: str
+    identity: tuple[int, int]
+    raw: bytes
+    stage_component: str
+    pending_claim_component: str
+
+
+@dataclass(frozen=True, slots=True)
+class _TransactionCreationIntent:
+    component: str
+    identity: tuple[int, int]
+    raw: bytes
+    stage_component: str
+    pending_claim_component: str
+    reservation_identity: tuple[int, int]
+    reservation_digest: str
+    binding: PersistentTransactionBinding
+
+
+def _transaction_creation_reservation_bytes(
+    store: _TransactionStore,
+    *,
+    transaction_id: str,
+    stage_component: str,
+    pending_claim_component: str,
+) -> bytes:
+    if (
+        _PERSISTENT_TRANSACTION.fullmatch(transaction_id) is None
+        or _TRANSACTION_STAGE.fullmatch(stage_component) is None
+        or _TRANSACTION_PENDING_CLAIM.fullmatch(pending_claim_component) is None
+    ):
+        raise ValueError("persistent transaction creation reservation")
+    body: dict[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "claims_identity": store.claims_identity,
+        "control_identity": store.control_identity,
+        "minimum_reader_version": _WRITER_VERSION,
+        "pending_claim_component": pending_claim_component,
+        "plugins_identity": store.plugins_identity,
+        "record_kind": "persistent-transaction-create-reservation",
+        "schema_digest": _TRANSACTION_CREATE_RESERVATION_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "stage_component": stage_component,
+        "store_identity": store.store_identity,
+        "transaction_id": transaction_id,
+        "writer_version": _WRITER_VERSION,
+    }
+    body["record_digest"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    return canonical_json_bytes(body, final_newline=True)
+
+
+def _transaction_creation_reservation_from_record(
+    store: _TransactionStore,
+    *,
+    transaction_id: str,
+    raw: bytes,
+    identity: tuple[int, int],
+) -> _TransactionCreationReservation:
+    record = decode_persistent_record(
+        raw,
+        supported_major=1,
+        reader_version=_WRITER_VERSION,
+    )
+    stage_component = record.get("stage_component")
+    pending_claim_component = record.get("pending_claim_component")
+    expected_fixed: Mapping[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "claims_identity": store.claims_identity,
+        "control_identity": store.control_identity,
+        "minimum_reader_version": _WRITER_VERSION,
+        "plugins_identity": store.plugins_identity,
+        "record_kind": "persistent-transaction-create-reservation",
+        "schema_digest": _TRANSACTION_CREATE_RESERVATION_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "store_identity": store.store_identity,
+        "transaction_id": transaction_id,
+        "writer_version": _WRITER_VERSION,
+    }
+    expected_keys = {
+        *expected_fixed,
+        "pending_claim_component",
+        "record_digest",
+        "stage_component",
+    }
+    if (
+        set(record) != expected_keys
+        or any(record.get(key) != value for key, value in expected_fixed.items())
+        or not isinstance(stage_component, str)
+        or _TRANSACTION_STAGE.fullmatch(stage_component) is None
+        or not isinstance(pending_claim_component, str)
+        or _TRANSACTION_PENDING_CLAIM.fullmatch(pending_claim_component) is None
+        or raw
+        != _transaction_creation_reservation_bytes(
+            store,
+            transaction_id=transaction_id,
+            stage_component=stage_component,
+            pending_claim_component=pending_claim_component,
+        )
+    ):
+        raise OSError(errno.ESTALE, "transaction creation reservation changed")
+    component = _transaction_creation_reservation_component(transaction_id)
+    if not _private_record_name_binds(
+        store.claims,
+        component,
+        identity,
+        expected_raw=raw,
+        windows=store.windows,
+    ):
+        raise OSError(errno.ESTALE, "transaction creation reservation changed")
+    return _TransactionCreationReservation(
+        component=component,
+        identity=identity,
+        raw=raw,
+        stage_component=stage_component,
+        pending_claim_component=pending_claim_component,
+    )
+
+
+def _transaction_creation_intent_bytes(
+    store: _TransactionStore,
+    *,
+    transaction_id: str,
+    reservation: _TransactionCreationReservation,
+    binding: PersistentTransactionBinding,
+) -> bytes:
+    if (
+        not isinstance(reservation, _TransactionCreationReservation)
+        or not _persistent_binding_invariants(binding)
+        or binding.transaction_id != transaction_id
+        or binding.plugins_identity != store.plugins_identity
+        or binding.control_identity != store.control_identity
+        or binding.store_identity != store.store_identity
+        or binding.claims_identity != store.claims_identity
+    ):
+        raise ValueError("persistent transaction creation intent")
+    body: dict[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "claim_digest": binding.claim_digest,
+        "claim_identity": binding.claim_identity,
+        "claims_identity": store.claims_identity,
+        "control_identity": store.control_identity,
+        "minimum_reader_version": _WRITER_VERSION,
+        "pending_claim_component": reservation.pending_claim_component,
+        "plugins_identity": store.plugins_identity,
+        "record_kind": "persistent-transaction-create-bound",
+        "reservation_digest": hashlib.sha256(reservation.raw).hexdigest(),
+        "reservation_identity": reservation.identity,
+        "schema_digest": _TRANSACTION_CREATE_INTENT_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "stage_component": reservation.stage_component,
+        "store_identity": store.store_identity,
+        "transaction_id": transaction_id,
+        "transaction_identity": binding.transaction_identity,
+        "writer_version": _WRITER_VERSION,
+    }
+    body["record_digest"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    return canonical_json_bytes(body, final_newline=True)
+
+
+def _transaction_creation_intent_from_record(
+    store: _TransactionStore,
+    *,
+    transaction_id: str,
+    raw: bytes,
+    identity: tuple[int, int],
+) -> _TransactionCreationIntent:
+    record = decode_persistent_record(
+        raw, supported_major=1, reader_version=_WRITER_VERSION
+    )
+    stage_component = record.get("stage_component")
+    pending_claim_component = record.get("pending_claim_component")
+    transaction_identity = record.get("transaction_identity")
+    claim_identity = record.get("claim_identity")
+    reservation_identity = record.get("reservation_identity")
+    reservation_digest = record.get("reservation_digest")
+    expected_fixed: Mapping[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "claims_identity": store.claims_identity,
+        "control_identity": store.control_identity,
+        "minimum_reader_version": _WRITER_VERSION,
+        "plugins_identity": store.plugins_identity,
+        "record_kind": "persistent-transaction-create-bound",
+        "schema_digest": _TRANSACTION_CREATE_INTENT_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "store_identity": store.store_identity,
+        "transaction_id": transaction_id,
+        "writer_version": _WRITER_VERSION,
+    }
+    expected_keys = {
+        *expected_fixed,
+        "claim_digest",
+        "claim_identity",
+        "pending_claim_component",
+        "record_digest",
+        "reservation_digest",
+        "reservation_identity",
+        "stage_component",
+        "transaction_identity",
+    }
+    if (
+        set(record) != expected_keys
+        or any(record.get(key) != value for key, value in expected_fixed.items())
+        or not isinstance(stage_component, str)
+        or _TRANSACTION_STAGE.fullmatch(stage_component) is None
+        or not isinstance(pending_claim_component, str)
+        or _TRANSACTION_PENDING_CLAIM.fullmatch(pending_claim_component) is None
+        or not _file_identity_invariants(transaction_identity)
+        or not _file_identity_invariants(claim_identity)
+        or not _file_identity_invariants(reservation_identity)
+        or not isinstance(reservation_digest, str)
+        or _DIGEST.fullmatch(reservation_digest) is None
+        or cast(tuple[int, int], transaction_identity)[0] != store.plugins_identity[0]
+        or cast(tuple[int, int], claim_identity)[0] != store.plugins_identity[0]
+        or cast(tuple[int, int], reservation_identity)[0] != store.plugins_identity[0]
+    ):
+        raise OSError(errno.ESTALE, "transaction creation intent changed")
+    reservation_component = _transaction_creation_reservation_component(transaction_id)
+    reservation_raw = _transaction_creation_reservation_bytes(
+        store,
+        transaction_id=transaction_id,
+        stage_component=stage_component,
+        pending_claim_component=pending_claim_component,
+    )
+    if hashlib.sha256(reservation_raw).hexdigest() != reservation_digest:
+        raise OSError(errno.ESTALE, "transaction creation intent changed")
+    reservation = _TransactionCreationReservation(
+        component=reservation_component,
+        identity=cast(tuple[int, int], reservation_identity),
+        raw=reservation_raw,
+        stage_component=stage_component,
+        pending_claim_component=pending_claim_component,
+    )
+    if not _transaction_record_is_active_or_retired_exact(
+        store,
+        reservation_component,
+        reservation.identity,
+        reservation.raw,
+    ):
+        raise OSError(errno.ESTALE, "transaction creation reservation changed")
+    binding, _claim_raw = _binding_from_fields(
+        transaction_id=transaction_id,
+        plugins_identity=store.plugins_identity,
+        control_identity=store.control_identity,
+        store_identity=store.store_identity,
+        claims_identity=store.claims_identity,
+        transaction_identity=cast(tuple[int, int], transaction_identity),
+        claim_identity=cast(tuple[int, int], claim_identity),
+    )
+    if record.get(
+        "claim_digest"
+    ) != binding.claim_digest or raw != _transaction_creation_intent_bytes(
+        store,
+        transaction_id=transaction_id,
+        reservation=reservation,
+        binding=binding,
+    ):
+        raise OSError(errno.ESTALE, "transaction creation intent changed")
+    component = _transaction_creation_intent_component(transaction_id)
+    if not _private_record_name_binds(
+        store.claims,
+        component,
+        identity,
+        expected_raw=raw,
+        windows=store.windows,
+    ):
+        raise OSError(errno.ESTALE, "transaction creation intent changed")
+    return _TransactionCreationIntent(
+        component=component,
+        identity=identity,
+        raw=raw,
+        stage_component=stage_component,
+        pending_claim_component=pending_claim_component,
+        reservation_identity=reservation.identity,
+        reservation_digest=reservation_digest,
+        binding=binding,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _TransactionCleanupRecord:
+    component: str
+    identity: tuple[int, int]
+    raw: bytes
+    delete_component: str
+    complete: bool
+
+
+def _transaction_cleanup_record_bytes(
+    binding: PersistentTransactionBinding,
+    *,
+    delete_component: str,
+    complete: bool,
+) -> bytes:
+    if (
+        not _persistent_binding_invariants(binding)
+        or _TRANSACTION_DELETE.fullmatch(delete_component) is None
+    ):
+        raise ValueError("persistent transaction cleanup record")
+    body: dict[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "binding": binding.canonical_projection(),
+        "delete_component": delete_component,
+        "minimum_reader_version": _WRITER_VERSION,
+        "record_kind": (
+            "persistent-transaction-cleanup-complete"
+            if complete
+            else "persistent-transaction-cleanup-intent"
+        ),
+        "schema_digest": _TRANSACTION_CLEANUP_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "transaction_id": binding.transaction_id,
+        "writer_version": _WRITER_VERSION,
+    }
+    body["record_digest"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    return canonical_json_bytes(body, final_newline=True)
+
+
+def _read_posix_private_record(
+    parent: int,
+    component: str,
+    *,
+    device: int,
+) -> tuple[bytes, tuple[int, int]]:
+    descriptor = os.open(component, _paths._posix_file_flags(), dir_fd=parent)
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or before.st_gid != os.getegid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_dev != device
+            or before.st_size > _TRANSACTION_RECORD_LIMIT
+            or not _paths._posix_security_metadata_supported(descriptor, before)
+        ):
+            raise OSError(errno.EPERM, "persistent transaction record is unsafe")
+        raw = os.pread(descriptor, _TRANSACTION_RECORD_LIMIT + 1, 0)
+        after = os.fstat(descriptor)
+        if (
+            len(raw) != before.st_size
+            or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+            or _paths._posix_status_fingerprint(before)
+            != _paths._posix_status_fingerprint(after)
+            or not _paths._posix_security_metadata_supported(descriptor, after)
+        ):
+            raise OSError(errno.ESTALE, "persistent transaction record changed")
+        return raw, (before.st_dev, before.st_ino)
+    finally:
+        os.close(descriptor)
+
+
+def _read_windows_private_record(
+    parent: int,
+    component: str,
+    *,
+    volume: int,
+) -> tuple[bytes, tuple[int, int]]:
+    descriptor = _paths._windows_open_child(
+        parent, component, directory=False, read_data=True
+    )
+    try:
+        before = _paths._windows_handle_status(descriptor)
+        if (
+            before.is_directory
+            or before.is_reparse
+            or before.link_count != 1
+            or before.identity[0] != volume
+            or before.size > _TRANSACTION_RECORD_LIMIT
+            or not _paths._windows_private_authorization(descriptor, exact=True)
+        ):
+            raise OSError(errno.EPERM, "persistent transaction record is unsafe")
+        raw = _paths._windows_read(descriptor, limit=_TRANSACTION_RECORD_LIMIT)
+        after = _paths._windows_handle_status(descriptor)
+        if (
+            len(raw) != before.size
+            or after.identity != before.identity
+            or after.fingerprint != before.fingerprint
+            or not _paths._windows_private_authorization(descriptor, exact=True)
+        ):
+            raise OSError(errno.ESTALE, "persistent transaction record changed")
+        return raw, before.identity
+    finally:
+        _paths._windows_close(descriptor)
+
+
+def _publish_posix_transaction_record(
+    store: _TransactionStore,
+    component: str,
+    raw: bytes,
+) -> tuple[int, int]:
+    temporary = f".record-{secrets.token_hex(16)}.tmp"
+    descriptor = -1
+    identity: tuple[int, int] | None = None
+    try:
+        try:
+            observed_raw, observed_identity = _read_posix_private_record(
+                store.claims,
+                component,
+                device=store.plugins_identity[0],
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            if observed_raw != raw or not _private_record_name_binds(
+                store.claims,
+                component,
+                observed_identity,
+                expected_raw=raw,
+                windows=False,
+            ):
+                raise OSError(errno.EEXIST, "transaction record conflicts")
+            return observed_identity
+        descriptor = os.open(
+            temporary,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=store.claims,
+        )
+        os.fchmod(descriptor, 0o600)
+        identity = _identity(descriptor)
+        _paths._write_all(descriptor, raw)
+        os.fsync(descriptor)
+        status = os.fstat(descriptor)
+        if (
+            (status.st_dev, status.st_ino) != identity
+            or not stat.S_ISREG(status.st_mode)
+            or status.st_uid != os.geteuid()
+            or status.st_gid != os.getegid()
+            or stat.S_IMODE(status.st_mode) != 0o600
+            or status.st_nlink != 1
+            or status.st_dev != store.plugins_identity[0]
+            or not _paths._posix_security_metadata_supported(descriptor, status)
+        ):
+            raise OSError(errno.EPERM, "transaction record is unsafe")
+        try:
+            _paths._exclusive_posix_rename(store.claims, temporary, component)
+        except FileExistsError:
+            observed_raw, observed_identity = _read_posix_private_record(
+                store.claims,
+                component,
+                device=store.plugins_identity[0],
+            )
+            if observed_raw != raw or not _private_record_name_binds(
+                store.claims,
+                component,
+                observed_identity,
+                expected_raw=raw,
+                windows=False,
+            ):
+                raise OSError(errno.EEXIST, "transaction record conflicts") from None
+            return observed_identity
+        os.fsync(store.claims)
+        if not _private_record_name_binds(
+            store.claims,
+            component,
+            identity,
+            expected_raw=raw,
+            windows=False,
+        ):
+            raise OSError(errno.ESTALE, "transaction record changed")
+        return identity
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if identity is not None:
+            try:
+                named = os.stat(temporary, dir_fd=store.claims, follow_symlinks=False)
+                if (named.st_dev, named.st_ino) == identity:
+                    os.unlink(temporary, dir_fd=store.claims)
+                    os.fsync(store.claims)
+            except OSError:
+                pass
+
+
+def _publish_windows_transaction_record(
+    store: _TransactionStore,
+    component: str,
+    raw: bytes,
+) -> tuple[int, int]:
+    temporary = f".record-{secrets.token_hex(16)}.tmp"
+    descriptor = 0
+    identity: tuple[int, int] | None = None
+    try:
+        try:
+            observed_raw, observed_identity = _read_windows_private_record(
+                store.claims,
+                component,
+                volume=store.plugins_identity[0],
+            )
+        except OSError as exc:
+            if not isinstance(exc, FileNotFoundError) and getattr(
+                exc, "winerror", None
+            ) not in {2, 3}:
+                raise
+        else:
+            if observed_raw != raw or not _private_record_name_binds(
+                store.claims,
+                component,
+                observed_identity,
+                expected_raw=raw,
+                windows=True,
+            ):
+                raise OSError(errno.EEXIST, "transaction record conflicts")
+            return observed_identity
+        descriptor = _paths._windows_create_private_file(store.claims, temporary)
+        identity = _paths._windows_handle_status(descriptor).identity
+        _paths._windows_write(descriptor, raw)
+        status = _paths._windows_handle_status(descriptor)
+        if (
+            status.identity != identity
+            or status.is_directory
+            or status.is_reparse
+            or status.link_count != 1
+            or status.identity[0] != store.plugins_identity[0]
+            or not _paths._windows_private_authorization(descriptor, exact=True)
+        ):
+            raise OSError(errno.EPERM, "transaction record is unsafe")
+        try:
+            _durable_windows_file_rename(
+                descriptor,
+                store.claims,
+                component,
+            )
+        except FileExistsError:
+            observed_raw, observed_identity = _read_windows_private_record(
+                store.claims,
+                component,
+                volume=store.plugins_identity[0],
+            )
+            if observed_raw != raw or not _private_record_name_binds(
+                store.claims,
+                component,
+                observed_identity,
+                expected_raw=raw,
+                windows=True,
+            ):
+                raise OSError(errno.EEXIST, "transaction record conflicts") from None
+            return observed_identity
+        _windows_flush_directory_binding(
+            store.store,
+            _TRANSACTION_CLAIMS_COMPONENT,
+            store.claims_identity,
+        )
+        if not _private_record_name_binds(
+            store.claims,
+            component,
+            identity,
+            expected_raw=raw,
+            windows=True,
+        ):
+            raise OSError(errno.ESTALE, "transaction record changed")
+        return identity
+    finally:
+        if descriptor:
+            _paths._windows_close(descriptor)
+        if identity is not None:
+            temporary_handle = 0
+            try:
+                temporary_handle = _paths._windows_open_child(
+                    store.claims,
+                    temporary,
+                    directory=False,
+                    read_data=True,
+                    delete_access=True,
+                )
+                status = _paths._windows_handle_status(temporary_handle)
+                if status.identity == identity:
+                    _windows_delete_handle(temporary_handle)
+            except (ForgeError, OSError):
+                pass
+            finally:
+                if temporary_handle:
+                    _paths._windows_close(temporary_handle)
+
+
+def _publish_transaction_record(
+    store: _TransactionStore,
+    component: str,
+    raw: bytes,
+) -> tuple[int, int]:
+    if store.windows:
+        return _publish_windows_transaction_record(store, component, raw)
+    return _publish_posix_transaction_record(store, component, raw)
+
+
+def _transaction_record_retirement_component(component: str) -> str:
+    if (
+        not isinstance(component, str)
+        or not component
+        or len(component.encode("utf-8")) > LIMIT_POLICY.value("path_component_bytes")
+        or "/" in component
+        or "\x00" in component
+    ):
+        raise ValueError("transaction record component")
+    digest = hashlib.sha256(component.encode("utf-8")).hexdigest()
+    return f".retired-{digest}.json"
+
+
+def _transaction_record_is_active_or_retired_exact(
+    store: _TransactionStore,
+    component: str,
+    expected_identity: tuple[int, int],
+    expected_raw: bytes,
+) -> bool:
+    retired = _transaction_record_retirement_component(component)
+    active_is_exact = _private_record_name_binds(
+        store.claims,
+        component,
+        expected_identity,
+        expected_raw=expected_raw,
+        windows=store.windows,
+    )
+    retired_is_exact = _private_record_name_binds(
+        store.claims,
+        retired,
+        expected_identity,
+        expected_raw=expected_raw,
+        windows=store.windows,
+    )
+    active_exists = active_is_exact or _transaction_name_exists(
+        store.claims,
+        component,
+        directory=False,
+        windows=store.windows,
+    )
+    retired_exists = retired_is_exact or _transaction_name_exists(
+        store.claims,
+        retired,
+        directory=False,
+        windows=store.windows,
+    )
+    return (active_is_exact and not retired_exists) or (
+        retired_is_exact and not active_exists
+    )
+
+
+def _remove_exact_transaction_record(
+    store: _TransactionStore,
+    component: str,
+    expected_identity: tuple[int, int],
+    expected_raw: bytes,
+) -> None:
+    retired = _transaction_record_retirement_component(component)
+    source_is_exact = _private_record_name_binds(
+        store.claims,
+        component,
+        expected_identity,
+        expected_raw=expected_raw,
+        windows=store.windows,
+    )
+    retired_is_exact = _private_record_name_binds(
+        store.claims,
+        retired,
+        expected_identity,
+        expected_raw=expected_raw,
+        windows=store.windows,
+    )
+    if not source_is_exact:
+        source_exists = _transaction_name_exists(
+            store.claims,
+            component,
+            directory=False,
+            windows=store.windows,
+        )
+        if not source_exists and retired_is_exact:
+            return
+        raise OSError(errno.ESTALE, "transaction record changed")
+    if retired_is_exact or _transaction_name_exists(
+        store.claims,
+        retired,
+        directory=False,
+        windows=store.windows,
+    ):
+        raise OSError(errno.EEXIST, "transaction retirement slot conflicts")
+    if store.windows:
+        descriptor = _paths._windows_open_child(
+            store.claims,
+            component,
+            directory=False,
+            read_data=True,
+            delete_access=True,
+        )
+        try:
+            status = _paths._windows_handle_status(descriptor)
+            if (
+                status.identity != expected_identity
+                or status.is_directory
+                or status.is_reparse
+                or status.link_count != 1
+                or not _paths._windows_private_authorization(descriptor, exact=True)
+            ):
+                raise OSError(errno.ESTALE, "transaction record changed")
+            _durable_windows_file_rename(
+                descriptor,
+                store.claims,
+                retired,
+            )
+        finally:
+            _paths._windows_close(descriptor)
+        _windows_flush_directory_binding(
+            store.store,
+            _TRANSACTION_CLAIMS_COMPONENT,
+            store.claims_identity,
+        )
+    else:
+        _paths._exclusive_posix_rename(store.claims, component, retired)
+        os.fsync(store.claims)
+    if not _private_record_name_binds(
+        store.claims,
+        retired,
+        expected_identity,
+        expected_raw=expected_raw,
+        windows=store.windows,
+    ) or _transaction_name_exists(
+        store.claims,
+        component,
+        directory=False,
+        windows=store.windows,
+    ):
+        raise OSError(errno.ESTALE, "retired transaction record changed")
+
+
+def _create_posix_store_record(store: int, raw: bytes) -> None:
+    descriptor = os.open(
+        _TRANSACTION_STORE_CONTROL,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=store,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        _paths._write_all(descriptor, raw)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.fsync(store)
+
+
+def _create_windows_store_record(store: int, raw: bytes) -> None:
+    descriptor = _paths._windows_create_private_file(store, _TRANSACTION_STORE_CONTROL)
+    try:
+        _paths._windows_write(descriptor, raw)
+    finally:
+        _paths._windows_close(descriptor)
+
+
+def _discard_posix_losing_transaction_store(
+    control: int,
+    stage_name: str,
+    staged: int,
+    store_identity: tuple[int, int],
+    claims: int,
+    claims_identity: tuple[int, int],
+    expected_record: bytes,
+) -> None:
+    """Remove only the exact, unopened first-publication loser."""
+
+    raw, record_identity = _read_posix_private_record(
+        staged,
+        _TRANSACTION_STORE_CONTROL,
+        device=store_identity[0],
+    )
+    if (
+        raw != expected_record
+        or tuple(os.listdir(claims))
+        or set(os.listdir(staged))
+        != {_TRANSACTION_CLAIMS_COMPONENT, _TRANSACTION_STORE_CONTROL}
+        or not _paths._posix_namespace_binds(control, stage_name, store_identity)
+        or not _paths._posix_namespace_binds(
+            staged, _TRANSACTION_CLAIMS_COMPONENT, claims_identity
+        )
+        or not _private_record_name_binds(
+            staged,
+            _TRANSACTION_STORE_CONTROL,
+            record_identity,
+            expected_raw=expected_record,
+            windows=False,
+        )
+    ):
+        raise OSError(errno.ESTALE, "losing transaction store changed")
+    os.unlink(_TRANSACTION_STORE_CONTROL, dir_fd=staged)
+    os.fsync(staged)
+    os.rmdir(_TRANSACTION_CLAIMS_COMPONENT, dir_fd=staged)
+    os.fsync(staged)
+    if not _paths._posix_namespace_binds(control, stage_name, store_identity):
+        raise OSError(errno.ESTALE, "losing transaction store changed")
+    os.rmdir(stage_name, dir_fd=control)
+    os.fsync(control)
+
+
+def _open_windows_losing_store_record(
+    control: int,
+    stage_name: str,
+    staged: int,
+    store_identity: tuple[int, int],
+    claims: int,
+    claims_identity: tuple[int, int],
+    expected_record: bytes,
+) -> int:
+    """Validate a first-publication loser and hold its exact control record."""
+
+    raw, record_identity = _read_windows_private_record(
+        staged,
+        _TRANSACTION_STORE_CONTROL,
+        volume=store_identity[0],
+    )
+    if (
+        raw != expected_record
+        or _windows_list_names(claims, limit=1)
+        or set(_windows_list_names(staged, limit=2))
+        != {_TRANSACTION_CLAIMS_COMPONENT, _TRANSACTION_STORE_CONTROL}
+        or not _paths._windows_namespace_binds(control, stage_name, store_identity)
+        or not _paths._windows_namespace_binds(
+            staged, _TRANSACTION_CLAIMS_COMPONENT, claims_identity
+        )
+    ):
+        raise OSError(errno.ESTALE, "losing transaction store changed")
+    record = _paths._windows_open_child(
+        staged,
+        _TRANSACTION_STORE_CONTROL,
+        directory=False,
+        read_data=True,
+        delete_access=True,
+    )
+    status = _paths._windows_handle_status(record)
+    if (
+        status.identity != record_identity
+        or status.is_directory
+        or status.is_reparse
+        or status.link_count != 1
+        or not _paths._windows_private_authorization(record, exact=True)
+    ):
+        _paths._windows_close(record)
+        raise OSError(errno.ESTALE, "losing transaction store changed")
+    return record
+
+
+def _open_posix_transaction_store(
+    owned_root: OwnedRoot, *, create: bool
+) -> _TransactionStore:
+    control = owned_root._duplicate_control_descriptor()
+    store = claims = -1
+    try:
+        if not owned_root._validate_control_descriptor(control):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        plugins_identity = owned_root.identity
+        control_identity = owned_root.control_identity
+        try:
+            store = _paths._open_directory_component(
+                control,
+                _TRANSACTION_STORE_COMPONENT,
+                linked_code="path.linked_leaf",
+            )
+        except ForgeError as exc:
+            if not create or exc.code != "path.outside_root":
+                raise _error(
+                    "ownership.unowned", "The transaction store is not trusted."
+                ) from None
+            stage_name, staged, store_identity = _paths._stage_posix_directory(
+                control, prefix="transactions"
+            )
+            try:
+                os.mkdir(_TRANSACTION_CLAIMS_COMPONENT, 0o700, dir_fd=staged)
+                claims = _paths._open_directory_component(
+                    staged,
+                    _TRANSACTION_CLAIMS_COMPONENT,
+                    linked_code="path.linked_leaf",
+                )
+                claims_status = os.fstat(claims)
+                claims_identity = (claims_status.st_dev, claims_status.st_ino)
+                raw = _transaction_store_record_bytes(
+                    plugins_identity=plugins_identity,
+                    control_identity=control_identity,
+                    store_identity=store_identity,
+                    claims_identity=claims_identity,
+                )
+                _create_posix_store_record(staged, raw)
+                try:
+                    _paths._exclusive_posix_rename(
+                        control, stage_name, _TRANSACTION_STORE_COMPONENT
+                    )
+                except FileExistsError:
+                    _discard_posix_losing_transaction_store(
+                        control,
+                        stage_name,
+                        staged,
+                        store_identity,
+                        claims,
+                        claims_identity,
+                        raw,
+                    )
+                    os.close(claims)
+                    claims = -1
+                    os.close(staged)
+                    staged = -1
+                    store = _paths._open_directory_component(
+                        control,
+                        _TRANSACTION_STORE_COMPONENT,
+                        linked_code="path.linked_leaf",
+                    )
+                else:
+                    os.fsync(control)
+                    store = staged
+                    staged = -1
+            finally:
+                if staged >= 0:
+                    os.close(staged)
+        store_status = os.fstat(store)
+        store_identity = (store_status.st_dev, store_status.st_ino)
+        if claims < 0:
+            claims = _paths._open_directory_component(
+                store,
+                _TRANSACTION_CLAIMS_COMPONENT,
+                linked_code="path.linked_ancestor",
+            )
+        claims_status = os.fstat(claims)
+        claims_identity = (claims_status.st_dev, claims_status.st_ino)
+        if (
+            store_status.st_dev != plugins_identity[0]
+            or claims_status.st_dev != plugins_identity[0]
+            or not _paths._private_directory(store, store_status, exact=True)
+            or not _paths._private_directory(claims, claims_status, exact=True)
+            or not owned_root._filesystem_guard(store)
+            or not owned_root._filesystem_guard(claims)
+        ):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        raw, _record_identity = _read_posix_private_record(
+            store,
+            _TRANSACTION_STORE_CONTROL,
+            device=plugins_identity[0],
+        )
+        if not _valid_transaction_store_record(
+            raw,
+            plugins_identity=plugins_identity,
+            control_identity=control_identity,
+            store_identity=store_identity,
+            claims_identity=claims_identity,
+        ) or not _private_record_name_binds(
+            store,
+            _TRANSACTION_STORE_CONTROL,
+            _record_identity,
+            expected_raw=raw,
+            windows=False,
+        ):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        if not owned_root._validate_control_descriptor(control):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        opened = _TransactionStore(
+            control,
+            store,
+            claims,
+            plugins_identity,
+            control_identity,
+            store_identity,
+            claims_identity,
+            False,
+        )
+        if not _transaction_store_namespace_is_valid(opened):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        control = store = claims = -1
+        return opened
+    finally:
+        for descriptor in (claims, store, control):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _open_windows_transaction_store(
+    owned_root: OwnedRoot, *, create: bool
+) -> _TransactionStore:
+    control = owned_root._duplicate_control_descriptor()
+    store = claims = 0
+    try:
+        if not owned_root._validate_control_descriptor(control):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        plugins_identity = owned_root.identity
+        control_identity = owned_root.control_identity
+        try:
+            store = _paths._windows_open_child(
+                control, _TRANSACTION_STORE_COMPONENT, directory=True
+            )
+        except OSError as exc:
+            missing = isinstance(exc, FileNotFoundError) or getattr(
+                exc, "winerror", None
+            ) in {2, 3}
+            if not create or not missing:
+                raise _error(
+                    "ownership.unowned", "The transaction store is not trusted."
+                ) from None
+            for _attempt in range(16):
+                stage_name = f".transactions-{secrets.token_hex(16)}.tmp"
+                try:
+                    staged = _paths._windows_create_private_directory(
+                        control, stage_name
+                    )
+                except FileExistsError:
+                    continue
+                break
+            else:
+                raise _error(
+                    "ownership.unowned", "The transaction store cannot be created."
+                )
+            try:
+                store_status = _paths._windows_handle_status(staged)
+                claims = _paths._windows_create_private_directory(
+                    staged, _TRANSACTION_CLAIMS_COMPONENT
+                )
+                claims_identity = _paths._windows_handle_status(claims).identity
+                raw = _transaction_store_record_bytes(
+                    plugins_identity=plugins_identity,
+                    control_identity=control_identity,
+                    store_identity=store_status.identity,
+                    claims_identity=claims_identity,
+                )
+                _create_windows_store_record(staged, raw)
+                _windows_flush_directory_binding(
+                    control,
+                    stage_name,
+                    store_status.identity,
+                )
+                try:
+                    _durable_windows_directory_rename(
+                        staged,
+                        control,
+                        _TRANSACTION_STORE_COMPONENT,
+                        store_status.identity,
+                    )
+                except FileExistsError:
+                    record = _open_windows_losing_store_record(
+                        control,
+                        stage_name,
+                        staged,
+                        store_status.identity,
+                        claims,
+                        claims_identity,
+                        raw,
+                    )
+                    try:
+                        _windows_delete_handle(record)
+                    finally:
+                        _paths._windows_close(record)
+                    _windows_delete_handle(claims)
+                    _paths._windows_close(claims)
+                    claims = 0
+                    if not _paths._windows_namespace_binds(
+                        control, stage_name, store_status.identity
+                    ):
+                        raise OSError(errno.ESTALE, "losing transaction store changed")
+                    _windows_delete_handle(staged)
+                    _paths._windows_close(staged)
+                    staged = 0
+                    store = _paths._windows_open_child(
+                        control, _TRANSACTION_STORE_COMPONENT, directory=True
+                    )
+                else:
+                    store = staged
+                    staged = 0
+            finally:
+                if staged:
+                    _paths._windows_close(staged)
+        store_status = _paths._windows_handle_status(store)
+        store_identity = store_status.identity
+        if not claims:
+            claims = _paths._windows_open_child(
+                store, _TRANSACTION_CLAIMS_COMPONENT, directory=True
+            )
+        claims_status = _paths._windows_handle_status(claims)
+        claims_identity = claims_status.identity
+        if (
+            store_identity[0] != plugins_identity[0]
+            or claims_identity[0] != plugins_identity[0]
+            or not _paths._windows_private_directory(store, exact=True)
+            or not _paths._windows_private_directory(claims, exact=True)
+            or not owned_root._filesystem_guard(store)
+            or not owned_root._filesystem_guard(claims)
+        ):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        raw, _record_identity = _read_windows_private_record(
+            store,
+            _TRANSACTION_STORE_CONTROL,
+            volume=plugins_identity[0],
+        )
+        if not _valid_transaction_store_record(
+            raw,
+            plugins_identity=plugins_identity,
+            control_identity=control_identity,
+            store_identity=store_identity,
+            claims_identity=claims_identity,
+        ) or not _private_record_name_binds(
+            store,
+            _TRANSACTION_STORE_CONTROL,
+            _record_identity,
+            expected_raw=raw,
+            windows=True,
+        ):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        if not owned_root._validate_control_descriptor(control):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        opened = _TransactionStore(
+            control,
+            store,
+            claims,
+            plugins_identity,
+            control_identity,
+            store_identity,
+            claims_identity,
+            True,
+        )
+        if not _transaction_store_namespace_is_valid(opened):
+            raise _error("ownership.unowned", "The transaction store is not trusted.")
+        control = store = claims = 0
+        return opened
+    finally:
+        for descriptor in (claims, store, control):
+            if descriptor:
+                _paths._windows_close(descriptor)
+
+
+def _open_transaction_store(
+    owned_root: OwnedRoot, *, create: bool
+) -> _TransactionStore:
+    if not isinstance(owned_root, OwnedRoot):
+        raise _error("ownership.unowned", "The transaction store is not trusted.")
+    if os.name == "nt":
+        return _open_windows_transaction_store(owned_root, create=create)
+    return _open_posix_transaction_store(owned_root, create=create)
+
+
+def _transaction_claim_body(
+    *,
+    transaction_id: str,
+    root_relative: str,
+    quarantine_relative: str,
+    claim_relative: str,
+    plugins_identity: tuple[int, int],
+    control_identity: tuple[int, int],
+    store_identity: tuple[int, int],
+    claims_identity: tuple[int, int],
+    transaction_identity: tuple[int, int],
+    claim_identity: tuple[int, int],
+) -> dict[str, object]:
+    return {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "claim_identity": claim_identity,
+        "claim_relative": claim_relative,
+        "claims_identity": claims_identity,
+        "control_identity": control_identity,
+        "minimum_reader_version": _WRITER_VERSION,
+        "plugins_identity": plugins_identity,
+        "quarantine_relative": quarantine_relative,
+        "record_kind": "persistent-transaction-root",
+        "root_relative": root_relative,
+        "schema_digest": _TRANSACTION_BINDING_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "store_identity": store_identity,
+        "transaction_id": transaction_id,
+        "transaction_identity": transaction_identity,
+        "writer_version": _WRITER_VERSION,
+    }
+
+
+def _binding_from_fields(
+    *,
+    transaction_id: str,
+    plugins_identity: tuple[int, int],
+    control_identity: tuple[int, int],
+    store_identity: tuple[int, int],
+    claims_identity: tuple[int, int],
+    transaction_identity: tuple[int, int],
+    claim_identity: tuple[int, int],
+) -> tuple[PersistentTransactionBinding, bytes]:
+    root_relative, quarantine_relative, claim_relative = (
+        _persistent_transaction_references(transaction_id)
+    )
+    body = _transaction_claim_body(
+        transaction_id=transaction_id,
+        root_relative=root_relative,
+        quarantine_relative=quarantine_relative,
+        claim_relative=claim_relative,
+        plugins_identity=plugins_identity,
+        control_identity=control_identity,
+        store_identity=store_identity,
+        claims_identity=claims_identity,
+        transaction_identity=transaction_identity,
+        claim_identity=claim_identity,
+    )
+    claim_digest = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    body["record_digest"] = claim_digest
+    binding = PersistentTransactionBinding(
+        transaction_id=transaction_id,
+        root_relative=root_relative,
+        quarantine_relative=quarantine_relative,
+        claim_relative=claim_relative,
+        plugins_identity=plugins_identity,
+        control_identity=control_identity,
+        store_identity=store_identity,
+        claims_identity=claims_identity,
+        transaction_identity=transaction_identity,
+        claim_identity=claim_identity,
+        claim_digest=claim_digest,
+        _token=_PERSISTENT_BINDING_TOKEN,
+    )
+    return binding, canonical_json_bytes(body, final_newline=True)
+
+
+def _persistent_binding_invariants(value: object) -> bool:
+    if type(value) is not PersistentTransactionBinding:
+        return False
+    binding = value
+    try:
+        if binding._seal is not _PERSISTENT_BINDING_TOKEN:
+            return False
+        root, quarantine, claim = _persistent_transaction_references(
+            binding.transaction_id
+        )
+        if (
+            binding.root_relative != root
+            or binding.quarantine_relative != quarantine
+            or binding.claim_relative != claim
+            or not all(
+                _file_identity_invariants(identity)
+                for identity in (
+                    binding.plugins_identity,
+                    binding.control_identity,
+                    binding.store_identity,
+                    binding.claims_identity,
+                    binding.transaction_identity,
+                    binding.claim_identity,
+                )
+            )
+            or binding.transaction_identity[0] != binding.plugins_identity[0]
+        ):
+            return False
+        body = _transaction_claim_body(
+            transaction_id=binding.transaction_id,
+            root_relative=binding.root_relative,
+            quarantine_relative=binding.quarantine_relative,
+            claim_relative=binding.claim_relative,
+            plugins_identity=binding.plugins_identity,
+            control_identity=binding.control_identity,
+            store_identity=binding.store_identity,
+            claims_identity=binding.claims_identity,
+            transaction_identity=binding.transaction_identity,
+            claim_identity=binding.claim_identity,
+        )
+        return (
+            hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+            == binding.claim_digest
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _transaction_journal_identity_error(
+    binding: PersistentTransactionBinding,
+) -> ForgeError:
+    return _error(
+        "ownership.identity_mismatch",
+        "The persistent transaction journal authority changed.",
+        recovery=(binding.quarantine_relative,),
+    )
+
+
+def _transaction_journal_binding_bytes(
+    binding: PersistentTransactionBinding,
+) -> bytes:
+    expected, raw = _binding_from_fields(
+        transaction_id=binding.transaction_id,
+        plugins_identity=binding.plugins_identity,
+        control_identity=binding.control_identity,
+        store_identity=binding.store_identity,
+        claims_identity=binding.claims_identity,
+        transaction_identity=binding.transaction_identity,
+        claim_identity=binding.claim_identity,
+    )
+    if expected != binding:
+        raise _transaction_journal_identity_error(binding)
+    return raw
+
+
+def _transaction_journal_store_is_valid(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+    filesystem_guard: _paths.FilesystemGuard,
+) -> bool:
+    if (
+        store.windows != (os.name == "nt")
+        or store.plugins_identity != binding.plugins_identity
+        or store.control_identity != binding.control_identity
+        or store.store_identity != binding.store_identity
+        or store.claims_identity != binding.claims_identity
+        or not _transaction_store_namespace_is_valid(store)
+    ):
+        return False
+    expected = (
+        binding.control_identity,
+        binding.store_identity,
+        binding.claims_identity,
+    )
+    descriptors = (store.control, store.store, store.claims)
+    try:
+        if store.windows:
+            for descriptor, identity in zip(descriptors, expected, strict=True):
+                windows_status = _paths._windows_handle_status(descriptor)
+                if (
+                    windows_status.identity != identity
+                    or windows_status.is_reparse
+                    or not _paths._windows_private_directory(descriptor, exact=True)
+                    or not filesystem_guard(descriptor)
+                ):
+                    return False
+            return True
+        for descriptor, identity in zip(descriptors, expected, strict=True):
+            posix_status = os.fstat(descriptor)
+            if (
+                (posix_status.st_dev, posix_status.st_ino) != identity
+                or not _paths._private_directory(descriptor, posix_status, exact=True)
+                or not filesystem_guard(descriptor)
+            ):
+                return False
+        return True
+    except (ForgeError, OSError):
+        return False
+
+
+def _transaction_journal_location_is_valid(
+    store: _TransactionStore,
+    descriptor: int,
+    binding: PersistentTransactionBinding,
+    location: TransactionLocation,
+    filesystem_guard: _paths.FilesystemGuard,
+) -> bool:
+    relative = (
+        binding.root_relative
+        if location is TransactionLocation.LIVE
+        else binding.quarantine_relative
+    )
+    component = relative.rsplit("/", 1)[-1]
+    try:
+        if store.windows:
+            windows_status = _paths._windows_handle_status(descriptor)
+            return (
+                windows_status.identity == binding.transaction_identity
+                and not windows_status.is_reparse
+                and _paths._windows_private_directory(descriptor, exact=True)
+                and filesystem_guard(descriptor)
+                and _paths._windows_namespace_binds(
+                    store.store,
+                    component,
+                    binding.transaction_identity,
+                )
+            )
+        posix_status = os.fstat(descriptor)
+        return (
+            (posix_status.st_dev, posix_status.st_ino) == binding.transaction_identity
+            and _paths._private_directory(descriptor, posix_status, exact=True)
+            and filesystem_guard(descriptor)
+            and _paths._posix_namespace_binds(
+                store.store,
+                component,
+                binding.transaction_identity,
+            )
+        )
+    except (ForgeError, OSError):
+        return False
+
+
+def _transaction_journal_records_are_valid(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+) -> bool:
+    try:
+        if store.windows:
+            store_raw, store_record_identity = _read_windows_private_record(
+                store.store,
+                _TRANSACTION_STORE_CONTROL,
+                volume=binding.plugins_identity[0],
+            )
+            claim_raw, claim_identity = _read_windows_private_record(
+                store.claims,
+                f"{binding.transaction_id}.json",
+                volume=binding.plugins_identity[0],
+            )
+        else:
+            store_raw, store_record_identity = _read_posix_private_record(
+                store.store,
+                _TRANSACTION_STORE_CONTROL,
+                device=binding.plugins_identity[0],
+            )
+            claim_raw, claim_identity = _read_posix_private_record(
+                store.claims,
+                f"{binding.transaction_id}.json",
+                device=binding.plugins_identity[0],
+            )
+        return (
+            _valid_transaction_store_record(
+                store_raw,
+                plugins_identity=binding.plugins_identity,
+                control_identity=binding.control_identity,
+                store_identity=binding.store_identity,
+                claims_identity=binding.claims_identity,
+            )
+            and _private_record_name_binds(
+                store.store,
+                _TRANSACTION_STORE_CONTROL,
+                store_record_identity,
+                expected_raw=store_raw,
+                windows=store.windows,
+            )
+            and claim_identity == binding.claim_identity
+            and claim_raw == _transaction_journal_binding_bytes(binding)
+            and _private_record_name_binds(
+                store.claims,
+                f"{binding.transaction_id}.json",
+                binding.claim_identity,
+                expected_raw=claim_raw,
+                windows=store.windows,
+            )
+        )
+    except (ForgeError, OSError, TypeError, ValueError):
+        return False
+
+
+class TransactionJournalAccess:
+    """Sealed authority for one exact live or quarantined transaction journal."""
+
+    _binding: PersistentTransactionBinding
+    _closed: bool
+    _descriptor: int
+    _filesystem_guard: _paths.FilesystemGuard
+    _location: TransactionLocation
+    _lock: LockType
+    _namespace: _paths._NamespaceCapability | None
+    _seal: object
+    _store: _TransactionStore | None
+
+    __slots__ = (
+        "_binding",
+        "_closed",
+        "_descriptor",
+        "_filesystem_guard",
+        "_location",
+        "_lock",
+        "_namespace",
+        "_seal",
+        "_store",
+    )
+
+    def __init__(
+        self,
+        *,
+        binding: PersistentTransactionBinding,
+        location: TransactionLocation,
+        descriptor: int,
+        store: _TransactionStore,
+        namespace: _paths._NamespaceCapability,
+        filesystem_guard: _paths.FilesystemGuard,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _TRANSACTION_JOURNAL_ACCESS_TOKEN
+            or not _persistent_binding_invariants(binding)
+            or location
+            not in (TransactionLocation.LIVE, TransactionLocation.QUARANTINED)
+        ):
+            raise TypeError(
+                "transaction journal access is created only by ownership authority"
+            )
+        object.__setattr__(self, "_binding", binding)
+        object.__setattr__(self, "_location", location)
+        object.__setattr__(self, "_descriptor", descriptor)
+        object.__setattr__(self, "_store", store)
+        object.__setattr__(self, "_namespace", namespace)
+        object.__setattr__(self, "_filesystem_guard", filesystem_guard)
+        object.__setattr__(self, "_closed", False)
+        object.__setattr__(self, "_lock", Lock())
+        object.__setattr__(self, "_seal", _TRANSACTION_JOURNAL_ACCESS_TOKEN)
+
+    @property
+    def binding(self) -> PersistentTransactionBinding:
+        return self._binding
+
+    @property
+    def location(self) -> TransactionLocation:
+        return self._location
+
+    @property
+    def read_only(self) -> bool:
+        return self._location is TransactionLocation.QUARANTINED
+
+    def _require_journal_access(self, *, write: bool) -> None:
+        with self._lock:
+            self._validate_locked(write=write)
+
+    def _validate_locked(self, *, write: bool) -> None:
+        binding = self._binding
+        if (
+            type(write) is not bool
+            or self._closed
+            or self._seal is not _TRANSACTION_JOURNAL_ACCESS_TOKEN
+            or not _persistent_binding_invariants(binding)
+            or self._location
+            not in (TransactionLocation.LIVE, TransactionLocation.QUARANTINED)
+        ):
+            raise _transaction_journal_identity_error(binding)
+        if write and self._location is TransactionLocation.QUARANTINED:
+            raise _error(
+                "ownership.unowned",
+                "Quarantined transaction journals are read-only.",
+                recovery=(binding.quarantine_relative,),
+            )
+        namespace = self._namespace
+        store = self._store
+        try:
+            if (
+                namespace is None
+                or store is None
+                or not namespace._validate_namespace_binding()
+                or _native_identity(namespace._plugins_descriptor)
+                != binding.plugins_identity
+                or _native_identity(namespace._control_descriptor)
+                != binding.control_identity
+                or not _transaction_journal_store_is_valid(
+                    store, binding, self._filesystem_guard
+                )
+                or not _transaction_journal_records_are_valid(store, binding)
+                or not _transaction_journal_location_is_valid(
+                    store,
+                    self._descriptor,
+                    binding,
+                    self._location,
+                    self._filesystem_guard,
+                )
+                or not namespace._validate_namespace_binding()
+                or not _transaction_store_namespace_is_valid(store)
+            ):
+                raise _transaction_journal_identity_error(binding)
+        except (AttributeError, ForgeError, OSError, TypeError, ValueError) as exc:
+            if (
+                isinstance(exc, ForgeError)
+                and exc.code == "ownership.identity_mismatch"
+            ):
+                raise
+            raise _transaction_journal_identity_error(binding) from None
+
+    def _duplicate_journal_descriptor(self, *, write: bool) -> int:
+        with self._lock:
+            self._validate_locked(write=write)
+            duplicate = (
+                _paths._windows_duplicate(self._descriptor)
+                if os.name == "nt"
+                else os.dup(self._descriptor)
+            )
+            try:
+                self._validate_locked(write=write)
+                if _native_identity(duplicate) != self._binding.transaction_identity:
+                    raise _transaction_journal_identity_error(self._binding)
+                return duplicate
+            except BaseException:
+                _close_native(duplicate)
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            descriptor = self._descriptor
+            store = self._store
+            namespace = self._namespace
+            object.__setattr__(self, "_descriptor", 0 if os.name == "nt" else -1)
+            object.__setattr__(self, "_store", None)
+            object.__setattr__(self, "_namespace", None)
+            object.__setattr__(self, "_closed", True)
+            _close_native(descriptor)
+            if store is not None:
+                store.close()
+            if namespace is not None:
+                namespace.close()
+
+    def __enter__(self) -> TransactionJournalAccess:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise AttributeError("transaction journal access is read-only")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("ownership capabilities are not serializable")
+
+
+def _read_transaction_record_if_present(
+    store: _TransactionStore, component: str
+) -> tuple[bytes, tuple[int, int]] | None:
+    try:
+        if store.windows:
+            return _read_windows_private_record(
+                store.claims,
+                component,
+                volume=store.plugins_identity[0],
+            )
+        return _read_posix_private_record(
+            store.claims,
+            component,
+            device=store.plugins_identity[0],
+        )
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError) or (
+            store.windows and getattr(exc, "winerror", None) in {2, 3}
+        ):
+            return None
+        raise
+
+
+def _transaction_name_exists(
+    parent: int, component: str, *, directory: bool, windows: bool
+) -> bool:
+    descriptor = 0 if windows else -1
+    try:
+        if windows:
+            descriptor = _paths._windows_open_child(
+                parent,
+                component,
+                directory=directory,
+            )
+        else:
+            os.stat(component, dir_fd=parent, follow_symlinks=False)
+        return True
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError) or (
+            windows and getattr(exc, "winerror", None) in {2, 3}
+        ):
+            return False
+        raise
+    finally:
+        if windows and descriptor:
+            _paths._windows_close(descriptor)
+
+
+def _load_transaction_creation_intent(
+    store: _TransactionStore, transaction_id: str
+) -> _TransactionCreationIntent | None:
+    component = _transaction_creation_intent_component(transaction_id)
+    observed = _read_transaction_record_if_present(store, component)
+    if observed is None:
+        return None
+    raw, identity = observed
+    return _transaction_creation_intent_from_record(
+        store,
+        transaction_id=transaction_id,
+        raw=raw,
+        identity=identity,
+    )
+
+
+def _load_transaction_creation_reservation(
+    store: _TransactionStore,
+    transaction_id: str,
+) -> _TransactionCreationReservation | None:
+    component = _transaction_creation_reservation_component(transaction_id)
+    observed = _read_transaction_record_if_present(store, component)
+    if observed is None:
+        return None
+    raw, identity = observed
+    return _transaction_creation_reservation_from_record(
+        store,
+        transaction_id=transaction_id,
+        raw=raw,
+        identity=identity,
+    )
+
+
+def _publish_transaction_creation_reservation(
+    store: _TransactionStore,
+    *,
+    transaction_id: str,
+) -> _TransactionCreationReservation:
+    component = _transaction_creation_reservation_component(transaction_id)
+    stage_component = f".root-{secrets.token_hex(16)}.tmp"
+    pending_claim_component = f".claim-{secrets.token_hex(16)}.tmp"
+    raw = _transaction_creation_reservation_bytes(
+        store,
+        transaction_id=transaction_id,
+        stage_component=stage_component,
+        pending_claim_component=pending_claim_component,
+    )
+    identity = _publish_transaction_record(store, component, raw)
+    return _transaction_creation_reservation_from_record(
+        store,
+        transaction_id=transaction_id,
+        raw=raw,
+        identity=identity,
+    )
+
+
+def _publish_transaction_creation_intent(
+    store: _TransactionStore,
+    *,
+    transaction_id: str,
+    reservation: _TransactionCreationReservation,
+    binding: PersistentTransactionBinding,
+) -> _TransactionCreationIntent:
+    component = _transaction_creation_intent_component(transaction_id)
+    raw = _transaction_creation_intent_bytes(
+        store,
+        transaction_id=transaction_id,
+        reservation=reservation,
+        binding=binding,
+    )
+    identity = _publish_transaction_record(store, component, raw)
+    return _transaction_creation_intent_from_record(
+        store,
+        transaction_id=transaction_id,
+        raw=raw,
+        identity=identity,
+    )
+
+
+def _require_new_transaction_namespace(
+    store: _TransactionStore, transaction_id: str
+) -> None:
+    final_claim = f"{transaction_id}.json"
+    if _transaction_name_exists(
+        store.store,
+        transaction_id,
+        directory=True,
+        windows=store.windows,
+    ) or _transaction_name_exists(
+        store.claims,
+        final_claim,
+        directory=False,
+        windows=store.windows,
+    ):
+        raise OSError(errno.EEXIST, "transaction state has no creation intent")
+
+
+def _transaction_directory_is_exact(
+    store: _TransactionStore,
+    component: str,
+    descriptor: int,
+    expected_identity: tuple[int, int],
+    *,
+    filesystem_guard: _paths.FilesystemGuard,
+) -> bool:
+    try:
+        if store.windows:
+            before = _paths._windows_handle_status(descriptor)
+            if (
+                before.identity != expected_identity
+                or before.is_reparse
+                or not _paths._windows_private_directory(descriptor, exact=True)
+                or not filesystem_guard(descriptor)
+                or not _paths._windows_namespace_binds(
+                    store.store, component, expected_identity
+                )
+            ):
+                return False
+            after = _paths._windows_handle_status(descriptor)
+            return (
+                after.identity == before.identity
+                and after.fingerprint == before.fingerprint
+                and _paths._windows_private_directory(descriptor, exact=True)
+                and _paths._windows_namespace_binds(
+                    store.store, component, expected_identity
+                )
+                and _transaction_store_namespace_is_valid(store)
+            )
+        posix_before = os.fstat(descriptor)
+        if (
+            (posix_before.st_dev, posix_before.st_ino) != expected_identity
+            or not _paths._private_directory(descriptor, posix_before, exact=True)
+            or not filesystem_guard(descriptor)
+            or not _paths._posix_namespace_binds(
+                store.store, component, expected_identity
+            )
+        ):
+            return False
+        posix_after = os.fstat(descriptor)
+        return (
+            (posix_after.st_dev, posix_after.st_ino) == expected_identity
+            and _paths._posix_status_fingerprint(posix_after)
+            == _paths._posix_status_fingerprint(posix_before)
+            and _paths._private_directory(descriptor, posix_after, exact=True)
+            and _paths._posix_namespace_binds(store.store, component, expected_identity)
+            and _transaction_store_namespace_is_valid(store)
+        )
+    except (ForgeError, OSError):
+        return False
+
+
+def _pending_transaction_claim_is_exact(
+    store: _TransactionStore,
+    component: str,
+    descriptor: int,
+    expected_identity: tuple[int, int],
+) -> bool:
+    named = 0
+    try:
+        if store.windows:
+            windows_before = _paths._windows_handle_status(descriptor)
+            named = _paths._windows_open_child(
+                store.claims,
+                component,
+                directory=False,
+                read_data=True,
+            )
+            windows_named = _paths._windows_handle_status(named)
+            windows_after = _paths._windows_handle_status(descriptor)
+            return (
+                windows_before.identity == expected_identity
+                and windows_named.identity == expected_identity
+                and windows_after.identity == expected_identity
+                and windows_after.fingerprint == windows_before.fingerprint
+                and not windows_before.is_directory
+                and not windows_before.is_reparse
+                and windows_before.link_count == 1
+                and windows_before.identity[0] == store.plugins_identity[0]
+                and windows_before.size <= _TRANSACTION_RECORD_LIMIT
+                and _paths._windows_private_authorization(descriptor, exact=True)
+                and _transaction_store_namespace_is_valid(store)
+            )
+        posix_before = os.fstat(descriptor)
+        posix_named = os.stat(component, dir_fd=store.claims, follow_symlinks=False)
+        posix_after = os.fstat(descriptor)
+        return (
+            (posix_before.st_dev, posix_before.st_ino) == expected_identity
+            and (posix_named.st_dev, posix_named.st_ino) == expected_identity
+            and (posix_after.st_dev, posix_after.st_ino) == expected_identity
+            and _paths._posix_status_fingerprint(posix_after)
+            == _paths._posix_status_fingerprint(posix_before)
+            and stat.S_ISREG(posix_before.st_mode)
+            and posix_before.st_uid == os.geteuid()
+            and posix_before.st_gid == os.getegid()
+            and stat.S_IMODE(posix_before.st_mode) == 0o600
+            and posix_before.st_nlink == 1
+            and posix_before.st_dev == store.plugins_identity[0]
+            and posix_before.st_size <= _TRANSACTION_RECORD_LIMIT
+            and _paths._posix_security_metadata_supported(descriptor, posix_before)
+            and _paths._posix_security_metadata_supported(
+                descriptor,
+                posix_after,
+            )
+            and _transaction_store_namespace_is_valid(store)
+        )
+    except (ForgeError, OSError):
+        return False
+    finally:
+        if named:
+            _paths._windows_close(named)
+
+
+def _persistent_transaction_root_capability(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+) -> PersistentTransactionRoot:
+    reference = _paths.validate_reference(
+        binding.root_relative,
+        role="persistent-transaction-root",
+        limits=LIMIT_POLICY,
+    ).unwrap()
+    claim = TransactionPathClaim(
+        binding.transaction_id,
+        reference,
+        store.plugins_identity,
+        binding.transaction_identity,
+        persistent_binding=binding,
+        _token=_CAPABILITY_TOKEN,
+    )
+    return PersistentTransactionRoot(binding, claim, _token=_PERSISTENT_ROOT_TOKEN)
+
+
+def _create_posix_persistent_transaction(
+    owned_root: OwnedRoot,
+    store: _TransactionStore,
+    *,
+    transaction_id: str,
+) -> PersistentTransactionRoot:
+    leaf = anchor = -1
+    final_claim = f"{transaction_id}.json"
+    try:
+        intent = _load_transaction_creation_intent(store, transaction_id)
+        if intent is None:
+            _require_new_transaction_namespace(store, transaction_id)
+            reservation = _load_transaction_creation_reservation(
+                store,
+                transaction_id,
+            )
+            if reservation is None:
+                reservation = _publish_transaction_creation_reservation(
+                    store,
+                    transaction_id=transaction_id,
+                )
+            _require_new_transaction_namespace(store, transaction_id)
+            if _transaction_name_exists(
+                store.store,
+                reservation.stage_component,
+                directory=True,
+                windows=False,
+            ) or _transaction_name_exists(
+                store.claims,
+                reservation.pending_claim_component,
+                directory=False,
+                windows=False,
+            ):
+                raise OSError(
+                    errno.ESTALE,
+                    "unbound reserved transaction object requires recovery",
+                )
+            os.mkdir(reservation.stage_component, 0o700, dir_fd=store.store)
+            leaf = os.open(
+                reservation.stage_component,
+                _directory_flags(),
+                dir_fd=store.store,
+            )
+            leaf_status = os.fstat(leaf)
+            transaction_identity = _identity(leaf)
+            if (
+                not _paths._private_directory(leaf, leaf_status, exact=True)
+                or transaction_identity[0] != store.plugins_identity[0]
+                or not owned_root._filesystem_guard(leaf)
+                or not _transaction_directory_is_exact(
+                    store,
+                    reservation.stage_component,
+                    leaf,
+                    transaction_identity,
+                    filesystem_guard=owned_root._filesystem_guard,
+                )
+            ):
+                raise OSError(errno.EPERM, "staged transaction root is unsafe")
+            os.fsync(leaf)
+            os.fsync(store.store)
+            anchor = os.open(
+                reservation.pending_claim_component,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=store.claims,
+            )
+            os.fchmod(anchor, 0o600)
+            claim_identity = _identity(anchor)
+            if not _pending_transaction_claim_is_exact(
+                store,
+                reservation.pending_claim_component,
+                anchor,
+                claim_identity,
+            ):
+                raise OSError(errno.EPERM, "staged transaction claim is unsafe")
+            binding, claim_raw = _binding_from_fields(
+                transaction_id=transaction_id,
+                plugins_identity=store.plugins_identity,
+                control_identity=store.control_identity,
+                store_identity=store.store_identity,
+                claims_identity=store.claims_identity,
+                transaction_identity=transaction_identity,
+                claim_identity=claim_identity,
+            )
+            if (
+                _load_transaction_creation_reservation(store, transaction_id)
+                != reservation
+                or not _transaction_directory_is_exact(
+                    store,
+                    reservation.stage_component,
+                    leaf,
+                    transaction_identity,
+                    filesystem_guard=owned_root._filesystem_guard,
+                )
+                or not _pending_transaction_claim_is_exact(
+                    store,
+                    reservation.pending_claim_component,
+                    anchor,
+                    claim_identity,
+                )
+            ):
+                raise OSError(
+                    errno.ESTALE,
+                    "transaction creation reservation changed",
+                )
+            intent = _publish_transaction_creation_intent(
+                store,
+                transaction_id=transaction_id,
+                reservation=reservation,
+                binding=binding,
+            )
+        else:
+            binding = intent.binding
+            claim_raw = _transaction_journal_binding_bytes(binding)
+            stage_leaf = _open_posix_transaction_location(
+                store,
+                intent.stage_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            live_leaf = _open_posix_transaction_location(
+                store,
+                transaction_id,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if (stage_leaf >= 0) == (live_leaf >= 0):
+                for descriptor in (stage_leaf, live_leaf):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                raise OSError(errno.ESTALE, "transaction root publication is ambiguous")
+            leaf = stage_leaf if stage_leaf >= 0 else live_leaf
+            published = _read_transaction_record_if_present(store, final_claim)
+            if published is None:
+                anchor = os.open(
+                    intent.pending_claim_component,
+                    os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=store.claims,
+                )
+                if not _pending_transaction_claim_is_exact(
+                    store,
+                    intent.pending_claim_component,
+                    anchor,
+                    binding.claim_identity,
+                ):
+                    raise OSError(errno.ESTALE, "pending transaction claim changed")
+            elif published != (claim_raw, binding.claim_identity):
+                raise OSError(errno.ESTALE, "published transaction claim changed")
+
+        root_is_live = _paths._posix_namespace_binds(
+            store.store,
+            transaction_id,
+            binding.transaction_identity,
+        )
+        if not root_is_live and not _transaction_directory_is_exact(
+            store,
+            intent.stage_component,
+            leaf,
+            binding.transaction_identity,
+            filesystem_guard=owned_root._filesystem_guard,
+        ):
+            raise OSError(errno.ESTALE, "staged transaction root changed")
+        if anchor >= 0:
+            if not _pending_transaction_claim_is_exact(
+                store,
+                intent.pending_claim_component,
+                anchor,
+                binding.claim_identity,
+            ):
+                raise OSError(errno.ESTALE, "pending transaction claim changed")
+            observed = os.pread(anchor, _TRANSACTION_RECORD_LIMIT + 1, 0)
+            if observed != claim_raw:
+                os.ftruncate(anchor, 0)
+                os.lseek(anchor, 0, os.SEEK_SET)
+                _paths._write_all(anchor, claim_raw)
+            os.fsync(anchor)
+            if not _private_record_name_binds(
+                store.claims,
+                intent.pending_claim_component,
+                binding.claim_identity,
+                expected_raw=claim_raw,
+                windows=False,
+            ):
+                raise OSError(errno.ESTALE, "pending transaction claim changed")
+        if not root_is_live:
+            _paths._exclusive_posix_rename(
+                store.store,
+                intent.stage_component,
+                transaction_id,
+            )
+            os.fsync(store.store)
+        if not _transaction_directory_is_exact(
+            store,
+            transaction_id,
+            leaf,
+            binding.transaction_identity,
+            filesystem_guard=owned_root._filesystem_guard,
+        ):
+            raise OSError(errno.ESTALE, "persistent transaction root moved")
+        if anchor >= 0:
+            _exclusive_rename(
+                store.claims,
+                intent.pending_claim_component,
+                final_claim,
+            )
+            os.fsync(store.claims)
+        if not _transaction_directory_is_exact(
+            store,
+            transaction_id,
+            leaf,
+            binding.transaction_identity,
+            filesystem_guard=owned_root._filesystem_guard,
+        ) or not _private_record_name_binds(
+            store.claims,
+            final_claim,
+            binding.claim_identity,
+            expected_raw=claim_raw,
+            windows=False,
+        ):
+            raise OSError(errno.ESTALE, "persistent transaction publication changed")
+        _finish_transaction_creation_intent(store, binding)
+        return _persistent_transaction_root_capability(store, binding)
+    finally:
+        for descriptor in (anchor, leaf):
+            if descriptor >= 0:
+                os.close(descriptor)
+
+
+def _revalidate_windows_claim_publication(
+    store: _TransactionStore,
+    *,
+    final_claim: str,
+    claim_identity: tuple[int, int],
+    raw: bytes,
+) -> bool | None:
+    """Return exact publication, proven absence, or preserved ambiguity."""
+
+    try:
+        observed_raw, observed_identity = _read_windows_private_record(
+            store.claims,
+            final_claim,
+            volume=store.plugins_identity[0],
+        )
+    except OSError as exc:
+        missing = isinstance(exc, FileNotFoundError) or getattr(
+            exc, "winerror", None
+        ) in {2, 3}
+        return False if missing else None
+    except (ForgeError, ValueError):
+        return None
+    if (
+        observed_identity != claim_identity
+        or observed_raw != raw
+        or not _private_record_name_binds(
+            store.claims,
+            final_claim,
+            claim_identity,
+            expected_raw=raw,
+            windows=True,
+        )
+        or not _transaction_store_namespace_is_valid(store)
+    ):
+        return None
+    return True
+
+
+def _create_windows_persistent_transaction(
+    owned_root: OwnedRoot,
+    store: _TransactionStore,
+    *,
+    transaction_id: str,
+) -> PersistentTransactionRoot:
+    leaf = anchor = 0
+    final_claim = f"{transaction_id}.json"
+    try:
+        intent = _load_transaction_creation_intent(store, transaction_id)
+        if intent is None:
+            _require_new_transaction_namespace(store, transaction_id)
+            reservation = _load_transaction_creation_reservation(
+                store,
+                transaction_id,
+            )
+            if reservation is None:
+                reservation = _publish_transaction_creation_reservation(
+                    store,
+                    transaction_id=transaction_id,
+                )
+            _require_new_transaction_namespace(store, transaction_id)
+            if _transaction_name_exists(
+                store.store,
+                reservation.stage_component,
+                directory=True,
+                windows=True,
+            ) or _transaction_name_exists(
+                store.claims,
+                reservation.pending_claim_component,
+                directory=False,
+                windows=True,
+            ):
+                raise OSError(
+                    errno.ESTALE,
+                    "unbound reserved transaction object requires recovery",
+                )
+            leaf = _paths._windows_create_private_directory(
+                store.store,
+                reservation.stage_component,
+            )
+            transaction_identity = _paths._windows_handle_status(leaf).identity
+            if (
+                transaction_identity[0] != store.plugins_identity[0]
+                or not _paths._windows_private_directory(leaf, exact=True)
+                or not owned_root._filesystem_guard(leaf)
+                or not _transaction_directory_is_exact(
+                    store,
+                    reservation.stage_component,
+                    leaf,
+                    transaction_identity,
+                    filesystem_guard=owned_root._filesystem_guard,
+                )
+            ):
+                raise OSError(errno.EPERM, "staged transaction root is unsafe")
+            _windows_flush_directory_binding(
+                store.store,
+                reservation.stage_component,
+                transaction_identity,
+            )
+            anchor = _paths._windows_create_private_file(
+                store.claims,
+                reservation.pending_claim_component,
+            )
+            claim_identity = _paths._windows_handle_status(anchor).identity
+            if not _pending_transaction_claim_is_exact(
+                store,
+                reservation.pending_claim_component,
+                anchor,
+                claim_identity,
+            ):
+                raise OSError(errno.EPERM, "staged transaction claim is unsafe")
+            binding, claim_raw = _binding_from_fields(
+                transaction_id=transaction_id,
+                plugins_identity=store.plugins_identity,
+                control_identity=store.control_identity,
+                store_identity=store.store_identity,
+                claims_identity=store.claims_identity,
+                transaction_identity=transaction_identity,
+                claim_identity=claim_identity,
+            )
+            if (
+                _load_transaction_creation_reservation(store, transaction_id)
+                != reservation
+                or not _transaction_directory_is_exact(
+                    store,
+                    reservation.stage_component,
+                    leaf,
+                    transaction_identity,
+                    filesystem_guard=owned_root._filesystem_guard,
+                )
+                or not _pending_transaction_claim_is_exact(
+                    store,
+                    reservation.pending_claim_component,
+                    anchor,
+                    claim_identity,
+                )
+            ):
+                raise OSError(
+                    errno.ESTALE,
+                    "transaction creation reservation changed",
+                )
+            intent = _publish_transaction_creation_intent(
+                store,
+                transaction_id=transaction_id,
+                reservation=reservation,
+                binding=binding,
+            )
+        else:
+            binding = intent.binding
+            claim_raw = _transaction_journal_binding_bytes(binding)
+            stage_leaf = _open_windows_transaction_location(
+                store,
+                intent.stage_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            live_leaf = _open_windows_transaction_location(
+                store,
+                transaction_id,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if bool(stage_leaf) == bool(live_leaf):
+                for descriptor in (stage_leaf, live_leaf):
+                    if descriptor:
+                        _paths._windows_close(descriptor)
+                raise OSError(errno.ESTALE, "transaction root publication is ambiguous")
+            leaf = stage_leaf or live_leaf
+            published = _read_transaction_record_if_present(store, final_claim)
+            if published is None:
+                anchor = _windows_open_raw_child(
+                    store.claims,
+                    intent.pending_claim_component,
+                    directory=False,
+                    read_data=True,
+                    write_data=True,
+                    delete_access=True,
+                )
+                if not _pending_transaction_claim_is_exact(
+                    store,
+                    intent.pending_claim_component,
+                    anchor,
+                    binding.claim_identity,
+                ):
+                    raise OSError(errno.ESTALE, "pending transaction claim changed")
+            elif published != (claim_raw, binding.claim_identity):
+                raise OSError(errno.ESTALE, "published transaction claim changed")
+
+        root_is_live = _paths._windows_namespace_binds(
+            store.store,
+            transaction_id,
+            binding.transaction_identity,
+        )
+        if not root_is_live and not _transaction_directory_is_exact(
+            store,
+            intent.stage_component,
+            leaf,
+            binding.transaction_identity,
+            filesystem_guard=owned_root._filesystem_guard,
+        ):
+            raise OSError(errno.ESTALE, "staged transaction root changed")
+        if anchor:
+            if not _pending_transaction_claim_is_exact(
+                store,
+                intent.pending_claim_component,
+                anchor,
+                binding.claim_identity,
+            ):
+                raise OSError(errno.ESTALE, "pending transaction claim changed")
+            observed = _paths._windows_read(anchor, limit=_TRANSACTION_RECORD_LIMIT)
+            if observed != claim_raw:
+                _windows_replace_bytes(anchor, claim_raw)
+            _windows_flush(anchor)
+            if not _private_record_name_binds(
+                store.claims,
+                intent.pending_claim_component,
+                binding.claim_identity,
+                expected_raw=claim_raw,
+                windows=True,
+            ):
+                raise OSError(errno.ESTALE, "pending transaction claim changed")
+        if not root_is_live:
+            _durable_windows_directory_rename(
+                leaf,
+                store.store,
+                transaction_id,
+                binding.transaction_identity,
+            )
+        if not _transaction_directory_is_exact(
+            store,
+            transaction_id,
+            leaf,
+            binding.transaction_identity,
+            filesystem_guard=owned_root._filesystem_guard,
+        ):
+            raise OSError(errno.ESTALE, "persistent transaction root moved")
+        if anchor:
+            _durable_windows_file_rename(
+                anchor,
+                store.claims,
+                final_claim,
+            )
+            _windows_flush_directory_binding(
+                store.store,
+                _TRANSACTION_CLAIMS_COMPONENT,
+                store.claims_identity,
+            )
+        if not _transaction_directory_is_exact(
+            store,
+            transaction_id,
+            leaf,
+            binding.transaction_identity,
+            filesystem_guard=owned_root._filesystem_guard,
+        ) or not _private_record_name_binds(
+            store.claims,
+            final_claim,
+            binding.claim_identity,
+            expected_raw=claim_raw,
+            windows=True,
+        ):
+            raise OSError(errno.ESTALE, "persistent transaction publication changed")
+        _finish_transaction_creation_intent(store, binding)
+        return _persistent_transaction_root_capability(store, binding)
+    finally:
+        for descriptor in (anchor, leaf):
+            if descriptor:
+                _paths._windows_close(descriptor)
+
+
+def create_persistent_transaction_root(
+    owned_root: OwnedRoot, *, transaction_id: str
+) -> Result[PersistentTransactionRoot]:
+    """Create one fixed transaction root plus an immutable sibling anchor."""
+
+    if (
+        not isinstance(owned_root, OwnedRoot)
+        or not isinstance(transaction_id, str)
+        or _PERSISTENT_TRANSACTION.fullmatch(transaction_id) is None
+    ):
+        return Result.failure(
+            _error("ownership.unowned", "Persistent transaction ownership is invalid.")
+        )
+    store: _TransactionStore | None = None
+    try:
+        store = _open_transaction_store(owned_root, create=True)
+        if store.windows:
+            created = _create_windows_persistent_transaction(
+                owned_root, store, transaction_id=transaction_id
+            )
+        else:
+            created = _create_posix_persistent_transaction(
+                owned_root, store, transaction_id=transaction_id
+            )
+        return Result.success(created)
+    except (ForgeError, OSError, ValueError):
+        return Result.failure(
+            _error(
+                "ownership.unowned",
+                "The persistent transaction root cannot be created safely.",
+            )
+        )
+    finally:
+        if store is not None:
+            store.close()
+
+
+def _binding_from_record(
+    raw: bytes,
+    *,
+    transaction_id: str,
+    store: _TransactionStore,
+    claim_identity: tuple[int, int],
+) -> PersistentTransactionBinding:
+    record = decode_persistent_record(
+        raw, supported_major=1, reader_version=_WRITER_VERSION
+    )
+    expected_root, expected_quarantine, expected_claim = (
+        _persistent_transaction_references(transaction_id)
+    )
+    expected_fixed: Mapping[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "claim_identity": claim_identity,
+        "claim_relative": expected_claim,
+        "claims_identity": store.claims_identity,
+        "control_identity": store.control_identity,
+        "minimum_reader_version": _WRITER_VERSION,
+        "plugins_identity": store.plugins_identity,
+        "quarantine_relative": expected_quarantine,
+        "record_kind": "persistent-transaction-root",
+        "root_relative": expected_root,
+        "schema_digest": _TRANSACTION_BINDING_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "store_identity": store.store_identity,
+        "transaction_id": transaction_id,
+        "writer_version": _WRITER_VERSION,
+    }
+    expected_keys = {*expected_fixed, "transaction_identity", "record_digest"}
+    transaction_identity = record.get("transaction_identity")
+    if (
+        set(record) != expected_keys
+        or any(record.get(key) != value for key, value in expected_fixed.items())
+        or not _file_identity_invariants(transaction_identity)
+        or cast(tuple[int, int], transaction_identity)[0] != store.plugins_identity[0]
+        or not isinstance(record.get("record_digest"), str)
+    ):
+        raise _error("ownership.unowned", "The transaction anchor is not trusted.")
+    binding = PersistentTransactionBinding(
+        transaction_id=transaction_id,
+        root_relative=expected_root,
+        quarantine_relative=expected_quarantine,
+        claim_relative=expected_claim,
+        plugins_identity=store.plugins_identity,
+        control_identity=store.control_identity,
+        store_identity=store.store_identity,
+        claims_identity=store.claims_identity,
+        transaction_identity=cast(tuple[int, int], transaction_identity),
+        claim_identity=claim_identity,
+        claim_digest=cast(str, record["record_digest"]),
+        _token=_PERSISTENT_BINDING_TOKEN,
+    )
+    if not _persistent_binding_invariants(binding):
+        raise _error("ownership.unowned", "The transaction anchor is not trusted.")
+    return binding
+
+
+def load_persistent_transaction_binding(
+    owned_root: OwnedRoot, *, transaction_id: str
+) -> Result[PersistentTransactionBinding]:
+    """Load one immutable data binding without minting cleanup authority."""
+
+    if (
+        not isinstance(owned_root, OwnedRoot)
+        or not isinstance(transaction_id, str)
+        or _PERSISTENT_TRANSACTION.fullmatch(transaction_id) is None
+    ):
+        return Result.failure(
+            _error("ownership.unowned", "The transaction anchor is not trusted.")
+        )
+    store: _TransactionStore | None = None
+    try:
+        store = _open_transaction_store(owned_root, create=False)
+        component = f"{transaction_id}.json"
+        if store.windows:
+            raw, identity = _read_windows_private_record(
+                store.claims, component, volume=store.plugins_identity[0]
+            )
+        else:
+            raw, identity = _read_posix_private_record(
+                store.claims, component, device=store.plugins_identity[0]
+            )
+        binding = _binding_from_record(
+            raw,
+            transaction_id=transaction_id,
+            store=store,
+            claim_identity=identity,
+        )
+        if (
+            not _private_record_name_binds(
+                store.claims,
+                component,
+                identity,
+                expected_raw=raw,
+                windows=store.windows,
+            )
+            or not _transaction_store_namespace_is_valid(store)
+            or not owned_root._validate_control_descriptor(store.control)
+        ):
+            raise _error("ownership.unowned", "The transaction anchor is not trusted.")
+        return Result.success(binding)
+    except (ForgeError, OSError, ValueError):
+        return Result.failure(
+            _error("ownership.unowned", "The transaction anchor is not trusted.")
+        )
+    finally:
+        if store is not None:
+            store.close()
+
+
+def _open_posix_transaction_location(
+    store: _TransactionStore,
+    component: str,
+    *,
+    expected_identity: tuple[int, int],
+    filesystem_guard: _paths.FilesystemGuard,
+) -> int:
+    try:
+        descriptor = os.open(component, _directory_flags(), dir_fd=store.store)
+    except FileNotFoundError:
+        return -1
+    try:
+        status = os.fstat(descriptor)
+        if (
+            (status.st_dev, status.st_ino) != expected_identity
+            or not _paths._private_directory(descriptor, status, exact=True)
+            or not filesystem_guard(descriptor)
+        ):
+            raise OSError(errno.ESTALE, "transaction location identity changed")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_windows_transaction_location(
+    store: _TransactionStore,
+    component: str,
+    *,
+    expected_identity: tuple[int, int],
+    filesystem_guard: _paths.FilesystemGuard,
+    write: bool = False,
+) -> int:
+    try:
+        descriptor = _paths._windows_open_child(
+            store.store,
+            component,
+            directory=True,
+            write_data=write,
+        )
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError) or getattr(exc, "winerror", None) in {
+            2,
+            3,
+        }:
+            return 0
+        raise
+    try:
+        status = _paths._windows_handle_status(descriptor)
+        if (
+            status.identity != expected_identity
+            or status.is_reparse
+            or not _paths._windows_private_directory(descriptor, exact=True)
+            or not filesystem_guard(descriptor)
+        ):
+            raise OSError(errno.ESTALE, "transaction location identity changed")
+        return descriptor
+    except BaseException:
+        _paths._windows_close(descriptor)
+        raise
+
+
+def _load_transaction_cleanup_record(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+    *,
+    complete: bool,
+) -> _TransactionCleanupRecord | None:
+    component = _transaction_cleanup_component(
+        binding.transaction_id, complete=complete
+    )
+    observed = _read_transaction_record_if_present(store, component)
+    if observed is None:
+        return None
+    observed_raw, observed_identity = observed
+    decoded = decode_persistent_record(
+        observed_raw,
+        supported_major=1,
+        reader_version=_WRITER_VERSION,
+    )
+    delete_component = decoded.get("delete_component")
+    if (
+        not isinstance(delete_component, str)
+        or _TRANSACTION_DELETE.fullmatch(delete_component) is None
+    ):
+        raise OSError(errno.ESTALE, "transaction cleanup record changed")
+    expected_raw = _transaction_cleanup_record_bytes(
+        binding,
+        delete_component=delete_component,
+        complete=complete,
+    )
+    if observed_raw != expected_raw or not _private_record_name_binds(
+        store.claims,
+        component,
+        observed_identity,
+        expected_raw=expected_raw,
+        windows=store.windows,
+    ):
+        raise OSError(errno.ESTALE, "transaction cleanup record changed")
+    return _TransactionCleanupRecord(
+        component=component,
+        identity=observed_identity,
+        raw=observed_raw,
+        delete_component=delete_component,
+        complete=complete,
+    )
+
+
+def _transaction_cleanup_record_is_valid(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+    *,
+    complete: bool,
+    delete_component: str | None = None,
+) -> bool:
+    try:
+        record = _load_transaction_cleanup_record(
+            store,
+            binding,
+            complete=complete,
+        )
+        return record is not None and (
+            delete_component is None or record.delete_component == delete_component
+        )
+    except (ForgeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _publish_transaction_cleanup_intent(
+    store: _TransactionStore, binding: PersistentTransactionBinding
+) -> _TransactionCleanupRecord:
+    if not _transaction_journal_records_are_valid(store, binding):
+        raise OSError(errno.ESTALE, "transaction cleanup authority changed")
+    existing = _load_transaction_cleanup_record(
+        store,
+        binding,
+        complete=False,
+    )
+    if existing is not None:
+        return existing
+    component = _transaction_cleanup_component(binding.transaction_id, complete=False)
+    delete_component = f".delete-{secrets.token_hex(16)}.tmp"
+    raw = _transaction_cleanup_record_bytes(
+        binding,
+        delete_component=delete_component,
+        complete=False,
+    )
+    _publish_transaction_record(store, component, raw)
+    created = _load_transaction_cleanup_record(
+        store,
+        binding,
+        complete=False,
+    )
+    if created is None or created.delete_component != delete_component:
+        raise OSError(errno.ESTALE, "transaction cleanup intent changed")
+    return created
+
+
+def _publish_transaction_cleanup_complete(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+    *,
+    delete_component: str,
+) -> None:
+    intent = _load_transaction_cleanup_record(
+        store,
+        binding,
+        complete=False,
+    )
+    if intent is None or intent.delete_component != delete_component:
+        raise OSError(errno.ESTALE, "transaction cleanup intent is missing")
+    component = _transaction_cleanup_component(binding.transaction_id, complete=True)
+    raw = _transaction_cleanup_record_bytes(
+        binding,
+        delete_component=delete_component,
+        complete=True,
+    )
+    _publish_transaction_record(store, component, raw)
+    complete_record = _load_transaction_cleanup_record(
+        store,
+        binding,
+        complete=True,
+    )
+    if complete_record is None or complete_record.delete_component != delete_component:
+        raise OSError(errno.ESTALE, "transaction cleanup completion changed")
+    _remove_exact_transaction_record(
+        store,
+        intent.component,
+        intent.identity,
+        intent.raw,
+    )
+
+
+def _finish_transaction_creation_intent(
+    store: _TransactionStore, binding: PersistentTransactionBinding
+) -> None:
+    component = _transaction_creation_intent_component(binding.transaction_id)
+    observed = _read_transaction_record_if_present(store, component)
+    if observed is None:
+        return
+    observed_raw, observed_identity = observed
+    intent = _transaction_creation_intent_from_record(
+        store,
+        transaction_id=binding.transaction_id,
+        raw=observed_raw,
+        identity=observed_identity,
+    )
+    if intent.binding != binding:
+        raise OSError(errno.ESTALE, "transaction creation intent changed")
+    reservation_component = _transaction_creation_reservation_component(
+        binding.transaction_id
+    )
+    reservation_raw = _transaction_creation_reservation_bytes(
+        store,
+        transaction_id=binding.transaction_id,
+        stage_component=intent.stage_component,
+        pending_claim_component=intent.pending_claim_component,
+    )
+    if hashlib.sha256(reservation_raw).hexdigest() != intent.reservation_digest:
+        raise OSError(errno.ESTALE, "transaction creation reservation changed")
+    reservation = _read_transaction_record_if_present(store, reservation_component)
+    if reservation is not None:
+        reservation_observed_raw, reservation_observed_identity = reservation
+        if (
+            reservation_observed_raw != reservation_raw
+            or reservation_observed_identity != intent.reservation_identity
+        ):
+            raise OSError(errno.ESTALE, "transaction creation reservation changed")
+        _remove_exact_transaction_record(
+            store,
+            reservation_component,
+            reservation_observed_identity,
+            reservation_observed_raw,
+        )
+    _remove_exact_transaction_record(
+        store,
+        component,
+        observed_identity,
+        observed_raw,
+    )
+
+
+def rebind_persistent_transaction(
+    owned_root: OwnedRoot, *, binding: PersistentTransactionBinding
+) -> Result[ReboundTransaction]:
+    """Classify and rebind only the anchor's exact live or quarantine identity."""
+
+    if not isinstance(owned_root, OwnedRoot) or not _persistent_binding_invariants(
+        binding
+    ):
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup cannot be rebound.",
+            )
+        )
+    loaded_result = load_persistent_transaction_binding(
+        owned_root, transaction_id=binding.transaction_id
+    )
+    if not loaded_result.is_ok or loaded_result.unwrap() != binding:
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup cannot be rebound.",
+                recovery=(binding.quarantine_relative,),
+            )
+        )
+    store: _TransactionStore | None = None
+    live = quarantine = deleting = 0 if os.name == "nt" else -1
+    root = 0 if os.name == "nt" else -1
+    namespace: _paths._NamespaceCapability | None = None
+    try:
+        store = _open_transaction_store(owned_root, create=False)
+        live_component = binding.root_relative.rsplit("/", 1)[-1]
+        quarantine_component = binding.quarantine_relative.rsplit("/", 1)[-1]
+        cleanup_intent = _load_transaction_cleanup_record(
+            store,
+            binding,
+            complete=False,
+        )
+        cleanup_complete = _load_transaction_cleanup_record(
+            store,
+            binding,
+            complete=True,
+        )
+        if (
+            cleanup_intent is not None
+            and cleanup_complete is not None
+            and cleanup_intent.delete_component != cleanup_complete.delete_component
+        ):
+            raise _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup evidence conflicts.",
+                recovery=(binding.quarantine_relative,),
+            )
+        delete_component = (
+            cleanup_intent.delete_component
+            if cleanup_intent is not None
+            else (
+                cleanup_complete.delete_component
+                if cleanup_complete is not None
+                else None
+            )
+        )
+        delete_reference = (
+            _persistent_delete_reference(binding, delete_component)
+            if delete_component is not None
+            else None
+        )
+        if store.windows:
+            live = _open_windows_transaction_location(
+                store,
+                live_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            quarantine = _open_windows_transaction_location(
+                store,
+                quarantine_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if delete_component is not None:
+                deleting = _open_windows_transaction_location(
+                    store,
+                    delete_component,
+                    expected_identity=binding.transaction_identity,
+                    filesystem_guard=owned_root._filesystem_guard,
+                )
+            live_exists = bool(live)
+            quarantine_exists = bool(quarantine)
+            deleting_exists = bool(deleting)
+        else:
+            live = _open_posix_transaction_location(
+                store,
+                live_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            quarantine = _open_posix_transaction_location(
+                store,
+                quarantine_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if delete_component is not None:
+                deleting = _open_posix_transaction_location(
+                    store,
+                    delete_component,
+                    expected_identity=binding.transaction_identity,
+                    filesystem_guard=owned_root._filesystem_guard,
+                )
+            live_exists = live >= 0
+            quarantine_exists = quarantine >= 0
+            deleting_exists = deleting >= 0
+        if sum((live_exists, quarantine_exists, deleting_exists)) > 1:
+            raise _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup is ambiguous.",
+                recovery=(binding.quarantine_relative,),
+            )
+        final_binding = load_persistent_transaction_binding(
+            owned_root, transaction_id=binding.transaction_id
+        )
+        if not final_binding.is_ok or final_binding.unwrap() != binding:
+            raise _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup authority changed.",
+                recovery=(binding.quarantine_relative,),
+            )
+        if not _transaction_store_namespace_is_valid(
+            store
+        ) or not owned_root._validate_control_descriptor(store.control):
+            raise _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup containment changed.",
+            )
+        if live_exists:
+            if cleanup_intent is not None or cleanup_complete is not None:
+                raise _error(
+                    "ownership.cleanup_incomplete",
+                    "Persistent transaction cleanup evidence conflicts with a live root.",
+                    recovery=(binding.quarantine_relative,),
+                )
+            _finish_transaction_creation_intent(store, binding)
+            reference = _paths.validate_reference(
+                binding.root_relative,
+                role="persistent-transaction-root",
+                limits=LIMIT_POLICY,
+            ).unwrap()
+            claim = TransactionPathClaim(
+                binding.transaction_id,
+                reference,
+                binding.plugins_identity,
+                binding.transaction_identity,
+                persistent_binding=binding,
+                _token=_CAPABILITY_TOKEN,
+            )
+            return Result.success(
+                ReboundTransaction(
+                    location=TransactionLocation.LIVE,
+                    binding=binding,
+                    claim=claim,
+                    ticket=None,
+                    _token=_REBOUND_TRANSACTION_TOKEN,
+                )
+            )
+        if quarantine_exists:
+            if cleanup_complete is not None:
+                raise _error(
+                    "ownership.cleanup_incomplete",
+                    "Persistent transaction cleanup completion conflicts.",
+                    recovery=(binding.quarantine_relative,),
+                )
+            root = owned_root._duplicate_root_descriptor()
+            namespace = owned_root._duplicate_namespace_capability()
+            if (
+                _native_identity(root) != binding.plugins_identity
+                or not namespace._validate_namespace_binding()
+            ):
+                raise _error(
+                    "ownership.cleanup_incomplete",
+                    "Persistent transaction cleanup containment changed.",
+                )
+            ticket = QuarantineTicket(
+                root,
+                namespace,
+                binding.quarantine_relative,
+                binding.transaction_identity,
+                binding.plugins_identity,
+                binding=binding,
+                _token=_CAPABILITY_TOKEN,
+            )
+            root = 0 if store.windows else -1
+            namespace = None
+            return Result.success(
+                ReboundTransaction(
+                    location=TransactionLocation.QUARANTINED,
+                    binding=binding,
+                    claim=None,
+                    ticket=ticket,
+                    _token=_REBOUND_TRANSACTION_TOKEN,
+                )
+            )
+        if deleting_exists:
+            if (
+                cleanup_intent is None
+                or cleanup_complete is not None
+                or delete_reference is None
+            ):
+                raise _error(
+                    "ownership.cleanup_incomplete",
+                    "Persistent transaction deletion is not authorized.",
+                    recovery=(binding.quarantine_relative,),
+                )
+            root = owned_root._duplicate_root_descriptor()
+            namespace = owned_root._duplicate_namespace_capability()
+            if (
+                _native_identity(root) != binding.plugins_identity
+                or not namespace._validate_namespace_binding()
+            ):
+                raise _error(
+                    "ownership.cleanup_incomplete",
+                    "Persistent transaction cleanup containment changed.",
+                )
+            ticket = QuarantineTicket(
+                root,
+                namespace,
+                delete_reference,
+                binding.transaction_identity,
+                binding.plugins_identity,
+                binding=binding,
+                _token=_CAPABILITY_TOKEN,
+            )
+            root = 0 if store.windows else -1
+            namespace = None
+            return Result.success(
+                ReboundTransaction(
+                    location=TransactionLocation.QUARANTINED,
+                    binding=binding,
+                    claim=None,
+                    ticket=ticket,
+                    _token=_REBOUND_TRANSACTION_TOKEN,
+                )
+            )
+        if (
+            _transaction_name_exists(
+                store.store,
+                live_component,
+                directory=True,
+                windows=store.windows,
+            )
+            or _transaction_name_exists(
+                store.store,
+                quarantine_component,
+                directory=True,
+                windows=store.windows,
+            )
+            or (
+                delete_component is not None
+                and _transaction_name_exists(
+                    store.store,
+                    delete_component,
+                    directory=True,
+                    windows=store.windows,
+                )
+            )
+        ):
+            raise _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup remains ambiguous.",
+                recovery=(binding.quarantine_relative,),
+            )
+        if cleanup_complete is None:
+            raise _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup completion is missing.",
+                recovery=(binding.quarantine_relative,),
+            )
+        if cleanup_intent is not None:
+            _remove_exact_transaction_record(
+                store,
+                cleanup_intent.component,
+                cleanup_intent.identity,
+                cleanup_intent.raw,
+            )
+        final_complete = _load_transaction_cleanup_record(
+            store,
+            binding,
+            complete=True,
+        )
+        if (
+            final_complete is None
+            or final_complete.delete_component != cleanup_complete.delete_component
+            or _transaction_name_exists(
+                store.store,
+                live_component,
+                directory=True,
+                windows=store.windows,
+            )
+            or _transaction_name_exists(
+                store.store,
+                quarantine_component,
+                directory=True,
+                windows=store.windows,
+            )
+            or _transaction_name_exists(
+                store.store,
+                cleanup_complete.delete_component,
+                directory=True,
+                windows=store.windows,
+            )
+        ):
+            raise _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup completion changed.",
+                recovery=(binding.quarantine_relative,),
+            )
+        return Result.success(
+            ReboundTransaction(
+                location=TransactionLocation.REMOVED,
+                binding=binding,
+                claim=None,
+                ticket=None,
+                _token=_REBOUND_TRANSACTION_TOKEN,
+            )
+        )
+    except (ForgeError, OSError, ValueError):
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Persistent transaction cleanup cannot be rebound.",
+                recovery=(binding.quarantine_relative,),
+            )
+        )
+    finally:
+        if namespace is not None:
+            namespace.close()
+        if os.name == "nt":
+            for descriptor in (deleting, quarantine, live, root):
+                if descriptor:
+                    _paths._windows_close(descriptor)
+        else:
+            for descriptor in (deleting, quarantine, live, root):
+                if descriptor >= 0:
+                    os.close(descriptor)
+        if store is not None:
+            store.close()
+
+
+def _transaction_path_claim_matches_binding(
+    claim: object,
+    binding: PersistentTransactionBinding,
+) -> bool:
+    if type(claim) is not TransactionPathClaim:
+        return False
+    selected = claim
+    try:
+        with selected._lock:
+            return (
+                not selected._consumed
+                and selected.transaction_id == binding.transaction_id
+                and selected.relative.value == binding.root_relative
+                and selected.root_identity == binding.plugins_identity
+                and selected.identity == binding.transaction_identity
+                and selected._persistent_binding == binding
+            )
+    except (AttributeError, ForgeError, TypeError, ValueError):
+        return False
+
+
+def _transaction_journal_source(
+    transaction: object,
+) -> tuple[PersistentTransactionBinding, TransactionLocation]:
+    if type(transaction) is PersistentTransactionRoot:
+        created = transaction
+        if _persistent_binding_invariants(
+            created.binding
+        ) and _transaction_path_claim_matches_binding(
+            created.claim,
+            created.binding,
+        ):
+            return created.binding, TransactionLocation.LIVE
+    elif type(transaction) is ReboundTransaction:
+        rebound = transaction
+        binding = rebound.binding
+        if not _persistent_binding_invariants(binding):
+            raise _error(
+                "ownership.unowned",
+                "Persistent transaction journal authority is invalid.",
+            )
+        if (
+            rebound.location is TransactionLocation.LIVE
+            and rebound.ticket is None
+            and _transaction_path_claim_matches_binding(rebound.claim, binding)
+        ):
+            return binding, TransactionLocation.LIVE
+        ticket = rebound.ticket
+        if (
+            rebound.location is TransactionLocation.QUARANTINED
+            and rebound.claim is None
+            and type(ticket) is QuarantineTicket
+            and ticket.recovery_reference == binding.quarantine_relative
+            and ticket._identity == binding.transaction_identity
+            and ticket._root_identity == binding.plugins_identity
+            and ticket._binding == binding
+        ):
+            return binding, TransactionLocation.QUARANTINED
+    raise _error(
+        "ownership.unowned",
+        "Persistent transaction journal authority is invalid.",
+    )
+
+
+def open_transaction_journal_access(
+    owned_root: OwnedRoot,
+    transaction: PersistentTransactionRoot | ReboundTransaction,
+) -> Result[TransactionJournalAccess]:
+    """Retain revalidated access to one exact persistent transaction journal."""
+
+    store: _TransactionStore | None = None
+    namespace: _paths._NamespaceCapability | None = None
+    descriptor = 0 if os.name == "nt" else -1
+    access: TransactionJournalAccess | None = None
+    binding: PersistentTransactionBinding | None = None
+    try:
+        if not isinstance(owned_root, OwnedRoot):
+            raise _error(
+                "ownership.unowned",
+                "Persistent transaction journal authority is invalid.",
+            )
+        binding, location = _transaction_journal_source(transaction)
+        store = _open_transaction_store(owned_root, create=False)
+        namespace = owned_root._duplicate_namespace_capability()
+        relative = (
+            binding.root_relative
+            if location is TransactionLocation.LIVE
+            else binding.quarantine_relative
+        )
+        component = relative.rsplit("/", 1)[-1]
+        if store.windows:
+            descriptor = _open_windows_transaction_location(
+                store,
+                component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+                write=location is TransactionLocation.LIVE,
+            )
+            if not descriptor:
+                raise _transaction_journal_identity_error(binding)
+        else:
+            descriptor = _open_posix_transaction_location(
+                store,
+                component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if descriptor < 0:
+                raise _transaction_journal_identity_error(binding)
+        access = TransactionJournalAccess(
+            binding=binding,
+            location=location,
+            descriptor=descriptor,
+            store=store,
+            namespace=namespace,
+            filesystem_guard=owned_root._filesystem_guard,
+            _token=_TRANSACTION_JOURNAL_ACCESS_TOKEN,
+        )
+        descriptor = 0 if store.windows else -1
+        store = None
+        namespace = None
+        access._require_journal_access(write=False)
+        return Result.success(access)
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        if access is not None:
+            access.close()
+        recovery = (
+            (binding.quarantine_relative,)
+            if binding is not None and _persistent_binding_invariants(binding)
+            else ()
+        )
+        return Result.failure(
+            _error(
+                "ownership.unowned",
+                "Persistent transaction journal authority cannot be retained.",
+                recovery=recovery,
+            )
+        )
+    finally:
+        if namespace is not None:
+            namespace.close()
+        if os.name == "nt" and descriptor:
+            _close_native(descriptor)
+        elif os.name != "nt" and descriptor >= 0:
+            _close_native(descriptor)
+        if store is not None:
+            store.close()
 
 
 def _create_windows_transaction_path(
@@ -1653,7 +5421,11 @@ def prove_transaction_owned(
             namespace,
             path.relative,
             claim.identity,
-            _TransactionObservation(path, claim.transaction_id),
+            _TransactionObservation(
+                path,
+                claim.transaction_id,
+                claim._persistent_binding,
+            ),
             _token=_CAPABILITY_TOKEN,
         )
         root = -1
@@ -2971,6 +6743,34 @@ def _quarantine_target(
     return destination, recovery
 
 
+def _persistent_cleanup_binding(
+    proof: OwnershipProof,
+    *,
+    transaction_id: str,
+    recovery: str,
+) -> PersistentTransactionBinding | None:
+    observed = proof._observed
+    if not isinstance(observed, _TransactionObservation):
+        return None
+    binding = observed.persistent_binding
+    if binding is None:
+        return None
+    if (
+        not _persistent_binding_invariants(binding)
+        or observed.transaction_id != binding.transaction_id
+        or transaction_id != binding.transaction_id
+        or proof.relative.value != binding.root_relative
+        or proof.identity != binding.transaction_identity
+        or proof._root_identity != binding.plugins_identity
+        or recovery != binding.quarantine_relative
+    ):
+        raise _error(
+            "ownership.identity_mismatch",
+            "Persistent transaction cleanup authority changed.",
+        )
+    return binding
+
+
 def _quarantine_windows(
     proof: OwnershipProof,
     reference: _SafeReferenceSnapshot,
@@ -2981,6 +6781,11 @@ def _quarantine_windows(
     namespace: _paths._NamespaceCapability | None = None
     try:
         destination, recovery = _quarantine_target(reference, transaction_id)
+        binding = _persistent_cleanup_binding(
+            proof,
+            transaction_id=transaction_id,
+            recovery=recovery,
+        )
         root, namespace = proof._take_authority()
     except ForgeError as exc:
         return Result.failure(exc)
@@ -3045,6 +6850,7 @@ def _quarantine_windows(
                 recovery,
                 proof.identity,
                 proof._root_identity,
+                binding=binding,
                 _token=_CAPABILITY_TOKEN,
             )
         )
@@ -3095,6 +6901,11 @@ def quarantine_owned(
     namespace: _paths._NamespaceCapability | None = None
     try:
         destination, recovery = _quarantine_target(reference, transaction_id)
+        binding = _persistent_cleanup_binding(
+            proof,
+            transaction_id=transaction_id,
+            recovery=recovery,
+        )
         root, namespace = proof._take_authority()
     except ForgeError as exc:
         return Result.failure(exc)
@@ -3148,6 +6959,7 @@ def quarantine_owned(
                 recovery,
                 proof.identity,
                 proof._root_identity,
+                binding=binding,
                 _token=_CAPABILITY_TOKEN,
             )
         )
@@ -3183,6 +6995,121 @@ def _consume_cleanup_entry(entries: list[int]) -> None:
 def _require_cleanup_namespace(namespace: _paths._NamespaceCapability) -> None:
     if not namespace._validate_namespace_binding():
         raise OSError(errno.ESTALE, "quarantine containment changed")
+
+
+_DARWIN_FSGETPATH_LIMIT = 8192
+
+
+def _darwin_held_directory_path(handle: int) -> bytes | None:
+    """Return a path to one held inode, or None only for proven ENOENT."""
+
+    if sys.platform != "darwin":
+        raise OSError(errno.ENOTSUP, "fsgetpath is Darwin-only")
+
+    class Fsid(ctypes.Structure):
+        _fields_ = [("value", ctypes.c_int32 * 2)]
+
+    class StatFs(ctypes.Structure):
+        _fields_ = [
+            ("block_size", ctypes.c_uint32),
+            ("io_size", ctypes.c_int32),
+            ("blocks", ctypes.c_uint64),
+            ("blocks_free", ctypes.c_uint64),
+            ("blocks_available", ctypes.c_uint64),
+            ("files", ctypes.c_uint64),
+            ("files_free", ctypes.c_uint64),
+            ("filesystem_id", Fsid),
+            ("owner", ctypes.c_uint32),
+            ("type", ctypes.c_uint32),
+            ("flags", ctypes.c_uint32),
+            ("subtype", ctypes.c_uint32),
+            ("type_name", ctypes.c_char * 16),
+            ("mounted_on", ctypes.c_char * 1024),
+            ("mounted_from", ctypes.c_char * 1024),
+            ("reserved", ctypes.c_uint32 * 8),
+        ]
+
+    before = os.fstat(handle)
+    if not stat.S_ISDIR(before.st_mode):
+        raise OSError(errno.ENOTDIR, "unlink proof requires a directory")
+    libc = ctypes.CDLL(None, use_errno=True)
+    fstatfs = libc.fstatfs
+    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(StatFs)]
+    fstatfs.restype = ctypes.c_int
+    information = StatFs()
+    ctypes.set_errno(0)
+    if fstatfs(handle, ctypes.byref(information)) != 0:
+        error = ctypes.get_errno() or errno.EIO
+        raise OSError(error, os.strerror(error))
+    try:
+        fsgetpath = libc.fsgetpath
+    except AttributeError as exc:
+        raise OSError(errno.ENOTSUP, "fsgetpath is unavailable") from exc
+    fsgetpath.argtypes = [
+        ctypes.POINTER(ctypes.c_char),
+        ctypes.c_size_t,
+        ctypes.POINTER(Fsid),
+        ctypes.c_uint64,
+    ]
+    fsgetpath.restype = ctypes.c_ssize_t
+    buffer = ctypes.create_string_buffer(_DARWIN_FSGETPATH_LIMIT)
+    ctypes.set_errno(0)
+    length = int(
+        fsgetpath(
+            buffer,
+            len(buffer),
+            ctypes.byref(information.filesystem_id),
+            before.st_ino,
+        )
+    )
+    error = ctypes.get_errno()
+    after = os.fstat(handle)
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        raise OSError(errno.ESTALE, "held directory identity changed")
+    if length == -1:
+        if error == errno.ENOENT:
+            return None
+        error = error or errno.EIO
+        raise OSError(error, os.strerror(error))
+    if length < 1 or length > len(buffer) or buffer.raw[length - 1] != 0:
+        raise OSError(errno.EIO, "fsgetpath returned an invalid path")
+    return buffer.raw[: length - 1]
+
+
+def _preflight_posix_directory_unlink_proof(
+    descriptor: int,
+    expected_identity: tuple[int, int],
+) -> None:
+    status = os.fstat(descriptor)
+    if (status.st_dev, status.st_ino) != expected_identity or not stat.S_ISDIR(
+        status.st_mode
+    ):
+        raise OSError(errno.ESTALE, "quarantine identity changed")
+    if sys.platform == "darwin":
+        if _darwin_held_directory_path(descriptor) is None:
+            raise OSError(errno.ESTALE, "quarantine is already unlinked")
+        return
+    if sys.platform.startswith("linux"):
+        if status.st_nlink <= 0:
+            raise OSError(errno.ESTALE, "quarantine is already unlinked")
+        return
+    raise OSError(errno.ENOTSUP, "directory unlink proof is unavailable")
+
+
+def _require_posix_directory_unlinked(
+    descriptor: int,
+    expected_identity: tuple[int, int],
+) -> None:
+    status = os.fstat(descriptor)
+    if (status.st_dev, status.st_ino) != expected_identity:
+        raise OSError(errno.ESTALE, "quarantine identity changed")
+    if sys.platform == "darwin":
+        if _darwin_held_directory_path(descriptor) is not None:
+            raise OSError(errno.ESTALE, "held quarantine survived deletion")
+        return
+    if sys.platform.startswith("linux") and status.st_nlink == 0:
+        return
+    raise OSError(errno.ESTALE, "held quarantine unlink is unproven")
 
 
 def _clean_directory(
@@ -3284,12 +7211,87 @@ def _clean_windows_directory(
                     _paths._windows_close(item)
 
 
+def _open_cleanup_transaction_store(
+    root: int,
+    namespace: _paths._NamespaceCapability,
+    binding: PersistentTransactionBinding,
+) -> _TransactionStore:
+    if (
+        not _persistent_binding_invariants(binding)
+        or not namespace._validate_namespace_binding()
+        or _native_identity(root) != binding.plugins_identity
+        or _native_identity(namespace._plugins_descriptor) != binding.plugins_identity
+        or _native_identity(namespace._control_descriptor) != binding.control_identity
+    ):
+        raise OSError(errno.ESTALE, "transaction cleanup authority changed")
+    duplicate = _paths._windows_duplicate if os.name == "nt" else os.dup
+    control = duplicate(namespace._control_descriptor)
+    store = claims = 0 if os.name == "nt" else -1
+    opened: _TransactionStore | None = None
+    try:
+        if os.name == "nt":
+            store = _paths._windows_open_child(
+                control, _TRANSACTION_STORE_COMPONENT, directory=True
+            )
+            claims = _paths._windows_open_child(
+                store, _TRANSACTION_CLAIMS_COMPONENT, directory=True
+            )
+        else:
+            store = _paths._open_directory_component(
+                control,
+                _TRANSACTION_STORE_COMPONENT,
+                linked_code="path.linked_leaf",
+            )
+            claims = _paths._open_directory_component(
+                store,
+                _TRANSACTION_CLAIMS_COMPONENT,
+                linked_code="path.linked_ancestor",
+            )
+        opened = _TransactionStore(
+            control,
+            store,
+            claims,
+            binding.plugins_identity,
+            binding.control_identity,
+            binding.store_identity,
+            binding.claims_identity,
+            os.name == "nt",
+        )
+        control = store = claims = 0 if os.name == "nt" else -1
+        if (
+            not _transaction_journal_store_is_valid(
+                opened,
+                binding,
+                namespace._filesystem_guard,
+            )
+            or not _transaction_journal_records_are_valid(opened, binding)
+            or not namespace._validate_namespace_binding()
+        ):
+            raise OSError(errno.ESTALE, "transaction cleanup authority changed")
+        selected = opened
+        opened = None
+        return selected
+    finally:
+        if opened is not None:
+            opened.close()
+        if os.name == "nt":
+            for descriptor in (claims, store, control):
+                if descriptor:
+                    _paths._windows_close(descriptor)
+        else:
+            for descriptor in (claims, store, control):
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+
 def _remove_windows_quarantine(
     ticket: QuarantineTicket,
     root: int,
     namespace: _paths._NamespaceCapability,
 ) -> Result[CleanupResult]:
     parent = leaf = 0
+    transaction_store: _TransactionStore | None = None
+    cleanup_record: _TransactionCleanupRecord | None = None
     components = tuple(ticket.recovery_reference.split("/"))
     try:
         root_status = _paths._windows_handle_status(root)
@@ -3298,6 +7300,16 @@ def _remove_windows_quarantine(
             or not _paths._windows_private_directory(root, exact=False)
         ):
             raise OSError(errno.ESTALE, "quarantine root identity changed")
+        if ticket._binding is not None:
+            transaction_store = _open_cleanup_transaction_store(
+                root,
+                namespace,
+                ticket._binding,
+            )
+            cleanup_record = _publish_transaction_cleanup_intent(
+                transaction_store,
+                ticket._binding,
+            )
         parent = _windows_open_parent(root, components[:-1])
         leaf = _windows_open_raw_child(
             parent,
@@ -3330,6 +7342,19 @@ def _remove_windows_quarantine(
             _windows_delete_handle(current)
         finally:
             _paths._windows_close(current)
+        if ticket._binding is not None:
+            if transaction_store is None or cleanup_record is None:
+                raise OSError(errno.ESTALE, "transaction cleanup authority changed")
+            _windows_flush_directory_binding(
+                transaction_store.control,
+                _TRANSACTION_STORE_COMPONENT,
+                transaction_store.store_identity,
+            )
+            _publish_transaction_cleanup_complete(
+                transaction_store,
+                ticket._binding,
+                delete_component=cleanup_record.delete_component,
+            )
         return Result.success(CleanupResult(True, ticket.recovery_reference))
     except (ForgeError, OSError):
         return Result.failure(
@@ -3340,6 +7365,8 @@ def _remove_windows_quarantine(
             )
         )
     finally:
+        if transaction_store is not None:
+            transaction_store.close()
         for item in (leaf, parent, root):
             if item:
                 _paths._windows_close(item)
@@ -3360,6 +7387,8 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
     if os.name == "nt":
         return _remove_windows_quarantine(ticket, root, namespace)
     parent = leaf = -1
+    transaction_store: _TransactionStore | None = None
+    cleanup_record: _TransactionCleanupRecord | None = None
     components = tuple(ticket.recovery_reference.split("/"))
     try:
         root_status = os.fstat(root)
@@ -3367,10 +7396,57 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
             root, root_status, exact=False
         ):
             raise OSError(errno.ESTALE, "quarantine root identity changed")
+        if ticket._binding is not None:
+            transaction_store = _open_cleanup_transaction_store(
+                root,
+                namespace,
+                ticket._binding,
+            )
+            cleanup_record = _publish_transaction_cleanup_intent(
+                transaction_store,
+                ticket._binding,
+            )
         parent = _open_parent(root, components[:-1])
-        leaf = os.open(components[-1], _directory_flags(), dir_fd=parent)
+        current_component = components[-1]
+        leaf = os.open(current_component, _directory_flags(), dir_fd=parent)
         if _identity(leaf) != ticket._identity:
             raise OSError(errno.ESTALE, "quarantine identity changed")
+        if ticket._binding is not None:
+            if cleanup_record is None:
+                raise OSError(errno.ESTALE, "transaction cleanup authority changed")
+            quarantine_component = ticket._binding.quarantine_relative.rsplit("/", 1)[
+                -1
+            ]
+            if current_component == quarantine_component:
+                if _transaction_name_exists(
+                    parent,
+                    cleanup_record.delete_component,
+                    directory=True,
+                    windows=False,
+                ):
+                    raise OSError(
+                        errno.EEXIST,
+                        "transaction delete token conflicts",
+                    )
+                _paths._exclusive_posix_rename(
+                    parent,
+                    current_component,
+                    cleanup_record.delete_component,
+                )
+                os.fsync(parent)
+                current_component = cleanup_record.delete_component
+            elif current_component != cleanup_record.delete_component:
+                raise OSError(errno.ESTALE, "transaction delete token changed")
+            if (
+                not _paths._posix_namespace_binds(
+                    parent,
+                    current_component,
+                    ticket._identity,
+                )
+                or _identity(leaf) != ticket._identity
+            ):
+                raise OSError(errno.ESTALE, "transaction delete token changed")
+        _preflight_posix_directory_unlink_proof(leaf, ticket._identity)
         _clean_directory(
             leaf,
             device=ticket._identity[0],
@@ -3378,11 +7454,32 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
             entries=[0],
             namespace=namespace,
         )
-        current = os.stat(components[-1], dir_fd=parent, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != ticket._identity:
+        if not _paths._posix_namespace_binds(
+            parent,
+            current_component,
+            ticket._identity,
+        ):
             raise OSError(errno.ESTALE, "quarantine identity changed")
+        _preflight_posix_directory_unlink_proof(leaf, ticket._identity)
         _require_cleanup_namespace(namespace)
-        os.rmdir(components[-1], dir_fd=parent)
+        os.rmdir(current_component, dir_fd=parent)
+        os.fsync(parent)
+        if _transaction_name_exists(
+            parent,
+            current_component,
+            directory=True,
+            windows=False,
+        ):
+            raise OSError(errno.ESTALE, "transaction delete token was replaced")
+        _require_posix_directory_unlinked(leaf, ticket._identity)
+        if ticket._binding is not None:
+            if transaction_store is None or cleanup_record is None:
+                raise OSError(errno.ESTALE, "transaction cleanup authority changed")
+            _publish_transaction_cleanup_complete(
+                transaction_store,
+                ticket._binding,
+                delete_component=cleanup_record.delete_component,
+            )
         return Result.success(CleanupResult(True, ticket.recovery_reference))
     except (ForgeError, OSError):
         return Result.failure(
@@ -3393,6 +7490,8 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
             )
         )
     finally:
+        if transaction_store is not None:
+            transaction_store.close()
         for descriptor in (leaf, parent, root):
             if descriptor >= 0:
                 os.close(descriptor)

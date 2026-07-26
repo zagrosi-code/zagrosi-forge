@@ -10,6 +10,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from threading import Barrier
 from typing import Any
 
 import pytest
@@ -740,6 +741,91 @@ def test_authenticated_existing_root_reopens_without_granting_deletion(
         assert reopened.control_identity == control_identity
         assert reopened._validate_live_descriptor()
         assert reopened._validate_control_binding()
+
+
+def test_preexisting_unclaimed_transaction_store_is_preserved(tmp_path: Path) -> None:
+    from zagrosi_forge.install.ownership import create_persistent_transaction_root
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    codex_home = tmp_path / "codex-home"
+    _private_test_directory(codex_home)
+    authority = PlatformPathAuthority()
+    owned = authority.bootstrap_forge_root(codex_home, runner=_runner()).unwrap()
+    store = codex_home / "plugins/.zagrosi/transactions"
+    _private_test_directory(store)
+    canary = store / "preserve"
+    canary.write_bytes(b"unowned")
+
+    result = create_persistent_transaction_root(
+        owned,
+        transaction_id="tx-44444444444444444444444444444444",
+    )
+
+    assert _code(result) == "ownership.unowned"
+    assert canary.read_bytes() == b"unowned"
+    assert tuple(store.iterdir()) == (canary,)
+    owned.close()
+
+
+def test_concurrent_persistent_transaction_store_loser_authenticates_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zagrosi_forge.install.paths as paths
+    from zagrosi_forge.install.ownership import create_persistent_transaction_root
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    codex_home = tmp_path / "codex-home"
+    _private_test_directory(codex_home)
+    owned = (
+        PlatformPathAuthority()
+        .bootstrap_forge_root(codex_home, runner=_runner())
+        .unwrap()
+    )
+    publication = Barrier(2)
+    if os.name == "nt":
+        original_rename = paths._windows_rename_handle
+
+        def synchronized_rename(source: int, parent: int, destination: str) -> None:
+            if destination == "transactions":
+                publication.wait(timeout=5)
+            original_rename(source, parent, destination)
+
+        monkeypatch.setattr(paths, "_windows_rename_handle", synchronized_rename)
+    else:
+        original_posix_rename = paths._exclusive_posix_rename
+
+        def synchronized_posix_rename(
+            parent: int, source: str, destination: str
+        ) -> None:
+            if destination == "transactions":
+                publication.wait(timeout=5)
+            original_posix_rename(parent, source, destination)
+
+        monkeypatch.setattr(paths, "_exclusive_posix_rename", synchronized_posix_rename)
+
+    transaction_ids = (
+        "tx-88888888888888888888888888888888",
+        "tx-99999999999999999999999999999999",
+    )
+
+    def create(transaction_id: str):
+        return create_persistent_transaction_root(
+            owned, transaction_id=transaction_id
+        ).unwrap()
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first, second = tuple(pool.map(create, transaction_ids))
+        assert first.binding.store_identity == second.binding.store_identity
+        assert first.binding.claims_identity == second.binding.claims_identity
+        assert first.binding.transaction_identity != second.binding.transaction_identity
+        assert all(
+            (codex_home / "plugins" / created.binding.root_relative).is_dir()
+            for created in (first, second)
+        )
+        assert not tuple((codex_home / "plugins/.zagrosi").glob(".transactions-*.tmp"))
+    finally:
+        owned.close()
 
 
 def test_concurrent_bootstrap_has_one_publisher_and_one_authenticated_reopen(

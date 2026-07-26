@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 from typing import Any
@@ -92,6 +93,24 @@ def _owned(tmp_path: Path):
     authority = PlatformPathAuthority()
     owned = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
     return authority, owned, home / "plugins"
+
+
+def _identity(path: Path) -> tuple[int, int]:
+    if os.name != "nt":
+        status = path.stat(follow_symlinks=False)
+        return status.st_dev, status.st_ino
+
+    import zagrosi_forge.install.paths as paths
+
+    parent = paths._windows_open_path(os.fspath(path.parent))
+    child = 0
+    try:
+        child = paths._windows_open_child(parent, path.name, directory=None)
+        return paths._windows_handle_status(child).identity
+    finally:
+        if child:
+            paths._windows_close(child)
+        paths._windows_close(parent)
 
 
 def _code(result: Any) -> str:
@@ -1754,6 +1773,1844 @@ def _transaction(tmp_path: Path, *, transaction_id: str = "tx-one"):
     path = authority.prove_descendant(owned, relative, expected_depth=2).unwrap()
     proof = prove_transaction_owned(path, claim=claim).unwrap()
     return proof, path, owned, root
+
+
+def _persistent_transaction(
+    tmp_path: Path, *, transaction_id: str = "tx-0123456789abcdef0123456789abcdef"
+):
+    from zagrosi_forge.install.ownership import create_persistent_transaction_root
+
+    authority, owned, root = _owned(tmp_path)
+    created = create_persistent_transaction_root(
+        owned, transaction_id=transaction_id
+    ).unwrap()
+    return authority, owned, root, created
+
+
+def test_transaction_store_namespace_failure_closes_each_native_handle_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, _ = _owned(tmp_path)
+    watched: set[int] = set()
+    close_counts: dict[int, int] = {}
+    original_store_close = ownership._TransactionStore.close
+
+    def capture_store_handles(store: Any) -> None:
+        empty = 0 if store.windows else -1
+        watched.update(
+            descriptor
+            for descriptor in (store.control, store.store, store.claims)
+            if descriptor != empty
+        )
+        original_store_close(store)
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            ownership,
+            "_transaction_store_namespace_is_valid",
+            lambda _store: False,
+        )
+        context.setattr(
+            ownership._TransactionStore,
+            "close",
+            capture_store_handles,
+        )
+        if os.name == "nt":
+            original_native_close = ownership._paths._windows_close
+
+            def close_once(descriptor: int) -> None:
+                if descriptor in watched:
+                    close_counts[descriptor] = close_counts.get(descriptor, 0) + 1
+                    assert close_counts[descriptor] == 1
+                original_native_close(descriptor)
+
+            context.setattr(ownership._paths, "_windows_close", close_once)
+        else:
+            original_native_close = ownership.os.close
+
+            def close_once(descriptor: int) -> None:
+                if descriptor in watched:
+                    close_counts[descriptor] = close_counts.get(descriptor, 0) + 1
+                    assert close_counts[descriptor] == 1
+                original_native_close(descriptor)
+
+            context.setattr(ownership.os, "close", close_once)
+
+        result = ownership.create_persistent_transaction_root(
+            owned,
+            transaction_id="tx-c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        )
+
+    assert _code(result) == "ownership.unowned"
+    owned.close()
+
+
+def test_windows_publication_adapters_order_namespace_before_barrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    events: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_rename_handle",
+        lambda source, parent, destination: events.append(
+            ("rename", (source, parent, destination))
+        ),
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_windows_flush",
+        lambda handle: events.append(("flush-file", handle)),
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_windows_flush_directory_binding",
+        lambda parent, component, identity: events.append(
+            ("flush-directory", (parent, component, identity))
+        ),
+    )
+
+    published = False
+
+    def mark_published() -> None:
+        nonlocal published
+        published = True
+        events.append(("published", True))
+
+    ownership._durable_windows_file_rename(
+        11,
+        12,
+        "claim.json",
+        after_rename=mark_published,
+    )
+    ownership._durable_windows_directory_rename(
+        21,
+        22,
+        "transactions",
+        (23, 24),
+    )
+
+    assert published
+    assert events == [
+        ("rename", (11, 12, "claim.json")),
+        ("published", True),
+        ("flush-file", 11),
+        ("rename", (21, 22, "transactions")),
+        ("flush-directory", (22, "transactions", (23, 24))),
+    ]
+
+
+def test_windows_claim_publication_revalidation_is_tristate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class Store:
+        claims = 41
+        plugins_identity = (42, 43)
+
+    store = Store()
+    raw = b"canonical-claim"
+    identity = (42, 44)
+    monkeypatch.setattr(
+        ownership,
+        "_transaction_store_namespace_is_valid",
+        lambda _store: True,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_private_record_name_binds",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_read_windows_private_record",
+        lambda *_args, **_kwargs: (raw, identity),
+    )
+    assert (
+        ownership._revalidate_windows_claim_publication(
+            store,
+            final_claim="tx.json",
+            claim_identity=identity,
+            raw=raw,
+        )
+        is True
+    )
+
+    def missing(*_args: object, **_kwargs: object) -> None:
+        raise FileNotFoundError
+
+    monkeypatch.setattr(ownership, "_read_windows_private_record", missing)
+    assert (
+        ownership._revalidate_windows_claim_publication(
+            store,
+            final_claim="tx.json",
+            claim_identity=identity,
+            raw=raw,
+        )
+        is False
+    )
+
+    def ambiguous(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EPERM, "injected ambiguity")
+
+    monkeypatch.setattr(ownership, "_read_windows_private_record", ambiguous)
+    assert (
+        ownership._revalidate_windows_claim_publication(
+            store,
+            final_claim="tx.json",
+            claim_identity=identity,
+            raw=raw,
+        )
+        is None
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-death durability")
+@pytest.mark.parametrize(
+    "barrier",
+    (
+        "root-durable",
+        "wal-durable",
+        "temp-anchor-durable",
+        "anchor-published",
+    ),
+)
+def test_persistent_creation_recovers_after_process_death_at_durable_barrier(
+    tmp_path: Path, barrier: str
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    transaction_id = (
+        "tx-c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+        if barrier == "root-durable"
+        else (
+            "tx-cbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcb"
+            if barrier == "temp-anchor-durable"
+            else (
+                "tx-c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9"
+                if barrier == "wal-durable"
+                else "tx-c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+            )
+        )
+    )
+    home = tmp_path / "codex-home"
+    _private_test_directory(home)
+    child = os.fork()
+    if child == 0:
+        try:
+            original_fsync = ownership.os.fsync
+            live = home / "plugins/.zagrosi/transactions" / transaction_id
+            claims = home / "plugins/.zagrosi/transactions/claims"
+            anchor = claims / f"{transaction_id}.json"
+            creation_intent = claims / f".{transaction_id}.create.json"
+            store = claims.parent
+
+            def terminate_after_real_fsync(descriptor: int) -> None:
+                original_fsync(descriptor)
+                descriptor_identity = ownership._identity(descriptor)
+                temporary_anchors = tuple(claims.glob(".claim-*.tmp"))
+                if (
+                    (
+                        barrier == "root-durable"
+                        and live.is_dir()
+                        and not anchor.exists()
+                        and descriptor_identity == _identity(store)
+                    )
+                    or (
+                        barrier == "wal-durable"
+                        and creation_intent.is_file()
+                        and temporary_anchors
+                        and all(
+                            candidate.stat().st_size == 0
+                            for candidate in temporary_anchors
+                        )
+                        and not live.exists()
+                        and not anchor.exists()
+                        and descriptor_identity == _identity(claims)
+                    )
+                    or (
+                        barrier == "temp-anchor-durable"
+                        and any(
+                            descriptor_identity == _identity(candidate)
+                            for candidate in temporary_anchors
+                        )
+                        and not anchor.exists()
+                    )
+                    or (
+                        barrier == "anchor-published"
+                        and anchor.is_file()
+                        and descriptor_identity == _identity(claims)
+                    )
+                ):
+                    os.kill(os.getpid(), signal.SIGKILL)
+
+            ownership.os.fsync = terminate_after_real_fsync
+            owned = (
+                PlatformPathAuthority()
+                .bootstrap_forge_root(home, runner=_runner())
+                .unwrap()
+            )
+            ownership.create_persistent_transaction_root(
+                owned, transaction_id=transaction_id
+            )
+        finally:
+            os._exit(91)
+
+    _waited, status = os.waitpid(child, 0)
+    assert os.WIFSIGNALED(status)
+    assert os.WTERMSIG(status) == signal.SIGKILL
+
+    owned = (
+        PlatformPathAuthority().bootstrap_forge_root(home, runner=_runner()).unwrap()
+    )
+    try:
+        recovered = ownership.create_persistent_transaction_root(
+            owned, transaction_id=transaction_id
+        ).unwrap()
+        loaded = ownership.load_persistent_transaction_binding(
+            owned, transaction_id=transaction_id
+        ).unwrap()
+        rebound = ownership.rebind_persistent_transaction(
+            owned, binding=loaded
+        ).unwrap()
+        assert recovered.binding == loaded
+        assert rebound.location is ownership.TransactionLocation.LIVE
+        claims = home / "plugins/.zagrosi/transactions/claims"
+        assert not tuple(claims.glob(f".{transaction_id}.*"))
+        assert not tuple(claims.glob(".record-*.tmp"))
+        assert not tuple(claims.glob(".claim-*.tmp"))
+    finally:
+        owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-death durability")
+@pytest.mark.parametrize(
+    "barrier",
+    (
+        "staged-root-parent-durable",
+        "pending-claim-created",
+    ),
+)
+def test_persistent_creation_prebinding_crash_preserves_unbound_reserved_names(
+    tmp_path: Path,
+    barrier: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    transaction_id = (
+        "tx-d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+        if barrier == "staged-root-parent-durable"
+        else "tx-d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"
+    )
+    home = tmp_path / "codex-home"
+    _private_test_directory(home)
+    store = home / "plugins/.zagrosi/transactions"
+    claims = store / "claims"
+    reservation = claims / f".{transaction_id}.reserve.json"
+    successor = claims / f".{transaction_id}.create.json"
+
+    child = os.fork()
+    if child == 0:
+        try:
+            original_fsync = ownership.os.fsync
+            original_open = ownership.os.open
+
+            def terminate_after_root_parent_fsync(descriptor: int) -> None:
+                original_fsync(descriptor)
+                if (
+                    barrier == "staged-root-parent-durable"
+                    and reservation.is_file()
+                    and not successor.exists()
+                    and tuple(store.glob(".root-*.tmp"))
+                    and not tuple(claims.glob(".claim-*.tmp"))
+                    and ownership._identity(descriptor) == _identity(store)
+                ):
+                    os.kill(os.getpid(), signal.SIGKILL)
+
+            def terminate_after_pending_claim_create(
+                component: str | bytes,
+                *args: Any,
+                **kwargs: Any,
+            ) -> int:
+                descriptor = original_open(component, *args, **kwargs)
+                if (
+                    barrier == "pending-claim-created"
+                    and isinstance(component, str)
+                    and component.startswith(".claim-")
+                    and component.endswith(".tmp")
+                    and reservation.is_file()
+                    and not successor.exists()
+                ):
+                    os.kill(os.getpid(), signal.SIGKILL)
+                return descriptor
+
+            ownership.os.fsync = terminate_after_root_parent_fsync
+            ownership.os.open = terminate_after_pending_claim_create
+            owned = (
+                PlatformPathAuthority()
+                .bootstrap_forge_root(home, runner=_runner())
+                .unwrap()
+            )
+            ownership.create_persistent_transaction_root(
+                owned,
+                transaction_id=transaction_id,
+            )
+        finally:
+            os._exit(91)
+
+    _waited, status = os.waitpid(child, 0)
+    assert os.WIFSIGNALED(status)
+    assert os.WTERMSIG(status) == signal.SIGKILL
+    reserved = json.loads(reservation.read_bytes())
+    staged = store / reserved["stage_component"]
+    pending = claims / reserved["pending_claim_component"]
+    assert staged.is_dir()
+    assert pending.exists() is (barrier == "pending-claim-created")
+    assert not successor.exists()
+
+    displaced = staged.with_name(f"{staged.name}-displaced")
+    if barrier == "staged-root-parent-durable":
+        staged.rename(displaced)
+        _private_test_directory(staged)
+        (staged / "replacement-canary").write_bytes(b"preserve-replacement")
+        (displaced / "original-canary").write_bytes(b"preserve-original")
+    else:
+        (staged / "unbound-canary").write_bytes(b"preserve-stage")
+        pending.write_bytes(b"preserve-unbound-claim")
+        pending.chmod(0o600)
+
+    owned = (
+        PlatformPathAuthority().bootstrap_forge_root(home, runner=_runner()).unwrap()
+    )
+    try:
+        for _attempt in range(2):
+            retried = ownership.create_persistent_transaction_root(
+                owned,
+                transaction_id=transaction_id,
+            )
+            assert _code(retried) == "ownership.unowned"
+        assert tuple(store.glob(".root-*.tmp")) == (staged,)
+        assert tuple(claims.glob(".claim-*.tmp")) == (
+            (pending,) if pending.exists() else ()
+        )
+        if barrier == "staged-root-parent-durable":
+            assert (
+                staged / "replacement-canary"
+            ).read_bytes() == b"preserve-replacement"
+            assert (displaced / "original-canary").read_bytes() == b"preserve-original"
+        else:
+            assert (staged / "unbound-canary").read_bytes() == b"preserve-stage"
+            assert pending.read_bytes() == b"preserve-unbound-claim"
+    finally:
+        owned.close()
+
+
+def test_persistent_creation_retries_when_only_durable_reservation_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class ReservationOnlyInterrupt(BaseException):
+        pass
+
+    transaction_id = "tx-d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+    _, owned, root = _owned(tmp_path)
+    original_publish = ownership._publish_transaction_creation_reservation
+
+    def publish_then_interrupt(*args: Any, **kwargs: Any) -> Any:
+        original_publish(*args, **kwargs)
+        raise ReservationOnlyInterrupt
+
+    monkeypatch.setattr(
+        ownership,
+        "_publish_transaction_creation_reservation",
+        publish_then_interrupt,
+    )
+    with pytest.raises(ReservationOnlyInterrupt):
+        ownership.create_persistent_transaction_root(
+            owned,
+            transaction_id=transaction_id,
+        )
+    store = root / ".zagrosi/transactions"
+    claims = store / "claims"
+    assert (claims / f".{transaction_id}.reserve.json").is_file()
+    assert not tuple(store.glob(".root-*.tmp"))
+    assert not tuple(claims.glob(".claim-*.tmp"))
+    monkeypatch.undo()
+
+    created = ownership.create_persistent_transaction_root(
+        owned,
+        transaction_id=transaction_id,
+    ).unwrap()
+
+    assert (root / created.binding.root_relative).is_dir()
+    assert (root / created.binding.claim_relative).is_file()
+    assert not tuple(store.glob(".root-*.tmp"))
+    assert not tuple(claims.glob(".claim-*.tmp"))
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX publication interruption")
+def test_posix_post_rename_interrupt_preserves_exact_root_and_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class InjectedPublicationInterrupt(BaseException):
+        pass
+
+    transaction_id = "tx-d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+    _, owned, root = _owned(tmp_path)
+    original_rename = ownership._exclusive_rename
+
+    def publish_then_interrupt(parent: int, source: str, destination: str) -> None:
+        original_rename(parent, source, destination)
+        raise InjectedPublicationInterrupt
+
+    monkeypatch.setattr(ownership, "_exclusive_rename", publish_then_interrupt)
+    with pytest.raises(InjectedPublicationInterrupt):
+        ownership.create_persistent_transaction_root(
+            owned,
+            transaction_id=transaction_id,
+        )
+
+    live = root / ".zagrosi/transactions" / transaction_id
+    anchor = root / ".zagrosi/transactions/claims" / f"{transaction_id}.json"
+    assert live.is_dir()
+    assert anchor.is_file()
+    binding = ownership.load_persistent_transaction_binding(
+        owned,
+        transaction_id=transaction_id,
+    ).unwrap()
+    rebound = ownership.rebind_persistent_transaction(
+        owned,
+        binding=binding,
+    ).unwrap()
+    assert rebound.location is ownership.TransactionLocation.LIVE
+    assert not (
+        root / ".zagrosi/transactions/claims" / f".{transaction_id}.create.json"
+    ).exists()
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX bound-successor interruption")
+@pytest.mark.parametrize("tamper", ("missing", "substituted"))
+def test_bound_creation_successor_requires_exact_reservation_predecessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class BoundSuccessorInterrupt(BaseException):
+        pass
+
+    transaction_id = (
+        "tx-d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+        if tamper == "missing"
+        else "tx-d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6"
+    )
+    _, owned, root = _owned(tmp_path)
+    final_claim = f"{transaction_id}.json"
+    original_rename = ownership._exclusive_rename
+
+    def publish_anchor_then_interrupt(
+        parent: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        original_rename(parent, source, destination)
+        if destination == final_claim:
+            raise BoundSuccessorInterrupt
+
+    monkeypatch.setattr(
+        ownership,
+        "_exclusive_rename",
+        publish_anchor_then_interrupt,
+    )
+    with pytest.raises(BoundSuccessorInterrupt):
+        ownership.create_persistent_transaction_root(
+            owned,
+            transaction_id=transaction_id,
+        )
+    monkeypatch.undo()
+
+    claims = root / ".zagrosi/transactions/claims"
+    reservation = claims / f".{transaction_id}.reserve.json"
+    if tamper == "missing":
+        reservation.unlink()
+    else:
+        reservation.rename(claims / "displaced-reservation.json")
+        reservation.write_bytes(b"preserve-substituted-reservation")
+        reservation.chmod(0o600)
+
+    retried = ownership.create_persistent_transaction_root(
+        owned,
+        transaction_id=transaction_id,
+    )
+
+    assert _code(retried) == "ownership.unowned"
+    assert (root / ".zagrosi/transactions" / transaction_id).is_dir()
+    assert (claims / final_claim).is_file()
+    if tamper == "substituted":
+        assert reservation.read_bytes() == b"preserve-substituted-reservation"
+    owned.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows publication interruption")
+def test_windows_post_rename_interrupt_preserves_exact_root_and_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class InjectedPublicationInterrupt(BaseException):
+        pass
+
+    transaction_id = "tx-f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+    final_claim = f"{transaction_id}.json"
+    _, owned, root = _owned(tmp_path)
+    original_rename = ownership._paths._windows_rename_handle
+
+    def publish_then_interrupt(source: int, parent: int, destination: str) -> None:
+        original_rename(source, parent, destination)
+        if destination == final_claim:
+            raise InjectedPublicationInterrupt
+
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_rename_handle",
+        publish_then_interrupt,
+    )
+    with pytest.raises(InjectedPublicationInterrupt):
+        ownership.create_persistent_transaction_root(
+            owned,
+            transaction_id=transaction_id,
+        )
+
+    live = root / ".zagrosi/transactions" / transaction_id
+    anchor = root / ".zagrosi/transactions/claims" / final_claim
+    assert live.is_dir()
+    assert anchor.is_file()
+    binding = ownership.load_persistent_transaction_binding(
+        owned,
+        transaction_id=transaction_id,
+    ).unwrap()
+    rebound = ownership.rebind_persistent_transaction(
+        owned,
+        binding=binding,
+    ).unwrap()
+    assert rebound.location is ownership.TransactionLocation.LIVE
+    assert not (
+        root / ".zagrosi/transactions/claims" / f".{transaction_id}.create.json"
+    ).exists()
+    owned.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows durability barriers")
+def test_windows_persistent_publication_flushes_intent_then_root_before_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    directory_barriers: list[bool] = []
+    original_flush = ownership._windows_flush
+
+    def record_flush(handle: int) -> None:
+        directory_barriers.append(
+            ownership._paths._windows_handle_status(handle).is_directory
+        )
+        original_flush(handle)
+
+    monkeypatch.setattr(ownership, "_windows_flush", record_flush)
+    _, owned, _, _ = _persistent_transaction(
+        tmp_path,
+        transaction_id="tx-e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+    )
+
+    file_barriers = [
+        index
+        for index, is_directory in enumerate(directory_barriers)
+        if not is_directory
+    ]
+    assert len(file_barriers) >= 3
+    intent_barrier = file_barriers[0]
+    anchor_barrier = file_barriers[-1]
+    assert anchor_barrier > intent_barrier
+    assert sum(directory_barriers[intent_barrier + 1 : anchor_barrier]) >= 2
+    assert directory_barriers[anchor_barrier + 1 :]
+    assert all(directory_barriers[anchor_barrier + 1 :])
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX anchor metadata race")
+@pytest.mark.parametrize("race", ("hardlink", "mode"))
+def test_persistent_anchor_after_read_race_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    anchor = root / created.binding.claim_relative
+    original_read = ownership._read_posix_private_record
+    raced = False
+
+    def read_then_race(
+        parent: int, component: str, *, device: int
+    ) -> tuple[bytes, tuple[int, int]]:
+        nonlocal raced
+        observed = original_read(parent, component, device=device)
+        if component == f"{transaction_id}.json" and not raced:
+            raced = True
+            if race == "hardlink":
+                os.link(anchor, anchor.with_name("anchor-race-link.json"))
+            else:
+                anchor.chmod(0o640)
+        return observed
+
+    monkeypatch.setattr(ownership, "_read_posix_private_record", read_then_race)
+    loaded = ownership.load_persistent_transaction_binding(
+        owned, transaction_id=transaction_id
+    )
+
+    assert raced
+    assert _code(loaded) == "ownership.unowned"
+    assert anchor.exists()
+    owned.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows anchor metadata race")
+@pytest.mark.parametrize("race", ("hardlink", "dacl"))
+def test_windows_persistent_anchor_after_read_race_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    anchor = root / created.binding.claim_relative
+    original_read = ownership._read_windows_private_record
+    raced = False
+
+    def read_then_race(
+        parent: int, component: str, *, volume: int
+    ) -> tuple[bytes, tuple[int, int]]:
+        nonlocal raced
+        observed = original_read(parent, component, volume=volume)
+        if component == f"{transaction_id}.json" and not raced:
+            raced = True
+            if race == "hardlink":
+                os.link(anchor, anchor.with_name("anchor-race-link.json"))
+            else:
+                subprocess.run(
+                    ["icacls", str(anchor), "/inheritance:e"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+        return observed
+
+    monkeypatch.setattr(ownership, "_read_windows_private_record", read_then_race)
+    loaded = ownership.load_persistent_transaction_binding(
+        owned, transaction_id=transaction_id
+    )
+
+    assert raced
+    assert _code(loaded) == "ownership.unowned"
+    assert anchor.exists()
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX namespace publication race")
+@pytest.mark.parametrize("phase", ("before", "after"))
+def test_persistent_creation_rejects_root_move_around_anchor_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = (
+        "tx-c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"
+        if phase == "before"
+        else "tx-c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
+    )
+    _, owned, root = _owned(tmp_path)
+    live = root / ".zagrosi/transactions" / transaction_id
+    displaced = live.with_name(f"{transaction_id}-displaced")
+    original_rename = ownership._exclusive_rename
+
+    def move_around_publish(parent: int, source: str, destination: str) -> None:
+        if destination == f"{transaction_id}.json" and phase == "before":
+            live.rename(displaced)
+        original_rename(parent, source, destination)
+        if destination == f"{transaction_id}.json" and phase == "after":
+            live.rename(displaced)
+
+    monkeypatch.setattr(ownership, "_exclusive_rename", move_around_publish)
+    created = ownership.create_persistent_transaction_root(
+        owned, transaction_id=transaction_id
+    )
+
+    assert _code(created) == "ownership.unowned"
+    assert displaced.is_dir()
+    assert not live.exists()
+    loaded = ownership.load_persistent_transaction_binding(
+        owned, transaction_id=transaction_id
+    )
+    if loaded.is_ok:
+        rebound = ownership.rebind_persistent_transaction(
+            owned, binding=loaded.unwrap()
+        )
+        assert _code(rebound) == "ownership.cleanup_incomplete"
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX namespace injection")
+def test_persistent_creation_never_adopts_unrelated_private_live_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    _, owned, root = _owned(tmp_path)
+    live = root / ".zagrosi/transactions" / transaction_id
+    original_mkdir = ownership.os.mkdir
+    original_rename = ownership._paths._exclusive_posix_rename
+    injected = False
+
+    def inject_live_root() -> None:
+        nonlocal injected
+        injected = True
+        live.mkdir(mode=0o700)
+        (live / "attacker-canary").write_bytes(b"preserve-unrelated")
+
+    def inject_before_mkdir(
+        component: str | bytes,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        if component == transaction_id and not injected:
+            inject_live_root()
+            raise FileExistsError(errno.EEXIST, "injected unrelated root")
+        original_mkdir(component, mode, dir_fd=dir_fd)
+
+    def inject_before_publish(
+        parent: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        if destination == transaction_id and not injected:
+            inject_live_root()
+        original_rename(parent, source, destination)
+
+    monkeypatch.setattr(ownership.os, "mkdir", inject_before_mkdir)
+    monkeypatch.setattr(
+        ownership._paths,
+        "_exclusive_posix_rename",
+        inject_before_publish,
+    )
+    created = ownership.create_persistent_transaction_root(
+        owned, transaction_id=transaction_id
+    )
+
+    assert injected
+    assert _code(created) == "ownership.unowned"
+    assert (live / "attacker-canary").read_bytes() == b"preserve-unrelated"
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX record retirement race")
+def test_posix_transaction_record_retirement_preserves_name_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-cececececececececececececececece"
+    _, owned, root = _owned(tmp_path)
+    claims = root / ".zagrosi/transactions/claims"
+    intent_component = f".{transaction_id}.create.json"
+    displaced = claims / "displaced-create-intent.json"
+    unknown = b"preserve-unknown-record"
+    original_rename = ownership._paths._exclusive_posix_rename
+    swapped = False
+
+    def swap_before_retirement(
+        parent: int,
+        source: str,
+        destination: str,
+    ) -> None:
+        nonlocal swapped
+        if source == intent_component and not swapped:
+            swapped = True
+            (claims / source).rename(displaced)
+            (claims / source).write_bytes(unknown)
+            (claims / source).chmod(0o600)
+        original_rename(parent, source, destination)
+
+    monkeypatch.setattr(
+        ownership._paths,
+        "_exclusive_posix_rename",
+        swap_before_retirement,
+    )
+    created = ownership.create_persistent_transaction_root(
+        owned, transaction_id=transaction_id
+    )
+
+    assert swapped
+    assert _code(created) == "ownership.unowned"
+    preserved = [
+        candidate
+        for candidate in claims.iterdir()
+        if candidate.is_file() and candidate.read_bytes() == unknown
+    ]
+    assert preserved
+    assert displaced.is_file()
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX record retirement")
+def test_posix_transaction_record_retirement_is_bounded_and_retry_safe(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, root = _owned(tmp_path)
+    store = ownership._open_transaction_store(owned, create=True)
+    component = ".bounded-retirement.json"
+    raw = b"exact-record"
+    retired = (
+        root
+        / ".zagrosi/transactions/claims"
+        / f".retired-{hashlib.sha256(component.encode()).hexdigest()}.json"
+    )
+    try:
+        identity = ownership._publish_transaction_record(store, component, raw)
+        ownership._remove_exact_transaction_record(
+            store,
+            component,
+            identity,
+            raw,
+        )
+        ownership._remove_exact_transaction_record(
+            store,
+            component,
+            identity,
+            raw,
+        )
+
+        assert retired.read_bytes() == raw
+        assert tuple(retired.parent.glob(".retired-*.json")) == (retired,)
+        active = retired.parent / component
+        active.write_bytes(b"preserve-active-substitution")
+        active.chmod(0o600)
+        with pytest.raises(OSError):
+            ownership._remove_exact_transaction_record(
+                store,
+                component,
+                identity,
+                raw,
+            )
+        assert active.read_bytes() == b"preserve-active-substitution"
+        assert retired.read_bytes() == raw
+    finally:
+        store.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX record retirement")
+def test_posix_transaction_record_retirement_preserves_deterministic_conflict(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, root = _owned(tmp_path)
+    store = ownership._open_transaction_store(owned, create=True)
+    component = ".bounded-conflict.json"
+    raw = b"exact-record"
+    claims = root / ".zagrosi/transactions/claims"
+    retired = claims / f".retired-{hashlib.sha256(component.encode()).hexdigest()}.json"
+    unknown = b"preserve-unknown-retirement"
+    try:
+        identity = ownership._publish_transaction_record(store, component, raw)
+        retired.write_bytes(unknown)
+        retired.chmod(0o600)
+
+        with pytest.raises(OSError):
+            ownership._remove_exact_transaction_record(
+                store,
+                component,
+                identity,
+                raw,
+            )
+
+        assert (claims / component).read_bytes() == raw
+        assert retired.read_bytes() == unknown
+        assert tuple(claims.glob(".retired-*.json")) == (retired,)
+    finally:
+        store.close()
+        owned.close()
+
+
+def test_persistent_transaction_root_rebinds_from_durable_sibling_anchor(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.ownership import (
+        TransactionLocation,
+        load_persistent_transaction_binding,
+        rebind_persistent_transaction,
+    )
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    transaction_id = "tx-0123456789abcdef0123456789abcdef"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    binding = created.binding
+    anchor = root / ".zagrosi/transactions/claims" / f"{transaction_id}.json"
+    anchor_before = (_identity(anchor), anchor.read_bytes())
+    assert binding.root_relative == f".zagrosi/transactions/{transaction_id}"
+    assert anchor.is_file()
+    owned.close()
+
+    authority = PlatformPathAuthority()
+    reopened = authority.bootstrap_forge_root(
+        tmp_path / "codex-home", runner=_runner()
+    ).unwrap()
+    try:
+        loaded = load_persistent_transaction_binding(
+            reopened, transaction_id=transaction_id
+        ).unwrap()
+        assert loaded == binding
+        rebound = rebind_persistent_transaction(reopened, binding=loaded).unwrap()
+        assert rebound.location is TransactionLocation.LIVE
+        assert rebound.claim is not None
+        assert rebound.ticket is None
+        assert rebound.claim.relative.value == binding.root_relative
+        assert rebound.claim.identity == binding.transaction_identity
+        assert (_identity(anchor), anchor.read_bytes()) == anchor_before
+    finally:
+        reopened.close()
+
+
+def test_transaction_journal_access_is_writable_live_and_read_only_quarantined(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.ownership import (
+        TransactionLocation,
+        open_transaction_journal_access,
+        prove_transaction_owned,
+        quarantine_owned,
+        rebind_persistent_transaction,
+    )
+
+    transaction_id = "tx-88888888888888888888888888888888"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    (live / "journal.json").write_bytes(b"sealed-journal")
+
+    live_access = open_transaction_journal_access(owned, created).unwrap()
+    assert live_access.location is TransactionLocation.LIVE
+    assert live_access.binding == created.binding
+    assert not live_access.read_only
+    live_access._require_journal_access(write=False)
+    live_access._require_journal_access(write=True)
+    descriptor = live_access._duplicate_journal_descriptor(write=True)
+    try:
+        import zagrosi_forge.install.ownership as ownership
+
+        assert (
+            ownership._native_identity(descriptor)
+            == created.binding.transaction_identity
+        )
+    finally:
+        ownership._close_native(descriptor)
+    live_access.close()
+
+    path = authority.prove_descendant(
+        owned, created.claim.relative, expected_depth=3
+    ).unwrap()
+    proof = prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = quarantine_owned(proof, transaction_id=transaction_id).unwrap()
+    rebound = rebind_persistent_transaction(owned, binding=created.binding).unwrap()
+    assert rebound.location is TransactionLocation.QUARANTINED
+    assert rebound.ticket is not None
+
+    quarantine_access = open_transaction_journal_access(owned, rebound).unwrap()
+    try:
+        assert quarantine_access.location is TransactionLocation.QUARANTINED
+        assert quarantine_access.binding == created.binding
+        assert quarantine_access.read_only
+        assert not hasattr(quarantine_access, "ticket")
+        quarantine_access._require_journal_access(write=False)
+        descriptor = quarantine_access._duplicate_journal_descriptor(write=False)
+        try:
+            assert (
+                ownership._native_identity(descriptor)
+                == created.binding.transaction_identity
+            )
+        finally:
+            ownership._close_native(descriptor)
+        with pytest.raises(ForgeError) as caught:
+            quarantine_access._require_journal_access(write=True)
+        assert caught.value.code == "ownership.unowned"
+        with pytest.raises(ForgeError) as caught:
+            quarantine_access._duplicate_journal_descriptor(write=True)
+        assert caught.value.code == "ownership.unowned"
+        assert rebound.ticket is not None
+    finally:
+        quarantine_access.close()
+        rebound.close()
+        ticket.close()
+        path.close()
+        owned.close()
+
+
+@pytest.mark.parametrize("tamper", ("unlink", "replace", "hardlink"))
+def test_transaction_journal_access_revalidates_exact_anchor(
+    tmp_path: Path, tamper: str
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.ownership import open_transaction_journal_access
+
+    transaction_id = "tx-99999999999999999999999999999999"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    access = open_transaction_journal_access(owned, created).unwrap()
+    anchor = root / created.binding.claim_relative
+    displaced = anchor.with_name("displaced-anchor.json")
+
+    if tamper == "unlink":
+        anchor.unlink()
+    elif tamper == "replace":
+        raw = anchor.read_bytes()
+        anchor.rename(displaced)
+        anchor.write_bytes(raw)
+        if os.name != "nt":
+            anchor.chmod(0o600)
+    else:
+        try:
+            os.link(anchor, displaced)
+        except OSError as exc:
+            access.close()
+            owned.close()
+            pytest.skip(f"hard links unavailable: {exc}")
+
+    try:
+        with pytest.raises(ForgeError) as caught:
+            access._require_journal_access(write=False)
+        assert caught.value.code == "ownership.identity_mismatch"
+        assert created.binding.quarantine_relative in caught.value.recovery_instructions
+    finally:
+        access.close()
+        owned.close()
+
+
+@pytest.mark.parametrize("drift", ("transaction", "store"))
+def test_transaction_journal_access_revalidates_exact_namespace(
+    tmp_path: Path, drift: str
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.ownership import open_transaction_journal_access
+
+    transaction_id = "tx-dddddddddddddddddddddddddddddddd"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    access = open_transaction_journal_access(owned, created).unwrap()
+    if drift == "transaction":
+        selected = root / created.binding.root_relative
+    else:
+        selected = root / ".zagrosi/transactions"
+    displaced = selected.with_name(f"{selected.name}-displaced")
+    selected.rename(displaced)
+    _private_test_directory(selected)
+
+    try:
+        with pytest.raises(ForgeError) as caught:
+            access._require_journal_access(write=False)
+        assert caught.value.code == "ownership.identity_mismatch"
+        assert created.binding.quarantine_relative in caught.value.recovery_instructions
+    finally:
+        access.close()
+        owned.close()
+
+
+def test_restart_rebinds_live_quarantined_and_removed_transaction_states(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.ownership import (
+        TransactionLocation,
+        load_persistent_transaction_binding,
+        prove_transaction_owned,
+        quarantine_owned,
+        rebind_persistent_transaction,
+        remove_quarantine,
+    )
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    transaction_id = "tx-11111111111111111111111111111111"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    binding = created.binding
+    live = root / binding.root_relative
+    (live / "journal.json").write_bytes(b"durable-journal")
+    path = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    proof = prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = quarantine_owned(proof, transaction_id=transaction_id).unwrap()
+    assert ticket.recovery_reference == binding.quarantine_relative
+    quarantine = root / binding.quarantine_relative
+    assert quarantine.is_dir()
+    assert not live.exists()
+    ticket.close()  # Simulate losing the in-memory ticket at process death.
+    path.close()
+    owned.close()
+
+    authority = PlatformPathAuthority()
+    reopened = authority.bootstrap_forge_root(
+        tmp_path / "codex-home", runner=_runner()
+    ).unwrap()
+    try:
+        loaded = load_persistent_transaction_binding(
+            reopened, transaction_id=transaction_id
+        ).unwrap()
+        rebound = rebind_persistent_transaction(reopened, binding=loaded).unwrap()
+        assert rebound.location is TransactionLocation.QUARANTINED
+        assert rebound.claim is None
+        assert rebound.ticket is not None
+        assert remove_quarantine(rebound.ticket).unwrap().removed
+        assert not quarantine.exists()
+
+        removed = rebind_persistent_transaction(reopened, binding=loaded).unwrap()
+        assert removed.location is TransactionLocation.REMOVED
+        assert removed.claim is None
+        assert removed.ticket is None
+        assert (
+            root / ".zagrosi/transactions/claims" / f"{transaction_id}.json"
+        ).is_file()
+    finally:
+        reopened.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-death durability")
+def test_restart_never_infers_cleanup_completion_after_deletion_process_death(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    transaction_id = "tx-c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    (live / "payload.bin").write_bytes(b"candidate")
+    path = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    proof = ownership.prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = ownership.quarantine_owned(proof, transaction_id=transaction_id).unwrap()
+    quarantine = root / created.binding.quarantine_relative
+    ticket.close()
+    path.close()
+    owned.close()
+
+    child = os.fork()
+    if child == 0:
+        try:
+            original_rmdir = ownership.os.rmdir
+
+            def terminate_after_real_rmdir(
+                component: str | bytes,
+                *args: Any,
+                **kwargs: Any,
+            ) -> None:
+                original_rmdir(component, *args, **kwargs)
+                if (
+                    isinstance(component, str)
+                    and component.startswith(".delete-")
+                    and component.endswith(".tmp")
+                ):
+                    os.kill(os.getpid(), signal.SIGKILL)
+
+            ownership.os.rmdir = terminate_after_real_rmdir
+            restarted = (
+                PlatformPathAuthority()
+                .bootstrap_forge_root(tmp_path / "codex-home", runner=_runner())
+                .unwrap()
+            )
+            loaded = ownership.load_persistent_transaction_binding(
+                restarted, transaction_id=transaction_id
+            ).unwrap()
+            rebound = ownership.rebind_persistent_transaction(
+                restarted, binding=loaded
+            ).unwrap()
+            assert rebound.ticket is not None
+            ownership.remove_quarantine(rebound.ticket)
+        finally:
+            os._exit(92)
+
+    _waited, status = os.waitpid(child, 0)
+    assert os.WIFSIGNALED(status)
+    assert os.WTERMSIG(status) == signal.SIGKILL
+    assert not quarantine.exists()
+
+    restarted = (
+        PlatformPathAuthority()
+        .bootstrap_forge_root(tmp_path / "codex-home", runner=_runner())
+        .unwrap()
+    )
+    try:
+        loaded = ownership.load_persistent_transaction_binding(
+            restarted, transaction_id=transaction_id
+        ).unwrap()
+        rebound = ownership.rebind_persistent_transaction(restarted, binding=loaded)
+        assert _code(rebound) == "ownership.cleanup_incomplete"
+        claims = root / ".zagrosi/transactions/claims"
+        assert not (claims / f"{transaction_id}.removed.json").exists()
+        assert (claims / f"{transaction_id}.removing.json").is_file()
+    finally:
+        restarted.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cleanup namespace race")
+def test_rebind_never_promotes_moved_quarantine_from_removing_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    (live / "survivor.bin").write_bytes(b"must-survive")
+    path = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    proof = ownership.prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = ownership.quarantine_owned(proof, transaction_id=transaction_id).unwrap()
+    quarantine = root / created.binding.quarantine_relative
+
+    with monkeypatch.context() as context:
+        context.setattr(
+            ownership,
+            "_clean_directory",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("injected before exact deletion")
+            ),
+        )
+        failed = ownership.remove_quarantine(ticket)
+    assert _code(failed) == "ownership.cleanup_incomplete"
+
+    removing = json.loads(
+        (
+            root / ".zagrosi/transactions/claims" / f"{transaction_id}.removing.json"
+        ).read_bytes()
+    )
+    delete_token = quarantine.with_name(removing["delete_component"])
+    displaced = delete_token.with_name(f"{delete_token.name}-moved")
+    delete_token.rename(displaced)
+    rebound = ownership.rebind_persistent_transaction(owned, binding=created.binding)
+
+    assert _code(rebound) == "ownership.cleanup_incomplete"
+    assert (displaced / "survivor.bin").read_bytes() == b"must-survive"
+    claims = root / ".zagrosi/transactions/claims"
+    assert not (claims / f"{transaction_id}.removed.json").exists()
+    assert (claims / f"{transaction_id}.removing.json").is_file()
+    path.close()
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX has no conditional rmdir by inode")
+def test_posix_cleanup_swap_at_delete_token_never_publishes_false_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    live = root / created.binding.root_relative
+    (live / "payload.bin").write_bytes(b"candidate")
+    path = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    proof = ownership.prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = ownership.quarantine_owned(
+        proof,
+        transaction_id=transaction_id,
+    ).unwrap()
+    original_rmdir = ownership.os.rmdir
+    displaced: Path | None = None
+    swapped = False
+
+    def swap_delete_token_before_rmdir(
+        component: str | bytes,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal displaced, swapped
+        if (
+            isinstance(component, str)
+            and component.startswith(".delete-")
+            and component.endswith(".tmp")
+            and not swapped
+        ):
+            swapped = True
+            delete_token = root / ".zagrosi/transactions" / component
+            displaced = delete_token.with_name(f"{component}-displaced")
+            delete_token.rename(displaced)
+            (displaced / "exact-survivor").write_bytes(b"must-survive")
+            _private_test_directory(delete_token)
+        original_rmdir(component, *args, **kwargs)
+
+    monkeypatch.setattr(ownership.os, "rmdir", swap_delete_token_before_rmdir)
+    removed = ownership.remove_quarantine(ticket)
+
+    assert swapped
+    assert _code(removed) == "ownership.cleanup_incomplete"
+    assert displaced is not None
+    assert (displaced / "exact-survivor").read_bytes() == b"must-survive"
+    claims = root / ".zagrosi/transactions/claims"
+    assert (claims / f"{transaction_id}.removing.json").is_file()
+    assert not (claims / f"{transaction_id}.removed.json").exists()
+    rebound = ownership.rebind_persistent_transaction(
+        owned,
+        binding=created.binding,
+    )
+    assert _code(rebound) == "ownership.cleanup_incomplete"
+    path.close()
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX delete-token conflict")
+def test_posix_cleanup_preserves_unknown_preexisting_delete_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    live = root / created.binding.root_relative
+    (live / "exact-canary").write_bytes(b"preserve-exact")
+    path = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    proof = ownership.prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = ownership.quarantine_owned(
+        proof,
+        transaction_id=transaction_id,
+    ).unwrap()
+    quarantine = root / created.binding.quarantine_relative
+    original_publish = ownership._publish_transaction_cleanup_intent
+    delete_token: Path | None = None
+
+    def publish_then_reserve_unknown(*args: Any, **kwargs: Any) -> Any:
+        nonlocal delete_token
+        record = original_publish(*args, **kwargs)
+        delete_token = quarantine.with_name(record.delete_component)
+        _private_test_directory(delete_token)
+        (delete_token / "unknown-canary").write_bytes(b"preserve-unknown")
+        return record
+
+    monkeypatch.setattr(
+        ownership,
+        "_publish_transaction_cleanup_intent",
+        publish_then_reserve_unknown,
+    )
+    removed = ownership.remove_quarantine(ticket)
+
+    assert _code(removed) == "ownership.cleanup_incomplete"
+    assert delete_token is not None
+    assert (quarantine / "exact-canary").read_bytes() == b"preserve-exact"
+    assert (delete_token / "unknown-canary").read_bytes() == b"preserve-unknown"
+    claims = root / ".zagrosi/transactions/claims"
+    assert (claims / f"{transaction_id}.removing.json").is_file()
+    assert not (claims / f"{transaction_id}.removed.json").exists()
+    path.close()
+    owned.close()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin fsgetpath proof")
+def test_darwin_fsgetpath_proves_exact_held_directory_unlink(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    directory = tmp_path / "held-directory"
+    directory.mkdir(mode=0o700)
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert ownership._darwin_held_directory_path(descriptor) is not None
+        directory.rmdir()
+        assert ownership._darwin_held_directory_path(descriptor) is None
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin fsgetpath proof")
+def test_posix_cleanup_fails_closed_when_fsgetpath_is_unsupported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    live = root / created.binding.root_relative
+    (live / "exact-canary").write_bytes(b"preserve-exact")
+    path = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    proof = ownership.prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = ownership.quarantine_owned(
+        proof,
+        transaction_id=transaction_id,
+    ).unwrap()
+
+    def unsupported(_descriptor: int) -> None:
+        raise OSError(errno.ENOTSUP, "injected unsupported fsgetpath")
+
+    monkeypatch.setattr(
+        ownership,
+        "_darwin_held_directory_path",
+        unsupported,
+    )
+    removed = ownership.remove_quarantine(ticket)
+
+    assert _code(removed) == "ownership.cleanup_incomplete"
+    claims = root / ".zagrosi/transactions/claims"
+    removing = json.loads((claims / f"{transaction_id}.removing.json").read_bytes())
+    delete_token = root / ".zagrosi/transactions" / removing["delete_component"]
+    assert (delete_token / "exact-canary").read_bytes() == b"preserve-exact"
+    assert not (claims / f"{transaction_id}.removed.json").exists()
+    path.close()
+    owned.close()
+
+
+def test_restart_mid_cleanup_rebinds_empty_exact_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    transaction_id = "tx-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    (live / "journal.json").write_bytes(b"durable-journal")
+    (live / "payload.bin").write_bytes(b"candidate")
+    path = authority.prove_descendant(
+        owned, created.claim.relative, expected_depth=3
+    ).unwrap()
+    proof = ownership.prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = ownership.quarantine_owned(proof, transaction_id=transaction_id).unwrap()
+    cleaner_name = "_clean_windows_directory" if os.name == "nt" else "_clean_directory"
+    original_cleaner = getattr(ownership, cleaner_name)
+
+    def clean_then_fail(*args: object, **kwargs: object) -> None:
+        original_cleaner(*args, **kwargs)
+        raise OSError("injected crash after inner cleanup")
+
+    monkeypatch.setattr(ownership, cleaner_name, clean_then_fail)
+    failed = ownership.remove_quarantine(ticket)
+    assert _code(failed) == "ownership.cleanup_incomplete"
+    quarantine = root / created.binding.quarantine_relative
+    if os.name == "nt":
+        cleanup_path = quarantine
+    else:
+        removing = json.loads(
+            (
+                root
+                / ".zagrosi/transactions/claims"
+                / f"{transaction_id}.removing.json"
+            ).read_bytes()
+        )
+        cleanup_path = quarantine.with_name(removing["delete_component"])
+    assert cleanup_path.is_dir()
+    assert tuple(cleanup_path.iterdir()) == ()
+    path.close()
+    owned.close()
+    monkeypatch.undo()
+
+    restarted_authority = PlatformPathAuthority()
+    restarted = restarted_authority.bootstrap_forge_root(
+        tmp_path / "codex-home", runner=_runner()
+    ).unwrap()
+    try:
+        binding = ownership.load_persistent_transaction_binding(
+            restarted, transaction_id=transaction_id
+        ).unwrap()
+        rebound = ownership.rebind_persistent_transaction(
+            restarted, binding=binding
+        ).unwrap()
+        assert rebound.location is ownership.TransactionLocation.QUARANTINED
+        assert rebound.ticket is not None
+        assert ownership.remove_quarantine(rebound.ticket).unwrap().removed
+        assert not cleanup_path.exists()
+    finally:
+        restarted.close()
+
+
+def test_persistent_transaction_rebind_preserves_replaced_live_identity(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.ownership import rebind_persistent_transaction
+
+    transaction_id = "tx-22222222222222222222222222222222"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    displaced = live.with_name(f"{transaction_id}-displaced")
+    live.rename(displaced)
+    _private_test_directory(live)
+    marker = live / "preserve"
+    marker.write_bytes(b"unowned-replacement")
+
+    result = rebind_persistent_transaction(owned, binding=created.binding)
+
+    assert _code(result) == "ownership.cleanup_incomplete"
+    assert marker.read_bytes() == b"unowned-replacement"
+    assert displaced.is_dir()
+    assert live.is_dir()
+    owned.close()
+
+
+def test_persistent_transaction_absence_without_cleanup_evidence_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.ownership import rebind_persistent_transaction
+
+    transaction_id = "tx-c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    displaced = live.with_name(f"{transaction_id}-unknown")
+    live.rename(displaced)
+    marker = displaced / "preserve"
+    marker.write_bytes(b"identity-survives")
+
+    result = rebind_persistent_transaction(owned, binding=created.binding)
+
+    assert _code(result) == "ownership.cleanup_incomplete"
+    assert marker.read_bytes() == b"identity-survives"
+    owned.close()
+
+
+@pytest.mark.parametrize("tamper", ("bytes", "hardlink"))
+def test_persistent_cleanup_completion_must_remain_exact(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-cacacacacacacacacacacacacacacaca"
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    path = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    proof = ownership.prove_transaction_owned(path, claim=created.claim).unwrap()
+    ticket = ownership.quarantine_owned(proof, transaction_id=transaction_id).unwrap()
+    assert ownership.remove_quarantine(ticket).unwrap().removed
+    completion = (
+        root / ".zagrosi/transactions/claims" / f"{transaction_id}.removed.json"
+    )
+    if tamper == "bytes":
+        completion.write_bytes(completion.read_bytes() + b" ")
+        if os.name != "nt":
+            completion.chmod(0o600)
+    else:
+        os.link(completion, completion.with_name("completion-hardlink.json"))
+
+    rebound = ownership.rebind_persistent_transaction(owned, binding=created.binding)
+
+    assert _code(rebound) == "ownership.cleanup_incomplete"
+    assert completion.exists()
+    path.close()
+    owned.close()
+
+
+def test_persistent_transaction_rebind_preserves_ambiguous_live_and_quarantine(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.ownership import rebind_persistent_transaction
+
+    transaction_id = "tx-33333333333333333333333333333333"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    quarantine = root / created.binding.quarantine_relative
+    _private_test_directory(quarantine)
+    (live / "live-canary").write_bytes(b"live")
+    (quarantine / "quarantine-canary").write_bytes(b"quarantine")
+
+    result = rebind_persistent_transaction(owned, binding=created.binding)
+
+    assert _code(result) == "ownership.cleanup_incomplete"
+    assert (live / "live-canary").read_bytes() == b"live"
+    assert (quarantine / "quarantine-canary").read_bytes() == b"quarantine"
+    owned.close()
+
+
+@pytest.mark.parametrize("tamper", ("corrupt", "future-schema", "hardlink"))
+def test_persistent_transaction_anchor_tamper_never_mints_cleanup_authority(
+    tmp_path: Path, tamper: str
+) -> None:
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.ownership import (
+        load_persistent_transaction_binding,
+        rebind_persistent_transaction,
+    )
+
+    transaction_id = "tx-55555555555555555555555555555555"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    marker = live / "preserve"
+    marker.write_bytes(b"managed-but-preserved")
+    anchor = root / created.binding.claim_relative
+    if tamper == "corrupt":
+        anchor.write_bytes(
+            anchor.read_bytes().replace(b'"record_kind"', b'"record_k1nd"')
+        )
+    elif tamper == "future-schema":
+        record = json.loads(anchor.read_bytes())
+        record["schema_version"] = "2.0"
+        del record["record_digest"]
+        record["record_digest"] = hashlib.sha256(
+            canonical_json_bytes(record)
+        ).hexdigest()
+        anchor.write_bytes(canonical_json_bytes(record, final_newline=True))
+    else:
+        displaced = anchor.with_name("displaced-anchor.json")
+        anchor.rename(displaced)
+        os.link(displaced, anchor)
+
+    loaded = load_persistent_transaction_binding(owned, transaction_id=transaction_id)
+    rebound = rebind_persistent_transaction(owned, binding=created.binding)
+
+    assert _code(loaded) == "ownership.unowned"
+    assert _code(rebound) == "ownership.cleanup_incomplete"
+    assert marker.read_bytes() == b"managed-but-preserved"
+    assert live.is_dir()
+    assert anchor.exists()
+    owned.close()
+
+
+def test_persistent_transaction_store_digest_tamper_never_mints_authority(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.ownership import (
+        load_persistent_transaction_binding,
+        rebind_persistent_transaction,
+    )
+
+    transaction_id = "tx-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    marker = live / "preserve"
+    marker.write_bytes(b"managed-but-preserved")
+    control = root / ".zagrosi/transactions/control-v1.json"
+    record = json.loads(control.read_bytes())
+    record["record_digest"] = "0" * 64
+    control.write_bytes(canonical_json_bytes(record, final_newline=True))
+
+    loaded = load_persistent_transaction_binding(owned, transaction_id=transaction_id)
+    rebound = rebind_persistent_transaction(owned, binding=created.binding)
+
+    assert _code(loaded) == "ownership.unowned"
+    assert _code(rebound) == "ownership.cleanup_incomplete"
+    assert marker.read_bytes() == b"managed-but-preserved"
+    assert live.is_dir()
+    owned.close()
+
+
+def test_persistent_transaction_binding_rejects_exact_id_and_root_retarget(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.ownership import rebind_persistent_transaction
+
+    transaction_id = "tx-66666666666666666666666666666666"
+    _, owned, root, created = _persistent_transaction(
+        tmp_path, transaction_id=transaction_id
+    )
+    live = root / created.binding.root_relative
+    marker = live / "preserve"
+    marker.write_bytes(b"exact-binding")
+    object.__setattr__(
+        created.binding,
+        "transaction_id",
+        "tx-77777777777777777777777777777777",
+    )
+
+    result = rebind_persistent_transaction(owned, binding=created.binding)
+
+    assert _code(result) == "ownership.cleanup_incomplete"
+    assert marker.read_bytes() == b"exact-binding"
+    assert live.is_dir()
+    owned.close()
 
 
 def test_transaction_creation_rejects_mutated_reference(tmp_path: Path) -> None:
