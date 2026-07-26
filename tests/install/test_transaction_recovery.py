@@ -3343,6 +3343,479 @@ def test_locked_recovery_rejects_untrusted_runner_before_lock_creation(
         owned.close()
 
 
+def test_locked_recovery_close_cannot_release_during_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from threading import Event, Thread
+
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    locked = None
+    release_observation = Event()
+    observation_started = Event()
+    close_finished = Event()
+    validation_errors: list[BaseException] = []
+    real_observe = recovery.observe_recovery_snapshot
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        def blocking_observation(*args, **kwargs):
+            observation_started.set()
+            if not release_observation.wait(2):
+                raise AssertionError("revalidation observation was not released")
+            return real_observe(*args, **kwargs)
+
+        def revalidate() -> None:
+            try:
+                locked.revalidate()
+            except BaseException as exc:
+                validation_errors.append(exc)
+
+        def close() -> None:
+            locked.close()
+            close_finished.set()
+
+        monkeypatch.setattr(
+            recovery,
+            "observe_recovery_snapshot",
+            blocking_observation,
+        )
+        validation = Thread(target=revalidate)
+        closing = Thread(target=close)
+        validation.start()
+        assert observation_started.wait(2)
+        closing.start()
+        released_early = close_finished.wait(0.1)
+        release_observation.set()
+        validation.join(2)
+        closing.join(2)
+
+        assert not released_early
+        assert not validation.is_alive()
+        assert not closing.is_alive()
+        assert validation_errors == []
+        assert close_finished.is_set()
+        assert locked.closed
+    finally:
+        release_observation.set()
+        if locked is not None:
+            locked.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_concurrent_locked_recovery_close_waits_for_kernel_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from threading import Event, Thread
+
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    acquired = []
+    release_started = Event()
+    release_allowed = Event()
+    second_returned = Event()
+    first_errors: list[BaseException] = []
+    second_errors: list[BaseException] = []
+    real_acquire = recovery.acquire_install_lock
+    real_release = recovery.HeldInstallLock.release
+
+    def record_acquire(*args, **kwargs):
+        held = real_acquire(*args, **kwargs)
+        acquired.append(held)
+        return held
+
+    def blocking_release(held) -> None:
+        if held is acquired[-1]:
+            release_started.set()
+            if not release_allowed.wait(2):
+                raise AssertionError("kernel release was not allowed")
+        real_release(held)
+
+    locked = None
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        monkeypatch.setattr(recovery, "acquire_install_lock", record_acquire)
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+        monkeypatch.setattr(recovery.HeldInstallLock, "release", blocking_release)
+
+        def first_close() -> None:
+            try:
+                locked.close()
+            except BaseException as exc:
+                first_errors.append(exc)
+
+        def second_close() -> None:
+            try:
+                locked.close()
+            except BaseException as exc:
+                second_errors.append(exc)
+            finally:
+                second_returned.set()
+
+        first = Thread(target=first_close)
+        second = Thread(target=second_close)
+        first.start()
+        assert release_started.wait(2)
+        second.start()
+        returned_before_release = second_returned.wait(0.1)
+        release_allowed.set()
+        first.join(2)
+        second.join(2)
+
+        assert not returned_before_release
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert first_errors == []
+        assert second_errors == []
+        assert acquired[-1]._released
+        assert locked.closed
+    finally:
+        release_allowed.set()
+        if acquired and not acquired[-1]._released:
+            real_release(acquired[-1])
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_close_retries_preconsumption_release_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.lock import acquire_install_lock
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    release_attempts = 0
+    observed_locks = []
+    real_release = recovery.HeldInstallLock.release
+    locked = None
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        def fail_once_before_consumption(held) -> None:
+            nonlocal release_attempts
+            release_attempts += 1
+            observed_locks.append(held)
+            if release_attempts == 1:
+                raise RuntimeError("injected pre-consumption release failure")
+            real_release(held)
+
+        monkeypatch.setattr(
+            recovery.HeldInstallLock,
+            "release",
+            fail_once_before_consumption,
+        )
+        with pytest.raises(RuntimeError, match="pre-consumption"):
+            locked.close()
+        assert not observed_locks[0]._released
+        assert not locked.closed
+
+        locked.close()
+        assert release_attempts == 2
+        assert observed_locks[0]._released
+        assert locked.closed
+        with acquire_install_lock(owned, timeout_seconds=0.1):
+            pass
+    finally:
+        if locked is not None:
+            locked.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_abandoned_locked_recovery_releases_kernel_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import gc
+    from weakref import ref
+
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.lock import acquire_install_lock
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    acquired = []
+    real_acquire = recovery.acquire_install_lock
+
+    def record_acquire(*args, **kwargs):
+        held = real_acquire(*args, **kwargs)
+        acquired.append(held)
+        return held
+
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        monkeypatch.setattr(recovery, "acquire_install_lock", record_acquire)
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+        abandoned = ref(locked)
+        initial_lock = acquired[0]
+
+        del locked
+        gc.collect()
+
+        assert abandoned() is None
+        assert initial_lock._released
+        with acquire_install_lock(owned, timeout_seconds=0.1):
+            pass
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_abandoned_locked_recovery_retains_failed_release_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import gc
+    from weakref import ref
+
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    acquired = []
+    release_attempts = 0
+    real_acquire = recovery.acquire_install_lock
+    real_release = recovery.HeldInstallLock.release
+    initial_lock = None
+
+    def record_acquire(*args, **kwargs):
+        held = real_acquire(*args, **kwargs)
+        acquired.append(held)
+        return held
+
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        monkeypatch.setattr(recovery, "acquire_install_lock", record_acquire)
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+        abandoned = ref(locked)
+        initial_lock = acquired[0]
+
+        def fail_twice_before_consumption(held) -> None:
+            nonlocal release_attempts
+            if held is initial_lock:
+                release_attempts += 1
+                if release_attempts <= 2:
+                    raise RuntimeError("injected abandoned release failure")
+            real_release(held)
+
+        monkeypatch.setattr(
+            recovery.HeldInstallLock,
+            "release",
+            fail_twice_before_consumption,
+        )
+        del locked
+        gc.collect()
+
+        assert abandoned() is None
+        assert release_attempts == 2
+        assert not initial_lock._released
+        assert any(
+            lease._held_lock is initial_lock
+            for lease in recovery._ABANDONED_LOCKED_RECOVERY_LEASES
+        )
+
+        monkeypatch.setattr(recovery.HeldInstallLock, "release", real_release)
+        with recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        ):
+            assert initial_lock._released
+        assert not recovery._ABANDONED_LOCKED_RECOVERY_LEASES
+    finally:
+        monkeypatch.setattr(recovery.HeldInstallLock, "release", real_release)
+        if initial_lock is not None and not initial_lock._released:
+            real_release(initial_lock)
+        recovery._retry_abandoned_locked_leases()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_locked_recovery_rejects_critical_field_deletion_and_substitution(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    locked = None
+    retained_lock = None
+    original_plan = None
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+        retained_lock = getattr(locked, "_held_lock", None)
+        original_plan = getattr(locked, "_plan", None)
+
+        with pytest.raises(AttributeError):
+            del locked._held_lock
+        replacement = recovery.plan_recovery(
+            recovery.RecoverySnapshot(
+                journals=(),
+                current_config=None,
+            )
+        )
+        with pytest.raises(AttributeError):
+            object.__setattr__(locked, "_plan", replacement)
+    finally:
+        if locked is not None:
+            try:
+                if original_plan is not None and hasattr(locked, "_plan"):
+                    object.__setattr__(locked, "_plan", original_plan)
+                locked.close()
+            except (AttributeError, ForgeError):
+                if retained_lock is not None and not retained_lock._released:
+                    retained_lock.release()
+        store.close()
+        proof.close()
+        owned.close()
+
+
 def test_locked_recovery_rejects_mismatched_authority_before_lock_creation(
     tmp_path: Path,
 ) -> None:
