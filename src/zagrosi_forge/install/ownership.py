@@ -18,6 +18,7 @@ import stat
 import sys
 from threading import Lock
 from typing import Callable, Mapping, Never, cast
+import unicodedata
 
 from .contracts import (
     ActiveInstallRelation,
@@ -68,6 +69,16 @@ _PERSISTENT_TRANSACTION = re.compile(r"tx-[0-9a-f]{32}\Z")
 _TRANSACTION_STAGE = re.compile(r"\.root-[0-9a-f]{32}\.tmp\Z")
 _TRANSACTION_PENDING_CLAIM = re.compile(r"\.claim-[0-9a-f]{32}\.tmp\Z")
 _TRANSACTION_DELETE = re.compile(r"\.delete-[0-9a-f]{32}\.tmp\Z")
+_TRANSACTION_ANCHOR = re.compile(r"(tx-[0-9a-f]{32})\.json\Z")
+_TRANSACTION_CREATION_RECORD = re.compile(
+    r"\.(tx-[0-9a-f]{32})\.(?:create|reserve)\.json\Z"
+)
+_TRANSACTION_CLEANUP_RECORD = re.compile(
+    r"(tx-[0-9a-f]{32})\.(?:removed|removing)\.json\Z"
+)
+_TRANSACTION_QUARANTINE = re.compile(r"\.zagrosi-quarantine-[0-9a-f]{24}\Z")
+_TRANSACTION_RETIRED_RECORD = re.compile(r"\.retired-[0-9a-f]{64}\.json\Z")
+_TRANSACTION_RECORD_STAGE = re.compile(r"\.record-[0-9a-f]{32}\.tmp\Z")
 _TRANSACTION_STORE_COMPONENT = "transactions"
 _TRANSACTION_CLAIMS_COMPONENT = "claims"
 _TRANSACTION_STORE_CONTROL = "control-v1.json"
@@ -91,6 +102,7 @@ _PERSISTENT_BINDING_TOKEN = object()
 _PERSISTENT_ROOT_TOKEN = object()
 _REBOUND_TRANSACTION_TOKEN = object()
 _TRANSACTION_JOURNAL_ACCESS_TOKEN = object()
+_PENDING_TRANSACTION_OBSERVATION_TOKEN = object()
 
 
 def _error(code: str, message: str, *, recovery: tuple[str, ...] = ()) -> ForgeError:
@@ -1302,6 +1314,47 @@ class TransactionLocation(str, Enum):
     LIVE = "live"
     QUARANTINED = "quarantined"
     REMOVED = "removed"
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PendingTransactionObservation:
+    """Effect-free restart observation; never mutation or cleanup authority."""
+
+    binding: PersistentTransactionBinding
+    location: TransactionLocation
+    journal_relative: str
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        binding: PersistentTransactionBinding,
+        location: TransactionLocation,
+        journal_relative: str,
+        _token: object,
+    ) -> None:
+        valid_relative = (
+            location is TransactionLocation.LIVE
+            and journal_relative == binding.root_relative
+        ) or (
+            location is TransactionLocation.QUARANTINED
+            and _persistent_cleanup_reference_is_valid(binding, journal_relative)
+        )
+        if (
+            _token is not _PENDING_TRANSACTION_OBSERVATION_TOKEN
+            or not _persistent_binding_invariants(binding)
+            or not valid_relative
+        ):
+            raise TypeError(
+                "pending transactions are observed only by ownership authority"
+            )
+        object.__setattr__(self, "binding", binding)
+        object.__setattr__(self, "location", location)
+        object.__setattr__(self, "journal_relative", journal_relative)
+        object.__setattr__(self, "_seal", _PENDING_TRANSACTION_OBSERVATION_TOKEN)
+
+    def __reduce__(self) -> Never:
+        raise TypeError("pending transaction observations are not serializable")
 
 
 class TransactionPathClaim:
@@ -2954,7 +3007,10 @@ def _open_windows_transaction_store(
         control_identity = owned_root.control_identity
         try:
             store = _paths._windows_open_child(
-                control, _TRANSACTION_STORE_COMPONENT, directory=True
+                control,
+                _TRANSACTION_STORE_COMPONENT,
+                directory=True,
+                read_data=True,
             )
         except OSError as exc:
             missing = isinstance(exc, FileNotFoundError) or getattr(
@@ -3027,7 +3083,10 @@ def _open_windows_transaction_store(
                     _paths._windows_close(staged)
                     staged = 0
                     store = _paths._windows_open_child(
-                        control, _TRANSACTION_STORE_COMPONENT, directory=True
+                        control,
+                        _TRANSACTION_STORE_COMPONENT,
+                        directory=True,
+                        read_data=True,
                     )
                 else:
                     store = staged
@@ -3039,7 +3098,10 @@ def _open_windows_transaction_store(
         store_identity = store_status.identity
         if not claims:
             claims = _paths._windows_open_child(
-                store, _TRANSACTION_CLAIMS_COMPONENT, directory=True
+                store,
+                _TRANSACTION_CLAIMS_COMPONENT,
+                directory=True,
+                read_data=True,
             )
         claims_status = _paths._windows_handle_status(claims)
         claims_identity = claims_status.identity
@@ -3304,15 +3366,10 @@ def _transaction_journal_location_is_valid(
     store: _TransactionStore,
     descriptor: int,
     binding: PersistentTransactionBinding,
-    location: TransactionLocation,
+    journal_relative: str,
     filesystem_guard: _paths.FilesystemGuard,
 ) -> bool:
-    relative = (
-        binding.root_relative
-        if location is TransactionLocation.LIVE
-        else binding.quarantine_relative
-    )
-    component = relative.rsplit("/", 1)[-1]
+    component = journal_relative.rsplit("/", 1)[-1]
     try:
         if store.windows:
             windows_status = _paths._windows_handle_status(descriptor)
@@ -3405,22 +3462,26 @@ class TransactionJournalAccess:
     _closed: bool
     _descriptor: int
     _filesystem_guard: _paths.FilesystemGuard
+    _journal_relative: str
     _location: TransactionLocation
     _lock: LockType
     _namespace: _paths._NamespaceCapability | None
     _seal: object
     _store: _TransactionStore | None
+    _writable: bool
 
     __slots__ = (
         "_binding",
         "_closed",
         "_descriptor",
         "_filesystem_guard",
+        "_journal_relative",
         "_location",
         "_lock",
         "_namespace",
         "_seal",
         "_store",
+        "_writable",
     )
 
     def __init__(
@@ -3428,23 +3489,37 @@ class TransactionJournalAccess:
         *,
         binding: PersistentTransactionBinding,
         location: TransactionLocation,
+        journal_relative: str,
+        writable: bool,
         descriptor: int,
         store: _TransactionStore,
         namespace: _paths._NamespaceCapability,
         filesystem_guard: _paths.FilesystemGuard,
         _token: object,
     ) -> None:
+        valid_relative = (
+            location is TransactionLocation.LIVE
+            and journal_relative == binding.root_relative
+        ) or (
+            location is TransactionLocation.QUARANTINED
+            and _persistent_cleanup_reference_is_valid(binding, journal_relative)
+        )
         if (
             _token is not _TRANSACTION_JOURNAL_ACCESS_TOKEN
             or not _persistent_binding_invariants(binding)
             or location
             not in (TransactionLocation.LIVE, TransactionLocation.QUARANTINED)
+            or type(writable) is not bool
+            or (writable and location is not TransactionLocation.LIVE)
+            or not valid_relative
         ):
             raise TypeError(
                 "transaction journal access is created only by ownership authority"
             )
         object.__setattr__(self, "_binding", binding)
         object.__setattr__(self, "_location", location)
+        object.__setattr__(self, "_journal_relative", journal_relative)
+        object.__setattr__(self, "_writable", writable)
         object.__setattr__(self, "_descriptor", descriptor)
         object.__setattr__(self, "_store", store)
         object.__setattr__(self, "_namespace", namespace)
@@ -3462,8 +3537,12 @@ class TransactionJournalAccess:
         return self._location
 
     @property
+    def journal_relative(self) -> str:
+        return self._journal_relative
+
+    @property
     def read_only(self) -> bool:
-        return self._location is TransactionLocation.QUARANTINED
+        return not self._writable
 
     def _require_journal_access(self, *, write: bool) -> None:
         with self._lock:
@@ -3478,12 +3557,13 @@ class TransactionJournalAccess:
             or not _persistent_binding_invariants(binding)
             or self._location
             not in (TransactionLocation.LIVE, TransactionLocation.QUARANTINED)
+            or type(self._writable) is not bool
         ):
             raise _transaction_journal_identity_error(binding)
-        if write and self._location is TransactionLocation.QUARANTINED:
+        if write and not self._writable:
             raise _error(
                 "ownership.unowned",
-                "Quarantined transaction journals are read-only.",
+                "This transaction journal capability is read-only.",
                 recovery=(binding.quarantine_relative,),
             )
         namespace = self._namespace
@@ -3505,7 +3585,7 @@ class TransactionJournalAccess:
                     store,
                     self._descriptor,
                     binding,
-                    self._location,
+                    self._journal_relative,
                     self._filesystem_guard,
                 )
                 or not namespace._validate_namespace_binding()
@@ -4530,6 +4610,7 @@ def _open_windows_transaction_location(
             store.store,
             component,
             directory=True,
+            read_data=True,
             write_data=write,
         )
     except OSError as exc:
@@ -4732,6 +4813,462 @@ def _finish_transaction_creation_intent(
         observed_identity,
         observed_raw,
     )
+
+
+def _transaction_control_names(owned_root: OwnedRoot) -> tuple[str, ...]:
+    namespace: _paths._NamespaceCapability | None = None
+    control = 0 if os.name == "nt" else -1
+    try:
+        if os.name == "nt":
+            namespace = owned_root._duplicate_namespace_capability()
+            if not namespace._validate_namespace_binding():
+                raise OSError(errno.ESTALE, "transaction namespace changed")
+            control = _paths._windows_open_child(
+                namespace._plugins_descriptor,
+                ".zagrosi",
+                directory=True,
+                read_data=True,
+            )
+        else:
+            control = owned_root._duplicate_control_descriptor()
+        if not owned_root._validate_control_descriptor(control):
+            raise OSError(errno.ESTALE, "transaction control identity changed")
+        names = _bounded_transaction_names(
+            control,
+            windows=os.name == "nt",
+        )
+        if not owned_root._validate_control_descriptor(control) or (
+            namespace is not None and not namespace._validate_namespace_binding()
+        ):
+            raise OSError(errno.ESTALE, "transaction control identity changed")
+        return names
+    finally:
+        if namespace is not None:
+            namespace.close()
+        if os.name == "nt":
+            if control:
+                _paths._windows_close(control)
+        else:
+            if control >= 0:
+                os.close(control)
+
+
+def _transaction_control_inventory_is_exact(
+    names: tuple[str, ...],
+    *,
+    store_present: bool,
+) -> bool:
+    reserved = tuple(
+        name
+        for name in names
+        if (key := _inventory_name_key(name)) == _TRANSACTION_STORE_COMPONENT
+        or key.startswith(f".{_TRANSACTION_STORE_COMPONENT}-")
+    )
+    return (
+        reserved == (_TRANSACTION_STORE_COMPONENT,) if store_present else not reserved
+    )
+
+
+def _transaction_store_is_exactly_absent(owned_root: OwnedRoot) -> bool:
+    initial = _transaction_control_names(owned_root)
+    if not _transaction_control_inventory_is_exact(
+        initial,
+        store_present=False,
+    ):
+        return False
+    return _transaction_control_names(
+        owned_root
+    ) == initial and _transaction_control_inventory_is_exact(
+        initial,
+        store_present=False,
+    )
+
+
+def _bounded_transaction_names(
+    descriptor: int,
+    *,
+    windows: bool,
+) -> tuple[str, ...]:
+    limit = LIMIT_POLICY.value("bundle_files")
+    if windows:
+        return _windows_list_names(descriptor, limit=limit)
+    names: list[str] = []
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            names.append(entry.name)
+            if len(names) > limit:
+                raise OSError(errno.E2BIG, "transaction inventory limit exceeded")
+    return tuple(sorted(names))
+
+
+def _inventory_name_key(name: str) -> str:
+    return unicodedata.normalize("NFKC", name).casefold()
+
+
+def _reject_inventory_name_collisions(names: tuple[str, ...]) -> None:
+    observed: dict[str, str] = {}
+    for name in names:
+        key = _inventory_name_key(name)
+        previous = observed.setdefault(key, name)
+        if previous != name:
+            raise OSError(errno.EEXIST, "transaction inventory name collision")
+
+
+def _claim_transaction_ids(names: tuple[str, ...]) -> set[str]:
+    transaction_ids: set[str] = set()
+    reserved_prefixes = ("tx-", ".tx-", ".claim-", ".record-", ".retired-")
+    for name in names:
+        match = _TRANSACTION_ANCHOR.fullmatch(name)
+        if match is not None:
+            transaction_ids.add(match.group(1))
+            continue
+        match = _TRANSACTION_CREATION_RECORD.fullmatch(name)
+        if match is not None:
+            transaction_ids.add(match.group(1))
+            continue
+        match = _TRANSACTION_CLEANUP_RECORD.fullmatch(name)
+        if match is not None:
+            transaction_ids.add(match.group(1))
+            continue
+        if _TRANSACTION_RETIRED_RECORD.fullmatch(name) is not None:
+            continue
+        if (
+            _TRANSACTION_PENDING_CLAIM.fullmatch(name) is not None
+            or _TRANSACTION_RECORD_STAGE.fullmatch(name) is not None
+        ):
+            raise OSError(errno.ESTALE, "unbound transaction record remains")
+        key = _inventory_name_key(name)
+        if any(key.startswith(prefix) for prefix in reserved_prefixes):
+            raise OSError(errno.EINVAL, "transaction claim name is ambiguous")
+    return transaction_ids
+
+
+def _store_transaction_ids(names: tuple[str, ...]) -> set[str]:
+    transaction_ids: set[str] = set()
+    reserved_prefixes = (
+        "tx-",
+        ".root-",
+        ".delete-",
+        ".zagrosi-quarantine-",
+        "control",
+        "claims",
+    )
+    for name in names:
+        if name in {_TRANSACTION_STORE_CONTROL, _TRANSACTION_CLAIMS_COMPONENT}:
+            continue
+        if _PERSISTENT_TRANSACTION.fullmatch(name) is not None:
+            transaction_ids.add(name)
+            continue
+        if (
+            _TRANSACTION_STAGE.fullmatch(name) is not None
+            or _TRANSACTION_DELETE.fullmatch(name) is not None
+            or _TRANSACTION_QUARANTINE.fullmatch(name) is not None
+        ):
+            continue
+        key = _inventory_name_key(name)
+        if any(key.startswith(prefix) for prefix in reserved_prefixes):
+            raise OSError(errno.EINVAL, "transaction store name is ambiguous")
+    return transaction_ids
+
+
+def _load_transaction_binding_from_store(
+    store: _TransactionStore,
+    transaction_id: str,
+) -> PersistentTransactionBinding:
+    component = f"{transaction_id}.json"
+    if store.windows:
+        raw, identity = _read_windows_private_record(
+            store.claims,
+            component,
+            volume=store.plugins_identity[0],
+        )
+    else:
+        raw, identity = _read_posix_private_record(
+            store.claims,
+            component,
+            device=store.plugins_identity[0],
+        )
+    binding = _binding_from_record(
+        raw,
+        transaction_id=transaction_id,
+        store=store,
+        claim_identity=identity,
+    )
+    if not _private_record_name_binds(
+        store.claims,
+        component,
+        identity,
+        expected_raw=raw,
+        windows=store.windows,
+    ):
+        raise OSError(errno.ESTALE, "transaction anchor changed")
+    return binding
+
+
+def _observe_pending_transaction(
+    owned_root: OwnedRoot,
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+) -> PendingTransactionObservation | None:
+    live = quarantine = deleting = 0 if store.windows else -1
+    try:
+        creation_intent = _load_transaction_creation_intent(
+            store,
+            binding.transaction_id,
+        )
+        creation_reservation = _load_transaction_creation_reservation(
+            store,
+            binding.transaction_id,
+        )
+        if creation_intent is None:
+            if creation_reservation is not None:
+                raise OSError(
+                    errno.ESTALE,
+                    "transaction reservation has no bound successor",
+                )
+        elif creation_intent.binding != binding or (
+            creation_reservation is not None
+            and (
+                creation_reservation.identity != creation_intent.reservation_identity
+                or hashlib.sha256(creation_reservation.raw).hexdigest()
+                != creation_intent.reservation_digest
+            )
+        ):
+            raise OSError(errno.ESTALE, "transaction creation evidence changed")
+
+        cleanup_intent = _load_transaction_cleanup_record(
+            store,
+            binding,
+            complete=False,
+        )
+        cleanup_complete = _load_transaction_cleanup_record(
+            store,
+            binding,
+            complete=True,
+        )
+        if (
+            cleanup_intent is not None
+            and cleanup_complete is not None
+            and cleanup_intent.delete_component != cleanup_complete.delete_component
+        ):
+            raise OSError(errno.ESTALE, "transaction cleanup evidence conflicts")
+        delete_component = (
+            cleanup_intent.delete_component
+            if cleanup_intent is not None
+            else (
+                cleanup_complete.delete_component
+                if cleanup_complete is not None
+                else None
+            )
+        )
+        live_component = binding.root_relative.rsplit("/", 1)[-1]
+        quarantine_component = binding.quarantine_relative.rsplit("/", 1)[-1]
+        if store.windows:
+            live = _open_windows_transaction_location(
+                store,
+                live_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            quarantine = _open_windows_transaction_location(
+                store,
+                quarantine_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if delete_component is not None:
+                deleting = _open_windows_transaction_location(
+                    store,
+                    delete_component,
+                    expected_identity=binding.transaction_identity,
+                    filesystem_guard=owned_root._filesystem_guard,
+                )
+            locations = (bool(live), bool(quarantine), bool(deleting))
+        else:
+            live = _open_posix_transaction_location(
+                store,
+                live_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            quarantine = _open_posix_transaction_location(
+                store,
+                quarantine_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if delete_component is not None:
+                deleting = _open_posix_transaction_location(
+                    store,
+                    delete_component,
+                    expected_identity=binding.transaction_identity,
+                    filesystem_guard=owned_root._filesystem_guard,
+                )
+            locations = (live >= 0, quarantine >= 0, deleting >= 0)
+        if sum(locations) > 1:
+            raise OSError(errno.ESTALE, "transaction locations are ambiguous")
+        if (
+            _load_transaction_binding_from_store(store, binding.transaction_id)
+            != binding
+        ):
+            raise OSError(errno.ESTALE, "transaction anchor changed")
+        if not _transaction_store_namespace_is_valid(
+            store
+        ) or not owned_root._validate_control_descriptor(store.control):
+            raise OSError(errno.ESTALE, "transaction namespace changed")
+        if locations[0]:
+            if cleanup_intent is not None or cleanup_complete is not None:
+                raise OSError(
+                    errno.ESTALE,
+                    "live transaction has cleanup evidence",
+                )
+            return PendingTransactionObservation(
+                binding=binding,
+                location=TransactionLocation.LIVE,
+                journal_relative=binding.root_relative,
+                _token=_PENDING_TRANSACTION_OBSERVATION_TOKEN,
+            )
+        if locations[1]:
+            if cleanup_complete is not None:
+                raise OSError(
+                    errno.ESTALE,
+                    "quarantine conflicts with cleanup completion",
+                )
+            return PendingTransactionObservation(
+                binding=binding,
+                location=TransactionLocation.QUARANTINED,
+                journal_relative=binding.quarantine_relative,
+                _token=_PENDING_TRANSACTION_OBSERVATION_TOKEN,
+            )
+        if locations[2]:
+            if (
+                cleanup_intent is None
+                or cleanup_complete is not None
+                or delete_component is None
+            ):
+                raise OSError(
+                    errno.ESTALE,
+                    "delete-token transaction lacks exact cleanup intent",
+                )
+            return PendingTransactionObservation(
+                binding=binding,
+                location=TransactionLocation.QUARANTINED,
+                journal_relative=_persistent_delete_reference(
+                    binding,
+                    delete_component,
+                ),
+                _token=_PENDING_TRANSACTION_OBSERVATION_TOKEN,
+            )
+        if cleanup_complete is None:
+            raise OSError(
+                errno.ESTALE,
+                "transaction root is missing without cleanup completion",
+            )
+        return None
+    finally:
+        if store.windows:
+            for descriptor in (deleting, quarantine, live):
+                if descriptor:
+                    _paths._windows_close(descriptor)
+        else:
+            for descriptor in (deleting, quarantine, live):
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+
+def discover_pending_transactions(
+    owned_root: OwnedRoot,
+) -> Result[tuple[PendingTransactionObservation, ...]]:
+    """Discover exact persistent journal roots without creating or retiring state."""
+
+    if not isinstance(owned_root, OwnedRoot):
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Pending transaction discovery requires an owned root.",
+            )
+        )
+    store: _TransactionStore | None = None
+    try:
+        if _transaction_store_is_exactly_absent(owned_root):
+            return Result.success(())
+        control_names = _transaction_control_names(owned_root)
+        if not _transaction_control_inventory_is_exact(
+            control_names,
+            store_present=True,
+        ):
+            raise OSError(errno.ESTALE, "transaction store bootstrap is ambiguous")
+        store = _open_transaction_store(owned_root, create=False)
+        store_names = _bounded_transaction_names(
+            store.store,
+            windows=store.windows,
+        )
+        claim_names = _bounded_transaction_names(
+            store.claims,
+            windows=store.windows,
+        )
+        _reject_inventory_name_collisions(store_names)
+        _reject_inventory_name_collisions(claim_names)
+        store_ids = _store_transaction_ids(store_names)
+        claim_ids = _claim_transaction_ids(claim_names)
+        anchor_ids = {
+            match.group(1)
+            for name in claim_names
+            if (match := _TRANSACTION_ANCHOR.fullmatch(name)) is not None
+        }
+        if (store_ids | claim_ids) - anchor_ids:
+            raise OSError(errno.ESTALE, "unbound transaction state remains")
+
+        observations: list[PendingTransactionObservation] = []
+        expected_store_names = {
+            _TRANSACTION_STORE_CONTROL,
+            _TRANSACTION_CLAIMS_COMPONENT,
+        }
+        maximum = LIMIT_POLICY.value("journal_records") + 1
+        for transaction_id in sorted(anchor_ids):
+            binding = _load_transaction_binding_from_store(store, transaction_id)
+            observation = _observe_pending_transaction(owned_root, store, binding)
+            if observation is not None:
+                observations.append(observation)
+                expected_store_names.add(
+                    observation.journal_relative.rsplit("/", 1)[-1]
+                )
+                if len(observations) >= maximum:
+                    break
+        if len(observations) < maximum:
+            reserved_locations = {
+                name
+                for name in store_names
+                if (
+                    _PERSISTENT_TRANSACTION.fullmatch(name) is not None
+                    or _TRANSACTION_STAGE.fullmatch(name) is not None
+                    or _TRANSACTION_DELETE.fullmatch(name) is not None
+                    or _TRANSACTION_QUARANTINE.fullmatch(name) is not None
+                )
+            }
+            if reserved_locations - expected_store_names:
+                raise OSError(errno.ESTALE, "unbound transaction location remains")
+        if (
+            _bounded_transaction_names(store.store, windows=store.windows)
+            != store_names
+            or _bounded_transaction_names(store.claims, windows=store.windows)
+            != claim_names
+            or _transaction_control_names(owned_root) != control_names
+            or not _transaction_store_namespace_is_valid(store)
+            or not owned_root._validate_control_descriptor(store.control)
+        ):
+            raise OSError(errno.ESTALE, "transaction inventory namespace changed")
+        return Result.success(tuple(observations))
+    except (ForgeError, OSError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Pending transaction discovery cannot trust the durable inventory.",
+            )
+        )
+    finally:
+        if store is not None:
+            store.close()
 
 
 def rebind_persistent_transaction(
@@ -5105,7 +5642,7 @@ def _transaction_path_claim_matches_binding(
 
 def _transaction_journal_source(
     transaction: object,
-) -> tuple[PersistentTransactionBinding, TransactionLocation]:
+) -> tuple[PersistentTransactionBinding, TransactionLocation, str]:
     if type(transaction) is PersistentTransactionRoot:
         created = transaction
         if _persistent_binding_invariants(
@@ -5114,7 +5651,11 @@ def _transaction_journal_source(
             created.claim,
             created.binding,
         ):
-            return created.binding, TransactionLocation.LIVE
+            return (
+                created.binding,
+                TransactionLocation.LIVE,
+                created.binding.root_relative,
+            )
     elif type(transaction) is ReboundTransaction:
         rebound = transaction
         binding = rebound.binding
@@ -5128,18 +5669,25 @@ def _transaction_journal_source(
             and rebound.ticket is None
             and _transaction_path_claim_matches_binding(rebound.claim, binding)
         ):
-            return binding, TransactionLocation.LIVE
+            return binding, TransactionLocation.LIVE, binding.root_relative
         ticket = rebound.ticket
         if (
             rebound.location is TransactionLocation.QUARANTINED
             and rebound.claim is None
             and type(ticket) is QuarantineTicket
-            and ticket.recovery_reference == binding.quarantine_relative
+            and _persistent_cleanup_reference_is_valid(
+                binding,
+                ticket.recovery_reference,
+            )
             and ticket._identity == binding.transaction_identity
             and ticket._root_identity == binding.plugins_identity
             and ticket._binding == binding
         ):
-            return binding, TransactionLocation.QUARANTINED
+            return (
+                binding,
+                TransactionLocation.QUARANTINED,
+                ticket.recovery_reference,
+            )
     raise _error(
         "ownership.unowned",
         "Persistent transaction journal authority is invalid.",
@@ -5163,14 +5711,9 @@ def open_transaction_journal_access(
                 "ownership.unowned",
                 "Persistent transaction journal authority is invalid.",
             )
-        binding, location = _transaction_journal_source(transaction)
+        binding, location, relative = _transaction_journal_source(transaction)
         store = _open_transaction_store(owned_root, create=False)
         namespace = owned_root._duplicate_namespace_capability()
-        relative = (
-            binding.root_relative
-            if location is TransactionLocation.LIVE
-            else binding.quarantine_relative
-        )
         component = relative.rsplit("/", 1)[-1]
         if store.windows:
             descriptor = _open_windows_transaction_location(
@@ -5194,6 +5737,8 @@ def open_transaction_journal_access(
         access = TransactionJournalAccess(
             binding=binding,
             location=location,
+            journal_relative=relative,
+            writable=location is TransactionLocation.LIVE,
             descriptor=descriptor,
             store=store,
             namespace=namespace,
@@ -5217,6 +5762,98 @@ def open_transaction_journal_access(
             _error(
                 "ownership.unowned",
                 "Persistent transaction journal authority cannot be retained.",
+                recovery=recovery,
+            )
+        )
+    finally:
+        if namespace is not None:
+            namespace.close()
+        if os.name == "nt" and descriptor:
+            _close_native(descriptor)
+        elif os.name != "nt" and descriptor >= 0:
+            _close_native(descriptor)
+        if store is not None:
+            store.close()
+
+
+def open_pending_transaction_journal_access(
+    owned_root: OwnedRoot,
+    observation: PendingTransactionObservation,
+) -> Result[TransactionJournalAccess]:
+    """Open one exact observed journal without retaining write authority."""
+
+    store: _TransactionStore | None = None
+    namespace: _paths._NamespaceCapability | None = None
+    descriptor = 0 if os.name == "nt" else -1
+    access: TransactionJournalAccess | None = None
+    binding: PersistentTransactionBinding | None = None
+    try:
+        if (
+            not isinstance(owned_root, OwnedRoot)
+            or type(observation) is not PendingTransactionObservation
+            or observation._seal is not _PENDING_TRANSACTION_OBSERVATION_TOKEN
+        ):
+            raise _error(
+                "ownership.unowned",
+                "Pending transaction journal authority is invalid.",
+            )
+        discovered = discover_pending_transactions(owned_root)
+        if not discovered.is_ok or observation not in discovered.unwrap():
+            raise _error(
+                "ownership.unowned",
+                "Pending transaction journal authority changed.",
+            )
+        binding = observation.binding
+        store = _open_transaction_store(owned_root, create=False)
+        namespace = owned_root._duplicate_namespace_capability()
+        component = observation.journal_relative.rsplit("/", 1)[-1]
+        if store.windows:
+            descriptor = _open_windows_transaction_location(
+                store,
+                component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+                write=False,
+            )
+            if not descriptor:
+                raise _transaction_journal_identity_error(binding)
+        else:
+            descriptor = _open_posix_transaction_location(
+                store,
+                component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if descriptor < 0:
+                raise _transaction_journal_identity_error(binding)
+        access = TransactionJournalAccess(
+            binding=binding,
+            location=observation.location,
+            journal_relative=observation.journal_relative,
+            writable=False,
+            descriptor=descriptor,
+            store=store,
+            namespace=namespace,
+            filesystem_guard=owned_root._filesystem_guard,
+            _token=_TRANSACTION_JOURNAL_ACCESS_TOKEN,
+        )
+        descriptor = 0 if store.windows else -1
+        store = None
+        namespace = None
+        access._require_journal_access(write=False)
+        return Result.success(access)
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        if access is not None:
+            access.close()
+        recovery = (
+            (binding.quarantine_relative,)
+            if binding is not None and _persistent_binding_invariants(binding)
+            else ()
+        )
+        return Result.failure(
+            _error(
+                "ownership.unowned",
+                "Pending transaction journal authority cannot be retained.",
                 recovery=recovery,
             )
         )
