@@ -686,6 +686,7 @@ class LoadedJournal:
     head: JournalHead
     records: tuple[JournalRecord, ...]
     byte_size: int
+    access_digest: str
     _binding_digest: str
     _seal: object
 
@@ -695,13 +696,15 @@ class LoadedJournal:
         head: JournalHead,
         records: tuple[JournalRecord, ...],
         byte_size: int,
+        access_digest: str,
         _token: object,
     ) -> None:
-        if _token is not _LOADED_TOKEN:
+        if _token is not _LOADED_TOKEN or not _valid_digest(access_digest):
             raise TypeError("journal evidence is loaded only by JournalStore")
         object.__setattr__(self, "head", head)
         object.__setattr__(self, "records", records)
         object.__setattr__(self, "byte_size", byte_size)
+        object.__setattr__(self, "access_digest", access_digest)
         object.__setattr__(
             self,
             "_binding_digest",
@@ -966,6 +969,7 @@ def _loaded_journal_binding_projection(
     value: LoadedJournal,
 ) -> Mapping[str, object]:
     return {
+        "access_digest": value.access_digest,
         "byte_size": value.byte_size,
         "head": {
             "record_digest": value.head.record_digest,
@@ -994,6 +998,7 @@ def _require_loaded_journal(value: LoadedJournal) -> None:
         or type(value.byte_size) is not int
         or value.byte_size <= 0
         or value.byte_size > LIMIT_POLICY.value("journal_total_bytes")
+        or not _valid_digest(value.access_digest)
     ):
         raise TypeError("loaded journal evidence")
     value.head._require_valid()
@@ -1649,6 +1654,7 @@ class JournalStore:
 
     __slots__ = (
         "_access",
+        "_access_digest",
         "_binding",
         "_binding_digest",
         "_closed",
@@ -1712,6 +1718,17 @@ class JournalStore:
             binding_digest = hashlib.sha256(
                 _render(binding_projection, final_newline=False)
             ).hexdigest()
+            access_digest = hashlib.sha256(
+                _render(
+                    {
+                        "binding_digest": binding_digest,
+                        "journal_relative": journal_access.journal_relative,
+                        "location": journal_access.location.value,
+                        "transaction_id": binding.transaction_id,
+                    },
+                    final_newline=False,
+                )
+            ).hexdigest()
         except BaseException:
             if writer is not None:
                 writer.close()
@@ -1722,6 +1739,7 @@ class JournalStore:
                 os.close(descriptor)
             raise
         self._access = journal_access
+        self._access_digest = access_digest
         self._binding = binding_projection
         self._binding_digest = binding_digest
         self._descriptor = descriptor
@@ -2004,6 +2022,7 @@ class JournalStore:
             head=self._head(records[-1]),
             records=records,
             byte_size=sum(record.raw_size for record in records),
+            access_digest=self._access_digest,
             _token=_LOADED_TOKEN,
         )
         self._require_open()

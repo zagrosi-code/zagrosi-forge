@@ -10,20 +10,24 @@ import re
 from typing import NamedTuple, Never
 import unicodedata
 
-from .contracts import canonical_json_bytes
+from .config import snapshot_config
+from .contracts import ForgeError, canonical_json_bytes
 from .journal import (
     JOURNAL_STATE_MACHINE_VERSION,
     JournalConfigIdentity,
     JournalState,
     LoadedJournal,
     RollbackAction,
+    load_pending,
 )
+from .paths import OwnedRoot, PlatformPathAuthority
 from .policies import LIMIT_POLICY
 
 
 RECOVERY_POLICY_VERSION = "1.0"
 _SNAPSHOT_TOKEN = object()
 _PLAN_TOKEN = object()
+_LIVE_OBSERVATION_TOKEN = object()
 _TRANSACTION_ID = re.compile(r"tx-[0-9a-f]{32}\Z")
 _ROLLBACK_STATES = frozenset(
     {
@@ -80,6 +84,7 @@ class _JournalCapture(NamedTuple):
 class _SnapshotCapture(NamedTuple):
     journals: tuple[_JournalCapture, ...]
     current_config: _ConfigCapture | None
+    inventory_digest: str | None
 
 
 def _valid_digest(value: object) -> bool:
@@ -140,6 +145,7 @@ def _journal_projection(journal: _JournalCapture) -> dict[str, object]:
 def _snapshot_projection(capture: _SnapshotCapture) -> dict[str, object]:
     return {
         "current_config": _config_projection(capture.current_config),
+        "inventory_digest": capture.inventory_digest,
         "journal_state_machine_version": JOURNAL_STATE_MACHINE_VERSION,
         "journal_digests": tuple(
             hashlib.sha256(
@@ -202,10 +208,12 @@ def _capture_journal(journal: LoadedJournal) -> _JournalCapture:
 def _capture_snapshot(
     journals: tuple[LoadedJournal, ...],
     current_config: JournalConfigIdentity | None,
+    inventory_digest: str | None,
 ) -> _SnapshotCapture:
     return _SnapshotCapture(
         journals=tuple(_capture_journal(journal) for journal in journals),
         current_config=_capture_optional_config(current_config),
+        inventory_digest=inventory_digest,
     )
 
 
@@ -305,6 +313,10 @@ def _valid_snapshot_capture(value: object) -> bool:
             value.current_config is not None
             and not _valid_config_capture(value.current_config)
         )
+        or (
+            value.inventory_digest is not None
+            and not _valid_digest(value.inventory_digest)
+        )
     ):
         return False
     transaction_ids = tuple(journal.transaction_id for journal in value.journals)
@@ -316,6 +328,7 @@ def _valid_snapshot_capture(value: object) -> bool:
 def _stable_snapshot_capture(
     journals: tuple[LoadedJournal, ...],
     current_config: JournalConfigIdentity | None,
+    inventory_digest: str | None,
 ) -> _SnapshotCapture:
     if (
         type(journals) is not tuple
@@ -325,6 +338,7 @@ def _stable_snapshot_capture(
             current_config is not None
             and type(current_config) is not JournalConfigIdentity
         )
+        or (inventory_digest is not None and not _valid_digest(inventory_digest))
     ):
         raise TypeError("RecoverySnapshot evidence is invalid")
     try:
@@ -332,12 +346,12 @@ def _stable_snapshot_capture(
             journal._require_valid()
         if current_config is not None:
             current_config.__post_init__()
-        captured = _capture_snapshot(journals, current_config)
+        captured = _capture_snapshot(journals, current_config, inventory_digest)
         for journal in journals:
             journal._require_valid()
         if current_config is not None:
             current_config.__post_init__()
-        confirmed = _capture_snapshot(journals, current_config)
+        confirmed = _capture_snapshot(journals, current_config, inventory_digest)
         if (
             captured != confirmed
             or not _valid_snapshot_capture(captured)
@@ -357,6 +371,8 @@ class RecoverySnapshot:
     current_config: JournalConfigIdentity | None
     snapshot_digest: str
     _capture: _SnapshotCapture
+    _inventory_digest: str | None
+    _observation_seal: object | None
     _seal: object
 
     def __init__(
@@ -364,13 +380,35 @@ class RecoverySnapshot:
         *,
         journals: tuple[LoadedJournal, ...],
         current_config: JournalConfigIdentity | None,
+        _inventory_digest: str | None = None,
+        _observation_token: object | None = None,
     ) -> None:
-        capture = _stable_snapshot_capture(journals, current_config)
+        if (_inventory_digest is None and _observation_token is not None) or (
+            _inventory_digest is not None
+            and (
+                not _valid_digest(_inventory_digest)
+                or _observation_token is not _LIVE_OBSERVATION_TOKEN
+            )
+        ):
+            raise TypeError(
+                "live recovery snapshots are minted only by recovery observation"
+            )
+        capture = _stable_snapshot_capture(
+            journals,
+            current_config,
+            _inventory_digest,
+        )
         digest = _snapshot_digest(capture)
         object.__setattr__(self, "journals", journals)
         object.__setattr__(self, "current_config", current_config)
         object.__setattr__(self, "snapshot_digest", digest)
         object.__setattr__(self, "_capture", capture)
+        object.__setattr__(self, "_inventory_digest", _inventory_digest)
+        object.__setattr__(
+            self,
+            "_observation_seal",
+            (_LIVE_OBSERVATION_TOKEN if _inventory_digest is not None else None),
+        )
         object.__setattr__(self, "_seal", _SNAPSHOT_TOKEN)
 
     def _require_valid(self) -> None:
@@ -378,12 +416,21 @@ class RecoverySnapshot:
             capture = _stable_snapshot_capture(
                 self.journals,
                 self.current_config,
+                self._inventory_digest,
             )
             expected = _snapshot_digest(capture)
         except (AttributeError, TypeError, ValueError):
             raise TypeError("RecoverySnapshot authority changed") from None
         if (
             self._seal is not _SNAPSHOT_TOKEN
+            or (self._inventory_digest is None and self._observation_seal is not None)
+            or (
+                self._inventory_digest is not None
+                and (
+                    not _valid_digest(self._inventory_digest)
+                    or self._observation_seal is not _LIVE_OBSERVATION_TOKEN
+                )
+            )
             or not _valid_digest(self.snapshot_digest)
             or type(self._capture) is not _SnapshotCapture
             or not _valid_snapshot_capture(self._capture)
@@ -687,4 +734,234 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
         transaction_ids=(journal.transaction_id,),
         rollback_actions=(),
         error_code="recovery.operator_conflict",
+    )
+
+
+def _plan_changed(
+    message: str = "The recovery plan changed before execution.",
+) -> ForgeError:
+    return ForgeError(
+        "transaction.plan_changed",
+        14,
+        message,
+    )
+
+
+def _matching_path_authority(
+    authority: object,
+    owned_root: object,
+) -> bool:
+    return (
+        type(authority) is PlatformPathAuthority
+        and isinstance(owned_root, OwnedRoot)
+        and authority._origin is owned_root._origin
+    )
+
+
+def _discover_inventory(owned_root: OwnedRoot) -> tuple[object, ...]:
+    from .ownership import discover_pending_transactions
+
+    discovered = discover_pending_transactions(owned_root)
+    if not discovered.is_ok:
+        raise _plan_changed("The pending recovery inventory changed.")
+    return discovered.unwrap()
+
+
+def _observed_inventory_digest(
+    observations: tuple[object, ...],
+    journals: tuple[LoadedJournal, ...],
+) -> str:
+    from . import ownership as _ownership
+
+    if (
+        type(observations) is not tuple
+        or type(journals) is not tuple
+        or len(observations) != len(journals)
+    ):
+        raise TypeError("recovery inventory evidence is invalid")
+    journal_ids: list[str] = []
+    try:
+        for journal in journals:
+            if type(journal) is not LoadedJournal:
+                raise ValueError
+            journal._require_valid()
+            journal_ids.append(journal.records[-1].transaction_id)
+        observation_digests: list[str] = []
+        observation_ids: list[str] = []
+        for observation in observations:
+            if (
+                type(observation) is not _ownership.PendingTransactionObservation
+                or observation._seal
+                is not _ownership._PENDING_TRANSACTION_OBSERVATION_TOKEN
+                or not _ownership._persistent_binding_invariants(observation.binding)
+                or type(observation.location) is not _ownership.TransactionLocation
+                or type(observation.journal_relative) is not str
+            ):
+                raise ValueError
+            binding = observation.binding
+            transaction_id = binding.transaction_id
+            location = observation.location
+            journal_relative = observation.journal_relative
+            valid_relative = (
+                location is _ownership.TransactionLocation.LIVE
+                and journal_relative == binding.root_relative
+            ) or (
+                location is _ownership.TransactionLocation.QUARANTINED
+                and _ownership._persistent_cleanup_reference_is_valid(
+                    binding,
+                    journal_relative,
+                )
+            )
+            binding_projection = binding.canonical_projection()
+            if (
+                not valid_relative
+                or not _ownership._persistent_binding_invariants(binding)
+                or binding_projection != binding.canonical_projection()
+                or transaction_id != binding.transaction_id
+                or location is not observation.location
+                or journal_relative != observation.journal_relative
+            ):
+                raise ValueError
+            binding_digest = hashlib.sha256(
+                canonical_json_bytes(binding_projection)
+            ).hexdigest()
+            observation_digest = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "binding_digest": binding_digest,
+                        "journal_relative": journal_relative,
+                        "location": location.value,
+                        "transaction_id": transaction_id,
+                    }
+                )
+            ).hexdigest()
+            journal = journals[len(observation_digests)]
+            if not hmac.compare_digest(
+                binding_digest,
+                journal.head.transaction_binding_digest,
+            ) or not hmac.compare_digest(
+                observation_digest,
+                journal.access_digest,
+            ):
+                raise ValueError
+            observation_digests.append(observation_digest)
+            observation_ids.append(transaction_id)
+        if (
+            tuple(observation_ids) != tuple(sorted(observation_ids))
+            or len(set(observation_ids)) != len(observation_ids)
+            or tuple(observation_ids) != tuple(journal_ids)
+        ):
+            raise ValueError
+        for journal in journals:
+            journal._require_valid()
+    except (AttributeError, ForgeError, TypeError, ValueError):
+        raise TypeError("recovery inventory evidence is invalid") from None
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "observation_digests": tuple(observation_digests),
+            }
+        )
+    ).hexdigest()
+
+
+def _observe_current_config_once(
+    *,
+    authority: PlatformPathAuthority,
+    owned_root: OwnedRoot,
+) -> JournalConfigIdentity:
+    if not _matching_path_authority(authority, owned_root):
+        raise TypeError("current config observation requires matching path authority")
+    proof = authority.prove_config_path(owned_root).unwrap()
+    try:
+        snapshot = snapshot_config(proof).unwrap()
+        snapshot._require_valid()
+        observed = JournalConfigIdentity(
+            parent_identity=snapshot.parent_identity,
+            leaf_identity=snapshot.leaf_identity,
+            byte_digest=snapshot.byte_digest,
+            semantic_digest=snapshot.semantic_digest,
+            metadata_fingerprint=snapshot.metadata_fingerprint,
+            snapshot_digest=snapshot.snapshot_digest,
+            target_metadata_digest=None,
+        )
+        snapshot._require_valid()
+        return observed
+    finally:
+        proof.close()
+
+
+def observe_current_config_identity(
+    *,
+    authority: PlatformPathAuthority,
+    owned_root: OwnedRoot,
+) -> JournalConfigIdentity:
+    """Twice observe the live config as rollback-only journal identity evidence."""
+
+    first = _observe_current_config_once(
+        authority=authority,
+        owned_root=owned_root,
+    )
+    second = _observe_current_config_once(
+        authority=authority,
+        owned_root=owned_root,
+    )
+    if first != second:
+        raise _plan_changed("The current config changed while it was observed.")
+    return second
+
+
+def observe_recovery_snapshot(
+    *,
+    authority: PlatformPathAuthority,
+    owned_root: OwnedRoot,
+) -> RecoverySnapshot:
+    """Observe one stable, effect-free rollback snapshot from live authorities."""
+
+    if not _matching_path_authority(authority, owned_root):
+        raise TypeError("recovery observation requires matching path authority")
+    first_inventory = _discover_inventory(owned_root)
+    first_journals = load_pending(owned_root)
+    first_config = observe_current_config_identity(
+        authority=authority,
+        owned_root=owned_root,
+    )
+    second_inventory = _discover_inventory(owned_root)
+    second_journals = load_pending(owned_root)
+    second_config = observe_current_config_identity(
+        authority=authority,
+        owned_root=owned_root,
+    )
+    final_inventory = _discover_inventory(owned_root)
+    try:
+        first_inventory_digest = _observed_inventory_digest(
+            first_inventory,
+            first_journals,
+        )
+        second_inventory_digest = _observed_inventory_digest(
+            second_inventory,
+            second_journals,
+        )
+        final_inventory_digest = _observed_inventory_digest(
+            final_inventory,
+            second_journals,
+        )
+    except TypeError:
+        raise _plan_changed(
+            "Recovery inventory changed while it was observed."
+        ) from None
+    if (
+        first_inventory != second_inventory
+        or second_inventory != final_inventory
+        or first_inventory_digest != second_inventory_digest
+        or second_inventory_digest != final_inventory_digest
+        or first_journals != second_journals
+        or first_config != second_config
+    ):
+        raise _plan_changed("Recovery evidence changed while it was observed.")
+    return RecoverySnapshot(
+        journals=second_journals,
+        current_config=second_config,
+        _inventory_digest=final_inventory_digest,
+        _observation_token=_LIVE_OBSERVATION_TOKEN,
     )

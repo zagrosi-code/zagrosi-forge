@@ -436,6 +436,7 @@ def _store(
     tmp_path: Path,
     *,
     transaction_id: str = "tx-0123456789abcdef0123456789abcdef",
+    authority=None,
 ):
     from zagrosi_forge.install.journal import JournalStore
     from zagrosi_forge.install.ownership import (
@@ -446,7 +447,7 @@ def _store(
 
     home = tmp_path / "codex-home"
     _private_directory(home)
-    authority = PlatformPathAuthority()
+    authority = PlatformPathAuthority() if authority is None else authority
     owned = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
     created = create_persistent_transaction_root(
         owned,
@@ -460,6 +461,29 @@ def _store(
     directory = home / "plugins" / created.binding.root_relative
     access = open_transaction_journal_access(owned, created).unwrap()
     return JournalStore(access, proof), proof, owned, directory, created.binding
+
+
+def _bind_prepared_to_current_config(prepared, current):
+    candidate = replace(
+        prepared.candidate_config,
+        parent_identity=current.parent_identity,
+        leaf_identity=None,
+        metadata_fingerprint=current.metadata_fingerprint,
+        snapshot_digest=current.snapshot_digest,
+    )
+    receipt = _prepared_receipt(
+        prepared.install_identity,
+        prepared.transaction_id,
+        current.byte_digest,
+        candidate.byte_digest,
+        effective_id=prepared.effective_marketplace_id,
+    )
+    return replace(
+        prepared,
+        before_config=current,
+        candidate_config=candidate,
+        prepared_receipt=receipt,
+    )
 
 
 def _record_bytes(record: Mapping[str, object]) -> bytes:
@@ -2594,6 +2618,337 @@ def test_candidate_relation_without_verified_published_evidence_requires_operato
         assert plan.transaction_ids == (prepared.transaction_id,)
         assert plan.rollback_actions == ()
         assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_observation_binds_live_config_and_pending_journals(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        observe_current_config_identity,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+
+        snapshot = observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        plan = plan_recovery(snapshot)
+
+        assert snapshot.current_config == current
+        assert len(snapshot.journals) == 1
+        assert snapshot.journals[0].records[-1].prepared == prepared
+        assert plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert plan.transaction_ids == (prepared.transaction_id,)
+        assert plan.rollback_actions == prepared.rollback_actions
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_observation_digest_binds_transaction_location(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import load_pending
+    from zagrosi_forge.install.lock import acquire_install_lock
+    from zagrosi_forge.install.ownership import (
+        discover_pending_transactions,
+        prove_transaction_owned,
+        quarantine_owned,
+        rebind_persistent_transaction,
+    )
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        lock_recovery_plan,
+        observe_current_config_identity,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    ticket = None
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        live_snapshot = observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        live_plan = plan_recovery(live_snapshot)
+        assert live_plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE
+        live_head = live_snapshot.journals[0].head.record_digest
+        live_inventory = discover_pending_transactions(owned).unwrap()
+        store.close()
+        proof.close()
+
+        rebound = rebind_persistent_transaction(owned, binding=binding).unwrap()
+        with rebound:
+            assert rebound.claim is not None
+            path = authority.prove_descendant(
+                owned,
+                rebound.claim.relative,
+                expected_depth=3,
+            ).unwrap()
+            try:
+                ownership = prove_transaction_owned(
+                    path,
+                    claim=rebound.claim,
+                ).unwrap()
+                ticket = quarantine_owned(
+                    ownership,
+                    transaction_id=prepared.transaction_id,
+                ).unwrap()
+            finally:
+                path.close()
+
+        quarantined_journals = load_pending(owned)
+        with pytest.raises(TypeError, match="inventory"):
+            recovery._observed_inventory_digest(
+                live_inventory,
+                quarantined_journals,
+            )
+        quarantined_snapshot = observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        quarantined_plan = plan_recovery(quarantined_snapshot)
+
+        assert quarantined_snapshot.journals[0].head.record_digest == live_head
+        assert quarantined_plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert quarantined_snapshot.snapshot_digest != live_snapshot.snapshot_digest
+        assert quarantined_plan.plan_digest != live_plan.plan_digest
+        with pytest.raises(ForgeError) as changed:
+            lock_recovery_plan(
+                live_plan,
+                authority=authority,
+                owned_root=owned,
+                runner=_runner(),
+                timeout_seconds=0.1,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+        with acquire_install_lock(owned, timeout_seconds=0.1):
+            pass
+    finally:
+        if ticket is not None:
+            ticket.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_observation_rejects_same_id_journal_from_other_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _private_directory(first_root)
+    _private_directory(second_root)
+    first_authority = PlatformPathAuthority()
+    second_authority = PlatformPathAuthority()
+    first = _store(first_root, authority=first_authority)
+    second = _store(second_root, authority=second_authority)
+    first_store, first_proof, first_owned, _first_directory, first_binding = first
+    second_store, second_proof, second_owned, _second_directory, second_binding = second
+    try:
+        first_current = recovery.observe_current_config_identity(
+            authority=first_authority,
+            owned_root=first_owned,
+        )
+        second_current = recovery.observe_current_config_identity(
+            authority=second_authority,
+            owned_root=second_owned,
+        )
+        first_store.create_prepared(
+            _bind_prepared_to_current_config(
+                _prepared(first_binding),
+                first_current,
+            )
+        )
+        second_store.create_prepared(
+            _bind_prepared_to_current_config(
+                _prepared(second_binding),
+                second_current,
+            )
+        )
+        foreign = second_store.load()
+        assert first_binding.transaction_id == second_binding.transaction_id
+        assert (
+            first_binding.canonical_projection()
+            != second_binding.canonical_projection()
+        )
+        monkeypatch.setattr(recovery, "load_pending", lambda _root: (foreign,))
+
+        with pytest.raises(ForgeError) as changed:
+            recovery.observe_recovery_snapshot(
+                authority=first_authority,
+                owned_root=first_owned,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+    finally:
+        second_store.close()
+        second_proof.close()
+        second_owned.close()
+        first_store.close()
+        first_proof.close()
+        first_owned.close()
+
+
+@pytest.mark.parametrize("missing_side", ("observation", "journal"))
+def test_recovery_observation_rejects_inventory_cardinality_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_side: str,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import load_pending
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        inventory = recovery._discover_inventory(owned)
+        journals = load_pending(owned)
+        assert len(inventory) == len(journals) == 1
+        if missing_side == "observation":
+            monkeypatch.setattr(recovery, "_discover_inventory", lambda _root: ())
+        else:
+            monkeypatch.setattr(recovery, "load_pending", lambda _root: ())
+
+        with pytest.raises(ForgeError) as changed:
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_observation_rejects_loaded_journal_access_digest_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    loaded = None
+    original = None
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        loaded = store.load()
+        original = loaded.access_digest
+        object.__setattr__(loaded, "access_digest", "f" * 64)
+        monkeypatch.setattr(recovery, "load_pending", lambda _root: (loaded,))
+
+        with pytest.raises(TypeError, match="loaded journal authority"):
+            loaded._require_valid()
+        with pytest.raises(ForgeError) as changed:
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+    finally:
+        if loaded is not None and original is not None:
+            object.__setattr__(loaded, "access_digest", original)
+            loaded._require_valid()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_live_recovery_snapshot_rejects_inventory_digest_tampering(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import (
+        observe_current_config_identity,
+        observe_recovery_snapshot,
+    )
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        snapshot = observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        original = snapshot._inventory_digest
+        object.__setattr__(snapshot, "_inventory_digest", "f" * 64)
+        try:
+            with pytest.raises(TypeError, match="RecoverySnapshot"):
+                snapshot._require_valid()
+        finally:
+            object.__setattr__(snapshot, "_inventory_digest", original)
+        snapshot._require_valid()
     finally:
         store.close()
         proof.close()
