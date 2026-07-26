@@ -250,7 +250,7 @@ def _prepared(binding, *, effective_id: str = "zagrosi"):
         TransactionOwnedPath,
     )
 
-    transaction_id = "tx-0123456789abcdef0123456789abcdef"
+    transaction_id = binding.transaction_id
     descriptor = _config_recovery_descriptor(transaction_id)
     before = JournalConfigIdentity(
         parent_identity=(11, 12),
@@ -413,7 +413,30 @@ def _advance_to_commit_intent(store, prepared, descriptor):
     return head
 
 
-def _store(tmp_path: Path):
+def _advance_to_finalized(store, prepared, descriptor):
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+
+    head = _advance_to_commit_intent(store, prepared, descriptor)
+    for transition in (
+        JournalTransition(
+            JournalState.CONFIG_COMMITTED,
+            config_result=_config_result(prepared, descriptor),
+        ),
+        JournalTransition(
+            JournalState.RECEIPT_COMMITTED,
+            receipt_result=_receipt_result(prepared),
+        ),
+        JournalTransition(JournalState.FINALIZED),
+    ):
+        head = store.append(head, transition)
+    return head
+
+
+def _store(
+    tmp_path: Path,
+    *,
+    transaction_id: str = "tx-0123456789abcdef0123456789abcdef",
+):
     from zagrosi_forge.install.journal import JournalStore
     from zagrosi_forge.install.ownership import (
         create_persistent_transaction_root,
@@ -427,7 +450,7 @@ def _store(tmp_path: Path):
     owned = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
     created = create_persistent_transaction_root(
         owned,
-        transaction_id="tx-0123456789abcdef0123456789abcdef",
+        transaction_id=transaction_id,
     ).unwrap()
     proof = authority.prove_descendant(
         owned,
@@ -2050,6 +2073,527 @@ def test_journal_load_rejects_detached_transaction_namespace_after_read(
         assert raised.value.code == "journal.corrupt"
         assert not directory.exists()
         assert (detached / "journal-00000000.json").read_bytes() == retained
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_plan_without_journals_is_no_recovery_and_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    def reject_effect(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pure recovery planning attempted a filesystem effect")
+
+    snapshot = RecoverySnapshot(journals=(), current_config=None)
+    with monkeypatch.context() as effects:
+        effects.setattr(os, "open", reject_effect)
+        effects.setattr(Path, "mkdir", reject_effect)
+        effects.setattr(Path, "write_bytes", reject_effect)
+        effects.setattr(Path, "unlink", reject_effect)
+        first = plan_recovery(snapshot)
+        second = plan_recovery(snapshot)
+
+    assert first == second
+    assert first.disposition is RecoveryDisposition.NO_RECOVERY
+    assert first.transaction_ids == ()
+    assert first.rollback_actions == ()
+    assert first.error_code is None
+    assert len(first.plan_digest) == 64
+    assert set(first.plan_digest) <= set("0123456789abcdef")
+
+
+def test_recovery_snapshot_revalidates_loaded_journal_authority(
+    tmp_path: Path,
+) -> None:
+    from enum import Enum
+
+    from zagrosi_forge.install.journal import RollbackAction
+    from zagrosi_forge.install.recovery import RecoverySnapshot
+
+    class FakeAction(str, Enum):
+        QUARANTINE = "quarantine-if-owned"
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        journal = store.load()
+        original = journal.records[-1].prepared.rollback_actions
+        injected = RollbackAction(
+            action="quarantine-if-owned",
+            relative_path="foreign/unrecorded-generation",
+            expected_identity=(99, 100),
+        )
+        object.__setattr__(
+            journal.records[-1].prepared,
+            "rollback_actions",
+            original + (injected,),
+        )
+        try:
+            with pytest.raises(TypeError, match="RecoverySnapshot"):
+                RecoverySnapshot(
+                    journals=(journal,),
+                    current_config=prepared.before_config,
+                )
+        finally:
+            object.__setattr__(
+                journal.records[-1].prepared,
+                "rollback_actions",
+                original,
+            )
+        journal._require_valid()
+
+        action = journal.records[-1].prepared.rollback_actions[0]
+        original_action = action.action
+        object.__setattr__(action, "action", FakeAction.QUARANTINE)
+        try:
+            with pytest.raises(TypeError, match="RecoverySnapshot"):
+                RecoverySnapshot(
+                    journals=(journal,),
+                    current_config=prepared.before_config,
+                )
+        finally:
+            object.__setattr__(action, "action", original_action)
+        journal._require_valid()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_rejects_evidence_change_between_decision_and_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        journal = store.load()
+        current = prepared.before_config
+        snapshot = recovery.RecoverySnapshot(
+            journals=(journal,),
+            current_config=current,
+        )
+        original = recovery._journal_disposition
+        original_digest = current.byte_digest
+
+        def mutate_after_decision(journal_capture, config_capture):
+            decision = original(journal_capture, config_capture)
+            object.__setattr__(current, "byte_digest", "d" * 64)
+            return decision
+
+        monkeypatch.setattr(
+            recovery,
+            "_journal_disposition",
+            mutate_after_decision,
+        )
+        try:
+            with pytest.raises(TypeError, match="RecoverySnapshot"):
+                recovery.plan_recovery(snapshot)
+        finally:
+            object.__setattr__(current, "byte_digest", original_digest)
+        snapshot._require_valid()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_plan_rejects_digest_equivalent_type_tampering() -> None:
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    class FakeDisposition:
+        value = RecoveryDisposition.NO_RECOVERY.value
+
+    plan = plan_recovery(RecoverySnapshot(journals=(), current_config=None))
+    for field, changed in (
+        ("transaction_ids", []),
+        ("rollback_actions", []),
+        ("disposition", FakeDisposition()),
+    ):
+        original = getattr(plan, field)
+        object.__setattr__(plan, field, changed)
+        try:
+            with pytest.raises(TypeError, match="RecoveryPlan"):
+                plan._require_valid()
+        finally:
+            object.__setattr__(plan, field, original)
+    plan._require_valid()
+
+
+@pytest.mark.parametrize(
+    ("first_terminal", "second_terminal", "expected_disposition"),
+    (
+        (False, False, "operator_conflict"),
+        (False, True, "operator_conflict"),
+        (True, True, "no_recovery"),
+    ),
+)
+def test_multiple_journals_never_merge_unfinished_rollback_authority(
+    tmp_path: Path,
+    first_terminal: bool,
+    second_terminal: bool,
+    expected_disposition: str,
+) -> None:
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _private_directory(first_root)
+    _private_directory(second_root)
+    first = _store(first_root, transaction_id="tx-" + "a" * 32)
+    second = _store(second_root, transaction_id="tx-" + "b" * 32)
+    first_store, first_proof, first_owned, _first_directory, first_binding = first
+    second_store, second_proof, second_owned, _second_directory, second_binding = second
+    try:
+        first_prepared = _prepared(first_binding)
+        second_prepared = _prepared(second_binding)
+        if first_terminal:
+            _advance_to_finalized(
+                first_store,
+                first_prepared,
+                _config_recovery_descriptor(first_prepared.transaction_id),
+            )
+        else:
+            first_store.create_prepared(first_prepared)
+        if second_terminal:
+            _advance_to_finalized(
+                second_store,
+                second_prepared,
+                _config_recovery_descriptor(second_prepared.transaction_id),
+            )
+        else:
+            second_store.create_prepared(second_prepared)
+
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(first_store.load(), second_store.load()),
+                current_config=first_prepared.before_config,
+            )
+        )
+
+        assert plan.disposition.value == expected_disposition
+        assert plan.rollback_actions == ()
+        if plan.disposition is RecoveryDisposition.OPERATOR_CONFLICT:
+            assert plan.transaction_ids == (
+                first_prepared.transaction_id,
+                second_prepared.transaction_id,
+            )
+            assert plan.error_code == "recovery.operator_conflict"
+        else:
+            assert plan.transaction_ids == ()
+            assert plan.error_code is None
+    finally:
+        second_store.close()
+        second_proof.close()
+        second_owned.close()
+        first_store.close()
+        first_proof.close()
+        first_owned.close()
+
+
+def test_recovery_supports_the_full_bounded_pending_inventory(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.policies import LIMIT_POLICY
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    resources = []
+    journals = []
+    prepared_transactions = []
+    try:
+        for index in range(LIMIT_POLICY.value("journal_records")):
+            root = tmp_path / f"inventory-{index:02d}"
+            _private_directory(root)
+            store, proof, owned, _directory, binding = _store(
+                root,
+                transaction_id=f"tx-{index:032x}",
+            )
+            resources.append((store, proof, owned))
+            prepared = _prepared(binding)
+            prepared_transactions.append(prepared)
+            store.create_prepared(prepared)
+            journals.append(store.load())
+
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=tuple(journals),
+                current_config=prepared_transactions[0].before_config,
+            )
+        )
+
+        assert plan.disposition is RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == tuple(
+            prepared.transaction_id for prepared in prepared_transactions
+        )
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        for store, proof, owned in reversed(resources):
+            store.close()
+            proof.close()
+            owned.close()
+
+
+def test_before_identity_recovery_rolls_back_only_recorded_owned_candidate(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        journal = store.load()
+        assert journal.records[-1].prepared == prepared
+
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(journal,),
+                current_config=prepared.before_config,
+            )
+        )
+
+        assert plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert plan.transaction_ids == (prepared.transaction_id,)
+        assert plan.rollback_actions == prepared.rollback_actions
+        assert all(
+            any(
+                owned_path.relative_path == action.relative_path
+                and owned_path.expected_identity == action.expected_identity
+                for owned_path in prepared.transaction_owned_paths
+            )
+            for action in plan.rollback_actions
+        )
+        assert plan.error_code is None
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_plan_rejects_digest_equivalent_nested_action_type(
+    tmp_path: Path,
+) -> None:
+    from enum import Enum
+
+    from zagrosi_forge.install.recovery import RecoverySnapshot, plan_recovery
+
+    class FakeAction(str, Enum):
+        QUARANTINE = "quarantine-if-owned"
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(store.load(),),
+                current_config=prepared.before_config,
+            )
+        )
+        action = plan.rollback_actions[0]
+        original = action.action
+        object.__setattr__(action, "action", FakeAction.QUARANTINE)
+        try:
+            with pytest.raises(TypeError, match="RecoveryPlan"):
+                plan._require_valid()
+        finally:
+            object.__setattr__(action, "action", original)
+        plan._require_valid()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_preserves_valid_internal_receipt_reference_domain(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import RollbackAction, TransactionOwnedPath
+    from zagrosi_forge.install.ownership import committed_receipt_reference
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        reference = committed_receipt_reference(
+            prepared.effective_marketplace_id,
+            prepared.install_identity,
+        ).value
+        retained = TransactionOwnedPath(
+            role="committed-receipt",
+            relative_path=reference,
+            expected_identity=None,
+        )
+        retain = RollbackAction(
+            action="retain",
+            relative_path=reference,
+            expected_identity=None,
+        )
+        prepared = replace(
+            prepared,
+            transaction_owned_paths=prepared.transaction_owned_paths + (retained,),
+            rollback_actions=prepared.rollback_actions + (retain,),
+        )
+        store.create_prepared(prepared)
+
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(store.load(),),
+                current_config=prepared.before_config,
+            )
+        )
+
+        assert plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert retain in plan.rollback_actions
+        assert plan.error_code is None
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.parametrize(
+    "changed",
+    (
+        {"leaf_identity": (11, 99)},
+        {"parent_identity": (11, 99)},
+        {"byte_digest": "d" * 64},
+        {"semantic_digest": "e" * 64},
+        {"metadata_fingerprint": "f" * 64},
+        {"snapshot_digest": "0" * 64},
+        {"target_metadata_digest": "9" * 64},
+    ),
+)
+def test_any_config_identity_drift_requires_operator(
+    tmp_path: Path,
+    changed: dict[str, object],
+) -> None:
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        journal = store.load()
+        current = replace(prepared.before_config, **changed)
+
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(journal,),
+                current_config=current,
+            )
+        )
+
+        assert plan.disposition is RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == (prepared.transaction_id,)
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_historical_publication_does_not_authorize_recovery_finalization(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        descriptor = _config_recovery_descriptor(prepared.transaction_id)
+        _advance_to_commit_intent(store, prepared, descriptor)
+        journal = store.load()
+        current = _config_result(prepared, descriptor)
+
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(journal,),
+                current_config=current,
+            )
+        )
+
+        assert plan.disposition is RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == (prepared.transaction_id,)
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_candidate_relation_without_verified_published_evidence_requires_operator(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        journal = store.load()
+        current = replace(
+            prepared.candidate_config,
+            leaf_identity=(11, 15),
+        )
+
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(journal,),
+                current_config=current,
+            )
+        )
+
+        assert plan.disposition is RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == (prepared.transaction_id,)
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
     finally:
         store.close()
         proof.close()

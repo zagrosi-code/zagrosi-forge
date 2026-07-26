@@ -73,6 +73,7 @@
     "src/zagrosi_forge/install/paths.py",
     "src/zagrosi_forge/install/policies.py",
     "src/zagrosi_forge/install/recovery-retention-policy.json",
+    "src/zagrosi_forge/install/recovery.py",
     "src/zagrosi_forge/install/schemas/bundle-manifest-v1.schema.json",
     "src/zagrosi_forge/install/schemas/bundle-policy-v1.schema.json",
     "src/zagrosi_forge/install/schemas/limit-policy-v1.schema.json",
