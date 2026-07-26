@@ -3426,6 +3426,483 @@ def test_fsynced_stage_process_death_uses_only_precrash_recovery_record(
         root.close()
 
 
+@pytest.mark.parametrize(
+    ("barrier", "persistent_backup", "expected_roles"),
+    (
+        ("snapshot", False, ("snapshot",)),
+        ("backup", True, ("snapshot", "backup")),
+        ("candidate", False, ("snapshot", "candidate")),
+        ("prepared-return", False, ("snapshot", "candidate")),
+    ),
+)
+def test_preparation_authority_discovery_is_fixed_and_effect_free(
+    tmp_path: Path,
+    barrier: str,
+    persistent_backup: bool,
+    expected_roles: tuple[str, ...],
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / f"discover-{barrier}"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier=barrier,
+        persistent_backup=persistent_backup,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    before = tuple(
+        (
+            item.name,
+            item.lstat().st_dev,
+            item.lstat().st_ino,
+            item.read_bytes(),
+        )
+        for item in sorted(home.iterdir())
+        if item.is_file() and "zagrosi-config-tx" in item.name
+    )
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        transaction_digest = hashlib.sha256(
+            f"tx-kill-{barrier}".encode("utf-8")
+        ).hexdigest()
+        first = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        ).unwrap()
+        second = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        ).unwrap()
+        assert first is not None
+        assert second is not None
+        assert first.to_record() == second.to_record()
+        assert first.transaction_digest == transaction_digest
+        assert tuple(role for role, _reference, _identity in first.stages) == (
+            expected_roles
+        )
+        assert first.authority_reference is not None
+        assert first.authority_identity is not None
+        assert (
+            atomic_file.discover_config_preparation_recovery(
+                proof,
+                "0" * 64,
+            ).unwrap()
+            is None
+        )
+        after = tuple(
+            (
+                item.name,
+                item.lstat().st_dev,
+                item.lstat().st_ino,
+                item.read_bytes(),
+            )
+            for item in sorted(home.iterdir())
+            if item.is_file() and "zagrosi-config-tx" in item.name
+        )
+        assert after == before
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_preparation_authority_discovery_reconciles_rotation_chain(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "discover-rotation"
+    workspace.mkdir()
+    completed = _run_checkpoint_rotation_death(workspace)
+    assert completed.returncode == 93, completed.stderr
+    home = workspace / "codex-home"
+    records = tuple(home.glob(".zagrosi-config-tx-*.authority"))
+    assert len(records) == 2
+    before = tuple(
+        (record.name, record.stat().st_ino, record.read_bytes())
+        for record in sorted(records)
+    )
+    transaction_digest = hashlib.sha256(b"tx-kill-authority-rotation").hexdigest()
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        descriptor = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        ).unwrap()
+        assert descriptor is not None
+        assert tuple(role for role, _reference, _identity in descriptor.stages) == (
+            "snapshot",
+            "candidate",
+        )
+        assert len(descriptor.predecessor_authorities) == 1
+        assert (
+            tuple(
+                (record.name, record.stat().st_ino, record.read_bytes())
+                for record in sorted(records)
+            )
+            == before
+        )
+        atomic_file.cleanup_restarted_config_preparation(
+            proof,
+            descriptor,
+        ).unwrap()
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_preparation_authority_discovery_preserves_conflicting_chain(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "discover-conflict"
+    workspace.mkdir()
+    completed = _run_checkpoint_rotation_death(workspace)
+    assert completed.returncode == 93, completed.stderr
+    home = workspace / "codex-home"
+    records = tuple(home.glob(".zagrosi-config-tx-*.authority"))
+    assert len(records) == 2
+    decoded = tuple(
+        (
+            record,
+            atomic_file.decode_config_preparation_recovery_descriptor(
+                json.loads(record.read_text(encoding="utf-8"))
+            ).unwrap(),
+        )
+        for record in records
+    )
+    predecessor_path, _predecessor = min(
+        decoded,
+        key=lambda item: len(item[1].stages),
+    )
+    predecessor_path.write_bytes(predecessor_path.read_bytes() + b" ")
+    retained = tuple(
+        (record.name, record.stat().st_ino, record.read_bytes())
+        for record in sorted(records)
+    )
+    transaction_digest = hashlib.sha256(b"tx-kill-authority-rotation").hexdigest()
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        observed = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        )
+        assert _code(observed) == "config.external_change"
+        assert (
+            tuple(
+                (record.name, record.stat().st_ino, record.read_bytes())
+                for record in sorted(records)
+            )
+            == retained
+        )
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_preparation_authority_discovery_rejects_inconsistent_transitive_chain(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "discover-transitive-conflict"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier="backup",
+        persistent_backup=True,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    backup_path = next(home.glob(".zagrosi-config-tx-*.backup.authority"))
+    backup_raw = backup_path.read_bytes()
+    backup = atomic_file.decode_config_preparation_recovery_descriptor(
+        json.loads(backup_raw)
+    ).unwrap()
+    assert backup.authority_reference is not None
+    assert backup.authority_identity is not None
+    assert len(backup.predecessor_authorities) == 1
+
+    tag = backup.transaction_digest[:24]
+    candidate_reference = f".zagrosi-config-tx-{tag}.candidate"
+    candidate_path = _write_private_test_file(home, candidate_reference, b"")
+    candidate_status = candidate_path.stat(follow_symlinks=False)
+    candidate_identity = (candidate_status.st_dev, candidate_status.st_ino)
+    authority_reference = f"{candidate_reference}.authority"
+    candidate_authority = _write_private_test_file(home, authority_reference, b"")
+    authority_status = candidate_authority.stat(follow_symlinks=False)
+    authority_identity = (authority_status.st_dev, authority_status.st_ino)
+    occupied_identities = {
+        *(identity for _role, _reference, identity in backup.stages),
+        backup.authority_identity,
+        candidate_identity,
+        authority_identity,
+    }
+    fake_snapshot_identity = (0, 0)
+    while fake_snapshot_identity in occupied_identities:
+        fake_snapshot_identity = (0, fake_snapshot_identity[1] + 1)
+    snapshot_reference = backup.predecessor_authorities[0][0]
+    candidate = atomic_file.ConfigPreparationRecoveryDescriptor(
+        transaction_digest=backup.transaction_digest,
+        parent_identity=backup.parent_identity,
+        authority_reference=authority_reference,
+        authority_identity=authority_identity,
+        predecessor_authorities=(
+            (snapshot_reference, fake_snapshot_identity, "0" * 64),
+            (
+                backup.authority_reference,
+                backup.authority_identity,
+                hashlib.sha256(backup_raw).hexdigest(),
+            ),
+        ),
+        stages=(
+            *backup.stages,
+            ("candidate", candidate_reference, candidate_identity),
+        ),
+        _token=atomic_file._PREPARATION_DESCRIPTOR_TOKEN,
+    )
+    candidate_authority.write_bytes(canonical_json_bytes(candidate.to_record()))
+    if os.name != "nt":
+        candidate_authority.chmod(0o600)
+    retained = tuple(
+        (item.name, item.stat().st_ino, item.read_bytes())
+        for item in sorted(home.iterdir())
+        if item.is_file()
+    )
+
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        observed = atomic_file.discover_config_preparation_recovery(
+            proof,
+            backup.transaction_digest,
+        )
+        assert _code(observed) == "config.external_change"
+        assert (
+            tuple(
+                (item.name, item.stat().st_ino, item.read_bytes())
+                for item in sorted(home.iterdir())
+                if item.is_file()
+            )
+            == retained
+        )
+    finally:
+        proof.close()
+        root.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX authority rename boundary")
+def test_preparation_authority_discovery_revalidates_name_after_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "discover-name-swap"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier="snapshot",
+        persistent_backup=False,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    authority_path = next(home.glob(".zagrosi-config-tx-*.authority"))
+    retained = home / "retained-authority"
+    original = atomic_file._recovery_descriptor_bytes
+    swapped = False
+
+    def swap_after_read(descriptor: int) -> bytes:
+        nonlocal swapped
+        raw = original(descriptor)
+        if not swapped:
+            authority_path.rename(retained)
+            _write_private_test_file(home, authority_path.name, raw)
+            swapped = True
+        return raw
+
+    monkeypatch.setattr(
+        atomic_file,
+        "_recovery_descriptor_bytes",
+        swap_after_read,
+    )
+    transaction_digest = hashlib.sha256(b"tx-kill-snapshot").hexdigest()
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        observed = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        )
+        assert _code(observed) == "config.external_change"
+        assert retained.is_file()
+        assert authority_path.is_file()
+        assert retained.read_bytes() == authority_path.read_bytes()
+    finally:
+        proof.close()
+        root.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX nonblocking FIFO contract")
+def test_preparation_authority_discovery_rejects_fifo_without_blocking(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "discover-fifo"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier="snapshot",
+        persistent_backup=False,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    authority_path = next(home.glob(".zagrosi-config-tx-*.authority"))
+    authority_path.unlink()
+    os.mkfifo(authority_path, 0o600)
+    transaction_digest = hashlib.sha256(b"tx-kill-snapshot").hexdigest()
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    started = time.monotonic()
+    try:
+        observed = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        )
+        assert time.monotonic() - started < 1.0
+        assert _code(observed) == "config.external_change"
+        assert stat.S_ISFIFO(authority_path.lstat().st_mode)
+    finally:
+        proof.close()
+        root.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cleanup-name restart boundary")
+def test_preparation_authority_discovery_accepts_exact_cleanup_name(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    workspace = tmp_path / "discover-cleanup-name"
+    workspace.mkdir()
+    completed = _run_fsynced_preparation_death(
+        workspace,
+        barrier="snapshot",
+        persistent_backup=False,
+    )
+    assert completed.returncode == 91, completed.stderr
+    home = workspace / "codex-home"
+    authority_path = next(home.glob(".zagrosi-config-tx-*.authority"))
+    cleanup_path = home / atomic_file._cleanup_reference(authority_path.name)
+    authority_path.rename(cleanup_path)
+    transaction_digest = hashlib.sha256(b"tx-kill-snapshot").hexdigest()
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        descriptor = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        ).unwrap()
+        assert descriptor is not None
+        atomic_file.cleanup_restarted_config_preparation(
+            proof,
+            descriptor,
+        ).unwrap()
+        assert not cleanup_path.exists()
+        assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
+    finally:
+        proof.close()
+        root.close()
+
+
+def test_preparation_authority_discovery_preserves_unbound_fixed_stage(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    home = tmp_path / "unbound-stage" / "codex-home"
+    home.parent.mkdir()
+    _private_directory(home)
+    transaction_digest = hashlib.sha256(b"tx-unbound-stage").hexdigest()
+    tag = transaction_digest[:24]
+    stage = _write_private_test_file(
+        home,
+        f".zagrosi-config-tx-{tag}.snapshot",
+        b"",
+    )
+    retained = (stage.stat().st_ino, stage.read_bytes())
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        observed = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        )
+        assert _code(observed) == "config.external_change"
+        assert (stage.stat().st_ino, stage.read_bytes()) == retained
+    finally:
+        proof.close()
+        root.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows case-folding contract")
+def test_preparation_authority_discovery_preserves_case_variant_unbound_stage(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    home = tmp_path / "case-variant-stage" / "codex-home"
+    _private_directory(home.parent)
+    _private_directory(home)
+    transaction_digest = hashlib.sha256(b"tx-case-variant-stage").hexdigest()
+    tag = transaction_digest[:24]
+    stage = _write_private_test_file(
+        home,
+        f".ZAGROSI-CONFIG-TX-{tag}.SNAPSHOT",
+        b"",
+    )
+    retained = stage.read_bytes()
+    authority = PlatformPathAuthority()
+    root = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    proof = authority.prove_config_path(root).unwrap()
+    try:
+        observed = atomic_file.discover_config_preparation_recovery(
+            proof,
+            transaction_digest,
+        )
+        assert _code(observed) == "config.external_change"
+        assert stage.is_file()
+        assert stage.read_bytes() == retained
+    finally:
+        proof.close()
+        root.close()
+
+
 def test_restarted_preparation_cleanup_prevalidates_every_stage(
     tmp_path: Path,
 ) -> None:

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 import errno
 import hashlib
+import json
 import os
 import stat
 import sys
@@ -1102,6 +1103,310 @@ def _open_preparation_cleanup_name(
 
 def _preparation_authority_reference(transaction_digest: str, role: str) -> str:
     return f"{_PRIVATE_PREFIX}{transaction_digest[:24]}.{role}.authority"
+
+
+def _preparation_recovery_name_exists(parent: int, reference: str) -> bool:
+    descriptor = _open_recovery_name(parent, reference)
+    try:
+        return _descriptor_is_open(descriptor)
+    finally:
+        _close_descriptor(descriptor)
+
+
+def _reject_unbound_preparation_stages(
+    parent: int,
+    transaction_digest: str,
+    recovery: ConfigPreparationRecoveryDescriptor | None,
+) -> None:
+    expected = (
+        frozenset(reference for _role, reference, _identity in recovery.stages)
+        if recovery is not None
+        else frozenset()
+    )
+    for role in ("snapshot", "backup", "candidate"):
+        reference = f"{_PRIVATE_PREFIX}{transaction_digest[:24]}.{role}"
+        if reference in expected:
+            continue
+        if _preparation_recovery_name_exists(
+            parent,
+            reference,
+        ) or _preparation_recovery_name_exists(
+            parent,
+            _cleanup_reference(reference),
+        ):
+            raise _error(
+                "config.external_change",
+                "Config preparation stage has no recovery authority.",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class _DiscoveredPreparationAuthority:
+    reference: str
+    bound_reference: str
+    identity: FileIdentity
+    raw_digest: str
+    recovery: ConfigPreparationRecoveryDescriptor
+
+
+def _preparation_authority_fingerprint(descriptor: int) -> tuple[object, ...]:
+    if os.name == "nt":
+        windows_status = _paths._windows_handle_status(descriptor)
+        return (windows_status.identity, *windows_status.fingerprint)
+    posix_status = os.fstat(descriptor)
+    return (
+        posix_status.st_dev,
+        posix_status.st_ino,
+        posix_status.st_mode,
+        posix_status.st_nlink,
+        posix_status.st_size,
+        posix_status.st_mtime_ns,
+        posix_status.st_ctime_ns,
+    )
+
+
+def _decode_preparation_authority_bytes(
+    raw: bytes,
+) -> ConfigPreparationRecoveryDescriptor:
+    if len(raw) > LIMIT_POLICY.value("json_record_bytes"):
+        raise ValueError("preparation authority record limit")
+
+    def reject_duplicates(
+        pairs: list[tuple[str, object]],
+    ) -> dict[str, object]:
+        decoded: dict[str, object] = {}
+        for key, value in pairs:
+            if key in decoded:
+                raise ValueError("duplicate preparation authority field")
+            decoded[key] = value
+        return decoded
+
+    try:
+        record = json.loads(
+            raw,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+        if type(record) is not dict or raw != canonical_json_bytes(record):
+            raise ValueError("noncanonical preparation authority record")
+        decoded = decode_config_preparation_recovery_descriptor(record)
+        if not decoded.is_ok:
+            raise ValueError("invalid preparation authority record")
+        return decoded.unwrap()
+    except (
+        ForgeError,
+        json.JSONDecodeError,
+        RecursionError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+    ):
+        raise _error(
+            "config.external_change",
+            "Config preparation recovery authority is invalid.",
+        ) from None
+
+
+def _discover_preparation_authority(
+    parent: int,
+    *,
+    parent_identity: FileIdentity,
+    transaction_digest: str,
+    role: str,
+) -> _DiscoveredPreparationAuthority | None:
+    reference = _preparation_authority_reference(transaction_digest, role)
+    cleanup_reference = _cleanup_reference(reference)
+    source = _open_recovery_name(parent, reference)
+    quarantined = _open_recovery_name(parent, cleanup_reference)
+    try:
+        if _descriptor_is_open(source) and _descriptor_is_open(quarantined):
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery authority is ambiguous.",
+            )
+        opened = source if _descriptor_is_open(source) else quarantined
+        if not _descriptor_is_open(opened):
+            return None
+        bound_reference = (
+            reference if _descriptor_is_open(source) else cleanup_reference
+        )
+        identity = _identity_from_descriptor(opened)
+        _require_private_preparation_file(opened, identity)
+        before = _preparation_authority_fingerprint(opened)
+        if not _name_binds(parent, bound_reference, identity):
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery authority moved.",
+            )
+        raw = _recovery_descriptor_bytes(opened)
+        recovery = _decode_preparation_authority_bytes(raw)
+        _require_private_preparation_file(opened, identity)
+        after = _preparation_authority_fingerprint(opened)
+        if (
+            before != after
+            or not _name_binds(parent, bound_reference, identity)
+            or recovery.transaction_digest != transaction_digest
+            or recovery.parent_identity != parent_identity
+            or recovery.authority_reference != reference
+            or recovery.authority_identity != identity
+        ):
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery authority changed.",
+            )
+        return _DiscoveredPreparationAuthority(
+            reference=reference,
+            bound_reference=bound_reference,
+            identity=identity,
+            raw_digest=hashlib.sha256(raw).hexdigest(),
+            recovery=recovery,
+        )
+    finally:
+        _close_descriptor(source)
+        if quarantined != source:
+            _close_descriptor(quarantined)
+
+
+def _validate_discovered_preparation_stages(
+    parent: int,
+    recovery: ConfigPreparationRecoveryDescriptor,
+) -> None:
+    for _role, reference, identity in recovery.stages:
+        assert identity is not None
+        source = _open_recovery_name(parent, reference)
+        cleanup_reference = _cleanup_reference(reference)
+        quarantined = _open_recovery_name(parent, cleanup_reference)
+        try:
+            if _descriptor_is_open(source) and _descriptor_is_open(quarantined):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation recovery stage is ambiguous.",
+                )
+            opened = source if _descriptor_is_open(source) else quarantined
+            if not _descriptor_is_open(opened):
+                continue
+            bound_reference = (
+                reference if _descriptor_is_open(source) else cleanup_reference
+            )
+            _require_private_preparation_file(opened, identity)
+            if not _name_binds(parent, bound_reference, identity):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation recovery stage changed.",
+                )
+        finally:
+            _close_descriptor(source)
+            if quarantined != source:
+                _close_descriptor(quarantined)
+
+
+def discover_config_preparation_recovery(
+    path: ConfigPathProof,
+    transaction_digest: str,
+) -> Result[ConfigPreparationRecoveryDescriptor | None]:
+    """Load fixed-name pre-STAGED recovery authority without changing it."""
+
+    parent = 0 if os.name == "nt" else -1
+    try:
+        if (
+            type(path) is not ConfigPathProof
+            or type(transaction_digest) is not str
+            or not _valid_digest(transaction_digest)
+        ):
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery discovery input is invalid.",
+            )
+        path._require_current()
+        parent = path._duplicate_parent_descriptor()
+        parent_identity = _identity_from_descriptor(parent)
+        if parent_identity != path.parent_identity:
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery parent changed.",
+            )
+        discovered = tuple(
+            authority
+            for role in ("snapshot", "backup", "candidate")
+            if (
+                authority := _discover_preparation_authority(
+                    parent,
+                    parent_identity=parent_identity,
+                    transaction_digest=transaction_digest,
+                    role=role,
+                )
+            )
+            is not None
+        )
+        if not discovered:
+            _reject_unbound_preparation_stages(
+                parent,
+                transaction_digest,
+                None,
+            )
+            path._require_current()
+            return Result.success(None)
+        newest = max(discovered, key=lambda item: len(item.recovery.stages))
+        if (
+            sum(
+                len(item.recovery.stages) == len(newest.recovery.stages)
+                for item in discovered
+            )
+            != 1
+        ):
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery authority is ambiguous.",
+            )
+        predecessors = {
+            reference: (identity, record_digest)
+            for reference, identity, record_digest in (
+                newest.recovery.predecessor_authorities
+            )
+        }
+        for authority in discovered:
+            if authority is newest:
+                continue
+            stage_count = len(authority.recovery.stages)
+            predecessor_count = len(authority.recovery.predecessor_authorities)
+            if (
+                authority.recovery.stages != newest.recovery.stages[:stage_count]
+                or authority.recovery.predecessor_authorities
+                != newest.recovery.predecessor_authorities[:predecessor_count]
+                or predecessors.get(authority.reference)
+                != (
+                    authority.identity,
+                    authority.raw_digest,
+                )
+            ):
+                raise _error(
+                    "config.external_change",
+                    "Config preparation recovery predecessor changed.",
+                )
+        _reject_unbound_preparation_stages(
+            parent,
+            transaction_digest,
+            newest.recovery,
+        )
+        _validate_discovered_preparation_stages(parent, newest.recovery)
+        path._require_current()
+        if _identity_from_descriptor(parent) != parent_identity:
+            raise _error(
+                "config.external_change",
+                "Config preparation recovery parent changed.",
+            )
+        return Result.success(newest.recovery)
+    except ForgeError as exc:
+        return Result.failure(exc)
+    except (AssertionError, OSError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "config.external_change",
+                "Config preparation recovery authority cannot be discovered safely.",
+            )
+        )
+    finally:
+        _close_descriptor(parent)
 
 
 def _require_private_preparation_file(
