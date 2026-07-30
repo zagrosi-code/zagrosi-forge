@@ -1904,6 +1904,89 @@ def test_windows_publication_adapters_order_namespace_before_barrier(
     ]
 
 
+def test_windows_record_retirement_opens_write_capable_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class Status:
+        identity = (17, 19)
+        is_directory = False
+        is_reparse = False
+        link_count = 1
+
+    store = ownership._TransactionStore(
+        control=11,
+        store=12,
+        claims=13,
+        plugins_identity=(17, 18),
+        control_identity=(17, 18),
+        store_identity=(17, 18),
+        claims_identity=(17, 18),
+        windows=True,
+    )
+    bindings = iter((True, False, True))
+    opened: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        ownership,
+        "_private_record_name_binds",
+        lambda *_args, **_kwargs: next(bindings),
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_transaction_name_exists",
+        lambda *_args, **_kwargs: False,
+    )
+
+    def open_child(
+        _parent: int,
+        _component: str,
+        **kwargs: object,
+    ) -> int:
+        opened.append(kwargs)
+        return 23
+
+    monkeypatch.setattr(ownership._paths, "_windows_open_child", open_child)
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_handle_status",
+        lambda _descriptor: Status(),
+    )
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_private_authorization",
+        lambda _descriptor, *, exact: exact,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_durable_windows_file_rename",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_windows_flush_directory_binding",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(ownership._paths, "_windows_close", lambda _descriptor: None)
+
+    ownership._remove_exact_transaction_record(
+        store,
+        ".intent.json",
+        (17, 19),
+        b"canonical-intent",
+    )
+
+    assert opened == [
+        {
+            "directory": False,
+            "read_data": True,
+            "write_data": True,
+            "delete_access": True,
+        }
+    ]
+
+
 def test_windows_directory_flush_converts_failing_ntstatus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

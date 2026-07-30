@@ -2749,6 +2749,7 @@ def _remove_exact_transaction_record(
             component,
             directory=False,
             read_data=True,
+            write_data=True,
             delete_access=True,
         )
         try:
