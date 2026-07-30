@@ -2811,6 +2811,7 @@ def _create_windows_store_record(store: int, raw: bytes) -> None:
     descriptor = _paths._windows_create_private_file(store, _TRANSACTION_STORE_CONTROL)
     try:
         _paths._windows_write(descriptor, raw)
+        _windows_flush(descriptor)
     finally:
         _paths._windows_close(descriptor)
 
@@ -3087,6 +3088,8 @@ def _open_windows_transaction_store(
                     claims_identity=claims_identity,
                 )
                 _create_windows_store_record(staged, raw)
+                _paths._windows_close(claims)
+                claims = 0
                 _windows_flush_directory_binding(
                     control,
                     stage_name,
@@ -3100,6 +3103,23 @@ def _open_windows_transaction_store(
                         store_status.identity,
                     )
                 except FileExistsError:
+                    claims = _paths._windows_open_child(
+                        staged,
+                        _TRANSACTION_CLAIMS_COMPONENT,
+                        directory=True,
+                        read_data=True,
+                        delete_access=True,
+                    )
+                    claims_status = _paths._windows_handle_status(claims)
+                    if (
+                        claims_status.identity != claims_identity
+                        or claims_status.is_reparse
+                        or not _paths._windows_private_directory(claims, exact=True)
+                    ):
+                        raise OSError(
+                            errno.ESTALE,
+                            "losing transaction claims changed",
+                        )
                     record = _open_windows_losing_store_record(
                         control,
                         stage_name,

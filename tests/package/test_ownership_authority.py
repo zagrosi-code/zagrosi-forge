@@ -2457,8 +2457,11 @@ def test_windows_persistent_publication_flushes_intent_then_root_before_anchor(
     import zagrosi_forge.install.ownership as ownership
 
     barriers: list[str] = []
+    claims_handle: int | None = None
     original_file_flush = ownership._windows_flush
     original_directory_flush = ownership._windows_flush_directory
+    original_create_directory = ownership._paths._windows_create_private_directory
+    original_rename = ownership._paths._windows_rename_handle
 
     def record_file_flush(handle: int) -> None:
         barriers.append("file")
@@ -2468,15 +2471,46 @@ def test_windows_persistent_publication_flushes_intent_then_root_before_anchor(
         barriers.append("directory")
         original_directory_flush(handle)
 
+    def capture_created_directory(parent: int, component: str) -> int:
+        nonlocal claims_handle
+        handle = original_create_directory(parent, component)
+        if component == ownership._TRANSACTION_CLAIMS_COMPONENT:
+            claims_handle = handle
+        return handle
+
+    def require_closed_child_before_parent_rename(
+        source: int,
+        parent: int,
+        destination: str,
+    ) -> None:
+        if destination == ownership._TRANSACTION_STORE_COMPONENT:
+            assert claims_handle is not None
+            with pytest.raises(OSError):
+                ownership._paths._windows_handle_status(claims_handle)
+        original_rename(source, parent, destination)
+
     monkeypatch.setattr(ownership, "_windows_flush", record_file_flush)
     monkeypatch.setattr(
         ownership,
         "_windows_flush_directory",
         record_directory_flush,
     )
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_create_private_directory",
+        capture_created_directory,
+    )
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_rename_handle",
+        require_closed_child_before_parent_rename,
+    )
     transaction_id = "tx-e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
     _, owned, _ = _owned(tmp_path)
     store = ownership._open_transaction_store(owned, create=True)
+    assert barriers[0] == "file"
+    assert "directory" in barriers[1:]
+    barriers.clear()
     try:
         ownership._create_windows_persistent_transaction(
             owned,
