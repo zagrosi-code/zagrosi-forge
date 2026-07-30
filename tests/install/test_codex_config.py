@@ -4330,6 +4330,74 @@ def test_preparation_authority_releases_only_after_explicit_acknowledgment(
         assert not any("zagrosi-config-tx" in item.name for item in home.iterdir())
 
 
+def test_preparation_rotation_pins_predecessor_handles_until_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+
+    raw = _fixture("cases/preserve.toml")
+    with _config_context(tmp_path, raw) as (
+        snapshot,
+        identity,
+        source,
+        proof,
+        _home,
+        _root,
+        _authority,
+    ):
+        original_create = atomic_file._create_stage
+        original_close = atomic_file._close_descriptor
+        authority_roles: dict[int, str] = {}
+        authority_descriptors: dict[str, int] = {}
+        closed_before_candidate: list[str] = []
+        closed_after_candidate: list[str] = []
+        candidate_authority_created = False
+
+        def track_create(parent: int, reference: str) -> int:
+            nonlocal candidate_authority_created
+            descriptor = original_create(parent, reference)
+            for role in ("snapshot", "backup", "candidate"):
+                if reference.endswith(f".{role}.authority"):
+                    authority_roles[descriptor] = role
+                    authority_descriptors[role] = descriptor
+                    if role == "candidate":
+                        candidate_authority_created = True
+                    break
+            return descriptor
+
+        def track_close(descriptor: int) -> None:
+            role = authority_roles.get(descriptor)
+            if role is not None:
+                target = (
+                    closed_after_candidate
+                    if candidate_authority_created
+                    else closed_before_candidate
+                )
+                target.append(role)
+            original_close(descriptor)
+
+        monkeypatch.setattr(atomic_file, "_create_stage", track_create)
+        monkeypatch.setattr(atomic_file, "_close_descriptor", track_close)
+        prepared = atomic_file.prepare_atomic_candidate(
+            proof,
+            snapshot,
+            _atomic_inputs(
+                snapshot,
+                identity,
+                source,
+                persistent_backup=True,
+            ),
+            atomic_file.begin_config_transaction("tx-pin-preparation-authority"),
+        ).unwrap()
+        try:
+            assert closed_before_candidate == []
+            assert set(closed_after_candidate) == {"snapshot", "backup"}
+            assert atomic_file._descriptor_is_open(authority_descriptors["candidate"])
+        finally:
+            prepared.close()
+
+
 def test_private_snapshot_exclusive_open_collision_preserves_unknown_file(
     tmp_path: Path,
 ) -> None:

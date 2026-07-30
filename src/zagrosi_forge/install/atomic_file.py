@@ -539,9 +539,6 @@ class ConfigPreparationRecovery:
                     )
                 previous.removed = True
                 self._rebind()
-                _close_descriptor(previous.descriptor)
-                previous.closed = True
-                self._rebind()
             _sync_parent(self._parent_descriptor)
             self._require_valid()
 
@@ -903,7 +900,17 @@ class ConfigPreparationRecovery:
                     "config.external_change",
                     "Config preparation checkpoint transfer is invalid.",
                 )
-            self._authorities = self._authorities[:-1]
+            predecessors = self._authorities[:-1]
+            for predecessor in predecessors:
+                if not predecessor.removed or predecessor.closed:
+                    raise _error(
+                        "config.external_change",
+                        "Config preparation predecessor transfer is invalid.",
+                    )
+                _close_descriptor(predecessor.descriptor)
+                predecessor.closed = True
+                self._rebind()
+            self._authorities = predecessors
             self._rebind(refresh_descriptor=True)
 
     def __repr__(self) -> str:
