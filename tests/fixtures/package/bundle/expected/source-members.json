@@ -361,8 +361,8 @@
   },
   {
     "path": "src/zagrosi_forge/install/ownership.py",
-    "sha256": "d766faffcf7e935a26fab3eea0226e2e8477d62fbfb1977569870c111c262de4",
-    "size": 301756
+    "sha256": "6c1fdc560bfa4286da08d8a3862b3bb68bc08c18ca202701e50bc542d8b90cea",
+    "size": 302979
   },
   {
     "path": "src/zagrosi_forge/install/paths.py",

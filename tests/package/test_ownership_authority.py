@@ -1904,6 +1904,42 @@ def test_windows_publication_adapters_order_namespace_before_barrier(
     ]
 
 
+def test_windows_directory_flush_converts_failing_ntstatus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class FakeFunction:
+        def __init__(self, result: int) -> None:
+            self.result = result
+            self.calls: list[tuple[object, ...]] = []
+            self.argtypes: object = None
+            self.restype: object = None
+
+        def __call__(self, *args: object) -> int:
+            self.calls.append(args)
+            return self.result
+
+    class FakeNtdll:
+        NtFlushBuffersFileEx = FakeFunction(-1073741790)
+        RtlNtStatusToDosError = FakeFunction(5)
+
+    ntdll = FakeNtdll()
+    monkeypatch.setattr(ownership._paths, "_windows_dll", lambda name: ntdll)
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_error",
+        lambda number: OSError(number, "Windows directory flush failed"),
+    )
+
+    with pytest.raises(OSError, match="Windows directory flush failed"):
+        ownership._windows_flush_directory(17)
+
+    assert ntdll.NtFlushBuffersFileEx.calls
+    assert ntdll.NtFlushBuffersFileEx.calls[0][:4] == (17, 0, None, 0)
+    assert ntdll.RtlNtStatusToDosError.calls == [(-1073741790,)]
+
+
 def test_windows_claim_publication_revalidation_is_tristate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2420,33 +2456,39 @@ def test_windows_persistent_publication_flushes_intent_then_root_before_anchor(
 ) -> None:
     import zagrosi_forge.install.ownership as ownership
 
-    directory_barriers: list[bool] = []
-    original_flush = ownership._windows_flush
+    barriers: list[str] = []
+    original_file_flush = ownership._windows_flush
+    original_directory_flush = ownership._windows_flush_directory
 
-    def record_flush(handle: int) -> None:
-        directory_barriers.append(
-            ownership._paths._windows_handle_status(handle).is_directory
-        )
-        original_flush(handle)
+    def record_file_flush(handle: int) -> None:
+        barriers.append("file")
+        original_file_flush(handle)
 
-    monkeypatch.setattr(ownership, "_windows_flush", record_flush)
+    def record_directory_flush(handle: int) -> None:
+        barriers.append("directory")
+        original_directory_flush(handle)
+
+    monkeypatch.setattr(ownership, "_windows_flush", record_file_flush)
+    monkeypatch.setattr(
+        ownership,
+        "_windows_flush_directory",
+        record_directory_flush,
+    )
     _, owned, _, _ = _persistent_transaction(
         tmp_path,
         transaction_id="tx-e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
     )
 
     file_barriers = [
-        index
-        for index, is_directory in enumerate(directory_barriers)
-        if not is_directory
+        index for index, barrier in enumerate(barriers) if barrier == "file"
     ]
     assert len(file_barriers) >= 3
     intent_barrier = file_barriers[0]
     anchor_barrier = file_barriers[-1]
     assert anchor_barrier > intent_barrier
-    assert sum(directory_barriers[intent_barrier + 1 : anchor_barrier]) >= 2
-    assert directory_barriers[anchor_barrier + 1 :]
-    assert all(directory_barriers[anchor_barrier + 1 :])
+    assert barriers[intent_barrier + 1 : anchor_barrier].count("directory") >= 2
+    assert barriers[anchor_barrier + 1 :]
+    assert set(barriers[anchor_barrier + 1 :]) == {"directory"}
     owned.close()
 
 

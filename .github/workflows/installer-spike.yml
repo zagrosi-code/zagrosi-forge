@@ -539,12 +539,12 @@ jobs:
           $Failures = @($Document.SelectNodes("//testcase/failure | //testcase/error"))
           $Skips = @($Document.SelectNodes("//testcase/skipped"))
           $ExpectedSkips = switch ($env:MATRIX_PLATFORM) {
-            "linux-x86_64" { 7 }
-            "windows-x86_64" { 10 }
-            default { 1 }
+            "linux-x86_64" { 13 }
+            "windows-x86_64" { 33 }
+            default { 5 }
           }
-          if ($Cases.Count -ne 179 -or $Failures.Count -ne 0 -or $Skips.Count -ne $ExpectedSkips) {
-            throw "authority hard gate requires 179 cases, zero failures/errors, and $ExpectedSkips platform skips"
+          if ($Cases.Count -ne 180 -or $Failures.Count -ne 0 -or $Skips.Count -ne $ExpectedSkips) {
+            throw "authority hard gate requires 180 cases, zero failures/errors, and $ExpectedSkips platform skips"
           }
 
       - name: Prove Codex cachebuster behavior

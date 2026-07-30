@@ -447,6 +447,47 @@ def _windows_flush(handle: int) -> None:
         raise _paths._windows_error(_paths._windows_last_error())
 
 
+def _windows_flush_directory(handle: int) -> None:
+    """Synchronously flush directory metadata through its native handle."""
+
+    from ctypes import wintypes
+
+    class StatusOrPointer(ctypes.Union):
+        _fields_ = [("status", wintypes.LONG), ("pointer", wintypes.LPVOID)]
+
+    class IoStatusBlock(ctypes.Structure):
+        _anonymous_ = ("result",)
+        _fields_ = [
+            ("result", StatusOrPointer),
+            ("information", ctypes.c_size_t),
+        ]
+
+    io_status = IoStatusBlock()
+    ntdll = _paths._windows_dll("ntdll")
+    ntdll.NtFlushBuffersFileEx.argtypes = [
+        wintypes.HANDLE,
+        wintypes.ULONG,
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.POINTER(IoStatusBlock),
+    ]
+    ntdll.NtFlushBuffersFileEx.restype = wintypes.LONG
+    result = int(
+        ntdll.NtFlushBuffersFileEx(
+            handle,
+            0,
+            None,
+            0,
+            ctypes.byref(io_status),
+        )
+    )
+    if result < 0:
+        ntdll.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
+        ntdll.RtlNtStatusToDosError.restype = wintypes.ULONG
+        number = int(ntdll.RtlNtStatusToDosError(result))
+        raise _paths._windows_error(number)
+
+
 def _windows_flush_directory_binding(
     parent: int,
     component: str,
@@ -469,7 +510,7 @@ def _windows_flush_directory_binding(
             or not _paths._windows_private_directory(handle, exact=True)
         ):
             raise OSError(errno.ESTALE, "Windows durability binding changed")
-        _windows_flush(handle)
+        _windows_flush_directory(handle)
         after = _paths._windows_handle_status(handle)
         if (
             after.identity != before.identity
