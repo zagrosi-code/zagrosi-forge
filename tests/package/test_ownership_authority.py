@@ -3097,25 +3097,37 @@ def test_transaction_journal_access_revalidates_exact_anchor(
 
 @pytest.mark.parametrize("drift", ("transaction", "store"))
 def test_transaction_journal_access_revalidates_exact_namespace(
-    tmp_path: Path, drift: str
+    tmp_path: Path,
+    drift: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import zagrosi_forge.install.ownership as ownership
     from zagrosi_forge.install.contracts import ForgeError
-    from zagrosi_forge.install.ownership import open_transaction_journal_access
 
     transaction_id = "tx-dddddddddddddddddddddddddddddddd"
     _, owned, root, created = _persistent_transaction(
         tmp_path, transaction_id=transaction_id
     )
-    access = open_transaction_journal_access(owned, created).unwrap()
+    access = ownership.open_transaction_journal_access(owned, created).unwrap()
     if drift == "transaction":
         selected = root / created.binding.root_relative
     else:
         selected = root / ".zagrosi/transactions"
     displaced = selected.with_name(f"{selected.name}-displaced")
-    selected.rename(displaced)
-    _private_test_directory(selected)
 
     try:
+        if os.name == "nt" and drift == "store":
+            with pytest.raises(PermissionError) as blocked:
+                selected.rename(displaced)
+            assert blocked.value.winerror == 5
+            monkeypatch.setattr(
+                ownership,
+                "_transaction_store_namespace_is_valid",
+                lambda _store: False,
+            )
+        else:
+            selected.rename(displaced)
+            _private_test_directory(selected)
         with pytest.raises(ForgeError) as caught:
             access._require_journal_access(write=False)
         assert caught.value.code == "ownership.identity_mismatch"

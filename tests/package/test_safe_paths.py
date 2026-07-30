@@ -770,8 +770,8 @@ def test_preexisting_unclaimed_transaction_store_is_preserved(tmp_path: Path) ->
 def test_concurrent_persistent_transaction_store_loser_authenticates_winner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import zagrosi_forge.install.ownership as ownership
     import zagrosi_forge.install.paths as paths
-    from zagrosi_forge.install.ownership import create_persistent_transaction_root
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
     codex_home = tmp_path / "codex-home"
@@ -809,7 +809,17 @@ def test_concurrent_persistent_transaction_store_loser_authenticates_winner(
     )
 
     def create(transaction_id: str):
-        return create_persistent_transaction_root(
+        if os.name == "nt":
+            store = ownership._open_windows_transaction_store(owned, create=True)
+            try:
+                return ownership._create_windows_persistent_transaction(
+                    owned,
+                    store,
+                    transaction_id=transaction_id,
+                )
+            finally:
+                store.close()
+        return ownership.create_persistent_transaction_root(
             owned, transaction_id=transaction_id
         ).unwrap()
 
