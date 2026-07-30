@@ -782,15 +782,35 @@ def test_concurrent_persistent_transaction_store_loser_authenticates_winner(
         .unwrap()
     )
     publication = Barrier(2)
+    loser_stage_reopened = False
     if os.name == "nt":
         original_rename = paths._windows_rename_handle
+        original_open_child = paths._windows_open_child
 
         def synchronized_rename(source: int, parent: int, destination: str) -> None:
             if destination == "transactions":
                 publication.wait(timeout=5)
             original_rename(source, parent, destination)
 
+        def observe_loser_stage_reopen(
+            parent: int,
+            component: str,
+            **kwargs: object,
+        ) -> int:
+            nonlocal loser_stage_reopened
+            descriptor = original_open_child(parent, component, **kwargs)
+            if (
+                component.startswith(".transactions-")
+                and kwargs.get("directory") is True
+                and kwargs.get("read_data") is True
+                and kwargs.get("delete_access") is True
+                and kwargs.get("create", False) is False
+            ):
+                loser_stage_reopened = True
+            return descriptor
+
         monkeypatch.setattr(paths, "_windows_rename_handle", synchronized_rename)
+        monkeypatch.setattr(paths, "_windows_open_child", observe_loser_stage_reopen)
     else:
         original_posix_rename = paths._exclusive_posix_rename
 
@@ -833,6 +853,8 @@ def test_concurrent_persistent_transaction_store_loser_authenticates_winner(
             (codex_home / "plugins" / created.binding.root_relative).is_dir()
             for created in (first, second)
         )
+        if os.name == "nt":
+            assert loser_stage_reopened
         assert not tuple((codex_home / "plugins/.zagrosi").glob(".transactions-*.tmp"))
     finally:
         owned.close()

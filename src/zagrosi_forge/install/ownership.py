@@ -3104,6 +3104,32 @@ def _open_windows_transaction_store(
                         store_status.identity,
                     )
                 except FileExistsError:
+                    reopened_staged = _paths._windows_open_child(
+                        control,
+                        stage_name,
+                        directory=True,
+                        read_data=True,
+                        delete_access=True,
+                    )
+                    try:
+                        reopened_status = _paths._windows_handle_status(reopened_staged)
+                        if (
+                            reopened_status.identity != store_status.identity
+                            or reopened_status.is_reparse
+                            or not _paths._windows_private_directory(
+                                reopened_staged,
+                                exact=True,
+                            )
+                        ):
+                            raise OSError(
+                                errno.ESTALE,
+                                "losing transaction store changed",
+                            )
+                        _paths._windows_close(staged)
+                    except BaseException:
+                        _paths._windows_close(reopened_staged)
+                        raise
+                    staged = reopened_staged
                     claims = _paths._windows_open_child(
                         staged,
                         _TRANSACTION_CLAIMS_COMPONENT,
