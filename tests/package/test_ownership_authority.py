@@ -2474,10 +2474,17 @@ def test_windows_persistent_publication_flushes_intent_then_root_before_anchor(
         "_windows_flush_directory",
         record_directory_flush,
     )
-    _, owned, _, _ = _persistent_transaction(
-        tmp_path,
-        transaction_id="tx-e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
-    )
+    transaction_id = "tx-e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    _, owned, _ = _owned(tmp_path)
+    store = ownership._open_transaction_store(owned, create=True)
+    try:
+        ownership._create_windows_persistent_transaction(
+            owned,
+            store,
+            transaction_id=transaction_id,
+        )
+    finally:
+        store.close()
 
     file_barriers = [
         index for index, barrier in enumerate(barriers) if barrier == "file"
