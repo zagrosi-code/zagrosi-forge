@@ -1607,6 +1607,35 @@ def test_rollback_actions_are_identity_bound_and_unique_per_target(
         owned.close()
 
 
+def test_prepared_requires_identity_bound_transaction_root_rollback(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import RollbackAction
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        snapshot = next(
+            path
+            for path in prepared.transaction_owned_paths
+            if path.role == "config-snapshot"
+        )
+        retain_only = RollbackAction(
+            action="retain",
+            relative_path=snapshot.relative_path,
+            expected_identity=snapshot.expected_identity,
+        )
+
+        with pytest.raises(ValueError, match="persistent transaction rollback"):
+            replace(prepared, rollback_actions=(retain_only,))
+
+        assert not tuple(directory.glob("journal*"))
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
 @pytest.mark.parametrize(
     "corruption", ["future", "minimum-reader", "truncated", "duplicate"]
 )
@@ -2451,6 +2480,49 @@ def test_recovery_plan_rejects_digest_equivalent_nested_action_type(
         finally:
             object.__setattr__(action, "action", original)
         plan._require_valid()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_plan_rejects_missing_transaction_root_rollback_authority(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import RollbackAction
+    import zagrosi_forge.install.recovery as recovery
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        plan = recovery.plan_recovery(
+            recovery.RecoverySnapshot(
+                journals=(store.load(),),
+                current_config=prepared.before_config,
+            )
+        )
+        original = plan.rollback_actions
+        snapshot = next(
+            path
+            for path in prepared.transaction_owned_paths
+            if path.role == "config-snapshot"
+        )
+        retain_only = RollbackAction(
+            action="retain",
+            relative_path=snapshot.relative_path,
+            expected_identity=snapshot.expected_identity,
+        )
+        with pytest.raises(TypeError, match="RecoveryPlan"):
+            recovery.RecoveryPlan(
+                snapshot_digest=plan.snapshot_digest,
+                disposition=plan.disposition,
+                transaction_ids=plan.transaction_ids,
+                rollback_actions=(retain_only,),
+                error_code=plan.error_code,
+                _token=recovery._PLAN_TOKEN,
+            )
+        assert original == prepared.rollback_actions
     finally:
         store.close()
         proof.close()

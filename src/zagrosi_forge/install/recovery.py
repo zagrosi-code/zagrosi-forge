@@ -285,6 +285,34 @@ def _valid_rollback_captures(value: object) -> bool:
     return len(collision_keys) == len(set(collision_keys))
 
 
+def _captured_root_rollback_is_exact(
+    actions: tuple[_RollbackCapture, ...],
+    *,
+    transaction_id: str,
+) -> bool:
+    reference = f".zagrosi/transactions/{transaction_id}"
+    roots = tuple(action for action in actions if action.relative_path == reference)
+    return (
+        len(roots) == 1
+        and roots[0].action == "quarantine-if-owned"
+        and roots[0].expected_identity is not None
+    )
+
+
+def _planned_root_rollback_is_exact(
+    actions: tuple[RollbackAction, ...],
+    *,
+    transaction_id: str,
+) -> bool:
+    reference = f".zagrosi/transactions/{transaction_id}"
+    roots = tuple(action for action in actions if action.relative_path == reference)
+    return (
+        len(roots) == 1
+        and roots[0].action == "quarantine-if-owned"
+        and roots[0].expected_identity is not None
+    )
+
+
 def _portable_collision_key(value: str) -> str:
     return "/".join(
         unicodedata.normalize("NFKC", component).casefold()
@@ -310,6 +338,10 @@ def _valid_journal_capture(value: object) -> bool:
         and value.before_config.target_metadata_digest is None
         and value.candidate_config.target_metadata_digest is not None
         and _valid_rollback_captures(value.rollback_actions)
+        and _captured_root_rollback_is_exact(
+            value.rollback_actions,
+            transaction_id=value.transaction_id,
+        )
     )
 
 
@@ -526,7 +558,13 @@ def _valid_plan_fields(
         return not transaction_ids and not rollback_actions and error_code is None
     if disposition is RecoveryDisposition.ROLLBACK_CANDIDATE:
         return (
-            len(transaction_ids) == 1 and bool(rollback_actions) and error_code is None
+            len(transaction_ids) == 1
+            and bool(rollback_actions)
+            and _planned_root_rollback_is_exact(
+                rollback_actions,
+                transaction_id=transaction_ids[0],
+            )
+            and error_code is None
         )
     return (
         disposition is RecoveryDisposition.OPERATOR_CONFLICT

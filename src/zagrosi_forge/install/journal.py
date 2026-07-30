@@ -407,8 +407,17 @@ class PreparedTransaction:
             and item.relative_path == expected_root
             and item.expected_identity is not None
         )
+        root_rollbacks = tuple(
+            item for item in rollback if item.relative_path == expected_root
+        )
         if len(roots) != 1 or len(owned_roots) != 1:
             raise ValueError("persistent transaction root")
+        if (
+            len(root_rollbacks) != 1
+            or root_rollbacks[0].action != "quarantine-if-owned"
+            or root_rollbacks[0].expected_identity != owned_roots[0].expected_identity
+        ):
+            raise ValueError("persistent transaction rollback")
         if (
             roots[0].leaf_identity != owned_roots[0].expected_identity
             or not isinstance(self.prepared_receipt, Mapping)
