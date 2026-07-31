@@ -602,6 +602,258 @@ def test_committed_receipt_is_immutable(
     owned.close()
 
 
+def test_matching_receipt_retry_reestablishes_namespace_durability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, root = _owned(tmp_path)
+    identity = _install_identity()
+    raw = _record_bytes(
+        _receipt(
+            identity,
+            relative=_source_relative(identity),
+            manifest="9" * 64,
+        )
+    )
+    reference = ownership.committed_receipt_reference("zagrosi", identity)
+    receipt_path = root / reference.value
+    renamed = False
+    try:
+        with monkeypatch.context() as context:
+            if os.name == "nt":
+                original_rename = ownership._windows_rename_handle
+
+                def rename_then_mark(
+                    handle: int,
+                    parent: int,
+                    leaf: str,
+                ) -> None:
+                    nonlocal renamed
+                    original_rename(handle, parent, leaf)
+                    renamed = True
+
+                context.setattr(
+                    ownership,
+                    "_windows_rename_handle",
+                    rename_then_mark,
+                )
+                original_flush_directory = ownership._windows_flush_directory
+
+                def fail_post_rename_directory_flush(handle: int) -> None:
+                    if renamed:
+                        raise OSError("injected receipt namespace flush failure")
+                    original_flush_directory(handle)
+
+                context.setattr(
+                    ownership,
+                    "_windows_flush_directory",
+                    fail_post_rename_directory_flush,
+                )
+            else:
+                original_rename = ownership._exclusive_rename
+
+                def rename_then_mark(
+                    parent: int,
+                    source: str,
+                    leaf: str,
+                ) -> None:
+                    nonlocal renamed
+                    original_rename(parent, source, leaf)
+                    renamed = True
+
+                context.setattr(
+                    ownership,
+                    "_exclusive_rename",
+                    rename_then_mark,
+                )
+                original_fsync = ownership.os.fsync
+
+                def fail_post_rename_directory_fsync(descriptor: int) -> None:
+                    if renamed:
+                        raise OSError("injected receipt namespace fsync failure")
+                    original_fsync(descriptor)
+
+                context.setattr(
+                    ownership.os,
+                    "fsync",
+                    fail_post_rename_directory_fsync,
+                )
+
+            first = ownership.publish_committed_receipt(owned, raw=raw)
+
+        assert not first.is_ok
+        assert renamed
+        assert receipt_path.read_bytes() == raw
+
+        durability_calls = 0
+        with monkeypatch.context() as context:
+            if os.name == "nt":
+                original_flush_directory = ownership._windows_flush_directory
+
+                def count_directory_flush(handle: int) -> None:
+                    nonlocal durability_calls
+                    durability_calls += 1
+                    original_flush_directory(handle)
+
+                context.setattr(
+                    ownership,
+                    "_windows_flush_directory",
+                    count_directory_flush,
+                )
+            else:
+                original_fsync = ownership.os.fsync
+
+                def count_directory_fsync(descriptor: int) -> None:
+                    nonlocal durability_calls
+                    durability_calls += 1
+                    original_fsync(descriptor)
+
+                context.setattr(
+                    ownership.os,
+                    "fsync",
+                    count_directory_fsync,
+                )
+
+            retried = ownership.publish_committed_receipt(owned, raw=raw).unwrap()
+
+        assert not retried.created
+        assert durability_calls >= 1
+        assert receipt_path.read_bytes() == raw
+    finally:
+        owned.close()
+
+
+@pytest.mark.parametrize("preexisting", (False, True))
+def test_receipt_publication_rejects_in_place_mutation_during_directory_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preexisting: bool,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, root = _owned(tmp_path)
+    identity = _install_identity()
+    raw = _record_bytes(
+        _receipt(
+            identity,
+            relative=_source_relative(identity),
+            manifest="9" * 64,
+        )
+    )
+    reference = ownership.committed_receipt_reference("zagrosi", identity)
+    receipt_path = root / reference.value
+    mutated_raw = b"[" + raw[1:]
+    mutation_identity: tuple[int, int] | None = None
+    try:
+        if preexisting:
+            ownership.publish_committed_receipt(owned, raw=raw).unwrap()
+
+        with monkeypatch.context() as context:
+            if os.name == "nt":
+                original_flush_directory = ownership._windows_flush_directory
+
+                def flush_then_mutate(handle: int) -> None:
+                    nonlocal mutation_identity
+                    original_flush_directory(handle)
+                    if receipt_path.exists() and mutation_identity is None:
+                        before = receipt_path.stat()
+                        receipt_path.write_bytes(mutated_raw)
+                        after = receipt_path.stat()
+                        assert (after.st_dev, after.st_ino) == (
+                            before.st_dev,
+                            before.st_ino,
+                        )
+                        mutation_identity = (after.st_dev, after.st_ino)
+
+                context.setattr(
+                    ownership,
+                    "_windows_flush_directory",
+                    flush_then_mutate,
+                )
+            else:
+                original_fsync = ownership.os.fsync
+
+                def fsync_then_mutate(descriptor: int) -> None:
+                    nonlocal mutation_identity
+                    original_fsync(descriptor)
+                    if receipt_path.exists() and mutation_identity is None:
+                        before = receipt_path.stat()
+                        receipt_path.write_bytes(mutated_raw)
+                        after = receipt_path.stat()
+                        assert (after.st_dev, after.st_ino) == (
+                            before.st_dev,
+                            before.st_ino,
+                        )
+                        mutation_identity = (after.st_dev, after.st_ino)
+
+                context.setattr(ownership.os, "fsync", fsync_then_mutate)
+
+            publication = ownership.publish_committed_receipt(owned, raw=raw)
+
+        assert _code(publication) == "ownership.receipt_conflict"
+        assert mutation_identity is not None
+        assert receipt_path.read_bytes() == mutated_raw
+        status = receipt_path.stat()
+        assert (status.st_dev, status.st_ino) == mutation_identity
+    finally:
+        owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX close-failure injection")
+def test_posix_receipt_publication_close_failure_attempts_every_native_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, _ = _owned(tmp_path)
+    identity = _install_identity()
+    raw = _record_bytes(
+        _receipt(
+            identity,
+            relative=_source_relative(identity),
+            manifest="9" * 64,
+        )
+    )
+    original_binding_state = ownership._receipt_binding_state
+    original_close = ownership.os.close
+    armed = False
+    close_attempts: list[int] = []
+
+    def binding_then_arm(*args: Any, **kwargs: Any) -> Any:
+        nonlocal armed
+        binding = original_binding_state(*args, **kwargs)
+        armed = True
+        return binding
+
+    def close_and_fail_first(descriptor: int) -> None:
+        if not armed:
+            original_close(descriptor)
+            return
+        close_attempts.append(descriptor)
+        original_close(descriptor)
+        if len(close_attempts) == 1:
+            raise OSError("injected receipt close failure")
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_receipt_binding_state",
+                binding_then_arm,
+            )
+            context.setattr(ownership.os, "close", close_and_fail_first)
+
+            publication = ownership.publish_committed_receipt(owned, raw=raw)
+
+            assert _code(publication) == "ownership.receipt_invalid"
+            assert len(close_attempts) == 3
+    finally:
+        owned.close()
+
+
 def test_committed_receipt_rejects_mutated_internal_reference(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

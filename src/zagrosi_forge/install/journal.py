@@ -2533,7 +2533,7 @@ class JournalStore:
             self._access.location is _ownership.TransactionLocation.QUARANTINED
             and self._access.journal_relative
             != cast(str, self._binding["root_relative"])
-            and root_intent_observed
+            and (root_intent_observed or records[-1].state is JournalState.FINALIZED)
         )
 
     def _read_records(
@@ -2946,14 +2946,30 @@ class JournalStore:
     def close(self) -> None:
         if self._closed:
             return
-        if self._writer is not None:
-            self._writer.close()
-        if os.name == "nt":
-            _paths._windows_close(self._descriptor)
-        else:
-            os.close(self._descriptor)
-        self._access.close()
         self._closed = True
+        first_failure: BaseException | None = None
+
+        def close_descriptor() -> None:
+            if os.name == "nt":
+                _paths._windows_close(self._descriptor)
+            else:
+                os.close(self._descriptor)
+
+        callbacks = (
+            self._writer.close if self._writer is not None else None,
+            close_descriptor,
+            self._access.close,
+        )
+        for callback in callbacks:
+            if callback is None:
+                continue
+            try:
+                callback()
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            raise first_failure
 
     def __enter__(self) -> JournalStore:
         return self

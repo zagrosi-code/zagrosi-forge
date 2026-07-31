@@ -37,7 +37,7 @@ from .paths import OpenedRegularFile, OwnedRoot, PathProof, SafeRelativePath
 from .policies import LIMIT_POLICY
 
 if TYPE_CHECKING:
-    from .journal import JournalPathIdentity, LoadedJournal
+    from .journal import JournalConfigIdentity, JournalPathIdentity, LoadedJournal
 
 
 RECEIPT_SCHEMA_DIGEST = (
@@ -109,8 +109,11 @@ _TRANSACTION_CREATE_INTENT_SCHEMA_DIGEST = (
 _TRANSACTION_CLEANUP_SCHEMA_DIGEST = (
     "348e089f2bc194332ea8e2189a1847efa01502293b497688e9759ccc0c8d1664"
 )
-_TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST = (
+_TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST_V1_0 = (
     "fd94ea12fe57a94b1c3372b79446e344b58956e0deccf2886cc51b9be7a6d1fc"
+)
+_TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST_V1_1 = (
+    "33414d9023d9c259335364ffca051102b7b3be879567cb781c47374541788a5d"
 )
 _ZERO_DIGEST = "0" * 64
 _PERSISTENT_BINDING_TOKEN = object()
@@ -205,6 +208,20 @@ def _close_all_native_descriptors(*descriptors: int) -> None:
             continue
         try:
             _close_native(descriptor)
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+    if first_failure is not None:
+        raise first_failure
+
+
+def _close_all_resources(*callbacks: Callable[[], None] | None) -> None:
+    first_failure: BaseException | None = None
+    for callback in callbacks:
+        if callback is None:
+            continue
+        try:
+            callback()
         except BaseException as exc:
             if first_failure is None:
                 first_failure = exc
@@ -1475,8 +1492,11 @@ class RecoveryCleanupAuthorization:
     journal_evidence_digest: str
     journal_head_sequence: int
     journal_head_record_digest: str
+    journal_head_state: str
     transaction_binding_digest: str
     delete_component: str
+    finalization_evidence: _RecoveryCleanupFinalizationEvidence | None
+    finalization_evidence_digest: str | None
     authorization_digest: str
     _component: str
     _identity: tuple[int, int]
@@ -1493,8 +1513,11 @@ class RecoveryCleanupAuthorization:
         journal_evidence_digest: str,
         journal_head_sequence: int,
         journal_head_record_digest: str,
+        journal_head_state: str,
         transaction_binding_digest: str,
         delete_component: str,
+        finalization_evidence: _RecoveryCleanupFinalizationEvidence | None,
+        finalization_evidence_digest: str | None,
         authorization_digest: str,
         _component: str,
         _identity: tuple[int, int],
@@ -1516,12 +1539,19 @@ class RecoveryCleanupAuthorization:
             "journal_head_record_digest",
             journal_head_record_digest,
         )
+        object.__setattr__(self, "journal_head_state", journal_head_state)
         object.__setattr__(
             self,
             "transaction_binding_digest",
             transaction_binding_digest,
         )
         object.__setattr__(self, "delete_component", delete_component)
+        object.__setattr__(self, "finalization_evidence", finalization_evidence)
+        object.__setattr__(
+            self,
+            "finalization_evidence_digest",
+            finalization_evidence_digest,
+        )
         object.__setattr__(self, "authorization_digest", authorization_digest)
         object.__setattr__(self, "_component", _component)
         object.__setattr__(self, "_identity", _identity)
@@ -1684,7 +1714,12 @@ def _recovery_finalization_capture_invariants(
         type(capture) is not _RecoveryFinalizationCapture
         or _PERSISTENT_TRANSACTION.fullmatch(capture.transaction_id) is None
         or capture.journal_state
-        not in {"COMMIT_INTENT", "CONFIG_COMMITTED", "RECEIPT_COMMITTED"}
+        not in {
+            "COMMIT_INTENT",
+            "CONFIG_COMMITTED",
+            "RECEIPT_COMMITTED",
+            "FINALIZED",
+        }
         or _DIGEST.fullmatch(capture.journal_access_digest) is None
         or _DIGEST.fullmatch(capture.journal_evidence_digest) is None
         or type(capture.journal_head_sequence) is not int
@@ -1701,6 +1736,14 @@ def _recovery_finalization_capture_invariants(
         or capture.receipt_existing_depth < 0
         or not _file_identity_invariants(capture.receipt_ancestor_identity)
         or _DIGEST.fullmatch(capture.prepared_receipt_digest) is None
+        or (
+            capture.journal_state == "COMMIT_INTENT"
+            and capture.receipt_status != "absent"
+        )
+        or (
+            capture.journal_state in {"RECEIPT_COMMITTED", "FINALIZED"}
+            and capture.receipt_status != "matching"
+        )
     ):
         return False
     components = capture.receipt_relative.split("/")
@@ -1766,6 +1809,75 @@ def _recovery_finalization_observation_digest(
 ) -> str:
     return hashlib.sha256(
         canonical_json_bytes(_recovery_finalization_projection(capture))
+    ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryCleanupFinalizationEvidence:
+    config: JournalConfigIdentity
+    finalization: _RecoveryFinalizationCapture
+
+
+def _recovery_config_projection(value: JournalConfigIdentity) -> dict[str, object]:
+    return {
+        "byte_digest": value.byte_digest,
+        "leaf_identity": value.leaf_identity,
+        "metadata_fingerprint": value.metadata_fingerprint,
+        "parent_identity": value.parent_identity,
+        "semantic_digest": value.semantic_digest,
+        "snapshot_digest": value.snapshot_digest,
+        "target_metadata_digest": value.target_metadata_digest,
+    }
+
+
+def _recovery_cleanup_finalization_projection(
+    evidence: _RecoveryCleanupFinalizationEvidence,
+) -> dict[str, object]:
+    return {
+        "config": _recovery_config_projection(evidence.config),
+        "finalization": _recovery_finalization_projection(evidence.finalization),
+        "record_kind": "persistent-transaction-recovery-cleanup-finalization",
+        "transaction_id": evidence.finalization.transaction_id,
+    }
+
+
+def _recovery_cleanup_finalization_invariants(
+    evidence: object,
+    *,
+    transaction_id: str,
+    journal_access_digest: str,
+    journal_evidence_digest: str,
+    journal_head_sequence: int,
+    journal_head_record_digest: str,
+) -> bool:
+    from .journal import JournalConfigIdentity as RuntimeJournalConfigIdentity
+
+    if (
+        type(evidence) is not _RecoveryCleanupFinalizationEvidence
+        or type(evidence.config) is not RuntimeJournalConfigIdentity
+        or not _recovery_finalization_capture_invariants(evidence.finalization)
+    ):
+        return False
+    try:
+        evidence.config.__post_init__()
+    except (AttributeError, TypeError, ValueError):
+        return False
+    capture = evidence.finalization
+    return (
+        capture.transaction_id == transaction_id
+        and capture.journal_state == "FINALIZED"
+        and capture.journal_access_digest == journal_access_digest
+        and capture.journal_evidence_digest == journal_evidence_digest
+        and capture.journal_head_sequence == journal_head_sequence
+        and capture.journal_head_record_digest == journal_head_record_digest
+    )
+
+
+def _recovery_cleanup_finalization_digest(
+    evidence: _RecoveryCleanupFinalizationEvidence,
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(_recovery_cleanup_finalization_projection(evidence))
     ).hexdigest()
 
 
@@ -2142,14 +2254,17 @@ class OwnershipProof:
 
     def close(self) -> None:
         with self._lock:
-            if not self._closed:
-                _close_native(self._root)
-                namespace = self._namespace
-                if namespace is not None:
-                    namespace.close()
-                object.__setattr__(self, "_root", -1)
-                object.__setattr__(self, "_namespace", None)
-                object.__setattr__(self, "_closed", True)
+            if self._closed:
+                return
+            descriptor = self._root
+            namespace = self._namespace
+            object.__setattr__(self, "_root", -1)
+            object.__setattr__(self, "_namespace", None)
+            object.__setattr__(self, "_closed", True)
+            _close_all_resources(
+                lambda: _close_native(descriptor),
+                namespace.close if namespace is not None else None,
+            )
 
     def __setattr__(self, _name: str, _value: object) -> Never:
         raise AttributeError("ownership proofs are read-only")
@@ -2249,14 +2364,17 @@ class QuarantineTicket:
 
     def close(self) -> None:
         with self._lock:
-            if not self._closed:
-                _close_native(self._root)
-                namespace = self._namespace
-                if namespace is not None:
-                    namespace.close()
-                object.__setattr__(self, "_root", -1)
-                object.__setattr__(self, "_namespace", None)
-                object.__setattr__(self, "_closed", True)
+            if self._closed:
+                return
+            descriptor = self._root
+            namespace = self._namespace
+            object.__setattr__(self, "_root", -1)
+            object.__setattr__(self, "_namespace", None)
+            object.__setattr__(self, "_closed", True)
+            _close_all_resources(
+                lambda: _close_native(descriptor),
+                namespace.close if namespace is not None else None,
+            )
 
     def __setattr__(self, _name: str, _value: object) -> Never:
         raise AttributeError("quarantine tickets are read-only")
@@ -2351,11 +2469,17 @@ class _TransactionStore:
     def close(self) -> None:
         close = _paths._windows_close if self.windows else os.close
         empty = 0 if self.windows else -1
-        for name in ("claims", "store", "control"):
-            descriptor = cast(int, getattr(self, name))
-            if descriptor != empty:
-                close(descriptor)
-                setattr(self, name, empty)
+        descriptors = (self.claims, self.store, self.control)
+        self.claims = empty
+        self.store = empty
+        self.control = empty
+        _close_all_resources(
+            *(
+                (lambda selected=descriptor: close(selected))
+                for descriptor in descriptors
+                if descriptor != empty
+            )
+        )
 
 
 def _transaction_store_namespace_is_valid(store: _TransactionStore) -> bool:
@@ -2903,6 +3027,14 @@ def _recovery_cleanup_access_digest(
     )
 
 
+def _recovery_cleanup_schema_contract(journal_head_state: str) -> tuple[str, str]:
+    if journal_head_state == "ROLLED_BACK":
+        return "1.0", _TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST_V1_0
+    if journal_head_state == "FINALIZED":
+        return "1.1", _TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST_V1_1
+    raise ValueError("recovery cleanup schema")
+
+
 def _recovery_cleanup_record_bytes(
     binding: PersistentTransactionBinding,
     *,
@@ -2912,8 +3044,11 @@ def _recovery_cleanup_record_bytes(
     journal_evidence_digest: str,
     journal_head_sequence: int,
     journal_head_record_digest: str,
+    journal_head_state: str,
     transaction_binding_digest: str,
     delete_component: str,
+    finalization_evidence: _RecoveryCleanupFinalizationEvidence | None,
+    finalization_evidence_digest: str | None,
     phase: _RecoveryCleanupPhase,
     previous_phase_digest: str,
 ) -> bytes:
@@ -2932,8 +3067,37 @@ def _recovery_cleanup_record_bytes(
         or type(journal_head_sequence) is not int
         or journal_head_sequence < 0
         or _DIGEST.fullmatch(journal_head_record_digest) is None
+        or journal_head_state not in {"FINALIZED", "ROLLED_BACK"}
         or transaction_binding_digest != binding_digest
         or _TRANSACTION_DELETE.fullmatch(delete_component) is None
+        or (
+            journal_head_state == "ROLLED_BACK"
+            and (
+                finalization_evidence is not None
+                or finalization_evidence_digest is not None
+            )
+        )
+        or (
+            journal_head_state == "FINALIZED"
+            and (
+                not _recovery_cleanup_finalization_invariants(
+                    finalization_evidence,
+                    transaction_id=binding.transaction_id,
+                    journal_access_digest=journal_access_digest,
+                    journal_evidence_digest=journal_evidence_digest,
+                    journal_head_sequence=journal_head_sequence,
+                    journal_head_record_digest=journal_head_record_digest,
+                )
+                or type(finalization_evidence_digest) is not str
+                or finalization_evidence_digest
+                != _recovery_cleanup_finalization_digest(
+                    cast(
+                        _RecoveryCleanupFinalizationEvidence,
+                        finalization_evidence,
+                    )
+                )
+            )
+        )
         or type(phase) is not _RecoveryCleanupPhase
         or _DIGEST.fullmatch(previous_phase_digest) is None
         or (
@@ -2946,6 +3110,9 @@ def _recovery_cleanup_record_bytes(
         )
     ):
         raise ValueError("recovery cleanup record")
+    schema_version, schema_digest = _recovery_cleanup_schema_contract(
+        journal_head_state
+    )
     body: dict[str, object] = {
         "authority": "zagrosi-forge-transaction-authority-v1",
         "binding": binding.canonical_projection(),
@@ -2955,7 +3122,7 @@ def _recovery_cleanup_record_bytes(
         "journal_evidence_digest": journal_evidence_digest,
         "journal_head_record_digest": journal_head_record_digest,
         "journal_head_sequence": journal_head_sequence,
-        "journal_head_state": "ROLLED_BACK",
+        "journal_head_state": journal_head_state,
         "journal_location": location.value,
         "journal_relative": journal_relative,
         "minimum_reader_version": _WRITER_VERSION,
@@ -2964,12 +3131,21 @@ def _recovery_cleanup_record_bytes(
         "record_kind": "persistent-transaction-recovery-cleanup",
         "recovery_cleanup_phase": phase.value,
         "root_identity": binding.transaction_identity,
-        "schema_digest": _TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST,
-        "schema_version": "1.0",
+        "schema_digest": schema_digest,
+        "schema_version": schema_version,
         "transaction_binding_digest": transaction_binding_digest,
         "transaction_id": binding.transaction_id,
         "writer_version": _WRITER_VERSION,
     }
+    if journal_head_state == "FINALIZED":
+        selected_evidence = cast(
+            _RecoveryCleanupFinalizationEvidence,
+            finalization_evidence,
+        )
+        body["finalization_evidence"] = _recovery_cleanup_finalization_projection(
+            selected_evidence
+        )
+        body["finalization_evidence_digest"] = finalization_evidence_digest
     body["record_digest"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
     return canonical_json_bytes(body, final_newline=True)
 
@@ -2989,8 +3165,11 @@ def _recovery_cleanup_phase_bytes(
         journal_evidence_digest=authorization.journal_evidence_digest,
         journal_head_sequence=authorization.journal_head_sequence,
         journal_head_record_digest=authorization.journal_head_record_digest,
+        journal_head_state=authorization.journal_head_state,
         transaction_binding_digest=authorization.transaction_binding_digest,
         delete_component=authorization.delete_component,
+        finalization_evidence=authorization.finalization_evidence,
+        finalization_evidence_digest=authorization.finalization_evidence_digest,
         phase=phase,
         previous_phase_digest=previous_phase_digest,
     )
@@ -3013,8 +3192,11 @@ def _recovery_cleanup_authorization_invariants(value: object) -> bool:
             journal_evidence_digest=authorization.journal_evidence_digest,
             journal_head_sequence=authorization.journal_head_sequence,
             journal_head_record_digest=authorization.journal_head_record_digest,
+            journal_head_state=authorization.journal_head_state,
             transaction_binding_digest=authorization.transaction_binding_digest,
             delete_component=authorization.delete_component,
+            finalization_evidence=authorization.finalization_evidence,
+            finalization_evidence_digest=authorization.finalization_evidence_digest,
             phase=_RecoveryCleanupPhase.AUTHORIZED,
             previous_phase_digest=_ZERO_DIGEST,
         )
@@ -4756,11 +4938,11 @@ class TransactionJournalAccess:
             object.__setattr__(self, "_store", None)
             object.__setattr__(self, "_namespace", None)
             object.__setattr__(self, "_closed", True)
-            _close_native(descriptor)
-            if store is not None:
-                store.close()
-            if namespace is not None:
-                namespace.close()
+            _close_all_resources(
+                lambda: _close_native(descriptor),
+                store.close if store is not None else None,
+                namespace.close if namespace is not None else None,
+            )
 
     def __enter__(self) -> TransactionJournalAccess:
         return self
@@ -5085,14 +5267,13 @@ class _QuarantinedRecoveryJournalWriter:
             object.__setattr__(self, "_ticket_root", 0 if os.name == "nt" else -1)
             object.__setattr__(self, "_ticket_namespace", None)
             object.__setattr__(self, "_closed", True)
-            _close_native(descriptor)
-            if store is not None:
-                store.close()
-            if namespace is not None:
-                namespace.close()
-            _close_native(ticket_root)
-            if ticket_namespace is not None:
-                ticket_namespace.close()
+            _close_all_resources(
+                lambda: _close_native(descriptor),
+                store.close if store is not None else None,
+                namespace.close if namespace is not None else None,
+                lambda: _close_native(ticket_root),
+                (ticket_namespace.close if ticket_namespace is not None else None),
+            )
 
     def __enter__(self) -> _QuarantinedRecoveryJournalWriter:
         return self
@@ -6308,6 +6489,176 @@ def _open_windows_transaction_location(
         raise
 
 
+def _recovery_cleanup_decoded_identity(
+    value: object,
+    *,
+    optional: bool = False,
+) -> tuple[int, int] | None:
+    if optional and value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 2
+        or any(type(item) is not int or item < 0 for item in value)
+    ):
+        raise ValueError("recovery cleanup identity")
+    return cast(tuple[int, int], tuple(value))
+
+
+def _recovery_cleanup_generation_from_projection(
+    value: object,
+) -> _RecoveryGenerationCapture:
+    if not isinstance(value, Mapping):
+        raise ValueError("recovery cleanup generation")
+    expected = {
+        "leaf_identity",
+        "manifest_digest",
+        "manifest_identity",
+        "manifest_parent_identity",
+        "manifest_relative",
+        "parent_identity",
+        "relative_path",
+    }
+    if set(value) != expected:
+        raise ValueError("recovery cleanup generation")
+    capture = _RecoveryGenerationCapture(
+        relative_path=cast(str, value["relative_path"]),
+        parent_identity=cast(
+            tuple[int, int],
+            _recovery_cleanup_decoded_identity(value["parent_identity"]),
+        ),
+        leaf_identity=cast(
+            tuple[int, int],
+            _recovery_cleanup_decoded_identity(value["leaf_identity"]),
+        ),
+        manifest_relative=cast(str, value["manifest_relative"]),
+        manifest_parent_identity=cast(
+            tuple[int, int],
+            _recovery_cleanup_decoded_identity(value["manifest_parent_identity"]),
+        ),
+        manifest_identity=cast(
+            tuple[int, int],
+            _recovery_cleanup_decoded_identity(value["manifest_identity"]),
+        ),
+        manifest_digest=cast(str, value["manifest_digest"]),
+    )
+    if not _recovery_generation_capture_invariants(capture):
+        raise ValueError("recovery cleanup generation")
+    return capture
+
+
+def _recovery_cleanup_finalization_from_projection(
+    value: object,
+) -> _RecoveryFinalizationCapture:
+    if not isinstance(value, Mapping):
+        raise ValueError("recovery cleanup finalization")
+    expected = {
+        "cache",
+        "journal_access_digest",
+        "journal_evidence_digest",
+        "journal_head_record_digest",
+        "journal_head_sequence",
+        "journal_state",
+        "prepared_receipt_digest",
+        "receipt_ancestor_identity",
+        "receipt_control_identity",
+        "receipt_digest",
+        "receipt_existing_depth",
+        "receipt_identity",
+        "receipt_parent_identity",
+        "receipt_relative",
+        "receipt_status",
+        "source",
+        "transaction_id",
+    }
+    if set(value) != expected:
+        raise ValueError("recovery cleanup finalization")
+    capture = _RecoveryFinalizationCapture(
+        transaction_id=cast(str, value["transaction_id"]),
+        journal_state=cast(str, value["journal_state"]),
+        journal_access_digest=cast(str, value["journal_access_digest"]),
+        journal_evidence_digest=cast(str, value["journal_evidence_digest"]),
+        journal_head_sequence=cast(int, value["journal_head_sequence"]),
+        journal_head_record_digest=cast(str, value["journal_head_record_digest"]),
+        source=_recovery_cleanup_generation_from_projection(value["source"]),
+        cache=_recovery_cleanup_generation_from_projection(value["cache"]),
+        receipt_status=cast(str, value["receipt_status"]),
+        receipt_relative=cast(str, value["receipt_relative"]),
+        receipt_control_identity=cast(
+            tuple[int, int],
+            _recovery_cleanup_decoded_identity(value["receipt_control_identity"]),
+        ),
+        receipt_existing_depth=cast(int, value["receipt_existing_depth"]),
+        receipt_ancestor_identity=cast(
+            tuple[int, int],
+            _recovery_cleanup_decoded_identity(value["receipt_ancestor_identity"]),
+        ),
+        receipt_parent_identity=_recovery_cleanup_decoded_identity(
+            value["receipt_parent_identity"],
+            optional=True,
+        ),
+        receipt_identity=_recovery_cleanup_decoded_identity(
+            value["receipt_identity"],
+            optional=True,
+        ),
+        receipt_digest=cast(str | None, value["receipt_digest"]),
+        prepared_receipt_digest=cast(str, value["prepared_receipt_digest"]),
+    )
+    if not _recovery_finalization_capture_invariants(capture):
+        raise ValueError("recovery cleanup finalization")
+    return capture
+
+
+def _recovery_cleanup_evidence_from_projection(
+    value: object,
+) -> _RecoveryCleanupFinalizationEvidence:
+    from .journal import JournalConfigIdentity
+
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"config", "finalization", "record_kind", "transaction_id"}
+        or value.get("record_kind")
+        != "persistent-transaction-recovery-cleanup-finalization"
+    ):
+        raise ValueError("recovery cleanup finalization evidence")
+    config_value = value["config"]
+    if not isinstance(config_value, Mapping) or set(config_value) != {
+        "byte_digest",
+        "leaf_identity",
+        "metadata_fingerprint",
+        "parent_identity",
+        "semantic_digest",
+        "snapshot_digest",
+        "target_metadata_digest",
+    }:
+        raise ValueError("recovery cleanup config")
+    config = JournalConfigIdentity(
+        parent_identity=cast(
+            tuple[int, int],
+            _recovery_cleanup_decoded_identity(config_value["parent_identity"]),
+        ),
+        leaf_identity=_recovery_cleanup_decoded_identity(
+            config_value["leaf_identity"],
+            optional=True,
+        ),
+        byte_digest=cast(str, config_value["byte_digest"]),
+        semantic_digest=cast(str, config_value["semantic_digest"]),
+        metadata_fingerprint=cast(str, config_value["metadata_fingerprint"]),
+        snapshot_digest=cast(str, config_value["snapshot_digest"]),
+        target_metadata_digest=cast(
+            str | None,
+            config_value["target_metadata_digest"],
+        ),
+    )
+    finalization = _recovery_cleanup_finalization_from_projection(value["finalization"])
+    if value["transaction_id"] != finalization.transaction_id:
+        raise ValueError("recovery cleanup transaction")
+    return _RecoveryCleanupFinalizationEvidence(
+        config=config,
+        finalization=finalization,
+    )
+
+
 def _recovery_cleanup_authorization_from_record(
     store: _TransactionStore,
     binding: PersistentTransactionBinding,
@@ -6327,13 +6678,20 @@ def _recovery_cleanup_authorization_from_record(
     journal_evidence_digest = record.get("journal_evidence_digest")
     journal_head_sequence = record.get("journal_head_sequence")
     journal_head_record_digest = record.get("journal_head_record_digest")
+    journal_head_state = record.get("journal_head_state")
     transaction_binding_digest = record.get("transaction_binding_digest")
     delete_component = record.get("delete_component")
+    finalization_evidence_value = record.get("finalization_evidence")
+    finalization_evidence_digest = record.get("finalization_evidence_digest")
+    if journal_head_state not in {"FINALIZED", "ROLLED_BACK"}:
+        raise OSError(errno.ESTALE, "recovery cleanup authorization changed")
+    schema_version, schema_digest = _recovery_cleanup_schema_contract(
+        journal_head_state
+    )
     expected_fixed: Mapping[str, object] = {
         "authority": "zagrosi-forge-transaction-authority-v1",
         "binding": binding.canonical_projection(),
         "binding_digest": _recovery_cleanup_binding_digest(binding),
-        "journal_head_state": "ROLLED_BACK",
         "journal_location": TransactionLocation.QUARANTINED.value,
         "minimum_reader_version": _WRITER_VERSION,
         "policy_version": _POLICY_VERSION,
@@ -6341,8 +6699,8 @@ def _recovery_cleanup_authorization_from_record(
         "record_kind": "persistent-transaction-recovery-cleanup",
         "recovery_cleanup_phase": _RecoveryCleanupPhase.AUTHORIZED.value,
         "root_identity": binding.transaction_identity,
-        "schema_digest": _TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST,
-        "schema_version": "1.0",
+        "schema_digest": schema_digest,
+        "schema_version": schema_version,
         "transaction_id": binding.transaction_id,
         "writer_version": _WRITER_VERSION,
     }
@@ -6353,10 +6711,23 @@ def _recovery_cleanup_authorization_from_record(
         "journal_evidence_digest",
         "journal_head_record_digest",
         "journal_head_sequence",
+        "journal_head_state",
         "journal_relative",
         "record_digest",
         "transaction_binding_digest",
     }
+    if journal_head_state == "FINALIZED":
+        expected_keys.update(
+            {
+                "finalization_evidence",
+                "finalization_evidence_digest",
+            }
+        )
+        finalization_evidence = _recovery_cleanup_evidence_from_projection(
+            finalization_evidence_value
+        )
+    else:
+        finalization_evidence = None
     if (
         set(record) != expected_keys
         or any(record.get(key) != value for key, value in expected_fixed.items())
@@ -6366,8 +6737,13 @@ def _recovery_cleanup_authorization_from_record(
         or not isinstance(journal_evidence_digest, str)
         or type(journal_head_sequence) is not int
         or not isinstance(journal_head_record_digest, str)
+        or journal_head_state not in {"FINALIZED", "ROLLED_BACK"}
         or not isinstance(transaction_binding_digest, str)
         or not isinstance(delete_component, str)
+        or (
+            journal_head_state == "FINALIZED"
+            and not isinstance(finalization_evidence_digest, str)
+        )
     ):
         raise OSError(errno.ESTALE, "recovery cleanup authorization changed")
     expected_raw = _recovery_cleanup_record_bytes(
@@ -6378,8 +6754,14 @@ def _recovery_cleanup_authorization_from_record(
         journal_evidence_digest=journal_evidence_digest,
         journal_head_sequence=journal_head_sequence,
         journal_head_record_digest=journal_head_record_digest,
+        journal_head_state=journal_head_state,
         transaction_binding_digest=transaction_binding_digest,
         delete_component=delete_component,
+        finalization_evidence=finalization_evidence,
+        finalization_evidence_digest=cast(
+            str | None,
+            finalization_evidence_digest,
+        ),
         phase=_RecoveryCleanupPhase.AUTHORIZED,
         previous_phase_digest=_ZERO_DIGEST,
     )
@@ -6409,8 +6791,14 @@ def _recovery_cleanup_authorization_from_record(
         journal_evidence_digest=journal_evidence_digest,
         journal_head_sequence=journal_head_sequence,
         journal_head_record_digest=journal_head_record_digest,
+        journal_head_state=journal_head_state,
         transaction_binding_digest=transaction_binding_digest,
         delete_component=delete_component,
+        finalization_evidence=finalization_evidence,
+        finalization_evidence_digest=cast(
+            str | None,
+            finalization_evidence_digest,
+        ),
         authorization_digest=record_digest,
         _component=component,
         _identity=identity,
@@ -8325,6 +8713,119 @@ def _open_recovery_receipt(
             _close_native(duplicate)
 
 
+def _open_recovery_receipt_by_capture(
+    owned_root: OwnedRoot,
+    source_root: _paths.SourceRoot,
+    capture: _RecoveryFinalizationCapture,
+) -> _OpenRecoveryReceipt:
+    reference = _paths._validate_internal_reference(
+        capture.receipt_relative,
+        role="committed-receipt",
+        limits=LIMIT_POLICY,
+    ).unwrap()
+    snapshot = _snapshot_safe_reference(reference)
+    if snapshot is None or capture.receipt_status != "matching":
+        raise ValueError("committed receipt evidence")
+    opened_file = source_root.open_regular_file(reference)
+    closing_opened: OpenedRegularFile | None = opened_file
+    duplicate = 0 if os.name == "nt" else -1
+    try:
+        raw = opened_file.read_bytes(limit=256 * 1024)
+        duplicate = opened_file._duplicate_descriptor()
+        binding = _receipt_binding_state(
+            owned_root,
+            snapshot,
+            expected_parent_identity=opened_file.parent_identity,
+            retained_leaf=duplicate,
+        )
+        selected = _OpenRecoveryReceipt(
+            status="matching",
+            control_identity=owned_root.control_identity,
+            existing_depth=len(snapshot.components[1:-1]),
+            ancestor_identity=opened_file.parent_identity,
+            parent_identity=opened_file.parent_identity,
+            identity=opened_file.identity,
+            digest=hashlib.sha256(raw).hexdigest(),
+            opened=opened_file,
+            ancestor=0 if os.name == "nt" else -1,
+        )
+        if (
+            selected.control_identity != capture.receipt_control_identity
+            or selected.existing_depth != capture.receipt_existing_depth
+            or selected.ancestor_identity != capture.receipt_ancestor_identity
+            or selected.parent_identity != capture.receipt_parent_identity
+            or selected.identity != capture.receipt_identity
+            or selected.digest != capture.receipt_digest
+            or selected.digest != capture.prepared_receipt_digest
+            or opened_file.root_identity != owned_root.identity
+            or not _private_receipt_descriptor(
+                duplicate,
+                device=owned_root.identity[0],
+            )
+            or not _receipt_parent_chain_is_private(owned_root, snapshot)
+            or not binding.valid
+        ):
+            raise OSError(errno.ESTALE, "committed receipt changed")
+        closing_opened = None
+        return selected
+    finally:
+        if closing_opened is not None:
+            closing_opened.close()
+        if (os.name == "nt" and duplicate) or (os.name != "nt" and duplicate >= 0):
+            _close_native(duplicate)
+
+
+def _recovery_receipt_capture_is_current(
+    owned_root: OwnedRoot,
+    opened: _OpenRecoveryReceipt,
+    capture: _RecoveryFinalizationCapture,
+) -> bool:
+    duplicate = 0 if os.name == "nt" else -1
+    try:
+        reference = _paths._validate_internal_reference(
+            capture.receipt_relative,
+            role="committed-receipt",
+            limits=LIMIT_POLICY,
+        ).unwrap()
+        snapshot = _snapshot_safe_reference(reference)
+        if (
+            snapshot is None
+            or opened.opened is None
+            or opened.status != "matching"
+            or opened.control_identity != capture.receipt_control_identity
+            or opened.existing_depth != capture.receipt_existing_depth
+            or opened.ancestor_identity != capture.receipt_ancestor_identity
+            or opened.parent_identity != capture.receipt_parent_identity
+            or opened.identity != capture.receipt_identity
+            or opened.digest != capture.receipt_digest
+        ):
+            return False
+        raw = opened.opened.read_bytes(limit=256 * 1024)
+        duplicate = opened.opened._duplicate_descriptor()
+        binding = _receipt_binding_state(
+            owned_root,
+            snapshot,
+            expected_parent_identity=cast(
+                tuple[int, int],
+                opened.parent_identity,
+            ),
+            retained_leaf=duplicate,
+        )
+        return (
+            hashlib.sha256(raw).hexdigest() == capture.receipt_digest
+            and opened.opened.root_identity == owned_root.identity
+            and opened.opened.parent_identity == capture.receipt_parent_identity
+            and opened.opened.identity == capture.receipt_identity
+            and _receipt_parent_chain_is_private(owned_root, snapshot)
+            and binding.valid
+        )
+    except (ForgeError, OSError, TypeError, ValueError):
+        return False
+    finally:
+        if (os.name == "nt" and duplicate) or (os.name != "nt" and duplicate >= 0):
+            _close_native(duplicate)
+
+
 def _recovery_finalization_evidence(
     observation: PendingTransactionObservation,
     journal: LoadedJournal,
@@ -8352,14 +8853,32 @@ def _recovery_finalization_evidence(
     binding = observation.binding
     binding_digest = _recovery_cleanup_binding_digest(binding)
     head = journal.records[-1]
+    final_location_is_valid = head.state is JournalState.FINALIZED and (
+        (
+            observation.location is TransactionLocation.LIVE
+            and observation.journal_relative == binding.root_relative
+        )
+        or (
+            observation.location is TransactionLocation.QUARANTINED
+            and _persistent_cleanup_reference_is_valid(
+                binding,
+                observation.journal_relative,
+            )
+        )
+    )
+    committed_location_is_valid = (
+        head.state is not JournalState.FINALIZED
+        and observation.location is TransactionLocation.LIVE
+        and observation.journal_relative == binding.root_relative
+    )
     if (
-        observation.location is not TransactionLocation.LIVE
-        or observation.journal_relative != binding.root_relative
+        not (committed_location_is_valid or final_location_is_valid)
         or head.state
         not in {
             JournalState.COMMIT_INTENT,
             JournalState.CONFIG_COMMITTED,
             JournalState.RECEIPT_COMMITTED,
+            JournalState.FINALIZED,
         }
         or head.transaction_id != binding.transaction_id
         or journal.head.transaction_binding_digest != binding_digest
@@ -8388,14 +8907,17 @@ def _recovery_finalization_evidence(
         or cache[0].leaf_identity is None
         or cache[0].content_digest is None
         or (
-            head.state is JournalState.RECEIPT_COMMITTED
+            head.state in {JournalState.RECEIPT_COMMITTED, JournalState.FINALIZED}
             and (
                 len(receipt) != 1
                 or receipt[0].leaf_identity is None
                 or receipt[0].content_digest is None
             )
         )
-        or (head.state is not JournalState.RECEIPT_COMMITTED and receipt)
+        or (
+            head.state not in {JournalState.RECEIPT_COMMITTED, JournalState.FINALIZED}
+            and receipt
+        )
     ):
         raise ValueError("recovery finalization evidence")
     prepared_raw = canonical_json_bytes(
@@ -8594,7 +9116,7 @@ def observe_recovery_finalization(
             item for item in head.identities if item.role == "committed-receipt"
         )
         if (journal_state == "COMMIT_INTENT" and receipt_status != "absent") or (
-            journal_state == "RECEIPT_COMMITTED"
+            journal_state in {"RECEIPT_COMMITTED", "FINALIZED"}
             and (
                 receipt_status != "matching"
                 or len(receipt_items) != 1
@@ -8680,6 +9202,168 @@ def observe_recovery_finalization(
             raise first_failure
 
 
+def _observe_recovery_cleanup_config_once(
+    owned_root: OwnedRoot,
+    authority: _paths.PlatformPathAuthority,
+    expected: JournalConfigIdentity,
+) -> JournalConfigIdentity:
+    from .config import snapshot_config
+    from .journal import JournalConfigIdentity as RuntimeJournalConfigIdentity
+
+    proof = authority.prove_config_path(owned_root).unwrap()
+    try:
+        snapshot = snapshot_config(proof).unwrap()
+        snapshot._require_valid()
+        selected = RuntimeJournalConfigIdentity(
+            parent_identity=snapshot.parent_identity,
+            leaf_identity=snapshot.leaf_identity,
+            byte_digest=snapshot.byte_digest,
+            semantic_digest=snapshot.semantic_digest,
+            metadata_fingerprint=snapshot.metadata_fingerprint,
+            snapshot_digest=snapshot.snapshot_digest,
+            target_metadata_digest=expected.target_metadata_digest,
+        )
+        snapshot._require_valid()
+        return selected
+    finally:
+        proof.close()
+
+
+def _require_finalized_cleanup_evidence_current(
+    owned_root: OwnedRoot,
+    authority: _paths.PlatformPathAuthority | None,
+    evidence: _RecoveryCleanupFinalizationEvidence,
+) -> None:
+    if not isinstance(
+        authority, _paths.PlatformPathAuthority
+    ) or not _recovery_cleanup_finalization_invariants(
+        evidence,
+        transaction_id=evidence.finalization.transaction_id,
+        journal_access_digest=evidence.finalization.journal_access_digest,
+        journal_evidence_digest=evidence.finalization.journal_evidence_digest,
+        journal_head_sequence=evidence.finalization.journal_head_sequence,
+        journal_head_record_digest=evidence.finalization.journal_head_record_digest,
+    ):
+        raise TypeError("finalized cleanup evidence")
+    first_source = first_cache = second_source = second_cache = None
+    first_receipt = second_receipt = None
+    source_root: _paths.SourceRoot | None = None
+    try:
+        first_config = _observe_recovery_cleanup_config_once(
+            owned_root,
+            authority,
+            evidence.config,
+        )
+        source_root = _recovery_source_root(owned_root)
+        capture = evidence.finalization
+        first_source = _open_recovery_generation(
+            owned_root,
+            source_root,
+            relative_path=capture.source.relative_path,
+            expected_parent_identity=capture.source.parent_identity,
+            expected_leaf_identity=capture.source.leaf_identity,
+            expected_manifest_digest=capture.source.manifest_digest,
+            manifest_relative=capture.source.manifest_relative,
+        )
+        first_cache = _open_recovery_generation(
+            owned_root,
+            source_root,
+            relative_path=capture.cache.relative_path,
+            expected_parent_identity=capture.cache.parent_identity,
+            expected_leaf_identity=capture.cache.leaf_identity,
+            expected_manifest_digest=capture.cache.manifest_digest,
+            manifest_relative=capture.cache.manifest_relative,
+        )
+        first_receipt = _open_recovery_receipt_by_capture(
+            owned_root,
+            source_root,
+            capture,
+        )
+        second_config = _observe_recovery_cleanup_config_once(
+            owned_root,
+            authority,
+            evidence.config,
+        )
+        second_source = _open_recovery_generation(
+            owned_root,
+            source_root,
+            relative_path=capture.source.relative_path,
+            expected_parent_identity=capture.source.parent_identity,
+            expected_leaf_identity=capture.source.leaf_identity,
+            expected_manifest_digest=capture.source.manifest_digest,
+            manifest_relative=capture.source.manifest_relative,
+        )
+        second_cache = _open_recovery_generation(
+            owned_root,
+            source_root,
+            relative_path=capture.cache.relative_path,
+            expected_parent_identity=capture.cache.parent_identity,
+            expected_leaf_identity=capture.cache.leaf_identity,
+            expected_manifest_digest=capture.cache.manifest_digest,
+            manifest_relative=capture.cache.manifest_relative,
+        )
+        second_receipt = _open_recovery_receipt_by_capture(
+            owned_root,
+            source_root,
+            capture,
+        )
+        confirmed_config = _observe_recovery_cleanup_config_once(
+            owned_root,
+            authority,
+            evidence.config,
+        )
+        if (
+            first_config != evidence.config
+            or second_config != evidence.config
+            or confirmed_config != evidence.config
+            or first_source.capture != capture.source
+            or second_source.capture != capture.source
+            or first_cache.capture != capture.cache
+            or second_cache.capture != capture.cache
+            or not _recovery_generation_is_current(
+                owned_root,
+                source_root,
+                first_source,
+            )
+            or not _recovery_generation_is_current(
+                owned_root,
+                source_root,
+                second_source,
+            )
+            or not _recovery_generation_is_current(
+                owned_root,
+                source_root,
+                first_cache,
+            )
+            or not _recovery_generation_is_current(
+                owned_root,
+                source_root,
+                second_cache,
+            )
+            or not _recovery_receipt_capture_is_current(
+                owned_root,
+                first_receipt,
+                capture,
+            )
+            or not _recovery_receipt_capture_is_current(
+                owned_root,
+                second_receipt,
+                capture,
+            )
+        ):
+            raise OSError(errno.ESTALE, "finalized cleanup evidence changed")
+    finally:
+        _close_all_resources(
+            second_receipt.close if second_receipt is not None else None,
+            second_cache.close if second_cache is not None else None,
+            second_source.close if second_source is not None else None,
+            first_receipt.close if first_receipt is not None else None,
+            first_cache.close if first_cache is not None else None,
+            first_source.close if first_source is not None else None,
+            source_root.close if source_root is not None else None,
+        )
+
+
 def _terminal_recovery_cleanup_evidence(
     observation: PendingTransactionObservation,
     journal: LoadedJournal,
@@ -8688,6 +9372,7 @@ def _terminal_recovery_cleanup_evidence(
     str,
     str,
     int,
+    str,
     str,
     str,
 ]:
@@ -8708,8 +9393,12 @@ def _terminal_recovery_cleanup_evidence(
             binding,
             observation.journal_relative,
         )
-        or journal.head.state is not JournalState.ROLLED_BACK
-        or journal.records[-1].state is not JournalState.ROLLED_BACK
+        or journal.head.state
+        not in {
+            JournalState.FINALIZED,
+            JournalState.ROLLED_BACK,
+        }
+        or journal.records[-1].state is not journal.head.state
         or journal.records[-1].transaction_id != binding.transaction_id
         or journal.head.transaction_binding_digest != binding_digest
         or journal.access_digest
@@ -8727,6 +9416,7 @@ def _terminal_recovery_cleanup_evidence(
         journal.access_digest,
         journal.head.sequence,
         journal.head.record_digest,
+        journal.head.state.value,
         journal._binding_digest,
     )
     journal._require_valid()
@@ -8736,6 +9426,7 @@ def _terminal_recovery_cleanup_evidence(
         journal.access_digest,
         journal.head.sequence,
         journal.head.record_digest,
+        journal.head.state.value,
         journal._binding_digest,
     )
     if captured != confirmed:
@@ -8751,7 +9442,9 @@ def _authorization_matches_terminal_evidence(
     journal_access_digest: str,
     journal_head_sequence: int,
     journal_head_record_digest: str,
+    journal_head_state: str,
     journal_evidence_digest: str,
+    finalization_evidence: _RecoveryCleanupFinalizationEvidence | None,
 ) -> bool:
     try:
         authorization._require_valid()
@@ -8762,9 +9455,17 @@ def _authorization_matches_terminal_evidence(
             and authorization.journal_access_digest == journal_access_digest
             and authorization.journal_head_sequence == journal_head_sequence
             and authorization.journal_head_record_digest == journal_head_record_digest
+            and authorization.journal_head_state == journal_head_state
             and authorization.journal_evidence_digest == journal_evidence_digest
             and authorization.transaction_binding_digest
             == _recovery_cleanup_binding_digest(binding)
+            and authorization.finalization_evidence == finalization_evidence
+            and authorization.finalization_evidence_digest
+            == (
+                None
+                if finalization_evidence is None
+                else _recovery_cleanup_finalization_digest(finalization_evidence)
+            )
         )
     except (AttributeError, TypeError, ValueError):
         return False
@@ -8775,8 +9476,11 @@ def authorize_recovery_cleanup(
     *,
     observation: PendingTransactionObservation,
     journal: LoadedJournal,
+    authority: _paths.PlatformPathAuthority | None = None,
+    finalized_config: JournalConfigIdentity | None = None,
+    finalization: RecoveryFinalizationObservation | None = None,
 ) -> Result[RecoveryCleanupAuthorization]:
-    """Durably bind one exact quarantined ROLLED_BACK journal to cleanup."""
+    """Durably bind one exact quarantined terminal journal to cleanup."""
 
     store: _TransactionStore | None = None
     state_lock: _TransactionStateLock | None = None
@@ -8789,8 +9493,44 @@ def authorize_recovery_cleanup(
             journal_access_digest,
             journal_head_sequence,
             journal_head_record_digest,
+            journal_head_state,
             journal_evidence_digest,
         ) = _terminal_recovery_cleanup_evidence(observation, journal)
+        finalization_evidence: _RecoveryCleanupFinalizationEvidence | None
+        if journal_head_state == "FINALIZED":
+            from .journal import JournalConfigIdentity as RuntimeJournalConfigIdentity
+
+            if (
+                type(finalized_config) is not RuntimeJournalConfigIdentity
+                or type(finalization) is not RecoveryFinalizationObservation
+            ):
+                raise TypeError("finalized cleanup evidence")
+            finalization._require_valid()
+            finalization_evidence = _RecoveryCleanupFinalizationEvidence(
+                config=finalized_config,
+                finalization=finalization._capture,
+            )
+            if (
+                journal.records[-1].committed_config != finalized_config
+                or not _recovery_cleanup_finalization_invariants(
+                    finalization_evidence,
+                    transaction_id=binding.transaction_id,
+                    journal_access_digest=journal_access_digest,
+                    journal_evidence_digest=journal_evidence_digest,
+                    journal_head_sequence=journal_head_sequence,
+                    journal_head_record_digest=journal_head_record_digest,
+                )
+            ):
+                raise ValueError("finalized cleanup evidence")
+            _require_finalized_cleanup_evidence_current(
+                owned_root,
+                authority,
+                finalization_evidence,
+            )
+        else:
+            if finalized_config is not None or finalization is not None:
+                raise TypeError("rolled back cleanup evidence")
+            finalization_evidence = None
         store = _open_transaction_store(owned_root, create=False)
         state_lock = _acquire_transaction_state_lock(store, binding)
         existing = _load_recovery_cleanup_authorization(store, binding)
@@ -8802,7 +9542,9 @@ def authorize_recovery_cleanup(
                 journal_access_digest=journal_access_digest,
                 journal_head_sequence=journal_head_sequence,
                 journal_head_record_digest=journal_head_record_digest,
+                journal_head_state=journal_head_state,
                 journal_evidence_digest=journal_evidence_digest,
+                finalization_evidence=finalization_evidence,
             ):
                 raise OSError(
                     errno.ESTALE,
@@ -8869,6 +9611,12 @@ def authorize_recovery_cleanup(
             raise OSError(errno.ESTALE, "recovery cleanup intent is missing")
         else:
             delete_component = f".delete-{secrets.token_hex(16)}.tmp"
+        if finalization_evidence is not None:
+            _require_finalized_cleanup_evidence_current(
+                owned_root,
+                authority,
+                finalization_evidence,
+            )
         raw = _recovery_cleanup_record_bytes(
             binding,
             location=TransactionLocation.QUARANTINED,
@@ -8877,8 +9625,15 @@ def authorize_recovery_cleanup(
             journal_evidence_digest=journal_evidence_digest,
             journal_head_sequence=journal_head_sequence,
             journal_head_record_digest=journal_head_record_digest,
+            journal_head_state=journal_head_state,
             transaction_binding_digest=_recovery_cleanup_binding_digest(binding),
             delete_component=delete_component,
+            finalization_evidence=finalization_evidence,
+            finalization_evidence_digest=(
+                None
+                if finalization_evidence is None
+                else _recovery_cleanup_finalization_digest(finalization_evidence)
+            ),
             phase=_RecoveryCleanupPhase.AUTHORIZED,
             previous_phase_digest=_ZERO_DIGEST,
         )
@@ -8895,9 +9650,17 @@ def authorize_recovery_cleanup(
             journal_access_digest=journal_access_digest,
             journal_head_sequence=journal_head_sequence,
             journal_head_record_digest=journal_head_record_digest,
+            journal_head_state=journal_head_state,
             journal_evidence_digest=journal_evidence_digest,
+            finalization_evidence=finalization_evidence,
         ):
             raise OSError(errno.ESTALE, "recovery cleanup publication changed")
+        if finalization_evidence is not None:
+            _require_finalized_cleanup_evidence_current(
+                owned_root,
+                authority,
+                finalization_evidence,
+            )
         _inspect_recovery_cleanup_state(owned_root, store, created)
         return Result.success(created)
     except (AttributeError, ForgeError, OSError, TypeError, ValueError):
@@ -10565,6 +11328,36 @@ def _receipt_temp_leaf(leaf: str) -> str:
     return f".receipt-{identity_prefix}-{secrets.token_hex(8)}.tmp"
 
 
+def _matching_posix_receipt_descriptor(
+    descriptor: int,
+    raw: bytes,
+    *,
+    device: int,
+) -> bool:
+    before = os.fstat(descriptor)
+    if not _private_posix_receipt(
+        descriptor,
+        before,
+        device=device,
+        size=len(raw),
+    ):
+        return False
+    rendered = _read_posix_descriptor(descriptor, limit=256 * 1024)
+    after = os.fstat(descriptor)
+    return (
+        (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+        and _paths._posix_status_fingerprint(after)
+        == _paths._posix_status_fingerprint(before)
+        and _private_posix_receipt(
+            descriptor,
+            after,
+            device=device,
+            size=len(raw),
+        )
+        and rendered == raw
+    )
+
+
 def _open_matching_posix_receipt(
     parent: int, leaf: str, raw: bytes, *, device: int
 ) -> int | None:
@@ -10575,19 +11368,11 @@ def _open_matching_posix_receipt(
             os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
             dir_fd=parent,
         )
-        before = os.fstat(descriptor)
-        if not _private_posix_receipt(descriptor, before, device=device):
-            return None
-        rendered = _read_posix_descriptor(descriptor, limit=256 * 1024)
-        after = os.fstat(descriptor)
-        matches = (
-            _identity(descriptor) == (before.st_dev, before.st_ino)
-            and _paths._posix_status_fingerprint(before)
-            == _paths._posix_status_fingerprint(after)
-            and _private_posix_receipt(descriptor, after, device=device)
-            and rendered == raw
-        )
-        if not matches:
+        if not _matching_posix_receipt_descriptor(
+            descriptor,
+            raw,
+            device=device,
+        ):
             return None
         retained = descriptor
         descriptor = -1
@@ -10643,6 +11428,35 @@ def _publish_posix_receipt(
                             "The canonical receipt binding changed.",
                         )
                     )
+                os.fsync(parent)
+                if not _matching_posix_receipt_descriptor(
+                    existing,
+                    raw,
+                    device=device,
+                ):
+                    return Result.failure(
+                        _error(
+                            "ownership.receipt_conflict",
+                            "The canonical receipt changed during publication.",
+                        )
+                    )
+                binding = _receipt_binding_state(
+                    owned_root,
+                    safe_reference,
+                    expected_parent_identity=expected_parent_identity,
+                    retained_leaf=existing,
+                )
+                if not binding.control_live:
+                    raise _error(
+                        "ownership.unowned", "The receipt root is not trusted."
+                    )
+                if not binding.valid:
+                    return Result.failure(
+                        _error(
+                            "ownership.receipt_conflict",
+                            "The canonical receipt binding changed.",
+                        )
+                    )
                 return Result.success(ReceiptPublication(reference, False))
             return Result.failure(
                 _error(
@@ -10655,7 +11469,7 @@ def _publish_posix_receipt(
         finally:
             if existing >= 0:
                 os.close(existing)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
         for _attempt in range(8):
             temp_leaf = _receipt_temp_leaf(leaf)
             try:
@@ -10709,6 +11523,36 @@ def _publish_posix_receipt(
                             "ownership.unowned", "The receipt root is not trusted."
                         )
                     if binding.valid:
+                        os.fsync(parent)
+                        if not _matching_posix_receipt_descriptor(
+                            existing,
+                            raw,
+                            device=device,
+                        ):
+                            return Result.failure(
+                                _error(
+                                    "ownership.receipt_conflict",
+                                    "The canonical receipt changed during publication.",
+                                )
+                            )
+                        binding = _receipt_binding_state(
+                            owned_root,
+                            safe_reference,
+                            expected_parent_identity=expected_parent_identity,
+                            retained_leaf=existing,
+                        )
+                        if not binding.control_live:
+                            raise _error(
+                                "ownership.unowned",
+                                "The receipt root is not trusted.",
+                            )
+                        if not binding.valid:
+                            return Result.failure(
+                                _error(
+                                    "ownership.receipt_conflict",
+                                    "The canonical receipt binding changed.",
+                                )
+                            )
                         return Result.success(ReceiptPublication(reference, False))
                 return Result.failure(
                     _error(
@@ -10734,6 +11578,17 @@ def _publish_posix_receipt(
         ):
             raise OSError(errno.ESTALE, "published receipt identity changed")
         os.fsync(parent)
+        if not _matching_posix_receipt_descriptor(
+            descriptor,
+            raw,
+            device=device,
+        ):
+            return Result.failure(
+                _error(
+                    "ownership.receipt_conflict",
+                    "The canonical receipt changed during publication.",
+                )
+            )
         binding = _receipt_binding_state(
             owned_root,
             safe_reference,
@@ -10770,9 +11625,32 @@ def _publish_posix_receipt(
                     os.unlink(temp_leaf, dir_fd=parent)
             except OSError:
                 pass
-        for item in (descriptor, parent, control):
-            if item >= 0:
-                os.close(item)
+        _close_all_native_descriptors(descriptor, parent, control)
+
+
+def _matching_windows_receipt_descriptor(
+    handle: int,
+    raw: bytes,
+    *,
+    volume: int,
+) -> bool:
+    before = _paths._windows_handle_status(handle)
+    if (
+        before.identity[0] != volume
+        or before.size != len(raw)
+        or before.size > 256 * 1024
+        or not _windows_private_file(handle)
+    ):
+        return False
+    rendered = _paths._windows_read(handle, limit=256 * 1024)
+    after = _paths._windows_handle_status(handle)
+    return (
+        after.identity == before.identity
+        and after.fingerprint == before.fingerprint
+        and after.size == len(raw)
+        and _windows_private_file(handle)
+        and rendered == raw
+    )
 
 
 def _publish_windows_receipt(
@@ -10811,13 +11689,40 @@ def _publish_windows_receipt(
                 raise
         if existing:
             try:
-                status = _paths._windows_handle_status(existing)
-                if (
-                    status.identity[0] == volume
-                    and _windows_private_file(existing)
-                    and status.size <= 256 * 1024
-                    and _paths._windows_read(existing, limit=256 * 1024) == raw
+                if _matching_windows_receipt_descriptor(
+                    existing,
+                    raw,
+                    volume=volume,
                 ):
+                    binding = _receipt_binding_state(
+                        owned_root,
+                        safe_reference,
+                        expected_parent_identity=expected_parent_identity,
+                        retained_leaf=existing,
+                    )
+                    if not binding.control_live:
+                        raise _error(
+                            "ownership.unowned", "The receipt root is not trusted."
+                        )
+                    if not binding.valid:
+                        return Result.failure(
+                            _error(
+                                "ownership.receipt_conflict",
+                                "The canonical receipt binding changed.",
+                            )
+                        )
+                    _windows_flush_directory(parent)
+                    if not _matching_windows_receipt_descriptor(
+                        existing,
+                        raw,
+                        volume=volume,
+                    ):
+                        return Result.failure(
+                            _error(
+                                "ownership.receipt_conflict",
+                                "The canonical receipt changed during publication.",
+                            )
+                        )
                     binding = _receipt_binding_state(
                         owned_root,
                         safe_reference,
@@ -10852,6 +11757,7 @@ def _publish_windows_receipt(
                     parent,
                     temp_leaf,
                     directory=False,
+                    read_data=True,
                     write_data=True,
                     delete_access=True,
                     create=True,
@@ -10879,13 +11785,40 @@ def _publish_windows_receipt(
                 parent, leaf, directory=False, read_data=True
             )
             try:
-                current = _paths._windows_handle_status(existing)
-                if (
-                    current.identity[0] == volume
-                    and _windows_private_file(existing)
-                    and current.size <= 256 * 1024
-                    and _paths._windows_read(existing, limit=256 * 1024) == raw
+                if _matching_windows_receipt_descriptor(
+                    existing,
+                    raw,
+                    volume=volume,
                 ):
+                    binding = _receipt_binding_state(
+                        owned_root,
+                        safe_reference,
+                        expected_parent_identity=expected_parent_identity,
+                        retained_leaf=existing,
+                    )
+                    if not binding.control_live:
+                        raise _error(
+                            "ownership.unowned", "The receipt root is not trusted."
+                        )
+                    if not binding.valid:
+                        return Result.failure(
+                            _error(
+                                "ownership.receipt_conflict",
+                                "The canonical receipt binding changed.",
+                            )
+                        )
+                    _windows_flush_directory(parent)
+                    if not _matching_windows_receipt_descriptor(
+                        existing,
+                        raw,
+                        volume=volume,
+                    ):
+                        return Result.failure(
+                            _error(
+                                "ownership.receipt_conflict",
+                                "The canonical receipt changed during publication.",
+                            )
+                        )
                     binding = _receipt_binding_state(
                         owned_root,
                         safe_reference,
@@ -10918,17 +11851,28 @@ def _publish_windows_receipt(
             parent, leaf, directory=False, read_data=True
         )
         try:
-            current = _paths._windows_handle_status(current_handle)
-            if (
-                current.identity != staged_identity
-                or current.identity[0] != volume
-                or current.size != len(raw)
-                or not _windows_private_file(current_handle)
-                or _paths._windows_read(current_handle, limit=256 * 1024) != raw
+            if _native_identity(
+                current_handle
+            ) != staged_identity or not _matching_windows_receipt_descriptor(
+                current_handle,
+                raw,
+                volume=volume,
             ):
                 raise OSError(errno.ESTALE, "published receipt identity changed")
         finally:
             _paths._windows_close(current_handle)
+        _windows_flush_directory(parent)
+        if not _matching_windows_receipt_descriptor(
+            handle,
+            raw,
+            volume=volume,
+        ):
+            return Result.failure(
+                _error(
+                    "ownership.receipt_conflict",
+                    "The canonical receipt changed during publication.",
+                )
+            )
         binding = _receipt_binding_state(
             owned_root,
             safe_reference,
@@ -10963,11 +11907,19 @@ def _publish_windows_receipt(
                 _windows_delete_handle(handle)
             except OSError:
                 pass
-        for item in (handle, parent, control):
-            if item:
-                _paths._windows_close(item)
-        if security_descriptor:
-            _paths._windows_local_free(security_descriptor)
+        close_failure: BaseException | None = None
+        try:
+            _close_all_native_descriptors(handle, parent, control)
+        except BaseException as exc:
+            close_failure = exc
+        try:
+            if security_descriptor:
+                _paths._windows_local_free(security_descriptor)
+        except BaseException:
+            if close_failure is None:
+                raise
+        if close_failure is not None:
+            raise close_failure
 
 
 def publish_committed_receipt(
@@ -11956,12 +12908,37 @@ def _require_windows_cleanup_name_absent(parent: int, component: str) -> None:
         raise OSError(errno.ESTALE, "transaction cleanup name was replaced")
 
 
+def _require_locked_cleanup_finalization_current(
+    authorization: RecoveryCleanupAuthorization | None,
+    owned_root: OwnedRoot | None,
+    authority: _paths.PlatformPathAuthority | None,
+) -> None:
+    if authorization is None or authorization.journal_head_state == "ROLLED_BACK":
+        if owned_root is not None or authority is not None:
+            raise TypeError("finalized cleanup authority")
+        return
+    if (
+        authorization.journal_head_state != "FINALIZED"
+        or authorization.finalization_evidence is None
+        or not isinstance(owned_root, OwnedRoot)
+        or not isinstance(authority, _paths.PlatformPathAuthority)
+    ):
+        raise TypeError("finalized cleanup authority")
+    _require_finalized_cleanup_evidence_current(
+        owned_root,
+        authority,
+        authorization.finalization_evidence,
+    )
+
+
 def _remove_windows_quarantine(
     ticket: QuarantineTicket,
     root: int,
     namespace: _paths._NamespaceCapability,
     *,
     recovery_authorization: RecoveryCleanupAuthorization | None = None,
+    recovery_owned_root: OwnedRoot | None = None,
+    recovery_authority: _paths.PlatformPathAuthority | None = None,
 ) -> Result[CleanupResult]:
     parent = leaf = 0
     transaction_store: _TransactionStore | None = None
@@ -12014,6 +12991,11 @@ def _remove_windows_quarantine(
             or leaf_status.identity[0] != ticket._root_identity[0]
         ):
             raise OSError(errno.ESTALE, "quarantine identity changed")
+        _require_locked_cleanup_finalization_current(
+            recovery_authorization,
+            recovery_owned_root,
+            recovery_authority,
+        )
         _clean_windows_directory(
             leaf,
             volume=ticket._identity[0],
@@ -12101,15 +13083,37 @@ def remove_quarantine(
     ticket: QuarantineTicket,
     *,
     _recovery_authorization: RecoveryCleanupAuthorization | None = None,
+    _recovery_owned_root: OwnedRoot | None = None,
+    _recovery_authority: _paths.PlatformPathAuthority | None = None,
 ) -> Result[CleanupResult]:
     """Remove one quarantined tree without following any link."""
 
-    if not isinstance(ticket, QuarantineTicket) or (
-        _recovery_authorization is not None
-        and (
-            type(_recovery_authorization) is not RecoveryCleanupAuthorization
-            or not _recovery_cleanup_authorization_invariants(_recovery_authorization)
-            or ticket._binding != _recovery_authorization.binding
+    finalized_cleanup = (
+        type(_recovery_authorization) is RecoveryCleanupAuthorization
+        and _recovery_authorization.journal_head_state == "FINALIZED"
+    )
+    if (
+        not isinstance(ticket, QuarantineTicket)
+        or (
+            _recovery_authorization is not None
+            and (
+                type(_recovery_authorization) is not RecoveryCleanupAuthorization
+                or not _recovery_cleanup_authorization_invariants(
+                    _recovery_authorization
+                )
+                or ticket._binding != _recovery_authorization.binding
+            )
+        )
+        or (
+            finalized_cleanup
+            and (
+                not isinstance(_recovery_owned_root, OwnedRoot)
+                or not isinstance(_recovery_authority, _paths.PlatformPathAuthority)
+            )
+        )
+        or (
+            not finalized_cleanup
+            and (_recovery_owned_root is not None or _recovery_authority is not None)
         )
     ):
         return Result.failure(
@@ -12125,6 +13129,8 @@ def remove_quarantine(
             root,
             namespace,
             recovery_authorization=_recovery_authorization,
+            recovery_owned_root=_recovery_owned_root,
+            recovery_authority=_recovery_authority,
         )
     parent = leaf = -1
     transaction_store: _TransactionStore | None = None
@@ -12166,6 +13172,11 @@ def remove_quarantine(
         leaf = os.open(current_component, _directory_flags(), dir_fd=parent)
         if _identity(leaf) != ticket._identity:
             raise OSError(errno.ESTALE, "quarantine identity changed")
+        _require_locked_cleanup_finalization_current(
+            _recovery_authorization,
+            _recovery_owned_root,
+            _recovery_authority,
+        )
         if ticket._binding is not None:
             if cleanup_record is None:
                 raise OSError(errno.ESTALE, "transaction cleanup authority changed")
@@ -12361,6 +13372,8 @@ def _complete_recovery_cleanup(
 def resume_recovery_cleanup(
     owned_root: OwnedRoot,
     authorization: RecoveryCleanupAuthorization,
+    *,
+    authority: _paths.PlatformPathAuthority | None = None,
 ) -> Result[CleanupResult]:
     """Resume one exact terminal cleanup from its durable three-phase WAL."""
 
@@ -12385,6 +13398,14 @@ def resume_recovery_cleanup(
             store.close()
             store = None
             return Result.success(_complete_recovery_cleanup(owned_root, authorization))
+        if authorization.journal_head_state == "FINALIZED":
+            if authorization.finalization_evidence is None:
+                raise OSError(errno.ESTALE, "finalized cleanup evidence is absent")
+            _require_finalized_cleanup_evidence_current(
+                owned_root,
+                authority,
+                authorization.finalization_evidence,
+            )
         if state.cleanup_complete is not None:
             raise OSError(errno.ESTALE, "recovery cleanup completion conflicts")
         cleanup_intent = _publish_transaction_cleanup_intent(
@@ -12418,10 +13439,24 @@ def resume_recovery_cleanup(
             or rebound.ticket.recovery_reference != state.journal_relative
         ):
             raise OSError(errno.ESTALE, "recovery cleanup rebound changed")
+        if authorization.journal_head_state == "FINALIZED":
+            if authorization.finalization_evidence is None:
+                raise OSError(errno.ESTALE, "finalized cleanup evidence is absent")
+            _require_finalized_cleanup_evidence_current(
+                owned_root,
+                authority,
+                authorization.finalization_evidence,
+            )
         ticket = rebound.ticket
         removed = remove_quarantine(
             ticket,
             _recovery_authorization=authorization,
+            _recovery_owned_root=(
+                owned_root if authorization.journal_head_state == "FINALIZED" else None
+            ),
+            _recovery_authority=(
+                authority if authorization.journal_head_state == "FINALIZED" else None
+            ),
         )
         rebound = None
         if not removed.is_ok:

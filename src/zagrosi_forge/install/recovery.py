@@ -1,4 +1,4 @@
-"""Pure rollback-only classification for immutable transaction evidence."""
+"""Pure recovery classification and locked execution for transaction evidence."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     )
 
 
-RECOVERY_POLICY_VERSION = "1.2"
+RECOVERY_POLICY_VERSION = "1.3"
 _SNAPSHOT_TOKEN = object()
 _PLAN_TOKEN = object()
 _LOCKED_PLAN_TOKEN = object()
@@ -127,6 +127,7 @@ class _CleanupCapture(NamedTuple):
     journal_evidence_digest: str
     journal_head_sequence: int
     journal_head_record_digest: str
+    journal_head_state: str
     transaction_binding_digest: str
     delete_component: str
     authorization_digest: str
@@ -223,6 +224,7 @@ def _cleanup_projection(cleanup: _CleanupCapture) -> dict[str, object]:
         "journal_evidence_digest": cleanup.journal_evidence_digest,
         "journal_head_record_digest": cleanup.journal_head_record_digest,
         "journal_head_sequence": cleanup.journal_head_sequence,
+        "journal_head_state": cleanup.journal_head_state,
         "journal_location": cleanup.location,
         "journal_relative": cleanup.journal_relative,
         "observation_digest": cleanup.observation_digest,
@@ -396,6 +398,7 @@ def _capture_cleanup_observation(
         journal_evidence_digest=authorization.journal_evidence_digest,
         journal_head_sequence=authorization.journal_head_sequence,
         journal_head_record_digest=authorization.journal_head_record_digest,
+        journal_head_state=authorization.journal_head_state,
         transaction_binding_digest=authorization.transaction_binding_digest,
         delete_component=authorization.delete_component,
         authorization_digest=authorization.authorization_digest,
@@ -678,6 +681,11 @@ def _valid_cleanup_capture(value: object) -> bool:
         and type(value.journal_head_sequence) is int
         and value.journal_head_sequence >= 0
         and _valid_digest(value.journal_head_record_digest)
+        and value.journal_head_state
+        in {
+            JournalState.FINALIZED.value,
+            JournalState.ROLLED_BACK.value,
+        }
         and _valid_digest(value.transaction_binding_digest)
         and type(value.delete_component) is str
         and _DELETE_COMPONENT.fullmatch(value.delete_component) is not None
@@ -695,6 +703,7 @@ def _valid_finalization_capture(value: object) -> bool:
             JournalState.COMMIT_INTENT.value,
             JournalState.CONFIG_COMMITTED.value,
             JournalState.RECEIPT_COMMITTED.value,
+            JournalState.FINALIZED.value,
         }
         and value.receipt_status in {"absent", "matching"}
         and (
@@ -702,7 +711,11 @@ def _valid_finalization_capture(value: object) -> bool:
             or value.receipt_status == "absent"
         )
         and (
-            value.journal_state != JournalState.RECEIPT_COMMITTED.value
+            value.journal_state
+            not in {
+                JournalState.RECEIPT_COMMITTED.value,
+                JournalState.FINALIZED.value,
+            }
             or value.receipt_status == "matching"
         )
         and _valid_digest(value.observation_digest)
@@ -725,7 +738,16 @@ def _finalization_matches_journal(
         and finalization.journal_evidence_digest == journal.evidence_digest
         and finalization.journal_head_sequence == journal.head_sequence
         and finalization.journal_head_record_digest == journal.head_digest
-        and journal.journal_location == "live"
+        and (
+            (
+                finalization.journal_state == JournalState.FINALIZED.value
+                and journal.journal_location in {"live", "quarantined"}
+            )
+            or (
+                finalization.journal_state != JournalState.FINALIZED.value
+                and journal.journal_location == "live"
+            )
+        )
     )
 
 
@@ -1256,6 +1278,7 @@ class RecoveryResult:
             or self.executed_disposition
             not in {
                 RecoveryDisposition.ROLLBACK_CANDIDATE,
+                RecoveryDisposition.FINALIZE_COMMITTED,
                 RecoveryDisposition.CLEANUP_PENDING,
             }
             or self.final_disposition is not RecoveryDisposition.NO_RECOVERY
@@ -1265,7 +1288,11 @@ class RecoveryResult:
             or type(self.completed_action_count) is not int
             or self.completed_action_count < 0
             or (
-                self.executed_disposition is RecoveryDisposition.CLEANUP_PENDING
+                self.executed_disposition
+                in {
+                    RecoveryDisposition.CLEANUP_PENDING,
+                    RecoveryDisposition.FINALIZE_COMMITTED,
+                }
                 and self.completed_action_count != 0
             )
             or self.cleanup_removed is not True
@@ -1303,6 +1330,8 @@ def _journal_disposition(
         if journal.journal_location == "quarantined":
             return RecoveryDisposition.CLEANUP_PENDING
         return RecoveryDisposition.OPERATOR_CONFLICT
+    if journal.head_state == JournalState.FINALIZED.value:
+        return RecoveryDisposition.OPERATOR_CONFLICT
     if journal.head_state in _NO_RECOVERY_STATES:
         return RecoveryDisposition.NO_RECOVERY
     if journal.head_state == JournalState.RECOVERY_REQUIRED.value:
@@ -1337,6 +1366,7 @@ def _current_config_is_committed_candidate(
         in {
             JournalState.CONFIG_COMMITTED.value,
             JournalState.RECEIPT_COMMITTED.value,
+            JournalState.FINALIZED.value,
         }
         and journal.committed_config is not None
         and current_config == journal.committed_config
@@ -1349,12 +1379,18 @@ def _journal_disposition_with_finalization(
     finalization: _FinalizationCapture | None,
 ) -> RecoveryDisposition:
     baseline = _journal_disposition(journal, current_config)
-    if (
-        baseline is RecoveryDisposition.OPERATOR_CONFLICT
-        and finalization is not None
+    exact_finalization = (
+        finalization is not None
         and _finalization_matches_journal(finalization, journal)
         and _current_config_is_committed_candidate(journal, current_config)
-    ):
+    )
+    if journal.head_state == JournalState.FINALIZED.value:
+        return (
+            RecoveryDisposition.CLEANUP_PENDING
+            if exact_finalization
+            else RecoveryDisposition.OPERATOR_CONFLICT
+        )
+    if baseline is RecoveryDisposition.OPERATOR_CONFLICT and exact_finalization:
         return RecoveryDisposition.FINALIZE_COMMITTED
     return baseline
 
@@ -1789,13 +1825,26 @@ def _eligible_finalization_pair(
     if (
         type(observation) is not _ownership.PendingTransactionObservation
         or observation._seal is not _ownership._PENDING_TRANSACTION_OBSERVATION_TOKEN
-        or observation.location is not _ownership.TransactionLocation.LIVE
-        or journal.records[-1].state
-        not in {
-            JournalState.COMMIT_INTENT,
-            JournalState.CONFIG_COMMITTED,
-            JournalState.RECEIPT_COMMITTED,
-        }
+        or (
+            journal.records[-1].state is JournalState.FINALIZED
+            and observation.location
+            not in {
+                _ownership.TransactionLocation.LIVE,
+                _ownership.TransactionLocation.QUARANTINED,
+            }
+        )
+        or (
+            journal.records[-1].state is not JournalState.FINALIZED
+            and (
+                observation.location is not _ownership.TransactionLocation.LIVE
+                or journal.records[-1].state
+                not in {
+                    JournalState.COMMIT_INTENT,
+                    JournalState.CONFIG_COMMITTED,
+                    JournalState.RECEIPT_COMMITTED,
+                }
+            )
+        )
     ):
         return None
     return observation, journal
@@ -2099,7 +2148,7 @@ def _reproduce_locked_evidence(
         )
         reproduced = plan_recovery(observed)
         reproduced._require_valid()
-    except (ForgeError, TypeError, ValueError):
+    except (ForgeError, OSError, TypeError, ValueError):
         raise _plan_changed() from None
     expected._require_valid()
     if not hmac.compare_digest(expected.plan_digest, reproduced.plan_digest):
@@ -2177,10 +2226,24 @@ def _cleanup_execution_evidence(
         raise _plan_changed("The locked plan does not authorize cleanup.")
     if snapshot.journals:
         observation, journal = _journal_execution_evidence(snapshot, plan)
-        if (
-            observation.location is not _ownership.TransactionLocation.QUARANTINED
-            or journal.head.state is not JournalState.ROLLED_BACK
-        ):
+        terminal_pair = (
+            observation.location,
+            journal.head.state,
+        )
+        if terminal_pair not in {
+            (
+                _ownership.TransactionLocation.QUARANTINED,
+                JournalState.ROLLED_BACK,
+            ),
+            (
+                _ownership.TransactionLocation.QUARANTINED,
+                JournalState.FINALIZED,
+            ),
+            (
+                _ownership.TransactionLocation.LIVE,
+                JournalState.FINALIZED,
+            ),
+        }:
             raise _plan_changed("The locked plan does not authorize cleanup.")
         return observation, journal, None
     cleanup_observations = snapshot._cleanup_observations
@@ -2614,6 +2677,274 @@ def lock_recovery_plan(
         raise
 
 
+def _stable_committed_finalization_step(
+    lease: _LockedRecoveryLease,
+    *,
+    observation: PendingTransactionObservation,
+    journal: LoadedJournal,
+) -> tuple[JournalConfigIdentity, RecoveryFinalizationObservation]:
+    from . import ownership as _ownership
+
+    first_config = _observe_recovery_config_once(
+        authority=lease.authority,
+        owned_root=lease.owned_root,
+        journal=journal,
+    )
+    first_observed = _ownership.observe_recovery_finalization(
+        lease.owned_root,
+        observation=observation,
+        journal=journal,
+    )
+    second_config = _observe_recovery_config_once(
+        authority=lease.authority,
+        owned_root=lease.owned_root,
+        journal=journal,
+    )
+    second_observed = _ownership.observe_recovery_finalization(
+        lease.owned_root,
+        observation=observation,
+        journal=journal,
+    )
+    confirmed_config = _observe_recovery_config_once(
+        authority=lease.authority,
+        owned_root=lease.owned_root,
+        journal=journal,
+    )
+    if (
+        first_config is None
+        or second_config is None
+        or confirmed_config is None
+        or first_config != second_config
+        or second_config != confirmed_config
+        or not first_observed.is_ok
+        or not second_observed.is_ok
+    ):
+        raise _plan_changed("Committed finalization evidence changed.")
+    first_finalization = first_observed.unwrap()
+    second_finalization = second_observed.unwrap()
+    try:
+        first_finalization._require_valid()
+        second_finalization._require_valid()
+    except (AttributeError, TypeError, ValueError):
+        raise _plan_changed("Committed finalization evidence changed.") from None
+    if (
+        first_finalization != second_finalization
+        or not _journal_identity_is_committed_candidate(journal, confirmed_config)
+    ):
+        raise _plan_changed("Committed finalization evidence changed.")
+    return confirmed_config, second_finalization
+
+
+def _finish_reopened_config_finalization(
+    lease: _LockedRecoveryLease,
+    *,
+    journal: LoadedJournal,
+) -> None:
+    from . import atomic_file
+
+    head = journal.records[-1]
+    if head.config_recovery is None:
+        raise _plan_changed("Committed config recovery evidence is absent.")
+    try:
+        decoded = json.loads(canonical_json_bytes(head.config_recovery))
+        descriptor_result = atomic_file.decode_config_recovery_descriptor(decoded)
+        if not descriptor_result.is_ok:
+            raise ValueError("config recovery descriptor")
+        descriptor = descriptor_result.unwrap()
+    except (ForgeError, TypeError, ValueError):
+        raise _plan_changed("Committed config recovery evidence changed.") from None
+
+    proof = lease.authority.prove_config_path(lease.owned_root).unwrap()
+    reopened = None
+    try:
+        reopened_result = atomic_file.reopen_config_recovery(
+            proof,
+            descriptor,
+        )
+        if not reopened_result.is_ok:
+            raise _plan_changed("Committed config recovery evidence changed.")
+        reopened = reopened_result.unwrap()
+        classified = atomic_file.classify_reopened_config_recovery(reopened)
+        if (
+            not classified.is_ok
+            or classified.unwrap() is not atomic_file.ConfigCommitState.CANDIDATE
+        ):
+            raise _plan_changed("The committed config identity changed.")
+        promoted = atomic_file.promote_reopened_config_backup(reopened)
+        if not promoted.is_ok:
+            error = promoted.error
+            if error is not None:
+                raise error
+            raise ValueError("config backup promotion")
+        cleaned = atomic_file.cleanup_reopened_config_recovery(reopened)
+        if not cleaned.is_ok:
+            error = cleaned.error
+            if error is not None:
+                raise error
+            raise ValueError("config recovery cleanup")
+        reopened = None
+    finally:
+        _close_all_recovery_resources(
+            None if reopened is None else reopened.close,
+            proof.close,
+        )
+
+
+def _finalization_incomplete(
+    reference: str,
+    message: str = "Committed recovery finalization remains incomplete.",
+) -> ForgeError:
+    return ForgeError(
+        "recovery.finalization_incomplete",
+        14,
+        message,
+        recovery_instructions=(reference,),
+    )
+
+
+def _stable_finalization_or_incomplete(
+    lease: _LockedRecoveryLease,
+    *,
+    observation: PendingTransactionObservation,
+    journal: LoadedJournal,
+    recovery_reference: str,
+) -> tuple[JournalConfigIdentity, RecoveryFinalizationObservation]:
+    try:
+        return _stable_committed_finalization_step(
+            lease,
+            observation=observation,
+            journal=journal,
+        )
+    except (ForgeError, OSError, TypeError, ValueError) as exc:
+        if isinstance(exc, ForgeError) and exc.code == "transaction.plan_changed":
+            raise
+        raise _finalization_incomplete(recovery_reference) from None
+
+
+def _quarantine_finalized_transaction(
+    lease: _LockedRecoveryLease,
+    snapshot: RecoverySnapshot,
+    plan: RecoveryPlan,
+    *,
+    consume_lease: bool,
+) -> str:
+    from . import ownership as _ownership
+    from .journal import JournalStore
+
+    observation, journal = _journal_execution_evidence(snapshot, plan)
+    if (
+        plan.disposition is not RecoveryDisposition.CLEANUP_PENDING
+        or observation.location is not _ownership.TransactionLocation.LIVE
+        or journal.head.state is not JournalState.FINALIZED
+    ):
+        raise _plan_changed("The locked plan does not authorize final cleanup.")
+    binding = observation.binding
+    recovery_reference = binding.quarantine_relative
+    rebound_result = _ownership.rebind_persistent_transaction_for_recovery(
+        lease.owned_root,
+        binding=binding,
+    )
+    if not rebound_result.is_ok:
+        raise _plan_changed("The finalized transaction root changed.")
+    transaction = rebound_result.unwrap()
+    path = None
+    access = None
+    store = None
+    proof = None
+    ticket = None
+    try:
+        if (
+            transaction.location is not _ownership.TransactionLocation.LIVE
+            or transaction.binding != binding
+            or transaction.ticket is not None
+            or type(transaction.claim) is not _ownership.TransactionPathClaim
+            or observation.journal_relative != binding.root_relative
+        ):
+            raise _plan_changed("The finalized transaction root changed.")
+        path_result = lease.authority.prove_descendant(
+            lease.owned_root,
+            transaction.claim.relative,
+            expected_depth=3,
+        )
+        if not path_result.is_ok:
+            raise _plan_changed("The finalized transaction root changed.")
+        path = path_result.unwrap()
+        access_result = _ownership.open_transaction_journal_access(
+            lease.owned_root,
+            transaction,
+        )
+        if not access_result.is_ok:
+            raise _plan_changed("The finalized transaction journal changed.")
+        access = access_result.unwrap()
+        store = JournalStore(access, path)
+        access = None
+        loaded = store.load()
+        if loaded.head != journal.head or tuple(
+            record.record_digest for record in loaded.records
+        ) != tuple(record.record_digest for record in journal.records):
+            raise _plan_changed("The finalized transaction journal changed.")
+        proof_result = _ownership.prove_transaction_owned(
+            path,
+            claim=transaction.claim,
+        )
+        if not proof_result.is_ok:
+            raise _plan_changed("The finalized transaction root changed.")
+        proof = proof_result.unwrap()
+        try:
+            _close_all_recovery_resources(
+                store.close,
+                path.close,
+                transaction.close,
+            )
+        except (ForgeError, OSError, TypeError, ValueError):
+            raise _finalization_incomplete(
+                recovery_reference,
+                "The finalized transaction authority could not be released.",
+            ) from None
+        store = None
+        path = None
+        if consume_lease:
+            lease.consume_execution()
+        quarantined = _ownership.quarantine_owned(
+            proof,
+            transaction_id=binding.transaction_id,
+        )
+        proof.close()
+        proof = None
+        if not quarantined.is_ok:
+            raise _finalization_incomplete(
+                recovery_reference,
+                "The finalized transaction root could not be quarantined.",
+            )
+        ticket = quarantined.unwrap()
+        if ticket.recovery_reference != recovery_reference:
+            raise _finalization_incomplete(
+                recovery_reference,
+                "The finalized transaction quarantine changed.",
+            )
+        return recovery_reference
+    finally:
+        try:
+            _close_all_recovery_resources(
+                ticket.close if ticket is not None else None,
+                proof.close if proof is not None else None,
+                (
+                    store.close
+                    if store is not None
+                    else access.close
+                    if access is not None
+                    else None
+                ),
+                path.close if path is not None else None,
+                transaction.close,
+            )
+        except (ForgeError, OSError, TypeError, ValueError):
+            raise _finalization_incomplete(
+                recovery_reference,
+                "The finalized transaction authority could not be released.",
+            ) from None
+
+
 def _execute_cleanup_pending(
     lease: _LockedRecoveryLease,
     snapshot: RecoverySnapshot,
@@ -2646,10 +2977,27 @@ def _execute_cleanup_pending(
         if authorization is None:
             if observation is None or journal is None:
                 raise TypeError("journal-backed cleanup evidence")
+            finalized_config = None
+            finalization = None
+            if journal.head.state is JournalState.FINALIZED:
+                finalizations = snapshot._finalization_observations
+                if (
+                    snapshot.current_config is None
+                    or type(finalizations) is not tuple
+                    or len(finalizations) != 1
+                    or type(finalizations[0])
+                    is not _ownership.RecoveryFinalizationObservation
+                ):
+                    raise TypeError("finalized cleanup evidence")
+                finalized_config = snapshot.current_config
+                finalization = finalizations[0]
             authorized = _ownership.authorize_recovery_cleanup(
                 lease.owned_root,
                 observation=observation,
                 journal=journal,
+                authority=lease.authority,
+                finalized_config=finalized_config,
+                finalization=finalization,
             )
             if authorized.is_ok:
                 authorization = authorized.unwrap()
@@ -2664,9 +3012,23 @@ def _execute_cleanup_pending(
                     or authorization.journal_head_sequence != journal.head.sequence
                     or authorization.journal_head_record_digest
                     != journal.head.record_digest
+                    or authorization.journal_head_state != journal.head.state.value
                     or authorization.transaction_binding_digest
                     != journal.head.transaction_binding_digest
                     or authorization.transaction_id != plan.transaction_ids[0]
+                    or (
+                        journal.head.state is JournalState.FINALIZED
+                        and (
+                            authorization.finalization_evidence is None
+                            or authorization.finalization_evidence.config
+                            != finalized_config
+                            or authorization.finalization_evidence.finalization
+                            != cast(
+                                "RecoveryFinalizationObservation",
+                                finalization,
+                            )._capture
+                        )
+                    )
                 ):
                     authorization = None
                     operation_message = (
@@ -2680,6 +3042,7 @@ def _execute_cleanup_pending(
             _ownership.resume_recovery_cleanup(
                 lease.owned_root,
                 authorization,
+                authority=lease.authority,
             )
     except (AttributeError, ForgeError, OSError, TypeError, ValueError):
         operation_message = "The exact recovery cleanup remains incomplete."
@@ -2720,6 +3083,347 @@ def _execute_cleanup_pending(
         cleanup_removed=True,
         recovery_references=(recovery_reference,),
     )
+
+
+def _execute_finalized_cleanup_pending(
+    lease: _LockedRecoveryLease,
+    snapshot: RecoverySnapshot,
+    plan: RecoveryPlan,
+    *,
+    consume_lease: bool,
+    executed_disposition: RecoveryDisposition,
+) -> RecoveryResult:
+    from . import ownership as _ownership
+
+    observation, journal, cleanup_observation = _cleanup_execution_evidence(
+        snapshot,
+        plan,
+    )
+    if observation is not None and journal is not None:
+        finalizations = snapshot._finalization_observations
+        recovery_reference = observation.binding.quarantine_relative
+        if (
+            journal.head.state is not JournalState.FINALIZED
+            or type(finalizations) is not tuple
+            or len(finalizations) != 1
+            or snapshot.current_config is None
+        ):
+            raise _plan_changed("The locked plan does not authorize finalized cleanup.")
+        current_config, current_finalization = _stable_finalization_or_incomplete(
+            lease,
+            observation=observation,
+            journal=journal,
+            recovery_reference=recovery_reference,
+        )
+        if (
+            current_config != snapshot.current_config
+            or current_finalization != finalizations[0]
+        ):
+            raise _plan_changed("Finalized cleanup evidence changed.")
+    if (
+        observation is not None
+        and journal is not None
+        and observation.location is _ownership.TransactionLocation.LIVE
+        and journal.head.state is JournalState.FINALIZED
+    ):
+        recovery_reference = _quarantine_finalized_transaction(
+            lease,
+            snapshot,
+            plan,
+            consume_lease=consume_lease,
+        )
+        try:
+            quarantined_snapshot = observe_recovery_snapshot(
+                authority=lease.authority,
+                owned_root=lease.owned_root,
+            )
+            quarantined_plan = plan_recovery(quarantined_snapshot)
+        except (ForgeError, TypeError, ValueError):
+            raise _finalization_incomplete(
+                recovery_reference,
+                "The finalized transaction quarantine remains incomplete.",
+            ) from None
+        if (
+            quarantined_plan.disposition is not RecoveryDisposition.CLEANUP_PENDING
+            or quarantined_plan.transaction_ids != plan.transaction_ids
+        ):
+            raise _finalization_incomplete(
+                recovery_reference,
+                "The finalized transaction cleanup plan is contradictory.",
+            )
+        return _execute_cleanup_pending(
+            lease,
+            quarantined_snapshot,
+            quarantined_plan,
+            consume_lease=False,
+            executed_disposition=executed_disposition,
+            completed_action_count=0,
+        )
+    if cleanup_observation is not None or (
+        observation is not None
+        and journal is not None
+        and observation.location is _ownership.TransactionLocation.QUARANTINED
+        and journal.head.state is JournalState.FINALIZED
+    ):
+        return _execute_cleanup_pending(
+            lease,
+            snapshot,
+            plan,
+            consume_lease=consume_lease,
+            executed_disposition=executed_disposition,
+            completed_action_count=0,
+        )
+    raise _plan_changed("The locked plan does not authorize finalized cleanup.")
+
+
+def _execute_finalize_committed(
+    lease: _LockedRecoveryLease,
+    snapshot: RecoverySnapshot,
+    plan: RecoveryPlan,
+) -> RecoveryResult:
+    from . import ownership as _ownership
+    from .journal import JournalPathIdentity, JournalStore, JournalTransition
+
+    observation, journal = _journal_execution_evidence(snapshot, plan)
+    finalizations = snapshot._finalization_observations
+    if (
+        plan.disposition is not RecoveryDisposition.FINALIZE_COMMITTED
+        or observation.location is not _ownership.TransactionLocation.LIVE
+        or type(finalizations) is not tuple
+        or len(finalizations) != 1
+        or snapshot.current_config is None
+        or journal.head.state
+        not in {
+            JournalState.COMMIT_INTENT,
+            JournalState.CONFIG_COMMITTED,
+            JournalState.RECEIPT_COMMITTED,
+        }
+    ):
+        raise _plan_changed("The locked plan does not authorize finalization.")
+    initial_finalization = finalizations[0]
+    binding = observation.binding
+    recovery_reference = binding.quarantine_relative
+    rebound_result = _ownership.rebind_persistent_transaction_for_recovery(
+        lease.owned_root,
+        binding=binding,
+    )
+    if not rebound_result.is_ok:
+        raise _plan_changed("The committed transaction root changed.")
+    transaction = rebound_result.unwrap()
+    path = None
+    access = None
+    store = None
+    try:
+        if (
+            transaction.location is not _ownership.TransactionLocation.LIVE
+            or transaction.binding != binding
+            or transaction.ticket is not None
+            or type(transaction.claim) is not _ownership.TransactionPathClaim
+            or observation.journal_relative != binding.root_relative
+        ):
+            raise _plan_changed("The committed transaction root changed.")
+        path_result = lease.authority.prove_descendant(
+            lease.owned_root,
+            transaction.claim.relative,
+            expected_depth=3,
+        )
+        if not path_result.is_ok:
+            raise _plan_changed("The committed transaction root changed.")
+        path = path_result.unwrap()
+        access_result = _ownership.open_transaction_journal_access(
+            lease.owned_root,
+            transaction,
+        )
+        if not access_result.is_ok:
+            raise _plan_changed("The committed transaction journal changed.")
+        access = access_result.unwrap()
+        store = JournalStore(access, path)
+        access = None
+        loaded = store.load()
+        if loaded.head != journal.head or tuple(
+            record.record_digest for record in loaded.records
+        ) != tuple(record.record_digest for record in journal.records):
+            raise _plan_changed("The committed transaction journal changed.")
+        current_config, current_finalization = _stable_finalization_or_incomplete(
+            lease,
+            observation=observation,
+            journal=loaded,
+            recovery_reference=recovery_reference,
+        )
+        if (
+            current_config != snapshot.current_config
+            or current_finalization != initial_finalization
+        ):
+            raise _plan_changed("Committed finalization evidence changed.")
+
+        lease.consume_execution()
+        try:
+            while loaded.head.state is not JournalState.FINALIZED:
+                state = loaded.head.state
+                if state is JournalState.COMMIT_INTENT:
+                    current_config, _current_finalization = (
+                        _stable_committed_finalization_step(
+                            lease,
+                            observation=observation,
+                            journal=loaded,
+                        )
+                    )
+                    store.append(
+                        loaded.head,
+                        JournalTransition(
+                            JournalState.CONFIG_COMMITTED,
+                            config_result=current_config,
+                        ),
+                    )
+                    loaded = store.load()
+                    continue
+
+                if state is JournalState.CONFIG_COMMITTED:
+                    current_config, _current_finalization = (
+                        _stable_committed_finalization_step(
+                            lease,
+                            observation=observation,
+                            journal=loaded,
+                        )
+                    )
+                    if current_config != loaded.records[-1].committed_config:
+                        raise _plan_changed("The committed config identity changed.")
+                    prepared_raw = canonical_json_bytes(
+                        loaded.records[-1].prepared.prepared_receipt,
+                        final_newline=True,
+                    )
+                    published = _ownership.publish_committed_receipt(
+                        lease.owned_root,
+                        raw=prepared_raw,
+                    )
+                    if not published.is_ok:
+                        error = published.error
+                        if error is not None:
+                            raise error
+                        raise ValueError("receipt publication")
+                    _current_config, receipt_finalization = (
+                        _stable_committed_finalization_step(
+                            lease,
+                            observation=observation,
+                            journal=loaded,
+                        )
+                    )
+                    receipt_capture = receipt_finalization._capture
+                    if (
+                        receipt_finalization.receipt_status != "matching"
+                        or receipt_capture.receipt_parent_identity is None
+                        or receipt_capture.receipt_identity is None
+                        or receipt_capture.receipt_digest is None
+                    ):
+                        raise _plan_changed("The committed receipt identity changed.")
+                    store.append(
+                        loaded.head,
+                        JournalTransition(
+                            JournalState.RECEIPT_COMMITTED,
+                            receipt_result=JournalPathIdentity(
+                                role="committed-receipt",
+                                relative_path=receipt_capture.receipt_relative,
+                                parent_identity=(
+                                    receipt_capture.receipt_parent_identity
+                                ),
+                                leaf_identity=receipt_capture.receipt_identity,
+                                content_digest=receipt_capture.receipt_digest,
+                            ),
+                        ),
+                    )
+                    loaded = store.load()
+                    continue
+
+                if state is JournalState.RECEIPT_COMMITTED:
+                    current_config, _current_finalization = (
+                        _stable_committed_finalization_step(
+                            lease,
+                            observation=observation,
+                            journal=loaded,
+                        )
+                    )
+                    if current_config != loaded.records[-1].committed_config:
+                        raise _plan_changed("The committed config identity changed.")
+                    _finish_reopened_config_finalization(
+                        lease,
+                        journal=loaded,
+                    )
+                    confirmed_config, _confirmed_finalization = (
+                        _stable_committed_finalization_step(
+                            lease,
+                            observation=observation,
+                            journal=loaded,
+                        )
+                    )
+                    if confirmed_config != current_config:
+                        raise _plan_changed("The committed config identity changed.")
+                    store.append(
+                        loaded.head,
+                        JournalTransition(JournalState.FINALIZED),
+                    )
+                    loaded = store.load()
+                    finalized_config, _finalized_observation = (
+                        _stable_committed_finalization_step(
+                            lease,
+                            observation=observation,
+                            journal=loaded,
+                        )
+                    )
+                    if finalized_config != confirmed_config:
+                        raise _plan_changed("The finalized config identity changed.")
+                    continue
+
+                raise _plan_changed(
+                    "The committed transaction state changed during finalization."
+                )
+        except (ForgeError, OSError, TypeError, ValueError) as exc:
+            if isinstance(exc, ForgeError) and exc.code == "transaction.plan_changed":
+                raise
+            raise _finalization_incomplete(recovery_reference) from None
+
+        try:
+            _close_all_recovery_resources(
+                store.close,
+                path.close,
+                transaction.close,
+            )
+        except (ForgeError, OSError, TypeError, ValueError):
+            raise _finalization_incomplete(recovery_reference) from None
+        store = None
+        path = None
+
+        cleanup_snapshot = observe_recovery_snapshot(
+            authority=lease.authority,
+            owned_root=lease.owned_root,
+        )
+        cleanup_plan = plan_recovery(cleanup_snapshot)
+        if (
+            cleanup_plan.disposition is not RecoveryDisposition.CLEANUP_PENDING
+            or cleanup_plan.transaction_ids != plan.transaction_ids
+        ):
+            raise _finalization_incomplete(
+                recovery_reference,
+                "The finalized transaction cleanup plan is contradictory.",
+            )
+        return _execute_finalized_cleanup_pending(
+            lease,
+            cleanup_snapshot,
+            cleanup_plan,
+            consume_lease=False,
+            executed_disposition=RecoveryDisposition.FINALIZE_COMMITTED,
+        )
+    finally:
+        _close_all_recovery_resources(
+            (
+                store.close
+                if store is not None
+                else access.close
+                if access is not None
+                else None
+            ),
+            path.close if path is not None else None,
+            transaction.close,
+        )
 
 
 def _execute_rollback_candidate(
@@ -3021,7 +3725,7 @@ def _execute_rollback_candidate(
 
 
 def execute_recovery(locked: LockedRecoveryPlan) -> RecoveryResult:
-    """Consume one exact rollback or cleanup plan after locked reproduction."""
+    """Consume one exact rollback, finalization, or cleanup plan."""
 
     if type(locked) is not LockedRecoveryPlan:
         raise TypeError("execute_recovery requires LockedRecoveryPlan")
@@ -3036,11 +3740,29 @@ def execute_recovery(locked: LockedRecoveryPlan) -> RecoveryResult:
             )
             if plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE:
                 return _execute_rollback_candidate(lease, snapshot, plan)
+            if plan.disposition is RecoveryDisposition.FINALIZE_COMMITTED:
+                return _execute_finalize_committed(lease, snapshot, plan)
             if plan.disposition is not RecoveryDisposition.CLEANUP_PENDING:
                 raise ForgeError(
                     "recovery.operator_conflict",
                     14,
                     "The locked recovery plan does not authorize cleanup.",
+                )
+            observation, journal, cleanup_observation = _cleanup_execution_evidence(
+                snapshot, plan
+            )
+            if (
+                cleanup_observation is None
+                and observation is not None
+                and journal is not None
+                and journal.head.state is JournalState.FINALIZED
+            ):
+                return _execute_finalized_cleanup_pending(
+                    lease,
+                    snapshot,
+                    plan,
+                    consume_lease=True,
+                    executed_disposition=RecoveryDisposition.CLEANUP_PENDING,
                 )
             return _execute_cleanup_pending(
                 lease,

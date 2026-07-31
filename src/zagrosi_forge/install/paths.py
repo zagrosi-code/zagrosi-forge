@@ -112,6 +112,22 @@ def _error(code: str, message: str) -> ForgeError:
     return ForgeError(code, 11, message)
 
 
+def _close_all_resources(*callbacks: Callable[[], None] | None) -> None:
+    """Attempt every retained close, then propagate the first close failure."""
+
+    first_failure: BaseException | None = None
+    for callback in callbacks:
+        if callback is None:
+            continue
+        try:
+            callback()
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+    if first_failure is not None:
+        raise first_failure
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class SafeComponent:
     value: str
@@ -2168,18 +2184,28 @@ class _NamespaceCapability:
     def close(self) -> None:
         if self._closed:
             return
+        self._closed = True
         descriptors = (
             self._home_descriptor,
             self._plugins_descriptor,
             self._control_descriptor,
         )
-        if self._windows:
-            for descriptor in descriptors:
-                _windows_close(descriptor)
-        else:
-            for descriptor in descriptors:
-                os.close(descriptor)
-        self._closed = True
+        empty = 0 if self._windows else -1
+        self._home_descriptor = empty
+        self._plugins_descriptor = empty
+        self._control_descriptor = empty
+        first_failure: BaseException | None = None
+        for descriptor in descriptors:
+            try:
+                if self._windows:
+                    _windows_close(descriptor)
+                else:
+                    os.close(descriptor)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            raise first_failure
 
     def __enter__(self) -> _NamespaceCapability:
         return self
@@ -3059,12 +3085,25 @@ class PathProof:
         return _mint_owned_directory_writer(self)
 
     def close(self) -> None:
-        if not self._closed:
-            os.close(self._descriptor)
-            os.close(self._control_descriptor)
-            os.close(self._root_descriptor)
-            os.close(self._home_descriptor)
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
+        descriptors = (
+            self._descriptor,
+            self._control_descriptor,
+            self._root_descriptor,
+            self._home_descriptor,
+        )
+        self._descriptor = -1
+        self._control_descriptor = -1
+        self._root_descriptor = -1
+        self._home_descriptor = -1
+        _close_all_resources(
+            *(
+                (lambda selected=descriptor: os.close(selected))
+                for descriptor in descriptors
+            )
+        )
 
     def __enter__(self) -> PathProof:
         return self
@@ -3572,12 +3611,25 @@ class _WindowsPathProof(PathProof):
         )
 
     def close(self) -> None:
-        if not self._closed:
-            _windows_close(self._descriptor)
-            _windows_close(self._control_descriptor)
-            _windows_close(self._root_descriptor)
-            _windows_close(self._home_descriptor)
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
+        descriptors = (
+            self._descriptor,
+            self._control_descriptor,
+            self._root_descriptor,
+            self._home_descriptor,
+        )
+        self._descriptor = 0
+        self._control_descriptor = 0
+        self._root_descriptor = 0
+        self._home_descriptor = 0
+        _close_all_resources(
+            *(
+                (lambda selected=descriptor: _windows_close(selected))
+                for descriptor in descriptors
+            )
+        )
 
 
 class ConfigPathProof:
@@ -3776,14 +3828,23 @@ class ConfigPathProof:
     def close(self) -> None:
         if self._closed:
             return
-        if self._leaf is not None:
-            self._leaf.close()
-        if self._windows:
-            _windows_close(self._home_descriptor)
-        else:
-            os.close(self._home_descriptor)
-        self._namespace.close()
         self._closed = True
+        leaf = self._leaf
+        self._leaf = None
+        home_descriptor = self._home_descriptor
+        self._home_descriptor = 0 if self._windows else -1
+
+        def close_home() -> None:
+            if self._windows:
+                _windows_close(home_descriptor)
+            else:
+                os.close(home_descriptor)
+
+        _close_all_resources(
+            leaf.close if leaf is not None else None,
+            close_home,
+            self._namespace.close,
+        )
 
     def __enter__(self) -> ConfigPathProof:
         return self
@@ -4225,12 +4286,24 @@ class OwnedDirectoryWriter:
     def close(self) -> None:
         if self._closed:
             return
-        if self._windows:
-            _windows_close(self._descriptor)
-        else:
-            os.close(self._descriptor)
-        self._namespace.close()
         self._closed = True
+        descriptor = self._descriptor
+        self._descriptor = 0 if self._windows else -1
+        first_failure: BaseException | None = None
+        try:
+            if self._windows:
+                _windows_close(descriptor)
+            else:
+                os.close(descriptor)
+        except BaseException as exc:
+            first_failure = exc
+        try:
+            self._namespace.close()
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+        if first_failure is not None:
+            raise first_failure
 
     def __enter__(self) -> OwnedDirectoryWriter:
         return self
