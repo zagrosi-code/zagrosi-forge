@@ -361,8 +361,8 @@
   },
   {
     "path": "src/zagrosi_forge/install/ownership.py",
-    "sha256": "343994d6aa2dfae10c111b06d48fbdb139e9a357e04615056a92c1cf1e2fe05a",
-    "size": 416615
+    "sha256": "bdfc9163887a2b2cd75d04be3efd4146d9cd4c37bd195a95f68efb30d362e47f",
+    "size": 462720
   },
   {
     "path": "src/zagrosi_forge/install/paths.py",
@@ -381,8 +381,8 @@
   },
   {
     "path": "src/zagrosi_forge/install/recovery.py",
-    "sha256": "5c7435f77b13e60aa09ec9f34be41dc57561a08b1adbca1cc5a236ec52a04bcf",
-    "size": 89785
+    "sha256": "bcb8599eef4325b1543187bf0c5528c6720799bc365c3b3692e159ec98eb42ae",
+    "size": 111445
   },
   {
     "path": "src/zagrosi_forge/install/schemas/bundle-manifest-v1.schema.json",
