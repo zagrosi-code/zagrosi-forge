@@ -17,9 +17,11 @@ import secrets
 import stat
 import sys
 from threading import Lock
-from typing import Callable, Mapping, Never, cast
+import time
+from typing import TYPE_CHECKING, Callable, Mapping, Never, cast
 import unicodedata
 
+from . import lock as _kernel_lock
 from .contracts import (
     ActiveInstallRelation,
     ForgeError,
@@ -33,6 +35,9 @@ from .contracts import (
 from . import paths as _paths
 from .paths import OpenedRegularFile, OwnedRoot, PathProof, SafeRelativePath
 from .policies import LIMIT_POLICY
+
+if TYPE_CHECKING:
+    from .journal import LoadedJournal
 
 
 RECEIPT_SCHEMA_DIGEST = (
@@ -65,6 +70,8 @@ _LEGACY_CATALOG_RECORD_DIGEST = (
 )
 _CLEANUP_MAX_DEPTH = LIMIT_POLICY.value("path_components")
 _CLEANUP_MAX_ENTRIES = LIMIT_POLICY.value("bundle_files")
+_TRANSACTION_STATE_LOCK_TIMEOUT_SECONDS = LIMIT_POLICY.value("lock_default_seconds")
+_TRANSACTION_STATE_LOCK_POLL_SECONDS = 0.02
 _PERSISTENT_TRANSACTION = re.compile(r"tx-[0-9a-f]{32}\Z")
 _TRANSACTION_STAGE = re.compile(r"\.root-[0-9a-f]{32}\.tmp\Z")
 _TRANSACTION_PENDING_CLAIM = re.compile(r"\.claim-[0-9a-f]{32}\.tmp\Z")
@@ -76,6 +83,9 @@ _TRANSACTION_CREATION_RECORD = re.compile(
 _TRANSACTION_CLEANUP_RECORD = re.compile(
     r"(tx-[0-9a-f]{32})\.(?:removed|removing)\.json\Z"
 )
+_TRANSACTION_RECOVERY_CLEANUP_RECORD = re.compile(
+    r"(tx-[0-9a-f]{32})\.rc-(?:auth|final|done)\.json\Z"
+)
 _TRANSACTION_QUARANTINE = re.compile(r"\.zagrosi-quarantine-[0-9a-f]{24}\Z")
 _TRANSACTION_RETIRED_RECORD = re.compile(r"\.retired-[0-9a-f]{64}\.json\Z")
 _TRANSACTION_RECORD_STAGE = re.compile(r"\.record-[0-9a-f]{32}\.tmp\Z")
@@ -83,6 +93,7 @@ _TRANSACTION_STORE_COMPONENT = "transactions"
 _TRANSACTION_CLAIMS_COMPONENT = "claims"
 _TRANSACTION_STORE_CONTROL = "control-v1.json"
 _TRANSACTION_RECORD_LIMIT = 8 * 1024
+_TRANSACTION_STATE_LOCK_OFFSET = _TRANSACTION_RECORD_LIMIT + 1
 _TRANSACTION_STORE_SCHEMA_DIGEST = (
     "fc1809f697c590f522f0fe9b6281d81123f7193a59cf1a209547cfe7fb908d5b"
 )
@@ -98,6 +109,10 @@ _TRANSACTION_CREATE_INTENT_SCHEMA_DIGEST = (
 _TRANSACTION_CLEANUP_SCHEMA_DIGEST = (
     "348e089f2bc194332ea8e2189a1847efa01502293b497688e9759ccc0c8d1664"
 )
+_TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST = (
+    "fd94ea12fe57a94b1c3372b79446e344b58956e0deccf2886cc51b9be7a6d1fc"
+)
+_ZERO_DIGEST = "0" * 64
 _PERSISTENT_BINDING_TOKEN = object()
 _PERSISTENT_ROOT_TOKEN = object()
 _REBOUND_TRANSACTION_TOKEN = object()
@@ -105,6 +120,8 @@ _TRANSACTION_JOURNAL_ACCESS_TOKEN = object()
 _QUARANTINED_RECOVERY_JOURNAL_ACCESS_TOKEN = object()
 _QUARANTINED_RECOVERY_JOURNAL_WRITER_TOKEN = object()
 _PENDING_TRANSACTION_OBSERVATION_TOKEN = object()
+_RECOVERY_CLEANUP_AUTHORIZATION_TOKEN = object()
+_RECOVERY_CLEANUP_OBSERVATION_TOKEN = object()
 
 
 def _error(code: str, message: str, *, recovery: tuple[str, ...] = ()) -> ForgeError:
@@ -1404,6 +1421,175 @@ class PendingTransactionObservation:
         raise TypeError("pending transaction observations are not serializable")
 
 
+class _RecoveryCleanupPhase(str, Enum):
+    AUTHORIZED = "AUTHORIZED"
+    FINALIZING = "FINALIZING"
+    COMPLETE = "COMPLETE"
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RecoveryCleanupAuthorization:
+    """Inert durable terminal evidence; never deletion authority by itself."""
+
+    binding: PersistentTransactionBinding
+    location: TransactionLocation
+    journal_relative: str
+    journal_access_digest: str
+    journal_evidence_digest: str
+    journal_head_sequence: int
+    journal_head_record_digest: str
+    transaction_binding_digest: str
+    delete_component: str
+    authorization_digest: str
+    _component: str
+    _identity: tuple[int, int]
+    _raw: bytes
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        binding: PersistentTransactionBinding,
+        location: TransactionLocation,
+        journal_relative: str,
+        journal_access_digest: str,
+        journal_evidence_digest: str,
+        journal_head_sequence: int,
+        journal_head_record_digest: str,
+        transaction_binding_digest: str,
+        delete_component: str,
+        authorization_digest: str,
+        _component: str,
+        _identity: tuple[int, int],
+        _raw: bytes,
+        _token: object,
+    ) -> None:
+        if _token is not _RECOVERY_CLEANUP_AUTHORIZATION_TOKEN:
+            raise TypeError(
+                "recovery cleanup authorizations are loaded only by ownership authority"
+            )
+        object.__setattr__(self, "binding", binding)
+        object.__setattr__(self, "location", location)
+        object.__setattr__(self, "journal_relative", journal_relative)
+        object.__setattr__(self, "journal_access_digest", journal_access_digest)
+        object.__setattr__(self, "journal_evidence_digest", journal_evidence_digest)
+        object.__setattr__(self, "journal_head_sequence", journal_head_sequence)
+        object.__setattr__(
+            self,
+            "journal_head_record_digest",
+            journal_head_record_digest,
+        )
+        object.__setattr__(
+            self,
+            "transaction_binding_digest",
+            transaction_binding_digest,
+        )
+        object.__setattr__(self, "delete_component", delete_component)
+        object.__setattr__(self, "authorization_digest", authorization_digest)
+        object.__setattr__(self, "_component", _component)
+        object.__setattr__(self, "_identity", _identity)
+        object.__setattr__(self, "_raw", _raw)
+        object.__setattr__(self, "_seal", _RECOVERY_CLEANUP_AUTHORIZATION_TOKEN)
+        self._require_valid()
+
+    @property
+    def transaction_id(self) -> str:
+        return self.binding.transaction_id
+
+    def _require_valid(self) -> None:
+        if not _recovery_cleanup_authorization_invariants(self):
+            raise TypeError("recovery cleanup authorization changed")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("recovery cleanup authorizations are not serializable")
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryCleanupObservationCapture:
+    transaction_id: str
+    authorization_identity: tuple[int, int]
+    authorization_active: bool
+    phase: str
+    current_reference: str | None
+    finalizing_record_digest: str | None
+    finalizing_identity: tuple[int, int] | None
+    finalizing_retired: bool | None
+    complete_record_digest: str | None
+    complete_identity: tuple[int, int] | None
+    complete_retired: bool | None
+    cleanup_intent_digest: str | None
+    cleanup_intent_identity: tuple[int, int] | None
+    cleanup_complete_digest: str | None
+    cleanup_complete_identity: tuple[int, int] | None
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RecoveryCleanupObservation:
+    """Sealed effect-free observation of one exact recovery cleanup WAL state."""
+
+    authorization: RecoveryCleanupAuthorization
+    phase: str
+    current_reference: str | None
+    observation_digest: str
+    _capture: _RecoveryCleanupObservationCapture
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        authorization: RecoveryCleanupAuthorization,
+        capture: _RecoveryCleanupObservationCapture,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _RECOVERY_CLEANUP_OBSERVATION_TOKEN
+            or not _recovery_cleanup_observation_capture_invariants(
+                authorization,
+                capture,
+            )
+        ):
+            raise TypeError(
+                "recovery cleanup observations are loaded only by ownership authority"
+            )
+        digest = _recovery_cleanup_observation_digest(authorization, capture)
+        object.__setattr__(self, "authorization", authorization)
+        object.__setattr__(self, "phase", capture.phase)
+        object.__setattr__(self, "current_reference", capture.current_reference)
+        object.__setattr__(self, "observation_digest", digest)
+        object.__setattr__(self, "_capture", capture)
+        object.__setattr__(self, "_seal", _RECOVERY_CLEANUP_OBSERVATION_TOKEN)
+
+    @property
+    def transaction_id(self) -> str:
+        return self.authorization.transaction_id
+
+    def _require_valid(self) -> None:
+        try:
+            valid = _recovery_cleanup_observation_capture_invariants(
+                self.authorization,
+                self._capture,
+            )
+            expected = _recovery_cleanup_observation_digest(
+                self.authorization,
+                self._capture,
+            )
+        except (AttributeError, ForgeError, TypeError, ValueError):
+            valid = False
+            expected = ""
+        if (
+            not valid
+            or self._seal is not _RECOVERY_CLEANUP_OBSERVATION_TOKEN
+            or self.phase != self._capture.phase
+            or self.current_reference != self._capture.current_reference
+            or _DIGEST.fullmatch(self.observation_digest) is None
+            or self.observation_digest != expected
+        ):
+            raise TypeError("recovery cleanup observation changed")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("recovery cleanup observations are not serializable")
+
+
 class TransactionPathClaim:
     _consumed: bool
     _identity: tuple[int, int]
@@ -2043,6 +2229,23 @@ def _transaction_cleanup_component(transaction_id: str, *, complete: bool) -> st
     return f"{transaction_id}.{suffix}.json"
 
 
+def _recovery_cleanup_component(
+    transaction_id: str,
+    phase: _RecoveryCleanupPhase,
+) -> str:
+    if (
+        _PERSISTENT_TRANSACTION.fullmatch(transaction_id) is None
+        or type(phase) is not _RecoveryCleanupPhase
+    ):
+        raise ValueError("recovery cleanup phase")
+    suffix = {
+        _RecoveryCleanupPhase.AUTHORIZED: "auth",
+        _RecoveryCleanupPhase.FINALIZING: "final",
+        _RecoveryCleanupPhase.COMPLETE: "done",
+    }[phase]
+    return f"{transaction_id}.rc-{suffix}.json"
+
+
 def _persistent_cleanup_reference_is_valid(
     binding: PersistentTransactionBinding,
     reference: str,
@@ -2361,6 +2564,17 @@ class _TransactionCleanupRecord:
     complete: bool
 
 
+@dataclass(frozen=True, slots=True)
+class _RecoveryCleanupPhaseRecord:
+    component: str
+    identity: tuple[int, int]
+    raw: bytes
+    phase: _RecoveryCleanupPhase
+    previous_phase_digest: str
+    record_digest: str
+    retired: bool
+
+
 def _transaction_cleanup_record_bytes(
     binding: PersistentTransactionBinding,
     *,
@@ -2389,6 +2603,309 @@ def _transaction_cleanup_record_bytes(
     }
     body["record_digest"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
     return canonical_json_bytes(body, final_newline=True)
+
+
+def _recovery_cleanup_binding_digest(
+    binding: PersistentTransactionBinding,
+) -> str:
+    if not _persistent_binding_invariants(binding):
+        raise ValueError("recovery cleanup binding")
+    return hashlib.sha256(
+        canonical_json_bytes(binding.canonical_projection())
+    ).hexdigest()
+
+
+def _recovery_cleanup_access_digest(
+    binding: PersistentTransactionBinding,
+    *,
+    location: TransactionLocation,
+    journal_relative: str,
+) -> str:
+    if (
+        not _persistent_binding_invariants(binding)
+        or location is not TransactionLocation.QUARANTINED
+        or not _persistent_cleanup_reference_is_valid(binding, journal_relative)
+    ):
+        raise ValueError("recovery cleanup observation")
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "binding_digest": _recovery_cleanup_binding_digest(binding),
+                "journal_relative": journal_relative,
+                "location": location.value,
+                "transaction_id": binding.transaction_id,
+            }
+        )
+    ).hexdigest()
+
+
+def _recovery_cleanup_record_bytes(
+    binding: PersistentTransactionBinding,
+    *,
+    location: TransactionLocation,
+    journal_relative: str,
+    journal_access_digest: str,
+    journal_evidence_digest: str,
+    journal_head_sequence: int,
+    journal_head_record_digest: str,
+    transaction_binding_digest: str,
+    delete_component: str,
+    phase: _RecoveryCleanupPhase,
+    previous_phase_digest: str,
+) -> bytes:
+    binding_digest = _recovery_cleanup_binding_digest(binding)
+    if (
+        location is not TransactionLocation.QUARANTINED
+        or not _persistent_cleanup_reference_is_valid(binding, journal_relative)
+        or _DIGEST.fullmatch(journal_access_digest) is None
+        or journal_access_digest
+        != _recovery_cleanup_access_digest(
+            binding,
+            location=location,
+            journal_relative=journal_relative,
+        )
+        or _DIGEST.fullmatch(journal_evidence_digest) is None
+        or type(journal_head_sequence) is not int
+        or journal_head_sequence < 0
+        or _DIGEST.fullmatch(journal_head_record_digest) is None
+        or transaction_binding_digest != binding_digest
+        or _TRANSACTION_DELETE.fullmatch(delete_component) is None
+        or type(phase) is not _RecoveryCleanupPhase
+        or _DIGEST.fullmatch(previous_phase_digest) is None
+        or (
+            phase is _RecoveryCleanupPhase.AUTHORIZED
+            and previous_phase_digest != _ZERO_DIGEST
+        )
+        or (
+            phase is not _RecoveryCleanupPhase.AUTHORIZED
+            and previous_phase_digest == _ZERO_DIGEST
+        )
+    ):
+        raise ValueError("recovery cleanup record")
+    body: dict[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "binding": binding.canonical_projection(),
+        "binding_digest": binding_digest,
+        "delete_component": delete_component,
+        "journal_access_digest": journal_access_digest,
+        "journal_evidence_digest": journal_evidence_digest,
+        "journal_head_record_digest": journal_head_record_digest,
+        "journal_head_sequence": journal_head_sequence,
+        "journal_head_state": "ROLLED_BACK",
+        "journal_location": location.value,
+        "journal_relative": journal_relative,
+        "minimum_reader_version": _WRITER_VERSION,
+        "policy_version": _POLICY_VERSION,
+        "previous_recovery_cleanup_digest": previous_phase_digest,
+        "record_kind": "persistent-transaction-recovery-cleanup",
+        "recovery_cleanup_phase": phase.value,
+        "root_identity": binding.transaction_identity,
+        "schema_digest": _TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "transaction_binding_digest": transaction_binding_digest,
+        "transaction_id": binding.transaction_id,
+        "writer_version": _WRITER_VERSION,
+    }
+    body["record_digest"] = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    return canonical_json_bytes(body, final_newline=True)
+
+
+def _recovery_cleanup_phase_bytes(
+    authorization: RecoveryCleanupAuthorization,
+    *,
+    phase: _RecoveryCleanupPhase,
+    previous_phase_digest: str,
+) -> bytes:
+    authorization._require_valid()
+    return _recovery_cleanup_record_bytes(
+        authorization.binding,
+        location=authorization.location,
+        journal_relative=authorization.journal_relative,
+        journal_access_digest=authorization.journal_access_digest,
+        journal_evidence_digest=authorization.journal_evidence_digest,
+        journal_head_sequence=authorization.journal_head_sequence,
+        journal_head_record_digest=authorization.journal_head_record_digest,
+        transaction_binding_digest=authorization.transaction_binding_digest,
+        delete_component=authorization.delete_component,
+        phase=phase,
+        previous_phase_digest=previous_phase_digest,
+    )
+
+
+def _recovery_cleanup_authorization_invariants(value: object) -> bool:
+    if type(value) is not RecoveryCleanupAuthorization:
+        return False
+    authorization = value
+    try:
+        expected_component = _recovery_cleanup_component(
+            authorization.binding.transaction_id,
+            _RecoveryCleanupPhase.AUTHORIZED,
+        )
+        expected_raw = _recovery_cleanup_record_bytes(
+            authorization.binding,
+            location=authorization.location,
+            journal_relative=authorization.journal_relative,
+            journal_access_digest=authorization.journal_access_digest,
+            journal_evidence_digest=authorization.journal_evidence_digest,
+            journal_head_sequence=authorization.journal_head_sequence,
+            journal_head_record_digest=authorization.journal_head_record_digest,
+            transaction_binding_digest=authorization.transaction_binding_digest,
+            delete_component=authorization.delete_component,
+            phase=_RecoveryCleanupPhase.AUTHORIZED,
+            previous_phase_digest=_ZERO_DIGEST,
+        )
+        decoded = decode_persistent_record(
+            expected_raw,
+            supported_major=1,
+            reader_version=_WRITER_VERSION,
+        )
+        return (
+            authorization._seal is _RECOVERY_CLEANUP_AUTHORIZATION_TOKEN
+            and authorization._component == expected_component
+            and _file_identity_invariants(authorization._identity)
+            and authorization._raw == expected_raw
+            and authorization.authorization_digest == decoded["record_digest"]
+        )
+    except (AttributeError, ForgeError, TypeError, ValueError):
+        return False
+
+
+def _recovery_cleanup_observation_projection(
+    authorization: RecoveryCleanupAuthorization,
+    capture: _RecoveryCleanupObservationCapture,
+) -> Mapping[str, object]:
+    return {
+        "authorization_active": capture.authorization_active,
+        "authorization_digest": authorization.authorization_digest,
+        "authorization_identity": capture.authorization_identity,
+        "cleanup_complete_digest": capture.cleanup_complete_digest,
+        "cleanup_complete_identity": capture.cleanup_complete_identity,
+        "cleanup_intent_digest": capture.cleanup_intent_digest,
+        "cleanup_intent_identity": capture.cleanup_intent_identity,
+        "complete_identity": capture.complete_identity,
+        "complete_record_digest": capture.complete_record_digest,
+        "complete_retired": capture.complete_retired,
+        "current_reference": capture.current_reference,
+        "finalizing_identity": capture.finalizing_identity,
+        "finalizing_record_digest": capture.finalizing_record_digest,
+        "finalizing_retired": capture.finalizing_retired,
+        "phase": capture.phase,
+        "transaction_id": capture.transaction_id,
+    }
+
+
+def _recovery_cleanup_observation_digest(
+    authorization: RecoveryCleanupAuthorization,
+    capture: _RecoveryCleanupObservationCapture,
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            _recovery_cleanup_observation_projection(authorization, capture)
+        )
+    ).hexdigest()
+
+
+def _optional_recovery_cleanup_record_invariants(
+    digest: object,
+    identity: object,
+) -> bool:
+    return (digest is None and identity is None) or (
+        isinstance(digest, str)
+        and _DIGEST.fullmatch(digest) is not None
+        and _file_identity_invariants(identity)
+    )
+
+
+def _optional_recovery_cleanup_phase_invariants(
+    digest: object,
+    identity: object,
+    retired: object,
+) -> bool:
+    return (digest is None and identity is None and retired is None) or (
+        isinstance(digest, str)
+        and _DIGEST.fullmatch(digest) is not None
+        and _file_identity_invariants(identity)
+        and type(retired) is bool
+    )
+
+
+def _recovery_cleanup_observation_capture_invariants(
+    authorization: object,
+    capture: object,
+) -> bool:
+    if (
+        type(authorization) is not RecoveryCleanupAuthorization
+        or not _recovery_cleanup_authorization_invariants(authorization)
+        or type(capture) is not _RecoveryCleanupObservationCapture
+        or capture.transaction_id != authorization.transaction_id
+        or capture.authorization_identity != authorization._identity
+        or capture.authorization_active is not True
+        or capture.phase
+        not in {
+            _RecoveryCleanupPhase.AUTHORIZED.value,
+            _RecoveryCleanupPhase.FINALIZING.value,
+            _RecoveryCleanupPhase.COMPLETE.value,
+        }
+        or not _optional_recovery_cleanup_phase_invariants(
+            capture.finalizing_record_digest,
+            capture.finalizing_identity,
+            capture.finalizing_retired,
+        )
+        or not _optional_recovery_cleanup_phase_invariants(
+            capture.complete_record_digest,
+            capture.complete_identity,
+            capture.complete_retired,
+        )
+        or not _optional_recovery_cleanup_record_invariants(
+            capture.cleanup_intent_digest,
+            capture.cleanup_intent_identity,
+        )
+        or not _optional_recovery_cleanup_record_invariants(
+            capture.cleanup_complete_digest,
+            capture.cleanup_complete_identity,
+        )
+    ):
+        return False
+    current_reference = capture.current_reference
+    valid_current_reference = current_reference is None or (
+        isinstance(current_reference, str)
+        and _persistent_cleanup_reference_is_valid(
+            authorization.binding,
+            current_reference,
+        )
+    )
+    if not valid_current_reference:
+        return False
+    if capture.phase == _RecoveryCleanupPhase.AUTHORIZED.value:
+        return (
+            current_reference is not None
+            and capture.finalizing_record_digest is None
+            and capture.complete_record_digest is None
+            and capture.cleanup_complete_digest is None
+        )
+    if capture.phase == _RecoveryCleanupPhase.FINALIZING.value:
+        return (
+            capture.finalizing_record_digest is not None
+            and capture.finalizing_retired is False
+            and capture.complete_record_digest is None
+            and (
+                capture.cleanup_intent_digest is not None
+                or capture.cleanup_complete_digest is not None
+            )
+            and not (
+                capture.cleanup_complete_digest is not None
+                and current_reference is not None
+            )
+        )
+    return (
+        current_reference is None
+        and capture.finalizing_record_digest is not None
+        and capture.complete_record_digest is not None
+        and capture.cleanup_complete_digest is not None
+        and not (
+            capture.finalizing_retired is True and capture.complete_retired is not True
+        )
+    )
 
 
 def _read_posix_private_record(
@@ -3547,6 +4064,259 @@ def _transaction_journal_records_are_valid(
         )
     except (ForgeError, OSError, TypeError, ValueError):
         return False
+
+
+def _try_windows_transaction_state_lock(
+    handle: int,
+) -> ctypes.Structure | None:
+    """Lock one byte beyond every allowed anchor read without extending the file."""
+
+    from ctypes import wintypes
+
+    overlapped = _kernel_lock._new_overlapped()
+    setattr(overlapped, "Offset", _TRANSACTION_STATE_LOCK_OFFSET & 0xFFFFFFFF)
+    setattr(
+        overlapped,
+        "OffsetHigh",
+        (_TRANSACTION_STATE_LOCK_OFFSET >> 32) & 0xFFFFFFFF,
+    )
+    kernel32 = _paths._windows_dll("kernel32")
+    kernel32.LockFileEx.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    kernel32.LockFileEx.restype = wintypes.BOOL
+    if kernel32.LockFileEx(
+        handle,
+        0x00000001 | 0x00000002,
+        0,
+        1,
+        0,
+        ctypes.byref(overlapped),
+    ):
+        return overlapped
+    number = _paths._windows_last_error()
+    if number == 33:
+        return None
+    raise OSError(number, "transaction state LockFileEx failed")
+
+
+def _unlock_windows_transaction_state_lock(
+    handle: int,
+    overlapped: ctypes.Structure,
+) -> None:
+    from ctypes import wintypes
+
+    kernel32 = _paths._windows_dll("kernel32")
+    kernel32.UnlockFileEx.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+    ]
+    kernel32.UnlockFileEx.restype = wintypes.BOOL
+    if not kernel32.UnlockFileEx(
+        handle,
+        0,
+        1,
+        0,
+        ctypes.byref(overlapped),
+    ):
+        raise OSError(
+            _paths._windows_last_error(),
+            "transaction state UnlockFileEx failed",
+        )
+
+
+@dataclass(slots=True)
+class _TransactionStateLock:
+    descriptor: int
+    windows: bool
+    overlapped: ctypes.Structure | None
+
+    def close(self) -> None:
+        empty = 0 if self.windows else -1
+        descriptor = self.descriptor
+        if descriptor == empty:
+            return
+        overlapped = self.overlapped
+        self.descriptor = empty
+        self.overlapped = None
+        try:
+            if self.windows:
+                if overlapped is not None:
+                    _unlock_windows_transaction_state_lock(
+                        descriptor,
+                        overlapped,
+                    )
+            else:
+                _kernel_lock._unlock_posix(descriptor)
+        finally:
+            if self.windows:
+                _paths._windows_close(descriptor)
+            else:
+                os.close(descriptor)
+
+
+def _transaction_state_lock_descriptor_is_valid(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+    descriptor: int,
+) -> bool:
+    component = f"{binding.transaction_id}.json"
+    try:
+        expected_raw = _transaction_journal_binding_bytes(binding)
+        if store.windows:
+            windows_before = _paths._windows_handle_status(descriptor)
+            raw = _paths._windows_read(
+                descriptor,
+                limit=_TRANSACTION_RECORD_LIMIT,
+            )
+            windows_after = _paths._windows_handle_status(descriptor)
+            descriptor_is_valid = (
+                windows_before.identity == binding.claim_identity
+                and not windows_before.is_directory
+                and not windows_before.is_reparse
+                and windows_before.link_count == 1
+                and windows_before.identity[0] == binding.plugins_identity[0]
+                and windows_before.size == len(expected_raw)
+                and raw == expected_raw
+                and windows_after.identity == windows_before.identity
+                and windows_after.fingerprint == windows_before.fingerprint
+                and _paths._windows_private_authorization(
+                    descriptor,
+                    exact=True,
+                )
+            )
+        else:
+            posix_before = os.fstat(descriptor)
+            raw = os.pread(descriptor, _TRANSACTION_RECORD_LIMIT + 1, 0)
+            posix_after = os.fstat(descriptor)
+            descriptor_is_valid = (
+                (posix_before.st_dev, posix_before.st_ino) == binding.claim_identity
+                and stat.S_ISREG(posix_before.st_mode)
+                and posix_before.st_uid == os.geteuid()
+                and posix_before.st_gid == os.getegid()
+                and stat.S_IMODE(posix_before.st_mode) == 0o600
+                and posix_before.st_nlink == 1
+                and posix_before.st_dev == binding.plugins_identity[0]
+                and posix_before.st_size == len(expected_raw)
+                and raw == expected_raw
+                and (posix_after.st_dev, posix_after.st_ino) == binding.claim_identity
+                and _paths._posix_status_fingerprint(posix_before)
+                == _paths._posix_status_fingerprint(posix_after)
+                and _paths._posix_security_metadata_supported(
+                    descriptor,
+                    posix_after,
+                )
+            )
+        return (
+            descriptor_is_valid
+            and _transaction_store_namespace_is_valid(store)
+            and _transaction_journal_records_are_valid(store, binding)
+            and _private_record_name_binds(
+                store.claims,
+                component,
+                binding.claim_identity,
+                expected_raw=expected_raw,
+                windows=store.windows,
+            )
+        )
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _acquire_transaction_state_lock(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+) -> _TransactionStateLock:
+    """Serialize exact transaction cleanup state across threads and processes."""
+
+    descriptor = 0 if store.windows else -1
+    acquired = False
+    overlapped: ctypes.Structure | None = None
+    try:
+        component = f"{binding.transaction_id}.json"
+        if store.windows:
+            descriptor = _windows_open_raw_child(
+                store.claims,
+                component,
+                directory=False,
+                read_data=True,
+                write_data=True,
+            )
+        else:
+            descriptor = os.open(
+                component,
+                _paths._posix_file_flags() | os.O_RDWR,
+                dir_fd=store.claims,
+            )
+        if not _transaction_state_lock_descriptor_is_valid(
+            store,
+            binding,
+            descriptor,
+        ):
+            raise OSError(errno.ESTALE, "transaction state lock authority changed")
+        deadline = time.monotonic() + _TRANSACTION_STATE_LOCK_TIMEOUT_SECONDS
+        while True:
+            if store.windows:
+                overlapped = _try_windows_transaction_state_lock(descriptor)
+                acquired = overlapped is not None
+            else:
+                acquired = _kernel_lock._try_posix_lock(descriptor)
+            if acquired:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise OSError(
+                    errno.ETIMEDOUT,
+                    "transaction state lock acquisition timed out",
+                )
+            time.sleep(min(_TRANSACTION_STATE_LOCK_POLL_SECONDS, remaining))
+        if not _transaction_state_lock_descriptor_is_valid(
+            store,
+            binding,
+            descriptor,
+        ):
+            raise OSError(errno.ESTALE, "transaction state lock authority changed")
+        selected = _TransactionStateLock(
+            descriptor,
+            store.windows,
+            overlapped,
+        )
+        descriptor = 0 if store.windows else -1
+        acquired = False
+        overlapped = None
+        return selected
+    finally:
+        if acquired:
+            try:
+                if store.windows:
+                    if overlapped is not None:
+                        _unlock_windows_transaction_state_lock(
+                            descriptor,
+                            overlapped,
+                        )
+                else:
+                    _kernel_lock._unlock_posix(descriptor)
+            finally:
+                if store.windows:
+                    if descriptor:
+                        _paths._windows_close(descriptor)
+                        descriptor = 0
+                elif descriptor >= 0:
+                    os.close(descriptor)
+                    descriptor = -1
+        if store.windows:
+            if descriptor:
+                _paths._windows_close(descriptor)
+        elif descriptor >= 0:
+            os.close(descriptor)
 
 
 class TransactionJournalAccess:
@@ -5274,6 +6044,283 @@ def _open_windows_transaction_location(
         raise
 
 
+def _recovery_cleanup_authorization_from_record(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+    *,
+    raw: bytes,
+    identity: tuple[int, int],
+    retired: bool = False,
+) -> RecoveryCleanupAuthorization:
+    record = decode_persistent_record(
+        raw,
+        supported_major=1,
+        reader_version=_WRITER_VERSION,
+    )
+    location_value = record.get("journal_location")
+    journal_relative = record.get("journal_relative")
+    journal_access_digest = record.get("journal_access_digest")
+    journal_evidence_digest = record.get("journal_evidence_digest")
+    journal_head_sequence = record.get("journal_head_sequence")
+    journal_head_record_digest = record.get("journal_head_record_digest")
+    transaction_binding_digest = record.get("transaction_binding_digest")
+    delete_component = record.get("delete_component")
+    expected_fixed: Mapping[str, object] = {
+        "authority": "zagrosi-forge-transaction-authority-v1",
+        "binding": binding.canonical_projection(),
+        "binding_digest": _recovery_cleanup_binding_digest(binding),
+        "journal_head_state": "ROLLED_BACK",
+        "journal_location": TransactionLocation.QUARANTINED.value,
+        "minimum_reader_version": _WRITER_VERSION,
+        "policy_version": _POLICY_VERSION,
+        "previous_recovery_cleanup_digest": _ZERO_DIGEST,
+        "record_kind": "persistent-transaction-recovery-cleanup",
+        "recovery_cleanup_phase": _RecoveryCleanupPhase.AUTHORIZED.value,
+        "root_identity": binding.transaction_identity,
+        "schema_digest": _TRANSACTION_RECOVERY_CLEANUP_SCHEMA_DIGEST,
+        "schema_version": "1.0",
+        "transaction_id": binding.transaction_id,
+        "writer_version": _WRITER_VERSION,
+    }
+    expected_keys = {
+        *expected_fixed,
+        "delete_component",
+        "journal_access_digest",
+        "journal_evidence_digest",
+        "journal_head_record_digest",
+        "journal_head_sequence",
+        "journal_relative",
+        "record_digest",
+        "transaction_binding_digest",
+    }
+    if (
+        set(record) != expected_keys
+        or any(record.get(key) != value for key, value in expected_fixed.items())
+        or location_value != TransactionLocation.QUARANTINED.value
+        or not isinstance(journal_relative, str)
+        or not isinstance(journal_access_digest, str)
+        or not isinstance(journal_evidence_digest, str)
+        or type(journal_head_sequence) is not int
+        or not isinstance(journal_head_record_digest, str)
+        or not isinstance(transaction_binding_digest, str)
+        or not isinstance(delete_component, str)
+    ):
+        raise OSError(errno.ESTALE, "recovery cleanup authorization changed")
+    expected_raw = _recovery_cleanup_record_bytes(
+        binding,
+        location=TransactionLocation.QUARANTINED,
+        journal_relative=journal_relative,
+        journal_access_digest=journal_access_digest,
+        journal_evidence_digest=journal_evidence_digest,
+        journal_head_sequence=journal_head_sequence,
+        journal_head_record_digest=journal_head_record_digest,
+        transaction_binding_digest=transaction_binding_digest,
+        delete_component=delete_component,
+        phase=_RecoveryCleanupPhase.AUTHORIZED,
+        previous_phase_digest=_ZERO_DIGEST,
+    )
+    component = _recovery_cleanup_component(
+        binding.transaction_id,
+        _RecoveryCleanupPhase.AUTHORIZED,
+    )
+    selected_component = (
+        _transaction_record_retirement_component(component) if retired else component
+    )
+    if raw != expected_raw or not _private_record_name_binds(
+        store.claims,
+        selected_component,
+        identity,
+        expected_raw=expected_raw,
+        windows=store.windows,
+    ):
+        raise OSError(errno.ESTALE, "recovery cleanup authorization changed")
+    record_digest = record.get("record_digest")
+    if not isinstance(record_digest, str):
+        raise OSError(errno.ESTALE, "recovery cleanup authorization changed")
+    return RecoveryCleanupAuthorization(
+        binding=binding,
+        location=TransactionLocation.QUARANTINED,
+        journal_relative=journal_relative,
+        journal_access_digest=journal_access_digest,
+        journal_evidence_digest=journal_evidence_digest,
+        journal_head_sequence=journal_head_sequence,
+        journal_head_record_digest=journal_head_record_digest,
+        transaction_binding_digest=transaction_binding_digest,
+        delete_component=delete_component,
+        authorization_digest=record_digest,
+        _component=component,
+        _identity=identity,
+        _raw=raw,
+        _token=_RECOVERY_CLEANUP_AUTHORIZATION_TOKEN,
+    )
+
+
+def _load_recovery_cleanup_authorization(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+) -> RecoveryCleanupAuthorization | None:
+    component = _recovery_cleanup_component(
+        binding.transaction_id,
+        _RecoveryCleanupPhase.AUTHORIZED,
+    )
+    observed = _read_transaction_record_if_present(store, component)
+    if observed is None:
+        return None
+    raw, identity = observed
+    return _recovery_cleanup_authorization_from_record(
+        store,
+        binding,
+        raw=raw,
+        identity=identity,
+    )
+
+
+def _load_recovery_cleanup_authorization_any(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+) -> tuple[RecoveryCleanupAuthorization | None, bool]:
+    component = _recovery_cleanup_component(
+        binding.transaction_id,
+        _RecoveryCleanupPhase.AUTHORIZED,
+    )
+    retired_component = _transaction_record_retirement_component(component)
+    active = _read_transaction_record_if_present(store, component)
+    retired = _read_transaction_record_if_present(store, retired_component)
+    if active is not None and retired is not None:
+        raise OSError(errno.ESTALE, "recovery cleanup authorization is ambiguous")
+    selected = active if active is not None else retired
+    if selected is None:
+        return None, False
+    raw, identity = selected
+    return (
+        _recovery_cleanup_authorization_from_record(
+            store,
+            binding,
+            raw=raw,
+            identity=identity,
+            retired=active is None,
+        ),
+        active is not None,
+    )
+
+
+def _recovery_cleanup_phase_digest(raw: bytes) -> str:
+    record = decode_persistent_record(
+        raw,
+        supported_major=1,
+        reader_version=_WRITER_VERSION,
+    )
+    digest = record.get("record_digest")
+    if not isinstance(digest, str) or _DIGEST.fullmatch(digest) is None:
+        raise OSError(errno.ESTALE, "recovery cleanup WAL changed")
+    return digest
+
+
+def _load_recovery_cleanup_phase(
+    store: _TransactionStore,
+    authorization: RecoveryCleanupAuthorization,
+    *,
+    phase: _RecoveryCleanupPhase,
+    previous_phase_digest: str,
+    allow_retired: bool,
+) -> _RecoveryCleanupPhaseRecord | None:
+    if phase is _RecoveryCleanupPhase.AUTHORIZED:
+        raise ValueError("authorized phase has dedicated evidence")
+    expected_raw = _recovery_cleanup_phase_bytes(
+        authorization,
+        phase=phase,
+        previous_phase_digest=previous_phase_digest,
+    )
+    component = _recovery_cleanup_component(authorization.transaction_id, phase)
+    retired_component = _transaction_record_retirement_component(component)
+    active = _read_transaction_record_if_present(store, component)
+    retired = (
+        _read_transaction_record_if_present(store, retired_component)
+        if allow_retired
+        else None
+    )
+    if active is not None and retired is not None:
+        raise OSError(errno.ESTALE, "recovery cleanup WAL is ambiguous")
+    observed = active if active is not None else retired
+    if observed is None:
+        return None
+    raw, identity = observed
+    selected_component = component if active is not None else retired_component
+    if raw != expected_raw or not _private_record_name_binds(
+        store.claims,
+        selected_component,
+        identity,
+        expected_raw=expected_raw,
+        windows=store.windows,
+    ):
+        raise OSError(errno.ESTALE, "recovery cleanup WAL changed")
+    return _RecoveryCleanupPhaseRecord(
+        component=component,
+        identity=identity,
+        raw=raw,
+        phase=phase,
+        previous_phase_digest=previous_phase_digest,
+        record_digest=_recovery_cleanup_phase_digest(raw),
+        retired=active is None,
+    )
+
+
+def _publish_recovery_cleanup_phase(
+    store: _TransactionStore,
+    authorization: RecoveryCleanupAuthorization,
+    *,
+    phase: _RecoveryCleanupPhase,
+    previous_phase_digest: str,
+) -> _RecoveryCleanupPhaseRecord:
+    existing = _load_recovery_cleanup_phase(
+        store,
+        authorization,
+        phase=phase,
+        previous_phase_digest=previous_phase_digest,
+        allow_retired=True,
+    )
+    if existing is not None:
+        return existing
+    component = _recovery_cleanup_component(authorization.transaction_id, phase)
+    raw = _recovery_cleanup_phase_bytes(
+        authorization,
+        phase=phase,
+        previous_phase_digest=previous_phase_digest,
+    )
+    _publish_transaction_record(store, component, raw)
+    created = _load_recovery_cleanup_phase(
+        store,
+        authorization,
+        phase=phase,
+        previous_phase_digest=previous_phase_digest,
+        allow_retired=False,
+    )
+    if created is None:
+        raise OSError(errno.ESTALE, "recovery cleanup WAL publication changed")
+    return created
+
+
+def _retire_recovery_cleanup_phase(
+    store: _TransactionStore,
+    record: _RecoveryCleanupPhaseRecord,
+) -> None:
+    if record.retired:
+        if not _transaction_record_is_active_or_retired_exact(
+            store,
+            record.component,
+            record.identity,
+            record.raw,
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup WAL retirement changed")
+        return
+    _remove_exact_transaction_record(
+        store,
+        record.component,
+        record.identity,
+        record.raw,
+    )
+
+
 def _load_transaction_cleanup_record(
     store: _TransactionStore,
     binding: PersistentTransactionBinding,
@@ -5341,9 +6388,15 @@ def _transaction_cleanup_record_is_valid(
 
 
 def _publish_transaction_cleanup_intent(
-    store: _TransactionStore, binding: PersistentTransactionBinding
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+    *,
+    delete_component: str | None = None,
 ) -> _TransactionCleanupRecord:
-    if not _transaction_journal_records_are_valid(store, binding):
+    if not _transaction_journal_records_are_valid(store, binding) or (
+        delete_component is not None
+        and _TRANSACTION_DELETE.fullmatch(delete_component) is None
+    ):
         raise OSError(errno.ESTALE, "transaction cleanup authority changed")
     existing = _load_transaction_cleanup_record(
         store,
@@ -5351,12 +6404,21 @@ def _publish_transaction_cleanup_intent(
         complete=False,
     )
     if existing is not None:
+        if (
+            delete_component is not None
+            and existing.delete_component != delete_component
+        ):
+            raise OSError(errno.ESTALE, "transaction cleanup intent changed")
         return existing
     component = _transaction_cleanup_component(binding.transaction_id, complete=False)
-    delete_component = f".delete-{secrets.token_hex(16)}.tmp"
+    selected_delete_component = (
+        f".delete-{secrets.token_hex(16)}.tmp"
+        if delete_component is None
+        else delete_component
+    )
     raw = _transaction_cleanup_record_bytes(
         binding,
-        delete_component=delete_component,
+        delete_component=selected_delete_component,
         complete=False,
     )
     _publish_transaction_record(store, component, raw)
@@ -5365,7 +6427,7 @@ def _publish_transaction_cleanup_intent(
         binding,
         complete=False,
     )
-    if created is None or created.delete_component != delete_component:
+    if created is None or created.delete_component != selected_delete_component:
         raise OSError(errno.ESTALE, "transaction cleanup intent changed")
     return created
 
@@ -5403,6 +6465,412 @@ def _publish_transaction_cleanup_complete(
         intent.identity,
         intent.raw,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryCleanupState:
+    authorization_active: bool
+    finalizing: _RecoveryCleanupPhaseRecord | None
+    complete: _RecoveryCleanupPhaseRecord | None
+    cleanup_intent: _TransactionCleanupRecord | None
+    cleanup_complete: _TransactionCleanupRecord | None
+    journal_relative: str | None
+
+
+def _publish_recovery_cleanup_finalizing(
+    store: _TransactionStore,
+    authorization: RecoveryCleanupAuthorization,
+    cleanup_record: _TransactionCleanupRecord,
+) -> _RecoveryCleanupPhaseRecord:
+    authorization._require_valid()
+    if (
+        not _recovery_cleanup_authorization_is_active(store, authorization)
+        or cleanup_record.complete
+        or cleanup_record.delete_component != authorization.delete_component
+        or _load_transaction_cleanup_record(
+            store,
+            authorization.binding,
+            complete=False,
+        )
+        != cleanup_record
+        or _load_transaction_cleanup_record(
+            store,
+            authorization.binding,
+            complete=True,
+        )
+        is not None
+        or _recovery_cleanup_phase_name_exists(
+            store,
+            authorization.transaction_id,
+            _RecoveryCleanupPhase.COMPLETE,
+        )
+    ):
+        raise OSError(errno.ESTALE, "recovery cleanup finalization changed")
+    finalizing = _publish_recovery_cleanup_phase(
+        store,
+        authorization,
+        phase=_RecoveryCleanupPhase.FINALIZING,
+        previous_phase_digest=authorization.authorization_digest,
+    )
+    if finalizing.retired:
+        raise OSError(errno.ESTALE, "recovery cleanup finalization is retired")
+    return finalizing
+
+
+def _recovery_cleanup_phase_name_exists(
+    store: _TransactionStore,
+    transaction_id: str,
+    phase: _RecoveryCleanupPhase,
+) -> bool:
+    component = _recovery_cleanup_component(transaction_id, phase)
+    return _transaction_name_exists(
+        store.claims,
+        component,
+        directory=False,
+        windows=store.windows,
+    ) or _transaction_name_exists(
+        store.claims,
+        _transaction_record_retirement_component(component),
+        directory=False,
+        windows=store.windows,
+    )
+
+
+def _recovery_cleanup_wal_residue_exists(
+    store: _TransactionStore,
+    transaction_id: str,
+) -> bool:
+    return any(
+        _recovery_cleanup_phase_name_exists(store, transaction_id, phase)
+        for phase in _RecoveryCleanupPhase
+    )
+
+
+def _recovery_cleanup_authorization_is_active(
+    store: _TransactionStore,
+    authorization: RecoveryCleanupAuthorization,
+) -> bool:
+    authorization._require_valid()
+    active = _private_record_name_binds(
+        store.claims,
+        authorization._component,
+        authorization._identity,
+        expected_raw=authorization._raw,
+        windows=store.windows,
+    )
+    retired_component = _transaction_record_retirement_component(
+        authorization._component
+    )
+    retired = _private_record_name_binds(
+        store.claims,
+        retired_component,
+        authorization._identity,
+        expected_raw=authorization._raw,
+        windows=store.windows,
+    )
+    active_exists = active or _transaction_name_exists(
+        store.claims,
+        authorization._component,
+        directory=False,
+        windows=store.windows,
+    )
+    retired_exists = retired or _transaction_name_exists(
+        store.claims,
+        retired_component,
+        directory=False,
+        windows=store.windows,
+    )
+    if (active and not retired_exists) or (retired and not active_exists):
+        return active
+    raise OSError(errno.ESTALE, "recovery cleanup authorization changed")
+
+
+def _recovery_cleanup_identity_is_elsewhere(
+    store: _TransactionStore,
+    *,
+    binding: PersistentTransactionBinding,
+    expected_components: frozenset[str],
+) -> bool:
+    names = _bounded_transaction_names(store.store, windows=store.windows)
+    for name in names:
+        if (
+            name
+            in {
+                _TRANSACTION_STORE_CONTROL,
+                _TRANSACTION_CLAIMS_COMPONENT,
+            }
+            or name in expected_components
+        ):
+            continue
+        descriptor = 0 if store.windows else -1
+        try:
+            if store.windows:
+                try:
+                    descriptor = _paths._windows_open_child(
+                        store.store,
+                        name,
+                        directory=True,
+                    )
+                except OSError:
+                    continue
+            else:
+                try:
+                    descriptor = os.open(name, _directory_flags(), dir_fd=store.store)
+                except OSError:
+                    continue
+            if _native_identity(descriptor) == binding.transaction_identity:
+                return True
+        finally:
+            if store.windows:
+                if descriptor:
+                    _paths._windows_close(descriptor)
+            elif descriptor >= 0:
+                os.close(descriptor)
+    return False
+
+
+def _inspect_recovery_cleanup_state(
+    owned_root: OwnedRoot,
+    store: _TransactionStore,
+    authorization: RecoveryCleanupAuthorization,
+) -> _RecoveryCleanupState:
+    authorization._require_valid()
+    binding = authorization.binding
+    if (
+        _load_transaction_binding_from_store(store, binding.transaction_id) != binding
+        or not _transaction_store_namespace_is_valid(store)
+        or not owned_root._validate_control_descriptor(store.control)
+    ):
+        raise OSError(errno.ESTALE, "recovery cleanup authority changed")
+    authorization_active = _recovery_cleanup_authorization_is_active(
+        store,
+        authorization,
+    )
+    finalizing = _load_recovery_cleanup_phase(
+        store,
+        authorization,
+        phase=_RecoveryCleanupPhase.FINALIZING,
+        previous_phase_digest=authorization.authorization_digest,
+        allow_retired=True,
+    )
+    if finalizing is None:
+        if _recovery_cleanup_phase_name_exists(
+            store,
+            binding.transaction_id,
+            _RecoveryCleanupPhase.COMPLETE,
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup WAL is incomplete")
+        complete = None
+    else:
+        complete = _load_recovery_cleanup_phase(
+            store,
+            authorization,
+            phase=_RecoveryCleanupPhase.COMPLETE,
+            previous_phase_digest=finalizing.record_digest,
+            allow_retired=True,
+        )
+    cleanup_intent = _load_transaction_cleanup_record(
+        store,
+        binding,
+        complete=False,
+    )
+    cleanup_complete = _load_transaction_cleanup_record(
+        store,
+        binding,
+        complete=True,
+    )
+    if (
+        cleanup_intent is not None
+        and cleanup_intent.delete_component != authorization.delete_component
+    ) or (
+        cleanup_complete is not None
+        and cleanup_complete.delete_component != authorization.delete_component
+    ):
+        raise OSError(errno.ESTALE, "recovery cleanup evidence conflicts")
+
+    live_component = binding.root_relative.rsplit("/", 1)[-1]
+    quarantine_component = binding.quarantine_relative.rsplit("/", 1)[-1]
+    delete_component = authorization.delete_component
+    live = quarantine = deleting = 0 if store.windows else -1
+    try:
+        if store.windows:
+            live = _open_windows_transaction_location(
+                store,
+                live_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            quarantine = _open_windows_transaction_location(
+                store,
+                quarantine_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            deleting = _open_windows_transaction_location(
+                store,
+                delete_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            locations = (bool(live), bool(quarantine), bool(deleting))
+        else:
+            live = _open_posix_transaction_location(
+                store,
+                live_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            quarantine = _open_posix_transaction_location(
+                store,
+                quarantine_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            deleting = _open_posix_transaction_location(
+                store,
+                delete_component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            locations = (live >= 0, quarantine >= 0, deleting >= 0)
+        if sum(locations) > 1 or locations[0]:
+            raise OSError(errno.ESTALE, "recovery cleanup location is ambiguous")
+        journal_relative = (
+            binding.quarantine_relative
+            if locations[1]
+            else (
+                _persistent_delete_reference(binding, delete_component)
+                if locations[2]
+                else None
+            )
+        )
+        if _recovery_cleanup_identity_is_elsewhere(
+            store,
+            binding=binding,
+            expected_components=frozenset(
+                {
+                    live_component,
+                    quarantine_component,
+                    delete_component,
+                }
+            ),
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup identity was displaced")
+    finally:
+        if store.windows:
+            for descriptor in (deleting, quarantine, live):
+                if descriptor:
+                    _paths._windows_close(descriptor)
+        else:
+            for descriptor in (deleting, quarantine, live):
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+    if finalizing is None:
+        if (
+            complete is not None
+            or cleanup_complete is not None
+            or journal_relative is None
+            or not authorization_active
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup authorization is incomplete")
+    else:
+        if cleanup_intent is None and cleanup_complete is None:
+            raise OSError(errno.ESTALE, "recovery cleanup intent is missing")
+        if complete is not None and (
+            cleanup_complete is None or journal_relative is not None
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup completion conflicts")
+        if cleanup_complete is not None and journal_relative is not None:
+            raise OSError(errno.ESTALE, "recovery cleanup completion conflicts")
+    if not authorization_active and (
+        finalizing is None
+        or complete is None
+        or not finalizing.retired
+        or not complete.retired
+        or cleanup_complete is None
+        or journal_relative is not None
+    ):
+        raise OSError(errno.ESTALE, "retired recovery cleanup is incomplete")
+    if (
+        finalizing is not None
+        and finalizing.retired
+        and (complete is None or not complete.retired)
+    ):
+        raise OSError(errno.ESTALE, "recovery cleanup retirement order changed")
+    if not _transaction_store_namespace_is_valid(
+        store
+    ) or not owned_root._validate_control_descriptor(store.control):
+        raise OSError(errno.ESTALE, "recovery cleanup namespace changed")
+    return _RecoveryCleanupState(
+        authorization_active=authorization_active,
+        finalizing=finalizing,
+        complete=complete,
+        cleanup_intent=cleanup_intent,
+        cleanup_complete=cleanup_complete,
+        journal_relative=journal_relative,
+    )
+
+
+def _generic_cleanup_record_digest(
+    record: _TransactionCleanupRecord | None,
+) -> str | None:
+    return None if record is None else hashlib.sha256(record.raw).hexdigest()
+
+
+def _capture_recovery_cleanup_observation(
+    authorization: RecoveryCleanupAuthorization,
+    state: _RecoveryCleanupState,
+) -> RecoveryCleanupObservation:
+    authorization._require_valid()
+    if not state.authorization_active:
+        raise OSError(errno.ESTALE, "recovery cleanup authorization is retired")
+    phase = (
+        _RecoveryCleanupPhase.COMPLETE
+        if state.complete is not None
+        else (
+            _RecoveryCleanupPhase.FINALIZING
+            if state.finalizing is not None
+            else _RecoveryCleanupPhase.AUTHORIZED
+        )
+    )
+    capture = _RecoveryCleanupObservationCapture(
+        transaction_id=authorization.transaction_id,
+        authorization_identity=authorization._identity,
+        authorization_active=state.authorization_active,
+        phase=phase.value,
+        current_reference=state.journal_relative,
+        finalizing_record_digest=(
+            None if state.finalizing is None else state.finalizing.record_digest
+        ),
+        finalizing_identity=(
+            None if state.finalizing is None else state.finalizing.identity
+        ),
+        finalizing_retired=(
+            None if state.finalizing is None else state.finalizing.retired
+        ),
+        complete_record_digest=(
+            None if state.complete is None else state.complete.record_digest
+        ),
+        complete_identity=None if state.complete is None else state.complete.identity,
+        complete_retired=None if state.complete is None else state.complete.retired,
+        cleanup_intent_digest=_generic_cleanup_record_digest(state.cleanup_intent),
+        cleanup_intent_identity=(
+            None if state.cleanup_intent is None else state.cleanup_intent.identity
+        ),
+        cleanup_complete_digest=_generic_cleanup_record_digest(state.cleanup_complete),
+        cleanup_complete_identity=(
+            None if state.cleanup_complete is None else state.cleanup_complete.identity
+        ),
+    )
+    observed = RecoveryCleanupObservation(
+        authorization=authorization,
+        capture=capture,
+        _token=_RECOVERY_CLEANUP_OBSERVATION_TOKEN,
+    )
+    observed._require_valid()
+    authorization._require_valid()
+    return observed
 
 
 def _finish_transaction_creation_intent(
@@ -5566,6 +7034,10 @@ def _claim_transaction_ids(names: tuple[str, ...]) -> set[str]:
             transaction_ids.add(match.group(1))
             continue
         match = _TRANSACTION_CLEANUP_RECORD.fullmatch(name)
+        if match is not None:
+            transaction_ids.add(match.group(1))
+            continue
+        match = _TRANSACTION_RECOVERY_CLEANUP_RECORD.fullmatch(name)
         if match is not None:
             transaction_ids.add(match.group(1))
             continue
@@ -5815,6 +7287,49 @@ def _observe_pending_transaction(
                     os.close(descriptor)
 
 
+def _active_recovery_cleanup_transaction_ids(
+    claim_names: tuple[str, ...],
+) -> tuple[str, ...]:
+    phase_ids = {
+        match.group(1)
+        for name in claim_names
+        if (match := _TRANSACTION_RECOVERY_CLEANUP_RECORD.fullmatch(name)) is not None
+    }
+    authorized_suffix = ".rc-auth.json"
+    authorized_ids = {
+        name[: -len(authorized_suffix)]
+        for name in claim_names
+        if name.endswith(authorized_suffix)
+        and _PERSISTENT_TRANSACTION.fullmatch(name[: -len(authorized_suffix)])
+        is not None
+    }
+    if phase_ids - authorized_ids:
+        raise OSError(errno.ESTALE, "recovery cleanup WAL lacks authorization")
+    return tuple(sorted(authorized_ids))
+
+
+def _inspect_active_recovery_cleanup_authorizations(
+    owned_root: OwnedRoot,
+    store: _TransactionStore,
+    claim_names: tuple[str, ...],
+) -> tuple[tuple[RecoveryCleanupAuthorization, _RecoveryCleanupState], ...]:
+    inspected: list[tuple[RecoveryCleanupAuthorization, _RecoveryCleanupState]] = []
+    for transaction_id in _active_recovery_cleanup_transaction_ids(claim_names):
+        binding = _load_transaction_binding_from_store(store, transaction_id)
+        authorization = _load_recovery_cleanup_authorization(store, binding)
+        if authorization is None:
+            raise OSError(errno.ESTALE, "recovery cleanup authorization is missing")
+        state = _inspect_recovery_cleanup_state(
+            owned_root,
+            store,
+            authorization,
+        )
+        if not state.authorization_active:
+            raise OSError(errno.ESTALE, "recovery cleanup authorization is retired")
+        inspected.append((authorization, state))
+    return tuple(inspected)
+
+
 def discover_pending_transactions(
     owned_root: OwnedRoot,
 ) -> Result[tuple[PendingTransactionObservation, ...]]:
@@ -5857,14 +7372,27 @@ def discover_pending_transactions(
         }
         if (store_ids | claim_ids) - anchor_ids:
             raise OSError(errno.ESTALE, "unbound transaction state remains")
+        recovery_cleanup = _inspect_active_recovery_cleanup_authorizations(
+            owned_root,
+            store,
+            claim_names,
+        )
+        recovery_cleanup_ids = {
+            authorization.transaction_id for authorization, _state in recovery_cleanup
+        }
 
         observations: list[PendingTransactionObservation] = []
         expected_store_names = {
             _TRANSACTION_STORE_CONTROL,
             _TRANSACTION_CLAIMS_COMPONENT,
         }
+        expected_store_names.update(
+            state.journal_relative.rsplit("/", 1)[-1]
+            for _authorization, state in recovery_cleanup
+            if state.journal_relative is not None
+        )
         maximum = LIMIT_POLICY.value("journal_records") + 1
-        for transaction_id in sorted(anchor_ids):
+        for transaction_id in sorted(anchor_ids - recovery_cleanup_ids):
             binding = _load_transaction_binding_from_store(store, transaction_id)
             observation = _observe_pending_transaction(owned_root, store, binding)
             if observation is not None:
@@ -5910,13 +7438,374 @@ def discover_pending_transactions(
             store.close()
 
 
-def rebind_persistent_transaction(
-    owned_root: OwnedRoot, *, binding: PersistentTransactionBinding
-) -> Result[ReboundTransaction]:
-    """Classify and rebind only the anchor's exact live or quarantine identity."""
+def _terminal_recovery_cleanup_evidence(
+    observation: PendingTransactionObservation,
+    journal: LoadedJournal,
+) -> tuple[
+    PersistentTransactionBinding,
+    str,
+    str,
+    int,
+    str,
+    str,
+]:
+    from .journal import JournalState, LoadedJournal as RuntimeLoadedJournal
 
-    if not isinstance(owned_root, OwnedRoot) or not _persistent_binding_invariants(
-        binding
+    if (
+        type(observation) is not PendingTransactionObservation
+        or observation._seal is not _PENDING_TRANSACTION_OBSERVATION_TOKEN
+        or type(journal) is not RuntimeLoadedJournal
+    ):
+        raise TypeError("terminal recovery cleanup evidence")
+    journal._require_valid()
+    binding = observation.binding
+    binding_digest = _recovery_cleanup_binding_digest(binding)
+    if (
+        observation.location is not TransactionLocation.QUARANTINED
+        or not _persistent_cleanup_reference_is_valid(
+            binding,
+            observation.journal_relative,
+        )
+        or journal.head.state is not JournalState.ROLLED_BACK
+        or journal.records[-1].state is not JournalState.ROLLED_BACK
+        or journal.records[-1].transaction_id != binding.transaction_id
+        or journal.head.transaction_binding_digest != binding_digest
+        or journal.access_digest
+        != _recovery_cleanup_access_digest(
+            binding,
+            location=observation.location,
+            journal_relative=observation.journal_relative,
+        )
+        or _DIGEST.fullmatch(journal._binding_digest) is None
+    ):
+        raise ValueError("terminal recovery cleanup evidence")
+    captured = (
+        binding,
+        observation.journal_relative,
+        journal.access_digest,
+        journal.head.sequence,
+        journal.head.record_digest,
+        journal._binding_digest,
+    )
+    journal._require_valid()
+    confirmed = (
+        observation.binding,
+        observation.journal_relative,
+        journal.access_digest,
+        journal.head.sequence,
+        journal.head.record_digest,
+        journal._binding_digest,
+    )
+    if captured != confirmed:
+        raise ValueError("terminal recovery cleanup evidence")
+    return captured
+
+
+def _authorization_matches_terminal_evidence(
+    authorization: RecoveryCleanupAuthorization,
+    *,
+    binding: PersistentTransactionBinding,
+    journal_relative: str,
+    journal_access_digest: str,
+    journal_head_sequence: int,
+    journal_head_record_digest: str,
+    journal_evidence_digest: str,
+) -> bool:
+    try:
+        authorization._require_valid()
+        return (
+            authorization.binding == binding
+            and authorization.location is TransactionLocation.QUARANTINED
+            and authorization.journal_relative == journal_relative
+            and authorization.journal_access_digest == journal_access_digest
+            and authorization.journal_head_sequence == journal_head_sequence
+            and authorization.journal_head_record_digest == journal_head_record_digest
+            and authorization.journal_evidence_digest == journal_evidence_digest
+            and authorization.transaction_binding_digest
+            == _recovery_cleanup_binding_digest(binding)
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def authorize_recovery_cleanup(
+    owned_root: OwnedRoot,
+    *,
+    observation: PendingTransactionObservation,
+    journal: LoadedJournal,
+) -> Result[RecoveryCleanupAuthorization]:
+    """Durably bind one exact quarantined ROLLED_BACK journal to cleanup."""
+
+    store: _TransactionStore | None = None
+    state_lock: _TransactionStateLock | None = None
+    try:
+        if not isinstance(owned_root, OwnedRoot):
+            raise TypeError("owned root")
+        (
+            binding,
+            journal_relative,
+            journal_access_digest,
+            journal_head_sequence,
+            journal_head_record_digest,
+            journal_evidence_digest,
+        ) = _terminal_recovery_cleanup_evidence(observation, journal)
+        store = _open_transaction_store(owned_root, create=False)
+        state_lock = _acquire_transaction_state_lock(store, binding)
+        existing = _load_recovery_cleanup_authorization(store, binding)
+        if existing is not None:
+            if not _authorization_matches_terminal_evidence(
+                existing,
+                binding=binding,
+                journal_relative=journal_relative,
+                journal_access_digest=journal_access_digest,
+                journal_head_sequence=journal_head_sequence,
+                journal_head_record_digest=journal_head_record_digest,
+                journal_evidence_digest=journal_evidence_digest,
+            ):
+                raise OSError(
+                    errno.ESTALE,
+                    "recovery cleanup authorization conflicts",
+                )
+            _inspect_recovery_cleanup_state(owned_root, store, existing)
+            return Result.success(existing)
+        if any(
+            _recovery_cleanup_phase_name_exists(
+                store,
+                binding.transaction_id,
+                phase,
+            )
+            for phase in (
+                _RecoveryCleanupPhase.FINALIZING,
+                _RecoveryCleanupPhase.COMPLETE,
+            )
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup WAL is incomplete")
+        store.close()
+        store = None
+
+        from .journal import load_pending
+
+        observations = discover_pending_transactions(owned_root)
+        if not observations.is_ok or observation not in observations.unwrap():
+            raise OSError(errno.ESTALE, "recovery cleanup observation changed")
+        loaded = load_pending(owned_root)
+        matches = tuple(
+            candidate
+            for candidate in loaded
+            if candidate.records[-1].transaction_id == binding.transaction_id
+        )
+        if len(matches) != 1 or matches[0] != journal:
+            raise OSError(errno.ESTALE, "recovery cleanup journal changed")
+
+        store = _open_transaction_store(owned_root, create=False)
+        if (
+            _load_transaction_binding_from_store(store, binding.transaction_id)
+            != binding
+            or _observe_pending_transaction(owned_root, store, binding) != observation
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup authority changed")
+        cleanup_intent = _load_transaction_cleanup_record(
+            store,
+            binding,
+            complete=False,
+        )
+        if _load_transaction_cleanup_record(store, binding, complete=True) is not None:
+            raise OSError(errno.ESTALE, "recovery cleanup is already complete")
+        observed_delete_component = (
+            journal_relative.rsplit("/", 1)[-1]
+            if journal_relative != binding.quarantine_relative
+            else None
+        )
+        if cleanup_intent is not None:
+            if (
+                observed_delete_component is not None
+                and cleanup_intent.delete_component != observed_delete_component
+            ):
+                raise OSError(errno.ESTALE, "recovery cleanup intent changed")
+            delete_component = cleanup_intent.delete_component
+        elif observed_delete_component is not None:
+            raise OSError(errno.ESTALE, "recovery cleanup intent is missing")
+        else:
+            delete_component = f".delete-{secrets.token_hex(16)}.tmp"
+        raw = _recovery_cleanup_record_bytes(
+            binding,
+            location=TransactionLocation.QUARANTINED,
+            journal_relative=journal_relative,
+            journal_access_digest=journal_access_digest,
+            journal_evidence_digest=journal_evidence_digest,
+            journal_head_sequence=journal_head_sequence,
+            journal_head_record_digest=journal_head_record_digest,
+            transaction_binding_digest=_recovery_cleanup_binding_digest(binding),
+            delete_component=delete_component,
+            phase=_RecoveryCleanupPhase.AUTHORIZED,
+            previous_phase_digest=_ZERO_DIGEST,
+        )
+        component = _recovery_cleanup_component(
+            binding.transaction_id,
+            _RecoveryCleanupPhase.AUTHORIZED,
+        )
+        _publish_transaction_record(store, component, raw)
+        created = _load_recovery_cleanup_authorization(store, binding)
+        if created is None or not _authorization_matches_terminal_evidence(
+            created,
+            binding=binding,
+            journal_relative=journal_relative,
+            journal_access_digest=journal_access_digest,
+            journal_head_sequence=journal_head_sequence,
+            journal_head_record_digest=journal_head_record_digest,
+            journal_evidence_digest=journal_evidence_digest,
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup publication changed")
+        _inspect_recovery_cleanup_state(owned_root, store, created)
+        return Result.success(created)
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        recovery = (
+            (observation.binding.quarantine_relative,)
+            if type(observation) is PendingTransactionObservation
+            and _persistent_binding_invariants(observation.binding)
+            else ()
+        )
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Recovery cleanup cannot be authorized.",
+                recovery=recovery,
+            )
+        )
+    finally:
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            if state_lock is not None:
+                state_lock.close()
+
+
+def _discover_recovery_cleanup_observations_once(
+    owned_root: OwnedRoot,
+) -> tuple[RecoveryCleanupObservation, ...]:
+    store: _TransactionStore | None = None
+    try:
+        if _transaction_store_is_exactly_absent(owned_root):
+            return ()
+        control_names = _transaction_control_names(owned_root)
+        if not _transaction_control_inventory_is_exact(
+            control_names,
+            store_present=True,
+        ):
+            raise OSError(errno.ESTALE, "transaction store bootstrap is ambiguous")
+        store = _open_transaction_store(owned_root, create=False)
+        store_names = _bounded_transaction_names(store.store, windows=store.windows)
+        claim_names = _bounded_transaction_names(store.claims, windows=store.windows)
+        _reject_inventory_name_collisions(store_names)
+        _reject_inventory_name_collisions(claim_names)
+        store_ids = _store_transaction_ids(store_names)
+        claim_ids = _claim_transaction_ids(claim_names)
+        anchor_ids = {
+            match.group(1)
+            for name in claim_names
+            if (match := _TRANSACTION_ANCHOR.fullmatch(name)) is not None
+        }
+        if (store_ids | claim_ids) - anchor_ids:
+            raise OSError(errno.ESTALE, "unbound transaction state remains")
+        inspected = _inspect_active_recovery_cleanup_authorizations(
+            owned_root,
+            store,
+            claim_names,
+        )
+        observations = tuple(
+            _capture_recovery_cleanup_observation(authorization, state)
+            for authorization, state in inspected
+        )
+        if (
+            _bounded_transaction_names(store.store, windows=store.windows)
+            != store_names
+            or _bounded_transaction_names(store.claims, windows=store.windows)
+            != claim_names
+            or _transaction_control_names(owned_root) != control_names
+            or not _transaction_store_namespace_is_valid(store)
+            or not owned_root._validate_control_descriptor(store.control)
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup inventory changed")
+        for observation in observations:
+            observation._require_valid()
+        return observations
+    finally:
+        if store is not None:
+            store.close()
+
+
+def discover_recovery_cleanup_observations(
+    owned_root: OwnedRoot,
+) -> Result[tuple[RecoveryCleanupObservation, ...]]:
+    """Twice observe exact active cleanup WAL state without minting authority."""
+
+    if not isinstance(owned_root, OwnedRoot):
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Recovery cleanup discovery requires an owned root.",
+            )
+        )
+    try:
+        first = _discover_recovery_cleanup_observations_once(owned_root)
+        second = _discover_recovery_cleanup_observations_once(owned_root)
+        if first != second:
+            raise OSError(errno.ESTALE, "recovery cleanup inventory changed")
+        for observation in second:
+            observation._require_valid()
+        return Result.success(second)
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Recovery cleanup discovery cannot trust the durable inventory.",
+            )
+        )
+
+
+def discover_recovery_cleanup_authorizations(
+    owned_root: OwnedRoot,
+) -> Result[tuple[RecoveryCleanupAuthorization, ...]]:
+    """Discover compatible base authorizations from sealed current observations."""
+
+    observed = discover_recovery_cleanup_observations(owned_root)
+    if not observed.is_ok:
+        error = observed.error
+        if error is None:
+            return Result.failure(
+                _error(
+                    "ownership.cleanup_incomplete",
+                    "Recovery cleanup discovery cannot trust the durable inventory.",
+                )
+            )
+        return Result.failure(error)
+    return Result.success(
+        tuple(observation.authorization for observation in observed.unwrap())
+    )
+
+
+def _rebind_persistent_transaction(
+    owned_root: OwnedRoot,
+    *,
+    binding: PersistentTransactionBinding,
+    perform_maintenance: bool,
+    recovery_authorization: RecoveryCleanupAuthorization | None,
+) -> Result[ReboundTransaction]:
+    if (
+        not isinstance(owned_root, OwnedRoot)
+        or not _persistent_binding_invariants(binding)
+        or type(perform_maintenance) is not bool
+        or (
+            recovery_authorization is not None
+            and (
+                type(recovery_authorization) is not RecoveryCleanupAuthorization
+                or not _recovery_cleanup_authorization_invariants(
+                    recovery_authorization
+                )
+                or recovery_authorization.binding != binding
+            )
+        )
     ):
         return Result.failure(
             _error(
@@ -5941,6 +7830,42 @@ def rebind_persistent_transaction(
     namespace: _paths._NamespaceCapability | None = None
     try:
         store = _open_transaction_store(owned_root, create=False)
+        recovery_record, recovery_record_active = (
+            _load_recovery_cleanup_authorization_any(store, binding)
+        )
+        if recovery_record is not None:
+            recovery_state = _inspect_recovery_cleanup_state(
+                owned_root,
+                store,
+                recovery_record,
+            )
+            if recovery_record_active and (
+                recovery_authorization is None
+                or recovery_record != recovery_authorization
+            ):
+                raise OSError(
+                    errno.ESTALE,
+                    "persistent transaction is recovery-cleanup authorized",
+                )
+            if not recovery_record_active and (
+                recovery_authorization is not None
+                or recovery_state.authorization_active
+                or recovery_state.finalizing is None
+                or recovery_state.complete is None
+                or not recovery_state.finalizing.retired
+                or not recovery_state.complete.retired
+                or recovery_state.cleanup_complete is None
+                or recovery_state.journal_relative is not None
+            ):
+                raise OSError(
+                    errno.ESTALE,
+                    "retired recovery cleanup WAL is incomplete",
+                )
+        elif recovery_authorization is not None or _recovery_cleanup_wal_residue_exists(
+            store,
+            binding.transaction_id,
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup authorization changed")
         live_component = binding.root_relative.rsplit("/", 1)[-1]
         quarantine_component = binding.quarantine_relative.rsplit("/", 1)[-1]
         cleanup_intent = _load_transaction_cleanup_record(
@@ -6052,7 +7977,8 @@ def rebind_persistent_transaction(
                     "Persistent transaction cleanup evidence conflicts with a live root.",
                     recovery=(binding.quarantine_relative,),
                 )
-            _finish_transaction_creation_intent(store, binding)
+            if perform_maintenance:
+                _finish_transaction_creation_intent(store, binding)
             reference = _paths.validate_reference(
                 binding.root_relative,
                 role="persistent-transaction-root",
@@ -6187,7 +8113,7 @@ def rebind_persistent_transaction(
                 "Persistent transaction cleanup completion is missing.",
                 recovery=(binding.quarantine_relative,),
             )
-        if cleanup_intent is not None:
+        if perform_maintenance and cleanup_intent is not None:
             _remove_exact_transaction_record(
                 store,
                 cleanup_intent.component,
@@ -6256,6 +8182,35 @@ def rebind_persistent_transaction(
                     os.close(descriptor)
         if store is not None:
             store.close()
+
+
+def rebind_persistent_transaction(
+    owned_root: OwnedRoot, *, binding: PersistentTransactionBinding
+) -> Result[ReboundTransaction]:
+    """Rebind one transaction and finish safe generic maintenance records."""
+
+    return _rebind_persistent_transaction(
+        owned_root,
+        binding=binding,
+        perform_maintenance=True,
+        recovery_authorization=None,
+    )
+
+
+def rebind_persistent_transaction_for_recovery(
+    owned_root: OwnedRoot,
+    *,
+    binding: PersistentTransactionBinding,
+    _recovery_authorization: RecoveryCleanupAuthorization | None = None,
+) -> Result[ReboundTransaction]:
+    """Effect-free rebind for locked recovery validation and exact WAL cleanup."""
+
+    return _rebind_persistent_transaction(
+        owned_root,
+        binding=binding,
+        perform_maintenance=False,
+        recovery_authorization=_recovery_authorization,
+    )
 
 
 def _transaction_path_claim_matches_binding(
@@ -8531,6 +10486,11 @@ def _preflight_posix_directory_unlink_proof(
     raise OSError(errno.ENOTSUP, "directory unlink proof is unavailable")
 
 
+def _posix_directory_is_empty(descriptor: int) -> bool:
+    with os.scandir(descriptor) as entries:
+        return next(entries, None) is None
+
+
 def _require_posix_directory_unlinked(
     descriptor: int,
     expected_identity: tuple[int, int],
@@ -8719,13 +10679,54 @@ def _open_cleanup_transaction_store(
                     os.close(descriptor)
 
 
+def _require_cleanup_recovery_mode(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+    authorization: RecoveryCleanupAuthorization | None,
+) -> None:
+    observed, observed_active = _load_recovery_cleanup_authorization_any(
+        store,
+        binding,
+    )
+    if observed is None:
+        if authorization is not None or _recovery_cleanup_wal_residue_exists(
+            store,
+            binding.transaction_id,
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup authorization changed")
+        return
+    if (
+        not observed_active
+        or authorization is None
+        or observed != authorization
+        or not _recovery_cleanup_authorization_is_active(store, observed)
+    ):
+        raise OSError(
+            errno.ESTALE,
+            "generic cleanup cannot bypass recovery cleanup authorization",
+        )
+
+
+def _require_windows_cleanup_name_absent(parent: int, component: str) -> None:
+    if _transaction_name_exists(
+        parent,
+        component,
+        directory=True,
+        windows=True,
+    ):
+        raise OSError(errno.ESTALE, "transaction cleanup name was replaced")
+
+
 def _remove_windows_quarantine(
     ticket: QuarantineTicket,
     root: int,
     namespace: _paths._NamespaceCapability,
+    *,
+    recovery_authorization: RecoveryCleanupAuthorization | None = None,
 ) -> Result[CleanupResult]:
     parent = leaf = 0
     transaction_store: _TransactionStore | None = None
+    state_lock: _TransactionStateLock | None = None
     cleanup_record: _TransactionCleanupRecord | None = None
     components = tuple(ticket.recovery_reference.split("/"))
     try:
@@ -8741,9 +10742,23 @@ def _remove_windows_quarantine(
                 namespace,
                 ticket._binding,
             )
+            state_lock = _acquire_transaction_state_lock(
+                transaction_store,
+                ticket._binding,
+            )
+            _require_cleanup_recovery_mode(
+                transaction_store,
+                ticket._binding,
+                recovery_authorization,
+            )
             cleanup_record = _publish_transaction_cleanup_intent(
                 transaction_store,
                 ticket._binding,
+                delete_component=(
+                    None
+                    if recovery_authorization is None
+                    else recovery_authorization.delete_component
+                ),
             )
         parent = _windows_open_parent(root, components[:-1])
         leaf = _windows_open_raw_child(
@@ -8771,12 +10786,40 @@ def _remove_windows_quarantine(
             parent, components[-1], directory=True, delete_access=True
         )
         try:
-            if _paths._windows_handle_status(current).identity != ticket._identity:
+            if _paths._windows_handle_status(
+                current
+            ).identity != ticket._identity or _windows_list_names(leaf, limit=1):
                 raise OSError(errno.ESTALE, "quarantine identity changed")
             _require_cleanup_namespace(namespace)
+            if recovery_authorization is not None:
+                if (
+                    ticket._binding != recovery_authorization.binding
+                    or transaction_store is None
+                    or cleanup_record is None
+                ):
+                    raise OSError(
+                        errno.ESTALE,
+                        "recovery cleanup authority changed",
+                    )
+                _publish_recovery_cleanup_finalizing(
+                    transaction_store,
+                    recovery_authorization,
+                    cleanup_record,
+                )
+                if _paths._windows_handle_status(
+                    current
+                ).identity != ticket._identity or _windows_list_names(leaf, limit=1):
+                    raise OSError(
+                        errno.ESTALE,
+                        "recovery cleanup finalization changed",
+                    )
+                _require_cleanup_namespace(namespace)
+            _paths._windows_close(leaf)
+            leaf = 0
             _windows_delete_handle(current)
         finally:
             _paths._windows_close(current)
+        _require_windows_cleanup_name_absent(parent, components[-1])
         if ticket._binding is not None:
             if transaction_store is None or cleanup_record is None:
                 raise OSError(errno.ESTALE, "transaction cleanup authority changed")
@@ -8785,6 +10828,7 @@ def _remove_windows_quarantine(
                 _TRANSACTION_STORE_COMPONENT,
                 transaction_store.store_identity,
             )
+            _require_windows_cleanup_name_absent(parent, components[-1])
             _publish_transaction_cleanup_complete(
                 transaction_store,
                 ticket._binding,
@@ -8800,18 +10844,35 @@ def _remove_windows_quarantine(
             )
         )
     finally:
-        if transaction_store is not None:
-            transaction_store.close()
-        for item in (leaf, parent, root):
-            if item:
-                _paths._windows_close(item)
-        namespace.close()
+        try:
+            if transaction_store is not None:
+                transaction_store.close()
+        finally:
+            try:
+                if state_lock is not None:
+                    state_lock.close()
+            finally:
+                for item in (leaf, parent, root):
+                    if item:
+                        _paths._windows_close(item)
+                namespace.close()
 
 
-def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
+def remove_quarantine(
+    ticket: QuarantineTicket,
+    *,
+    _recovery_authorization: RecoveryCleanupAuthorization | None = None,
+) -> Result[CleanupResult]:
     """Remove one quarantined tree without following any link."""
 
-    if not isinstance(ticket, QuarantineTicket):
+    if not isinstance(ticket, QuarantineTicket) or (
+        _recovery_authorization is not None
+        and (
+            type(_recovery_authorization) is not RecoveryCleanupAuthorization
+            or not _recovery_cleanup_authorization_invariants(_recovery_authorization)
+            or ticket._binding != _recovery_authorization.binding
+        )
+    ):
         return Result.failure(
             _error("ownership.cleanup_incomplete", "A quarantine ticket is required.")
         )
@@ -8820,9 +10881,15 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
     except ForgeError as exc:
         return Result.failure(exc)
     if os.name == "nt":
-        return _remove_windows_quarantine(ticket, root, namespace)
+        return _remove_windows_quarantine(
+            ticket,
+            root,
+            namespace,
+            recovery_authorization=_recovery_authorization,
+        )
     parent = leaf = -1
     transaction_store: _TransactionStore | None = None
+    state_lock: _TransactionStateLock | None = None
     cleanup_record: _TransactionCleanupRecord | None = None
     components = tuple(ticket.recovery_reference.split("/"))
     try:
@@ -8837,9 +10904,23 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
                 namespace,
                 ticket._binding,
             )
+            state_lock = _acquire_transaction_state_lock(
+                transaction_store,
+                ticket._binding,
+            )
+            _require_cleanup_recovery_mode(
+                transaction_store,
+                ticket._binding,
+                _recovery_authorization,
+            )
             cleanup_record = _publish_transaction_cleanup_intent(
                 transaction_store,
                 ticket._binding,
+                delete_component=(
+                    None
+                    if _recovery_authorization is None
+                    else _recovery_authorization.delete_component
+                ),
             )
         parent = _open_parent(root, components[:-1])
         current_component = components[-1]
@@ -8897,6 +10978,31 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
             raise OSError(errno.ESTALE, "quarantine identity changed")
         _preflight_posix_directory_unlink_proof(leaf, ticket._identity)
         _require_cleanup_namespace(namespace)
+        if not _posix_directory_is_empty(leaf):
+            raise OSError(errno.ENOTEMPTY, "quarantine changed after cleanup")
+        if _recovery_authorization is not None:
+            if (
+                ticket._binding != _recovery_authorization.binding
+                or transaction_store is None
+                or cleanup_record is None
+            ):
+                raise OSError(errno.ESTALE, "recovery cleanup authority changed")
+            _publish_recovery_cleanup_finalizing(
+                transaction_store,
+                _recovery_authorization,
+                cleanup_record,
+            )
+            if not _paths._posix_namespace_binds(
+                parent,
+                current_component,
+                ticket._identity,
+            ) or not _posix_directory_is_empty(leaf):
+                raise OSError(
+                    errno.ESTALE,
+                    "recovery cleanup finalization changed",
+                )
+            _preflight_posix_directory_unlink_proof(leaf, ticket._identity)
+            _require_cleanup_namespace(namespace)
         os.rmdir(current_component, dir_fd=parent)
         os.fsync(parent)
         if _transaction_name_exists(
@@ -8925,12 +11031,182 @@ def remove_quarantine(ticket: QuarantineTicket) -> Result[CleanupResult]:
             )
         )
     finally:
-        if transaction_store is not None:
-            transaction_store.close()
-        for descriptor in (leaf, parent, root):
-            if descriptor >= 0:
-                os.close(descriptor)
-        namespace.close()
+        try:
+            if transaction_store is not None:
+                transaction_store.close()
+        finally:
+            try:
+                if state_lock is not None:
+                    state_lock.close()
+            finally:
+                for descriptor in (leaf, parent, root):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                namespace.close()
+
+
+def _complete_recovery_cleanup(
+    owned_root: OwnedRoot,
+    authorization: RecoveryCleanupAuthorization,
+) -> CleanupResult:
+    store = _open_transaction_store(owned_root, create=False)
+    try:
+        state = _inspect_recovery_cleanup_state(
+            owned_root,
+            store,
+            authorization,
+        )
+        if not state.authorization_active:
+            return CleanupResult(True, authorization.journal_relative)
+        if state.finalizing is None or state.journal_relative is not None:
+            raise OSError(errno.ESTALE, "recovery cleanup is not finalizing")
+        if state.cleanup_complete is None:
+            if state.cleanup_intent is None:
+                raise OSError(errno.ESTALE, "recovery cleanup intent is missing")
+            _publish_transaction_cleanup_complete(
+                store,
+                authorization.binding,
+                delete_component=authorization.delete_component,
+            )
+        elif state.cleanup_intent is not None:
+            _remove_exact_transaction_record(
+                store,
+                state.cleanup_intent.component,
+                state.cleanup_intent.identity,
+                state.cleanup_intent.raw,
+            )
+
+        state = _inspect_recovery_cleanup_state(
+            owned_root,
+            store,
+            authorization,
+        )
+        if (
+            state.finalizing is None
+            or state.cleanup_complete is None
+            or state.journal_relative is not None
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup completion changed")
+        complete = state.complete
+        if complete is None:
+            complete = _publish_recovery_cleanup_phase(
+                store,
+                authorization,
+                phase=_RecoveryCleanupPhase.COMPLETE,
+                previous_phase_digest=state.finalizing.record_digest,
+            )
+        _retire_recovery_cleanup_phase(store, complete)
+        _retire_recovery_cleanup_phase(store, state.finalizing)
+        authorization_record = _RecoveryCleanupPhaseRecord(
+            component=authorization._component,
+            identity=authorization._identity,
+            raw=authorization._raw,
+            phase=_RecoveryCleanupPhase.AUTHORIZED,
+            previous_phase_digest=_ZERO_DIGEST,
+            record_digest=authorization.authorization_digest,
+            retired=False,
+        )
+        _retire_recovery_cleanup_phase(store, authorization_record)
+        final_state = _inspect_recovery_cleanup_state(
+            owned_root,
+            store,
+            authorization,
+        )
+        if final_state.authorization_active:
+            raise OSError(errno.ESTALE, "recovery cleanup retirement changed")
+        return CleanupResult(True, authorization.journal_relative)
+    finally:
+        store.close()
+
+
+def resume_recovery_cleanup(
+    owned_root: OwnedRoot,
+    authorization: RecoveryCleanupAuthorization,
+) -> Result[CleanupResult]:
+    """Resume one exact terminal cleanup from its durable three-phase WAL."""
+
+    store: _TransactionStore | None = None
+    rebound: ReboundTransaction | None = None
+    try:
+        if (
+            not isinstance(owned_root, OwnedRoot)
+            or type(authorization) is not RecoveryCleanupAuthorization
+            or not _recovery_cleanup_authorization_invariants(authorization)
+        ):
+            raise TypeError("recovery cleanup authorization")
+        store = _open_transaction_store(owned_root, create=False)
+        state = _inspect_recovery_cleanup_state(
+            owned_root,
+            store,
+            authorization,
+        )
+        if not state.authorization_active:
+            return Result.success(CleanupResult(True, authorization.journal_relative))
+        if state.journal_relative is None:
+            store.close()
+            store = None
+            return Result.success(_complete_recovery_cleanup(owned_root, authorization))
+        if state.cleanup_complete is not None:
+            raise OSError(errno.ESTALE, "recovery cleanup completion conflicts")
+        cleanup_intent = _publish_transaction_cleanup_intent(
+            store,
+            authorization.binding,
+            delete_component=authorization.delete_component,
+        )
+        if cleanup_intent.delete_component != authorization.delete_component:
+            raise OSError(errno.ESTALE, "recovery cleanup intent changed")
+        confirmed = _inspect_recovery_cleanup_state(
+            owned_root,
+            store,
+            authorization,
+        )
+        if confirmed.journal_relative != state.journal_relative:
+            raise OSError(errno.ESTALE, "recovery cleanup location changed")
+        store.close()
+        store = None
+
+        rebound_result = rebind_persistent_transaction_for_recovery(
+            owned_root,
+            binding=authorization.binding,
+            _recovery_authorization=authorization,
+        )
+        if not rebound_result.is_ok:
+            raise OSError(errno.ESTALE, "recovery cleanup cannot be rebound")
+        rebound = rebound_result.unwrap()
+        if (
+            rebound.location is not TransactionLocation.QUARANTINED
+            or rebound.ticket is None
+            or rebound.ticket.recovery_reference != state.journal_relative
+        ):
+            raise OSError(errno.ESTALE, "recovery cleanup rebound changed")
+        ticket = rebound.ticket
+        removed = remove_quarantine(
+            ticket,
+            _recovery_authorization=authorization,
+        )
+        rebound = None
+        if not removed.is_ok:
+            return removed
+        return Result.success(_complete_recovery_cleanup(owned_root, authorization))
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        recovery = (
+            (authorization.binding.quarantine_relative,)
+            if type(authorization) is RecoveryCleanupAuthorization
+            and _recovery_cleanup_authorization_invariants(authorization)
+            else ()
+        )
+        return Result.failure(
+            _error(
+                "ownership.cleanup_incomplete",
+                "Recovery cleanup is incomplete.",
+                recovery=recovery,
+            )
+        )
+    finally:
+        if rebound is not None:
+            rebound.close()
+        if store is not None:
+            store.close()
 
 
 def load_legacy_install_catalog() -> Result[LegacyInstallCatalog]:

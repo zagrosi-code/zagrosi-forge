@@ -10,6 +10,8 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1787,6 +1789,207 @@ def _persistent_transaction(
     return authority, owned, root, created
 
 
+def _recovery_prepared(binding: Any) -> Any:
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.journal import (
+        JournalConfigIdentity,
+        JournalPathIdentity,
+        PreparedTransaction,
+        RollbackAction,
+        TransactionOwnedPath,
+    )
+
+    identity = _install_identity()
+    before = JournalConfigIdentity(
+        parent_identity=(11, 12),
+        leaf_identity=(11, 13),
+        byte_digest="0" * 64,
+        semantic_digest="2" * 64,
+        metadata_fingerprint="3" * 64,
+        snapshot_digest="4" * 64,
+        target_metadata_digest=None,
+    )
+    candidate = JournalConfigIdentity(
+        parent_identity=(11, 12),
+        leaf_identity=None,
+        byte_digest="1" * 64,
+        semantic_digest="6" * 64,
+        metadata_fingerprint="3" * 64,
+        snapshot_digest="4" * 64,
+        target_metadata_digest="5" * 64,
+    )
+    receipt = _receipt(
+        identity,
+        relative=_source_relative(identity),
+        manifest="8" * 64,
+    )
+    receipt["transaction"] = {
+        "id": binding.transaction_id,
+        "lineage": [binding.transaction_id],
+    }
+    receipt["config"] = {
+        "path_id": "codex-config",
+        "before_digest": before.byte_digest,
+        "after_digest": candidate.byte_digest,
+    }
+    receipt["record_digest"] = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+    root_relative = binding.root_relative
+    rollback = RollbackAction(
+        action="quarantine-if-owned",
+        relative_path=root_relative,
+        expected_identity=binding.transaction_identity,
+    )
+    return PreparedTransaction(
+        transaction_id=binding.transaction_id,
+        effective_marketplace_id="zagrosi",
+        config_transaction_digest=hashlib.sha256(
+            binding.transaction_id.encode("utf-8")
+        ).hexdigest(),
+        plan_digest="9" * 64,
+        runner_provenance=_runner(),
+        install_identity=identity,
+        before_relation_digest="a" * 64,
+        candidate_relation_digest="b" * 64,
+        before_config=before,
+        candidate_config=candidate,
+        identities=(
+            JournalPathIdentity(
+                role="transaction-root",
+                relative_path=root_relative,
+                parent_identity=binding.store_identity,
+                leaf_identity=binding.transaction_identity,
+                content_digest=None,
+            ),
+            JournalPathIdentity(
+                role="source-generation",
+                relative_path=_source_relative(identity),
+                parent_identity=(20, 23),
+                leaf_identity=None,
+                content_digest="8" * 64,
+            ),
+            JournalPathIdentity(
+                role="cache-generation",
+                relative_path=_cache_relative(identity),
+                parent_identity=(20, 24),
+                leaf_identity=None,
+                content_digest="f" * 64,
+            ),
+        ),
+        transaction_owned_paths=(
+            TransactionOwnedPath(
+                role="transaction-root",
+                relative_path=root_relative,
+                expected_identity=binding.transaction_identity,
+            ),
+        ),
+        rollback_actions=(rollback,),
+        prepared_receipt=receipt,
+    )
+
+
+def _recovery_cleanup_fixture(
+    tmp_path: Path,
+    *,
+    transaction_id: str,
+    terminal: bool = True,
+) -> tuple[Any, Path, Any, Any]:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.journal import (
+        JournalRollbackEvent,
+        JournalState,
+        JournalStore,
+        JournalTransition,
+        load_pending,
+    )
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    authority, owned, root, created = _persistent_transaction(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    live_proof = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    store = JournalStore(
+        ownership.open_transaction_journal_access(owned, created).unwrap(),
+        live_proof,
+    )
+    prepared = _recovery_prepared(created.binding)
+    action = prepared.rollback_actions[0]
+    head = store.create_prepared(prepared)
+    head = store.append(
+        head,
+        JournalTransition(
+            JournalState.ROLLBACK_ACTION_INTENT,
+            rollback_event=JournalRollbackEvent(
+                action_index=0,
+                action_digest=action.action_digest,
+            ),
+        ),
+    )
+    store.close()
+    live_proof.close()
+
+    rebound = ownership.rebind_persistent_transaction(
+        owned,
+        binding=created.binding,
+    ).unwrap()
+    assert rebound.claim is not None
+    path = authority.prove_descendant(
+        owned,
+        rebound.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    cleanup = ownership.prove_transaction_owned(
+        path,
+        claim=rebound.claim,
+    ).unwrap()
+    ticket = ownership.quarantine_owned(
+        cleanup,
+        transaction_id=transaction_id,
+    ).unwrap()
+    rebound.close()
+    path.close()
+
+    quarantined = ownership.rebind_persistent_transaction(
+        owned,
+        binding=created.binding,
+    ).unwrap()
+    if terminal:
+        access = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantined,
+        ).unwrap()
+        recovery_store = JournalStore.from_quarantined_recovery(access)
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                rollback_event=JournalRollbackEvent(
+                    action_index=0,
+                    action_digest=action.action_digest,
+                    outcome="quarantined",
+                    observed_identity=created.binding.transaction_identity,
+                    recovery_reference=created.binding.quarantine_relative,
+                ),
+            ),
+        )
+        recovery_store.append_recovery(
+            head,
+            JournalTransition(JournalState.ROLLED_BACK),
+        )
+        recovery_store.close()
+    quarantined.close()
+    ticket.close()
+
+    observations = ownership.discover_pending_transactions(owned).unwrap()
+    journals = load_pending(owned)
+    assert len(observations) == len(journals) == 1
+    return owned, root, observations[0], journals[0]
+
+
 def test_transaction_store_namespace_failure_closes_each_native_handle_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2417,6 +2620,66 @@ def test_posix_post_rename_interrupt_preserves_exact_root_and_anchor(
     assert not (
         root / ".zagrosi/transactions/claims" / f".{transaction_id}.create.json"
     ).exists()
+    owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX publication interruption")
+def test_recovery_rebind_preserves_durable_creation_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class InjectedPublicationInterrupt(BaseException):
+        pass
+
+    transaction_id = "tx-c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7"
+    _, owned, root = _owned(tmp_path)
+    original_rename = ownership._exclusive_rename
+
+    def publish_then_interrupt(parent: int, source: str, destination: str) -> None:
+        original_rename(parent, source, destination)
+        raise InjectedPublicationInterrupt
+
+    monkeypatch.setattr(ownership, "_exclusive_rename", publish_then_interrupt)
+    with pytest.raises(InjectedPublicationInterrupt):
+        ownership.create_persistent_transaction_root(
+            owned,
+            transaction_id=transaction_id,
+        )
+    monkeypatch.undo()
+
+    binding = ownership.load_persistent_transaction_binding(
+        owned,
+        transaction_id=transaction_id,
+    ).unwrap()
+    claims = root / ".zagrosi/transactions/claims"
+    creation_intent = claims / f".{transaction_id}.create.json"
+    before = (
+        creation_intent.stat().st_dev,
+        creation_intent.stat().st_ino,
+        creation_intent.read_bytes(),
+    )
+    rebound = ownership.rebind_persistent_transaction_for_recovery(
+        owned,
+        binding=binding,
+    ).unwrap()
+    try:
+        assert rebound.location is ownership.TransactionLocation.LIVE
+        assert (
+            creation_intent.stat().st_dev,
+            creation_intent.stat().st_ino,
+            creation_intent.read_bytes(),
+        ) == before
+    finally:
+        rebound.close()
+
+    maintained = ownership.rebind_persistent_transaction(
+        owned,
+        binding=binding,
+    ).unwrap()
+    maintained.close()
+    assert not creation_intent.exists()
     owned.close()
 
 
@@ -3279,6 +3542,580 @@ def test_restart_never_infers_cleanup_completion_after_deletion_process_death(
         assert (claims / f"{transaction_id}.removing.json").is_file()
     finally:
         restarted.close()
+
+
+def test_terminal_recovery_cleanup_authorization_is_sealed_and_separate(
+    tmp_path: Path,
+) -> None:
+    import pickle
+
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8"
+    owned, _root, observation, journal = _recovery_cleanup_fixture(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    try:
+        authorized = ownership.authorize_recovery_cleanup(
+            owned,
+            observation=observation,
+            journal=journal,
+        ).unwrap()
+
+        assert authorized.binding == observation.binding
+        assert authorized.location is ownership.TransactionLocation.QUARANTINED
+        assert authorized.journal_relative == observation.journal_relative
+        assert authorized.journal_access_digest == journal.access_digest
+        assert authorized.journal_head_record_digest == journal.head.record_digest
+        assert authorized.journal_head_sequence == journal.head.sequence
+        assert authorized.delete_component.startswith(".delete-")
+        assert authorized.delete_component.endswith(".tmp")
+        assert len(authorized.authorization_digest) == 64
+        with pytest.raises(AttributeError):
+            authorized.delete_component = ".delete-" + ("0" * 32) + ".tmp"  # type: ignore[misc]
+        with pytest.raises(TypeError, match="not serializable"):
+            pickle.dumps(authorized)
+
+        assert ownership.discover_pending_transactions(owned).unwrap() == ()
+        assert ownership.discover_recovery_cleanup_authorizations(owned).unwrap() == (
+            authorized,
+        )
+    finally:
+        owned.close()
+
+
+def test_recovery_cleanup_observation_seals_exact_current_wal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pickle
+
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7"
+    owned, _root, observation, journal = _recovery_cleanup_fixture(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    authorized = ownership.authorize_recovery_cleanup(
+        owned,
+        observation=observation,
+        journal=journal,
+    ).unwrap()
+    original_complete = ownership._publish_transaction_cleanup_complete
+    original_retire = ownership._retire_recovery_cleanup_phase
+    try:
+        initial = ownership.discover_recovery_cleanup_observations(owned).unwrap()
+
+        assert len(initial) == 1
+        assert initial[0].authorization == authorized
+        assert initial[0].phase == "AUTHORIZED"
+        assert initial[0].current_reference == observation.journal_relative
+        assert len(initial[0].observation_digest) == 64
+        with pytest.raises(AttributeError):
+            initial[0].phase = "FINALIZING"  # type: ignore[misc]
+        with pytest.raises(TypeError, match="not serializable"):
+            pickle.dumps(initial[0])
+        object.__setattr__(initial[0], "phase", "FINALIZING")
+        with pytest.raises(TypeError, match="observation changed"):
+            initial[0]._require_valid()
+        object.__setattr__(initial[0], "phase", "AUTHORIZED")
+        initial[0]._require_valid()
+
+        def lose_response_after_exact_removal(*args: Any, **kwargs: Any) -> None:
+            raise OSError("injected after exact rmdir")
+
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_publish_transaction_cleanup_complete",
+                lose_response_after_exact_removal,
+            )
+            interrupted = ownership.resume_recovery_cleanup(owned, authorized)
+        assert _code(interrupted) == "ownership.cleanup_incomplete"
+
+        finalizing = ownership.discover_recovery_cleanup_observations(owned).unwrap()
+        assert len(finalizing) == 1
+        assert finalizing[0].authorization == authorized
+        assert finalizing[0].phase == "FINALIZING"
+        assert finalizing[0].current_reference is None
+        assert finalizing[0].observation_digest != initial[0].observation_digest
+
+        def stop_before_retirement(*args: Any, **kwargs: Any) -> None:
+            raise OSError("injected after durable completion")
+
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_retire_recovery_cleanup_phase",
+                stop_before_retirement,
+            )
+            completed_without_retirement = ownership.resume_recovery_cleanup(
+                owned,
+                authorized,
+            )
+        assert _code(completed_without_retirement) == "ownership.cleanup_incomplete"
+
+        complete = ownership.discover_recovery_cleanup_observations(owned).unwrap()
+        assert len(complete) == 1
+        assert complete[0].authorization == authorized
+        assert complete[0].phase == "COMPLETE"
+        assert complete[0].current_reference is None
+        assert complete[0].observation_digest not in {
+            initial[0].observation_digest,
+            finalizing[0].observation_digest,
+        }
+
+        assert ownership.resume_recovery_cleanup(owned, authorized).unwrap().removed
+        assert ownership.discover_recovery_cleanup_observations(owned).unwrap() == ()
+    finally:
+        monkeypatch.setattr(
+            ownership,
+            "_publish_transaction_cleanup_complete",
+            original_complete,
+        )
+        monkeypatch.setattr(
+            ownership,
+            "_retire_recovery_cleanup_phase",
+            original_retire,
+        )
+        owned.close()
+
+
+def test_active_recovery_cleanup_authorization_blocks_generic_rebind_and_ticket(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6"
+    owned, root, observation, journal = _recovery_cleanup_fixture(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    stale = ownership.rebind_persistent_transaction(
+        owned,
+        binding=observation.binding,
+    ).unwrap()
+    assert stale.ticket is not None
+    authorized = ownership.authorize_recovery_cleanup(
+        owned,
+        observation=observation,
+        journal=journal,
+    ).unwrap()
+    quarantine = root / observation.journal_relative
+    claims = root / ".zagrosi/transactions/claims"
+    before = tuple(
+        (
+            path.relative_to(root).as_posix(),
+            path.stat().st_dev,
+            path.stat().st_ino,
+            path.read_bytes(),
+        )
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    )
+    try:
+        rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=observation.binding,
+        )
+        removed = ownership.remove_quarantine(stale.ticket)
+
+        assert _code(rebound) == "ownership.cleanup_incomplete"
+        assert _code(removed) == "ownership.cleanup_incomplete"
+        assert quarantine.is_dir()
+        assert (claims / f"{transaction_id}.rc-auth.json").is_file()
+        assert not (claims / f"{transaction_id}.rc-final.json").exists()
+        assert not (claims / f"{transaction_id}.rc-done.json").exists()
+        assert (
+            tuple(
+                (
+                    path.relative_to(root).as_posix(),
+                    path.stat().st_dev,
+                    path.stat().st_ino,
+                    path.read_bytes(),
+                )
+                for path in sorted(root.rglob("*"))
+                if path.is_file()
+            )
+            == before
+        )
+        assert ownership.discover_recovery_cleanup_authorizations(owned).unwrap() == (
+            authorized,
+        )
+    finally:
+        stale.close()
+        owned.close()
+
+
+def test_generic_cleanup_and_recovery_authorization_are_transaction_serialized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+    owned, root, observation, journal = _recovery_cleanup_fixture(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    stale = ownership.rebind_persistent_transaction(
+        owned,
+        binding=observation.binding,
+    ).unwrap()
+    assert stale.ticket is not None
+    entered_cleanup_intent = threading.Event()
+    continue_cleanup = threading.Event()
+    authorization_lock_attempted = threading.Event()
+    authorization_finished = threading.Event()
+    results: dict[str, Any] = {}
+    original_acquire = ownership._acquire_transaction_state_lock
+    original_publish = ownership._publish_transaction_cleanup_intent
+
+    def observe_lock_attempt(store: Any, binding: Any) -> Any:
+        if threading.current_thread().name == "authorize-cleanup":
+            authorization_lock_attempted.set()
+        return original_acquire(store, binding)
+
+    def pause_generic_after_intent(*args: Any, **kwargs: Any) -> Any:
+        record = original_publish(*args, **kwargs)
+        entered_cleanup_intent.set()
+        if not continue_cleanup.wait(timeout=5):
+            raise OSError("authorization did not attempt the transaction lock")
+        return record
+
+    def run_generic_cleanup() -> None:
+        try:
+            results["cleanup"] = ownership.remove_quarantine(stale.ticket)
+        except BaseException as exc:  # pragma: no cover - diagnostic propagation
+            results["cleanup_exception"] = exc
+
+    def run_authorization() -> None:
+        try:
+            results["authorization"] = ownership.authorize_recovery_cleanup(
+                owned,
+                observation=observation,
+                journal=journal,
+            )
+        except BaseException as exc:  # pragma: no cover - diagnostic propagation
+            results["authorization_exception"] = exc
+        finally:
+            authorization_finished.set()
+
+    monkeypatch.setattr(
+        ownership,
+        "_acquire_transaction_state_lock",
+        observe_lock_attempt,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_publish_transaction_cleanup_intent",
+        pause_generic_after_intent,
+    )
+    cleanup_thread = threading.Thread(
+        target=run_generic_cleanup,
+        name="generic-cleanup",
+    )
+    authorization_thread = threading.Thread(
+        target=run_authorization,
+        name="authorize-cleanup",
+    )
+    try:
+        cleanup_thread.start()
+        assert entered_cleanup_intent.wait(timeout=5)
+        authorization_thread.start()
+        assert authorization_lock_attempted.wait(timeout=5)
+        assert not authorization_finished.wait(timeout=0.1)
+        continue_cleanup.set()
+        cleanup_thread.join(timeout=5)
+        authorization_thread.join(timeout=5)
+
+        assert not cleanup_thread.is_alive()
+        assert not authorization_thread.is_alive()
+        assert "cleanup_exception" not in results
+        assert "authorization_exception" not in results
+        assert results["cleanup"].unwrap().removed
+        assert _code(results["authorization"]) == "ownership.cleanup_incomplete"
+        claims = root / ".zagrosi/transactions/claims"
+        assert (claims / f"{transaction_id}.removed.json").is_file()
+        assert not (claims / f"{transaction_id}.removing.json").exists()
+        assert not (claims / f"{transaction_id}.rc-auth.json").exists()
+        assert not (claims / f"{transaction_id}.rc-final.json").exists()
+        assert not (claims / f"{transaction_id}.rc-done.json").exists()
+        assert not (root / observation.journal_relative).exists()
+        assert ownership.discover_recovery_cleanup_observations(owned).unwrap() == ()
+    finally:
+        continue_cleanup.set()
+        cleanup_thread.join(timeout=5)
+        authorization_thread.join(timeout=5)
+        stale.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX finalization interruption")
+@pytest.mark.parametrize("authorization_state", ("missing", "retired"))
+def test_recovery_cleanup_phase_residue_blocks_generic_cleanup_without_active_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authorization_state: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = (
+        "tx-d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+        if authorization_state == "missing"
+        else "tx-d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
+    )
+    owned, root, observation, journal = _recovery_cleanup_fixture(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    authorized = ownership.authorize_recovery_cleanup(
+        owned,
+        observation=observation,
+        journal=journal,
+    ).unwrap()
+    original_rmdir = ownership.os.rmdir
+
+    def stop_after_finalizing(*args: Any, **kwargs: Any) -> None:
+        raise OSError("injected before exact rmdir")
+
+    recovery_rebound = None
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(ownership.os, "rmdir", stop_after_finalizing)
+            interrupted = ownership.resume_recovery_cleanup(owned, authorized)
+        assert _code(interrupted) == "ownership.cleanup_incomplete"
+
+        recovery_rebound = ownership.rebind_persistent_transaction_for_recovery(
+            owned,
+            binding=observation.binding,
+            _recovery_authorization=authorized,
+        ).unwrap()
+        assert recovery_rebound.ticket is not None
+
+        claims = root / ".zagrosi/transactions/claims"
+        authorization_record = claims / f"{transaction_id}.rc-auth.json"
+        finalizing_record = claims / f"{transaction_id}.rc-final.json"
+        if authorization_state == "missing":
+            authorization_record.unlink()
+        else:
+            authorization_record.rename(
+                claims
+                / ownership._transaction_record_retirement_component(
+                    authorization_record.name
+                )
+            )
+        assert finalizing_record.is_file()
+        targets = tuple(
+            path
+            for path in (root / ".zagrosi/transactions").iterdir()
+            if path.is_dir() and path.name.startswith(".delete-")
+        )
+        assert len(targets) == 1
+        before = tuple(
+            (
+                path.relative_to(root).as_posix(),
+                path.stat().st_dev,
+                path.stat().st_ino,
+                path.read_bytes(),
+            )
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        )
+
+        rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=observation.binding,
+        )
+        removed = ownership.remove_quarantine(recovery_rebound.ticket)
+
+        assert _code(rebound) == "ownership.cleanup_incomplete"
+        assert _code(removed) == "ownership.cleanup_incomplete"
+        assert targets[0].is_dir()
+        assert finalizing_record.is_file()
+        assert (
+            tuple(
+                (
+                    path.relative_to(root).as_posix(),
+                    path.stat().st_dev,
+                    path.stat().st_ino,
+                    path.read_bytes(),
+                )
+                for path in sorted(root.rglob("*"))
+                if path.is_file()
+            )
+            == before
+        )
+    finally:
+        monkeypatch.setattr(ownership.os, "rmdir", original_rmdir)
+        if recovery_rebound is not None:
+            recovery_rebound.close()
+        owned.close()
+
+
+def test_recovery_cleanup_authorization_rejects_nonterminal_or_mismatched_journal(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    first_owned, first_root, first_observation, first_journal = (
+        _recovery_cleanup_fixture(
+            tmp_path / "first",
+            transaction_id="tx-d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9",
+            terminal=False,
+        )
+    )
+    second_owned, _second_root, _second_observation, second_journal = (
+        _recovery_cleanup_fixture(
+            tmp_path / "second",
+            transaction_id="tx-dadadadadadadadadadadadadadadada",
+        )
+    )
+    try:
+        nonterminal = ownership.authorize_recovery_cleanup(
+            first_owned,
+            observation=first_observation,
+            journal=first_journal,
+        )
+        mismatched = ownership.authorize_recovery_cleanup(
+            first_owned,
+            observation=first_observation,
+            journal=second_journal,
+        )
+
+        assert _code(nonterminal) == "ownership.cleanup_incomplete"
+        assert _code(mismatched) == "ownership.cleanup_incomplete"
+        claims = first_root / ".zagrosi/transactions/claims"
+        assert not (
+            claims / (f"{first_observation.binding.transaction_id}.rc-auth.json")
+        ).exists()
+        assert (first_root / first_observation.binding.quarantine_relative).is_dir()
+    finally:
+        first_owned.close()
+        second_owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-death injection")
+def test_terminal_recovery_cleanup_resumes_only_from_finalizing_wal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-dbdbdbdbdbdbdbdbdbdbdbdbdbdbdbdb"
+    owned, root, observation, journal = _recovery_cleanup_fixture(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    authorized = ownership.authorize_recovery_cleanup(
+        owned,
+        observation=observation,
+        journal=journal,
+    ).unwrap()
+    quarantine = root / observation.binding.quarantine_relative
+    claims = root / ".zagrosi/transactions/claims"
+    original_complete = ownership._publish_transaction_cleanup_complete
+
+    def lose_response_before_generic_completion(*args: Any, **kwargs: Any) -> None:
+        raise OSError("injected after exact rmdir")
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_publish_transaction_cleanup_complete",
+                lose_response_before_generic_completion,
+            )
+            interrupted = ownership.resume_recovery_cleanup(owned, authorized)
+
+        assert _code(interrupted) == "ownership.cleanup_incomplete"
+        assert not quarantine.exists()
+        assert (claims / f"{transaction_id}.rc-auth.json").is_file()
+        assert (claims / f"{transaction_id}.rc-final.json").is_file()
+        assert not (claims / f"{transaction_id}.rc-done.json").exists()
+        assert (claims / f"{transaction_id}.removing.json").is_file()
+        assert not (claims / f"{transaction_id}.removed.json").exists()
+        assert (
+            _code(
+                ownership.rebind_persistent_transaction(
+                    owned,
+                    binding=observation.binding,
+                )
+            )
+            == "ownership.cleanup_incomplete"
+        )
+
+        discovered = ownership.discover_recovery_cleanup_authorizations(owned).unwrap()
+        assert discovered == (authorized,)
+        resumed = ownership.resume_recovery_cleanup(owned, discovered[0]).unwrap()
+
+        assert resumed.removed
+        assert not quarantine.exists()
+        assert (claims / f"{transaction_id}.removed.json").is_file()
+        assert not (claims / f"{transaction_id}.removing.json").exists()
+        assert not (claims / f"{transaction_id}.rc-auth.json").exists()
+        assert not (claims / f"{transaction_id}.rc-final.json").exists()
+        assert not (claims / f"{transaction_id}.rc-done.json").exists()
+        assert (claims / f"{transaction_id}.json").is_file()
+        assert ownership.discover_pending_transactions(owned).unwrap() == ()
+        assert ownership.discover_recovery_cleanup_authorizations(owned).unwrap() == ()
+
+        completed_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=observation.binding,
+        ).unwrap()
+        assert completed_rebound.location is ownership.TransactionLocation.REMOVED
+        completed_rebound.close()
+
+        response_lost = ownership.resume_recovery_cleanup(
+            owned,
+            authorized,
+        ).unwrap()
+        assert response_lost.removed
+    finally:
+        monkeypatch.setattr(
+            ownership,
+            "_publish_transaction_cleanup_complete",
+            original_complete,
+        )
+        owned.close()
+
+
+def test_recovery_cleanup_authorization_tamper_preserves_exact_quarantine(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    transaction_id = "tx-dcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdc"
+    owned, root, observation, journal = _recovery_cleanup_fixture(
+        tmp_path,
+        transaction_id=transaction_id,
+    )
+    try:
+        authorized = ownership.authorize_recovery_cleanup(
+            owned,
+            observation=observation,
+            journal=journal,
+        ).unwrap()
+        record = (
+            root / ".zagrosi/transactions/claims" / f"{transaction_id}.rc-auth.json"
+        )
+        record.write_bytes(record.read_bytes() + b" ")
+        if os.name != "nt":
+            record.chmod(0o600)
+
+        failed = ownership.resume_recovery_cleanup(owned, authorized)
+
+        assert _code(failed) == "ownership.cleanup_incomplete"
+        assert (root / observation.binding.quarantine_relative).is_dir()
+        assert not (record.with_name(f"{transaction_id}.rc-final.json")).exists()
+        assert not (
+            root / ".zagrosi/transactions/claims" / f"{transaction_id}.removed.json"
+        ).exists()
+    finally:
+        owned.close()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX cleanup namespace race")
@@ -4180,6 +5017,234 @@ def test_cleanup_failure_retains_quarantine_and_recovery_reference(
     assert result.error.recovery_instructions == (ticket.recovery_reference,)
     path.close()
     owned.close()
+
+
+@pytest.mark.parametrize("flush_failure", (False, True))
+def test_windows_cleanup_closes_tree_handles_before_flush_and_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    flush_failure: bool,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    root_handle = 101
+    parent_handle = 201
+    leaf_handle = 301
+    delete_handle = 302
+    cleanup_component = ".delete-" + ("a" * 32) + ".tmp"
+    binding = object()
+    ticket = SimpleNamespace(
+        _binding=binding,
+        _identity=(7, 30),
+        _root_identity=(7, 10),
+        recovery_reference=".zagrosi/transactions/quarantine",
+    )
+    events: list[str] = []
+    open_tree_handles = {leaf_handle, delete_handle}
+
+    class FakeNamespace:
+        def close(self) -> None:
+            events.append("close:namespace")
+
+    class FakeStore:
+        control = 400
+        store_identity = (7, 40)
+
+        def close(self) -> None:
+            events.append("close:store")
+
+    class FakeStateLock:
+        def close(self) -> None:
+            events.append("close:state-lock")
+
+    def status(handle: int) -> Any:
+        identity = (7, 10) if handle == root_handle else (7, 30)
+        return SimpleNamespace(identity=identity, is_reparse=False)
+
+    def open_child(
+        _parent: int,
+        _component: str,
+        **kwargs: Any,
+    ) -> int:
+        selected = leaf_handle if kwargs.get("read_data") else delete_handle
+        events.append(f"open:{selected}")
+        return selected
+
+    def close(handle: int) -> None:
+        events.append(f"close:{handle}")
+        open_tree_handles.discard(handle)
+
+    def delete(handle: int) -> None:
+        assert handle == delete_handle
+        events.append("delete")
+
+    def require_absent(_parent: int, _component: str) -> None:
+        assert not open_tree_handles
+        events.append("absent")
+
+    def flush(*_args: Any, **_kwargs: Any) -> None:
+        assert not open_tree_handles
+        events.append("flush")
+        if flush_failure:
+            raise OSError("injected crash before completion publication")
+
+    def publish_complete(*_args: Any, **_kwargs: Any) -> None:
+        assert not open_tree_handles
+        events.append("publish:removed")
+
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_handle_status",
+        status,
+    )
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_private_directory",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(ownership._paths, "_windows_close", close)
+    monkeypatch.setattr(
+        ownership,
+        "_open_cleanup_transaction_store",
+        lambda *_args, **_kwargs: FakeStore(),
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_acquire_transaction_state_lock",
+        lambda *_args, **_kwargs: FakeStateLock(),
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_require_cleanup_recovery_mode",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_publish_transaction_cleanup_intent",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            delete_component=cleanup_component,
+        ),
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_windows_open_parent",
+        lambda *_args, **_kwargs: parent_handle,
+    )
+    monkeypatch.setattr(ownership, "_windows_open_raw_child", open_child)
+    monkeypatch.setattr(
+        ownership,
+        "_clean_windows_directory",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_windows_list_names",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_require_cleanup_namespace",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(ownership, "_windows_delete_handle", delete)
+    monkeypatch.setattr(
+        ownership,
+        "_require_windows_cleanup_name_absent",
+        require_absent,
+    )
+    monkeypatch.setattr(ownership, "_windows_flush_directory_binding", flush)
+    monkeypatch.setattr(
+        ownership,
+        "_publish_transaction_cleanup_complete",
+        publish_complete,
+    )
+
+    result = ownership._remove_windows_quarantine(
+        ticket,
+        root_handle,
+        FakeNamespace(),
+    )
+
+    assert events.index(f"close:{leaf_handle}") < events.index("flush")
+    assert events.index(f"close:{delete_handle}") < events.index("flush")
+    if flush_failure:
+        assert _code(result) == "ownership.cleanup_incomplete"
+        assert "publish:removed" not in events
+    else:
+        assert result.unwrap().removed
+        assert events.index("flush") < events.index("publish:removed")
+        assert events.count("absent") == 2
+
+
+def test_windows_transaction_lock_does_not_overlap_anchor_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    locked_offsets: list[int] = []
+    unlocked_offsets: list[int] = []
+    closed: list[int] = []
+
+    class FakeKernelCall:
+        argtypes: Any = None
+        restype: Any = None
+
+        def __init__(self, observed: list[int]) -> None:
+            self._observed = observed
+
+        def __call__(self, *_args: Any) -> int:
+            overlapped = getattr(_args[-1], "_obj")
+            offset = int(getattr(overlapped, "Offset")) | (
+                int(getattr(overlapped, "OffsetHigh")) << 32
+            )
+            self._observed.append(offset)
+            return 1
+
+    kernel32 = SimpleNamespace(
+        LockFileEx=FakeKernelCall(locked_offsets),
+        UnlockFileEx=FakeKernelCall(unlocked_offsets),
+    )
+    validation_count = 0
+
+    def validate_locked_anchor(*_args: Any, **_kwargs: Any) -> bool:
+        nonlocal validation_count
+        validation_count += 1
+        if locked_offsets:
+            requested_read_end = ownership._TRANSACTION_RECORD_LIMIT + 1
+            assert requested_read_end <= locked_offsets[-1]
+        return True
+
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_dll",
+        lambda _name: kernel32,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_windows_open_raw_child",
+        lambda *_args, **_kwargs: 91,
+    )
+    monkeypatch.setattr(
+        ownership,
+        "_transaction_state_lock_descriptor_is_valid",
+        validate_locked_anchor,
+    )
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_close",
+        closed.append,
+    )
+    store = SimpleNamespace(windows=True, claims=81)
+    binding = SimpleNamespace(
+        transaction_id="tx-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    )
+
+    state_lock = ownership._acquire_transaction_state_lock(store, binding)
+    state_lock.close()
+
+    assert validation_count == 2
+    assert locked_offsets == [ownership._TRANSACTION_STATE_LOCK_OFFSET]
+    assert unlocked_offsets == locked_offsets
+    assert closed == [91]
 
 
 def test_mid_cleanup_plugins_rebind_preserves_quarantine_and_external_canary(
