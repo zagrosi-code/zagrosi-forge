@@ -8,7 +8,7 @@ import hashlib
 import hmac
 import re
 from threading import Lock
-from typing import NamedTuple, Never
+from typing import TYPE_CHECKING, Callable, NamedTuple, Never
 import unicodedata
 from weakref import finalize, WeakKeyDictionary, WeakSet
 
@@ -32,13 +32,20 @@ from .lock import HeldInstallLock, acquire_install_lock
 from .paths import OwnedRoot, PlatformPathAuthority
 from .policies import LIMIT_POLICY
 
+if TYPE_CHECKING:
+    from .ownership import (
+        PendingTransactionObservation,
+        RecoveryCleanupObservation,
+    )
 
-RECOVERY_POLICY_VERSION = "1.0"
+
+RECOVERY_POLICY_VERSION = "1.1"
 _SNAPSHOT_TOKEN = object()
 _PLAN_TOKEN = object()
 _LOCKED_PLAN_TOKEN = object()
 _LIVE_OBSERVATION_TOKEN = object()
 _TRANSACTION_ID = re.compile(r"tx-[0-9a-f]{32}\Z")
+_DELETE_COMPONENT = re.compile(r"\.delete-[0-9a-f]{32}\.tmp\Z")
 _PRECOMMIT_ROLLBACK_STATES = frozenset(
     {
         JournalState.PREPARED.value,
@@ -101,8 +108,25 @@ class _JournalCapture(NamedTuple):
     next_action_index: int | None
 
 
+class _CleanupCapture(NamedTuple):
+    transaction_id: str
+    phase: str
+    current_reference: str | None
+    observation_digest: str
+    location: str
+    journal_relative: str
+    journal_access_digest: str
+    journal_evidence_digest: str
+    journal_head_sequence: int
+    journal_head_record_digest: str
+    transaction_binding_digest: str
+    delete_component: str
+    authorization_digest: str
+
+
 class _SnapshotCapture(NamedTuple):
     journals: tuple[_JournalCapture, ...]
+    cleanup_observations: tuple[_CleanupCapture, ...]
     current_config: _ConfigCapture | None
     inventory_digest: str | None
 
@@ -165,8 +189,32 @@ def _journal_projection(journal: _JournalCapture) -> dict[str, object]:
     }
 
 
+def _cleanup_projection(cleanup: _CleanupCapture) -> dict[str, object]:
+    return {
+        "authorization_digest": cleanup.authorization_digest,
+        "current_reference": cleanup.current_reference,
+        "delete_component": cleanup.delete_component,
+        "journal_access_digest": cleanup.journal_access_digest,
+        "journal_evidence_digest": cleanup.journal_evidence_digest,
+        "journal_head_record_digest": cleanup.journal_head_record_digest,
+        "journal_head_sequence": cleanup.journal_head_sequence,
+        "journal_location": cleanup.location,
+        "journal_relative": cleanup.journal_relative,
+        "observation_digest": cleanup.observation_digest,
+        "phase": cleanup.phase,
+        "transaction_binding_digest": cleanup.transaction_binding_digest,
+        "transaction_id": cleanup.transaction_id,
+    }
+
+
 def _snapshot_projection(capture: _SnapshotCapture) -> dict[str, object]:
     return {
+        "cleanup_observation_digests": tuple(
+            hashlib.sha256(
+                canonical_json_bytes(_cleanup_projection(cleanup))
+            ).hexdigest()
+            for cleanup in capture.cleanup_observations
+        ),
         "current_config": _config_projection(capture.current_config),
         "inventory_digest": capture.inventory_digest,
         "journal_state_machine_version": JOURNAL_STATE_MACHINE_VERSION,
@@ -248,6 +296,39 @@ def _capture_journal(
     )
 
 
+def _capture_cleanup_observation(
+    observation: object,
+) -> _CleanupCapture:
+    from . import ownership as _ownership
+
+    if (
+        type(observation) is not _ownership.RecoveryCleanupObservation
+        or observation._seal is not _ownership._RECOVERY_CLEANUP_OBSERVATION_TOKEN
+    ):
+        raise ValueError("recovery cleanup observation")
+    observation._require_valid()
+    authorization = observation.authorization
+    authorization._require_valid()
+    captured = _CleanupCapture(
+        transaction_id=authorization.transaction_id,
+        phase=observation.phase,
+        current_reference=observation.current_reference,
+        observation_digest=observation.observation_digest,
+        location=authorization.location.value,
+        journal_relative=authorization.journal_relative,
+        journal_access_digest=authorization.journal_access_digest,
+        journal_evidence_digest=authorization.journal_evidence_digest,
+        journal_head_sequence=authorization.journal_head_sequence,
+        journal_head_record_digest=authorization.journal_head_record_digest,
+        transaction_binding_digest=authorization.transaction_binding_digest,
+        delete_component=authorization.delete_component,
+        authorization_digest=authorization.authorization_digest,
+    )
+    authorization._require_valid()
+    observation._require_valid()
+    return captured
+
+
 def _next_rollback_action_index(journal: LoadedJournal) -> int | None:
     head = journal.records[-1]
     if head.state.value in _PRECOMMIT_ROLLBACK_STATES:
@@ -265,6 +346,7 @@ def _next_rollback_action_index(journal: LoadedJournal) -> int | None:
 
 def _capture_snapshot(
     journals: tuple[LoadedJournal, ...],
+    cleanup_observations: tuple[object, ...] | None,
     current_config: JournalConfigIdentity | None,
     inventory_digest: str | None,
     observations: tuple[object, ...] | None,
@@ -278,6 +360,14 @@ def _capture_snapshot(
                 None if observations is None else observations[index],
             )
             for index, journal in enumerate(journals)
+        ),
+        cleanup_observations=(
+            ()
+            if cleanup_observations is None
+            else tuple(
+                _capture_cleanup_observation(observation)
+                for observation in cleanup_observations
+            )
         ),
         current_config=_capture_optional_config(current_config),
         inventory_digest=inventory_digest,
@@ -422,12 +512,44 @@ def _valid_journal_capture(value: object) -> bool:
     return value.next_action_index is None
 
 
+def _valid_cleanup_capture(value: object) -> bool:
+    return (
+        type(value) is _CleanupCapture
+        and type(value.transaction_id) is str
+        and _TRANSACTION_ID.fullmatch(value.transaction_id) is not None
+        and value.phase in {"AUTHORIZED", "FINALIZING", "COMPLETE"}
+        and (
+            value.current_reference is None
+            or (type(value.current_reference) is str and bool(value.current_reference))
+        )
+        and _valid_digest(value.observation_digest)
+        and value.location == "quarantined"
+        and type(value.journal_relative) is str
+        and bool(value.journal_relative)
+        and _valid_digest(value.journal_access_digest)
+        and _valid_digest(value.journal_evidence_digest)
+        and type(value.journal_head_sequence) is int
+        and value.journal_head_sequence >= 0
+        and _valid_digest(value.journal_head_record_digest)
+        and _valid_digest(value.transaction_binding_digest)
+        and type(value.delete_component) is str
+        and _DELETE_COMPONENT.fullmatch(value.delete_component) is not None
+        and _valid_digest(value.authorization_digest)
+    )
+
+
 def _valid_snapshot_capture(value: object) -> bool:
     if (
         type(value) is not _SnapshotCapture
         or type(value.journals) is not tuple
-        or len(value.journals) > LIMIT_POLICY.value("journal_records")
+        or type(value.cleanup_observations) is not tuple
+        or len(value.journals) + len(value.cleanup_observations)
+        > LIMIT_POLICY.value("journal_records")
         or any(not _valid_journal_capture(journal) for journal in value.journals)
+        or any(
+            not _valid_cleanup_capture(cleanup)
+            for cleanup in value.cleanup_observations
+        )
         or (
             value.current_config is not None
             and not _valid_config_capture(value.current_config)
@@ -439,14 +561,24 @@ def _valid_snapshot_capture(value: object) -> bool:
     ):
         return False
     transaction_ids = tuple(journal.transaction_id for journal in value.journals)
+    cleanup_ids = tuple(
+        cleanup.transaction_id for cleanup in value.cleanup_observations
+    )
     captured_locations = tuple(
         journal.journal_location is not None for journal in value.journals
     )
     return (
         transaction_ids == tuple(sorted(transaction_ids))
         and len(set(transaction_ids)) == len(transaction_ids)
+        and cleanup_ids == tuple(sorted(cleanup_ids))
+        and len(set(cleanup_ids)) == len(cleanup_ids)
+        and not set(transaction_ids).intersection(cleanup_ids)
         and (
-            (value.inventory_digest is None and not any(captured_locations))
+            (
+                value.inventory_digest is None
+                and not any(captured_locations)
+                and not value.cleanup_observations
+            )
             or (value.inventory_digest is not None and all(captured_locations))
         )
     )
@@ -454,13 +586,18 @@ def _valid_snapshot_capture(value: object) -> bool:
 
 def _stable_snapshot_capture(
     journals: tuple[LoadedJournal, ...],
+    cleanup_observations: tuple[object, ...] | None,
     current_config: JournalConfigIdentity | None,
     inventory_digest: str | None,
     observations: tuple[object, ...] | None,
 ) -> _SnapshotCapture:
     if (
         type(journals) is not tuple
-        or len(journals) > LIMIT_POLICY.value("journal_records")
+        or (
+            len(journals)
+            + (0 if cleanup_observations is None else len(cleanup_observations))
+            > LIMIT_POLICY.value("journal_records")
+        )
         or any(type(journal) is not LoadedJournal for journal in journals)
         or (
             current_config is not None
@@ -471,13 +608,27 @@ def _stable_snapshot_capture(
             observations is not None
             and (type(observations) is not tuple or len(observations) != len(journals))
         )
-        or (inventory_digest is None) != (observations is None)
+        or (
+            cleanup_observations is not None and type(cleanup_observations) is not tuple
+        )
+        or (
+            inventory_digest is None
+            and (observations is not None or cleanup_observations is not None)
+        )
+        or (
+            inventory_digest is not None
+            and (observations is None or cleanup_observations is None)
+        )
     ):
         raise TypeError("RecoverySnapshot evidence is invalid")
     try:
         if observations is not None:
             if inventory_digest is None or not hmac.compare_digest(
-                _observed_inventory_digest(observations, journals),
+                _observed_inventory_digest(
+                    observations,
+                    journals,
+                    cleanup_observations or (),
+                ),
                 inventory_digest,
             ):
                 raise ValueError
@@ -487,6 +638,7 @@ def _stable_snapshot_capture(
             current_config.__post_init__()
         captured = _capture_snapshot(
             journals,
+            cleanup_observations,
             current_config,
             inventory_digest,
             observations,
@@ -497,12 +649,17 @@ def _stable_snapshot_capture(
             current_config.__post_init__()
         if observations is not None:
             if inventory_digest is None or not hmac.compare_digest(
-                _observed_inventory_digest(observations, journals),
+                _observed_inventory_digest(
+                    observations,
+                    journals,
+                    cleanup_observations or (),
+                ),
                 inventory_digest,
             ):
                 raise ValueError
         confirmed = _capture_snapshot(
             journals,
+            cleanup_observations,
             current_config,
             inventory_digest,
             observations,
@@ -528,6 +685,7 @@ class RecoverySnapshot:
     _capture: _SnapshotCapture
     _inventory_digest: str | None
     _observations: tuple[object, ...] | None
+    _cleanup_observations: tuple[object, ...] | None
     _observation_seal: object | None
     _seal: object
 
@@ -538,16 +696,22 @@ class RecoverySnapshot:
         current_config: JournalConfigIdentity | None,
         _inventory_digest: str | None = None,
         _observations: tuple[object, ...] | None = None,
+        _cleanup_observations: tuple[object, ...] | None = None,
         _observation_token: object | None = None,
     ) -> None:
         if (
             _inventory_digest is None
-            and (_observations is not None or _observation_token is not None)
+            and (
+                _observations is not None
+                or _cleanup_observations is not None
+                or _observation_token is not None
+            )
         ) or (
             _inventory_digest is not None
             and (
                 not _valid_digest(_inventory_digest)
                 or type(_observations) is not tuple
+                or type(_cleanup_observations) is not tuple
                 or _observation_token is not _LIVE_OBSERVATION_TOKEN
             )
         ):
@@ -556,6 +720,7 @@ class RecoverySnapshot:
             )
         capture = _stable_snapshot_capture(
             journals,
+            _cleanup_observations,
             current_config,
             _inventory_digest,
             _observations,
@@ -569,6 +734,11 @@ class RecoverySnapshot:
         object.__setattr__(self, "_observations", _observations)
         object.__setattr__(
             self,
+            "_cleanup_observations",
+            _cleanup_observations,
+        )
+        object.__setattr__(
+            self,
             "_observation_seal",
             (_LIVE_OBSERVATION_TOKEN if _inventory_digest is not None else None),
         )
@@ -578,6 +748,7 @@ class RecoverySnapshot:
         try:
             capture = _stable_snapshot_capture(
                 self.journals,
+                self._cleanup_observations,
                 self.current_config,
                 self._inventory_digest,
                 self._observations,
@@ -590,7 +761,9 @@ class RecoverySnapshot:
             or (
                 self._inventory_digest is None
                 and (
-                    self._observations is not None or self._observation_seal is not None
+                    self._observations is not None
+                    or self._cleanup_observations is not None
+                    or self._observation_seal is not None
                 )
             )
             or (
@@ -598,6 +771,7 @@ class RecoverySnapshot:
                 and (
                     not _valid_digest(self._inventory_digest)
                     or type(self._observations) is not tuple
+                    or type(self._cleanup_observations) is not tuple
                     or self._observation_seal is not _LIVE_OBSERVATION_TOKEN
                 )
             )
@@ -812,6 +986,62 @@ class RecoveryPlan:
         raise TypeError("recovery plans are not serializable")
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryResult:
+    """Inert outcome from one consumed locked recovery execution."""
+
+    executed_disposition: RecoveryDisposition
+    final_disposition: RecoveryDisposition
+    transaction_ids: tuple[str, ...]
+    completed_action_count: int
+    cleanup_removed: bool
+    recovery_references: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.executed_disposition) is not RecoveryDisposition
+            or self.executed_disposition
+            not in {
+                RecoveryDisposition.ROLLBACK_CANDIDATE,
+                RecoveryDisposition.CLEANUP_PENDING,
+            }
+            or self.final_disposition is not RecoveryDisposition.NO_RECOVERY
+            or type(self.transaction_ids) is not tuple
+            or len(self.transaction_ids) != 1
+            or _TRANSACTION_ID.fullmatch(self.transaction_ids[0]) is None
+            or type(self.completed_action_count) is not int
+            or self.completed_action_count < 0
+            or (
+                self.executed_disposition is RecoveryDisposition.CLEANUP_PENDING
+                and self.completed_action_count != 0
+            )
+            or self.cleanup_removed is not True
+            or type(self.recovery_references) is not tuple
+            or len(self.recovery_references) != 1
+            or type(self.recovery_references[0]) is not str
+            or not self.recovery_references[0]
+        ):
+            raise ValueError("recovery result")
+
+
+def _close_all_recovery_resources(
+    *callbacks: Callable[[], None] | None,
+) -> None:
+    """Attempt every retained close, then propagate the first close failure."""
+
+    first_failure: BaseException | None = None
+    for callback in callbacks:
+        if callback is None:
+            continue
+        try:
+            callback()
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+    if first_failure is not None:
+        raise first_failure
+
+
 def _journal_disposition(
     journal: _JournalCapture,
     current_config: _ConfigCapture | None,
@@ -885,7 +1115,7 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
     capture = snapshot._capture
     capture_digest = _snapshot_digest(capture)
     snapshot._require_valid()
-    if not capture.journals:
+    if not capture.journals and not capture.cleanup_observations:
         return _make_plan(
             snapshot,
             capture,
@@ -897,12 +1127,45 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             error_code=None,
         )
 
-    decisions = tuple(
+    journal_decisions = tuple(
         _journal_disposition(journal, capture.current_config)
         for journal in capture.journals
     )
-    all_transaction_ids = tuple(journal.transaction_id for journal in capture.journals)
-    if all(disposition is RecoveryDisposition.NO_RECOVERY for disposition in decisions):
+    journal_transaction_ids = tuple(
+        journal.transaction_id for journal in capture.journals
+    )
+    cleanup_transaction_ids = tuple(
+        cleanup.transaction_id for cleanup in capture.cleanup_observations
+    )
+    all_transaction_ids = tuple(
+        sorted((*journal_transaction_ids, *cleanup_transaction_ids))
+    )
+    if capture.cleanup_observations:
+        if not capture.journals and len(capture.cleanup_observations) == 1:
+            return _make_plan(
+                snapshot,
+                capture,
+                capture_digest,
+                disposition=RecoveryDisposition.CLEANUP_PENDING,
+                transaction_ids=cleanup_transaction_ids,
+                rollback_actions=(),
+                next_action_index=None,
+                error_code=None,
+            )
+        return _make_plan(
+            snapshot,
+            capture,
+            capture_digest,
+            disposition=RecoveryDisposition.OPERATOR_CONFLICT,
+            transaction_ids=all_transaction_ids,
+            rollback_actions=(),
+            next_action_index=None,
+            error_code="recovery.operator_conflict",
+        )
+    if all(
+        disposition is RecoveryDisposition.NO_RECOVERY
+        for disposition in journal_decisions
+    ):
         return _make_plan(
             snapshot,
             capture,
@@ -925,7 +1188,7 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             error_code="recovery.operator_conflict",
         )
     journal = capture.journals[0]
-    if decisions[0] is RecoveryDisposition.ROLLBACK_CANDIDATE:
+    if journal_decisions[0] is RecoveryDisposition.ROLLBACK_CANDIDATE:
         return _make_plan(
             snapshot,
             capture,
@@ -938,7 +1201,7 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             next_action_index=journal.next_action_index,
             error_code=None,
         )
-    if decisions[0] is RecoveryDisposition.CLEANUP_PENDING:
+    if journal_decisions[0] is RecoveryDisposition.CLEANUP_PENDING:
         return _make_plan(
             snapshot,
             capture,
@@ -991,16 +1254,29 @@ def _discover_inventory(owned_root: OwnedRoot) -> tuple[object, ...]:
     return discovered.unwrap()
 
 
+def _discover_cleanup_inventory(owned_root: OwnedRoot) -> tuple[object, ...]:
+    from .ownership import discover_recovery_cleanup_observations
+
+    discovered = discover_recovery_cleanup_observations(owned_root)
+    if not discovered.is_ok:
+        raise _plan_changed("The pending cleanup inventory changed.")
+    return discovered.unwrap()
+
+
 def _observed_inventory_digest(
     observations: tuple[object, ...],
     journals: tuple[LoadedJournal, ...],
+    cleanup_observations: tuple[object, ...] = (),
 ) -> str:
     from . import ownership as _ownership
 
     if (
         type(observations) is not tuple
         or type(journals) is not tuple
+        or type(cleanup_observations) is not tuple
         or len(observations) != len(journals)
+        or len(journals) + len(cleanup_observations)
+        > LIMIT_POLICY.value("journal_records")
     ):
         raise TypeError("recovery inventory evidence is invalid")
     journal_ids: list[str] = []
@@ -1076,6 +1352,17 @@ def _observed_inventory_digest(
             or tuple(observation_ids) != tuple(journal_ids)
         ):
             raise ValueError
+        cleanup_captures = tuple(
+            _capture_cleanup_observation(observation)
+            for observation in cleanup_observations
+        )
+        cleanup_ids = tuple(cleanup.transaction_id for cleanup in cleanup_captures)
+        if (
+            cleanup_ids != tuple(sorted(cleanup_ids))
+            or len(set(cleanup_ids)) != len(cleanup_ids)
+            or set(cleanup_ids).intersection(observation_ids)
+        ):
+            raise ValueError
         for journal in journals:
             journal._require_valid()
     except (AttributeError, ForgeError, TypeError, ValueError):
@@ -1083,6 +1370,12 @@ def _observed_inventory_digest(
     return hashlib.sha256(
         canonical_json_bytes(
             {
+                "cleanup_observation_digests": tuple(
+                    hashlib.sha256(
+                        canonical_json_bytes(_cleanup_projection(cleanup))
+                    ).hexdigest()
+                    for cleanup in cleanup_captures
+                ),
                 "observation_digests": tuple(observation_digests),
             }
         )
@@ -1145,30 +1438,36 @@ def observe_recovery_snapshot(
     if not _matching_path_authority(authority, owned_root):
         raise TypeError("recovery observation requires matching path authority")
     first_inventory = _discover_inventory(owned_root)
+    first_cleanup_inventory = _discover_cleanup_inventory(owned_root)
     first_journals = load_pending(owned_root)
     first_config = observe_current_config_identity(
         authority=authority,
         owned_root=owned_root,
     )
     second_inventory = _discover_inventory(owned_root)
+    second_cleanup_inventory = _discover_cleanup_inventory(owned_root)
     second_journals = load_pending(owned_root)
     second_config = observe_current_config_identity(
         authority=authority,
         owned_root=owned_root,
     )
     final_inventory = _discover_inventory(owned_root)
+    final_cleanup_inventory = _discover_cleanup_inventory(owned_root)
     try:
         first_inventory_digest = _observed_inventory_digest(
             first_inventory,
             first_journals,
+            first_cleanup_inventory,
         )
         second_inventory_digest = _observed_inventory_digest(
             second_inventory,
             second_journals,
+            second_cleanup_inventory,
         )
         final_inventory_digest = _observed_inventory_digest(
             final_inventory,
             second_journals,
+            final_cleanup_inventory,
         )
     except TypeError:
         raise _plan_changed(
@@ -1177,6 +1476,8 @@ def observe_recovery_snapshot(
     if (
         first_inventory != second_inventory
         or second_inventory != final_inventory
+        or first_cleanup_inventory != second_cleanup_inventory
+        or second_cleanup_inventory != final_cleanup_inventory
         or first_inventory_digest != second_inventory_digest
         or second_inventory_digest != final_inventory_digest
         or first_journals != second_journals
@@ -1188,6 +1489,7 @@ def observe_recovery_snapshot(
         current_config=second_config,
         _inventory_digest=final_inventory_digest,
         _observations=final_inventory,
+        _cleanup_observations=final_cleanup_inventory,
         _observation_token=_LIVE_OBSERVATION_TOKEN,
     )
 
@@ -1198,17 +1500,138 @@ def _reproduce_locked_plan(
     authority: PlatformPathAuthority,
     owned_root: OwnedRoot,
 ) -> RecoveryPlan:
-    expected._require_valid()
-    observed = observe_recovery_snapshot(
+    _snapshot, reproduced = _reproduce_locked_evidence(
+        expected,
         authority=authority,
         owned_root=owned_root,
     )
-    reproduced = plan_recovery(observed)
-    reproduced._require_valid()
+    return reproduced
+
+
+def _reproduce_locked_evidence(
+    expected: RecoveryPlan,
+    *,
+    authority: PlatformPathAuthority,
+    owned_root: OwnedRoot,
+) -> tuple[RecoverySnapshot, RecoveryPlan]:
+    expected._require_valid()
+    try:
+        observed = observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned_root,
+        )
+        reproduced = plan_recovery(observed)
+        reproduced._require_valid()
+    except (ForgeError, TypeError, ValueError):
+        raise _plan_changed() from None
     expected._require_valid()
     if not hmac.compare_digest(expected.plan_digest, reproduced.plan_digest):
         raise _plan_changed()
-    return reproduced
+    observed._require_valid()
+    return observed, reproduced
+
+
+def _journal_execution_evidence(
+    snapshot: RecoverySnapshot,
+    plan: RecoveryPlan,
+) -> tuple[PendingTransactionObservation, LoadedJournal]:
+    from . import ownership as _ownership
+
+    snapshot._require_valid()
+    plan._require_valid()
+    observations = snapshot._observations
+    cleanup_observations = snapshot._cleanup_observations
+    if (
+        len(plan.transaction_ids) != 1
+        or type(observations) is not tuple
+        or len(observations) != 1
+        or type(cleanup_observations) is not tuple
+        or cleanup_observations
+        or len(snapshot.journals) != 1
+        or snapshot._capture.cleanup_observations
+    ):
+        raise _plan_changed("The locked plan does not authorize cleanup.")
+    observation = observations[0]
+    journal = snapshot.journals[0]
+    if (
+        type(observation) is not _ownership.PendingTransactionObservation
+        or observation._seal is not _ownership._PENDING_TRANSACTION_OBSERVATION_TOKEN
+        or observation.binding.transaction_id != plan.transaction_ids[0]
+        or observation.journal_relative
+        != snapshot._capture.journals[0].journal_relative
+        or journal.head.transaction_binding_digest
+        != hashlib.sha256(
+            canonical_json_bytes(observation.binding.canonical_projection())
+        ).hexdigest()
+    ):
+        raise _plan_changed("The locked cleanup evidence changed.")
+    try:
+        if not hmac.compare_digest(
+            _observed_inventory_digest((observation,), (journal,)),
+            snapshot._inventory_digest or "",
+        ):
+            raise ValueError
+    except (AttributeError, TypeError, ValueError):
+        raise _plan_changed("The locked cleanup evidence changed.") from None
+    snapshot._require_valid()
+    plan._require_valid()
+    journal._require_valid()
+    return observation, journal
+
+
+def _cleanup_execution_evidence(
+    snapshot: RecoverySnapshot,
+    plan: RecoveryPlan,
+) -> tuple[
+    PendingTransactionObservation | None,
+    LoadedJournal | None,
+    RecoveryCleanupObservation | None,
+]:
+    from . import ownership as _ownership
+
+    snapshot._require_valid()
+    plan._require_valid()
+    if plan.disposition is not RecoveryDisposition.CLEANUP_PENDING:
+        raise _plan_changed("The locked plan does not authorize cleanup.")
+    if snapshot.journals:
+        observation, journal = _journal_execution_evidence(snapshot, plan)
+        if (
+            observation.location is not _ownership.TransactionLocation.QUARANTINED
+            or journal.head.state is not JournalState.ROLLED_BACK
+        ):
+            raise _plan_changed("The locked plan does not authorize cleanup.")
+        return observation, journal, None
+    cleanup_observations = snapshot._cleanup_observations
+    if (
+        type(cleanup_observations) is not tuple
+        or len(cleanup_observations) != 1
+        or snapshot._observations != ()
+        or len(snapshot._capture.cleanup_observations) != 1
+    ):
+        raise _plan_changed("The locked plan does not authorize cleanup.")
+    cleanup_observation = cleanup_observations[0]
+    try:
+        if (
+            type(cleanup_observation) is not _ownership.RecoveryCleanupObservation
+            or cleanup_observation._seal
+            is not _ownership._RECOVERY_CLEANUP_OBSERVATION_TOKEN
+            or cleanup_observation.phase not in {"AUTHORIZED", "FINALIZING", "COMPLETE"}
+            or cleanup_observation.transaction_id != plan.transaction_ids[0]
+            or _capture_cleanup_observation(cleanup_observation)
+            != snapshot._capture.cleanup_observations[0]
+            or not hmac.compare_digest(
+                _observed_inventory_digest((), (), (cleanup_observation,)),
+                snapshot._inventory_digest or "",
+            )
+        ):
+            raise ValueError
+        cleanup_observation._require_valid()
+    except (AttributeError, TypeError, ValueError):
+        raise _plan_changed("The locked cleanup evidence changed.") from None
+    snapshot._require_valid()
+    plan._require_valid()
+    cleanup_observation._require_valid()
+    return None, None, cleanup_observation
 
 
 class _LockedRecoveryLease:
@@ -1217,6 +1640,7 @@ class _LockedRecoveryLease:
     _authority: PlatformPathAuthority
     _binding_digest: str
     _closed: bool
+    _execution_consumed: bool
     _guard: Lock
     _held_lock: HeldInstallLock
     _object_identities: tuple[int, int, int, int, int]
@@ -1228,6 +1652,7 @@ class _LockedRecoveryLease:
         "_authority",
         "_binding_digest",
         "_closed",
+        "_execution_consumed",
         "_guard",
         "_held_lock",
         "_object_identities",
@@ -1251,6 +1676,7 @@ class _LockedRecoveryLease:
         object.__setattr__(self, "_runner", runner)
         object.__setattr__(self, "_held_lock", held_lock)
         object.__setattr__(self, "_closed", False)
+        object.__setattr__(self, "_execution_consumed", False)
         object.__setattr__(self, "_guard", Lock())
         object.__setattr__(
             self,
@@ -1314,6 +1740,7 @@ class _LockedRecoveryLease:
         try:
             if (
                 self._closed
+                or self._execution_consumed
                 or type(self._plan) is not RecoveryPlan
                 or not _matching_path_authority(
                     self._authority,
@@ -1355,6 +1782,10 @@ class _LockedRecoveryLease:
             )
             self.require_open_locked()
             return reproduced
+
+    def consume_execution(self) -> None:
+        self.require_open_locked()
+        object.__setattr__(self, "_execution_consumed", True)
 
     def release(self) -> None:
         with self._guard:
@@ -1594,3 +2025,443 @@ def lock_recovery_plan(
         else:
             held.release()
         raise
+
+
+def _execute_cleanup_pending(
+    lease: _LockedRecoveryLease,
+    snapshot: RecoverySnapshot,
+    plan: RecoveryPlan,
+    *,
+    consume_lease: bool,
+    executed_disposition: RecoveryDisposition,
+    completed_action_count: int,
+) -> RecoveryResult:
+    from . import ownership as _ownership
+
+    observation, journal, cleanup_observation = _cleanup_execution_evidence(
+        snapshot,
+        plan,
+    )
+    authorization = (
+        None if cleanup_observation is None else cleanup_observation.authorization
+    )
+    if observation is not None:
+        recovery_reference = observation.journal_relative
+    elif cleanup_observation is not None:
+        recovery_reference = cleanup_observation.authorization.journal_relative
+    else:
+        raise _plan_changed("The locked plan does not authorize cleanup.")
+    if consume_lease:
+        lease.consume_execution()
+
+    operation_message = "Recovery cleanup could not be authorized."
+    try:
+        if authorization is None:
+            if observation is None or journal is None:
+                raise TypeError("journal-backed cleanup evidence")
+            authorized = _ownership.authorize_recovery_cleanup(
+                lease.owned_root,
+                observation=observation,
+                journal=journal,
+            )
+            if authorized.is_ok:
+                authorization = authorized.unwrap()
+                if (
+                    type(authorization) is not _ownership.RecoveryCleanupAuthorization
+                    or authorization.binding != observation.binding
+                    or authorization.location
+                    is not _ownership.TransactionLocation.QUARANTINED
+                    or authorization.journal_relative != recovery_reference
+                    or authorization.journal_access_digest != journal.access_digest
+                    or authorization.journal_evidence_digest != journal._binding_digest
+                    or authorization.journal_head_sequence != journal.head.sequence
+                    or authorization.journal_head_record_digest
+                    != journal.head.record_digest
+                    or authorization.transaction_binding_digest
+                    != journal.head.transaction_binding_digest
+                    or authorization.transaction_id != plan.transaction_ids[0]
+                ):
+                    authorization = None
+                    operation_message = (
+                        "Recovery cleanup authorization returned contradictory "
+                        "evidence."
+                    )
+            if authorization is None:
+                operation_message = "Recovery cleanup could not be authorized."
+        if authorization is not None:
+            operation_message = "The exact recovery cleanup remains incomplete."
+            _ownership.resume_recovery_cleanup(
+                lease.owned_root,
+                authorization,
+            )
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        operation_message = "The exact recovery cleanup remains incomplete."
+
+    try:
+        final_snapshot = observe_recovery_snapshot(
+            authority=lease.authority,
+            owned_root=lease.owned_root,
+        )
+        final_plan = plan_recovery(final_snapshot)
+    except (ForgeError, TypeError, ValueError):
+        raise ForgeError(
+            "recovery.cleanup_incomplete",
+            14,
+            operation_message,
+            recovery_instructions=(recovery_reference,),
+        ) from None
+    if (
+        final_plan.disposition is not RecoveryDisposition.NO_RECOVERY
+        or final_snapshot._capture.journals
+        or final_snapshot._capture.cleanup_observations
+        or final_plan.transaction_ids
+        or final_plan.rollback_actions
+        or final_plan.next_action_index is not None
+        or final_plan.error_code is not None
+    ):
+        raise ForgeError(
+            "recovery.cleanup_incomplete",
+            14,
+            operation_message,
+            recovery_instructions=(recovery_reference,),
+        )
+    return RecoveryResult(
+        executed_disposition=executed_disposition,
+        final_disposition=final_plan.disposition,
+        transaction_ids=plan.transaction_ids,
+        completed_action_count=completed_action_count,
+        cleanup_removed=True,
+        recovery_references=(recovery_reference,),
+    )
+
+
+def _execute_rollback_candidate(
+    lease: _LockedRecoveryLease,
+    snapshot: RecoverySnapshot,
+    plan: RecoveryPlan,
+) -> RecoveryResult:
+    from . import ownership as _ownership
+    from .journal import (
+        JournalRollbackEvent,
+        JournalStore,
+        JournalTransition,
+    )
+
+    observation, journal = _journal_execution_evidence(snapshot, plan)
+    if (
+        plan.disposition is not RecoveryDisposition.ROLLBACK_CANDIDATE
+        or plan.next_action_index is None
+        or not plan.rollback_actions
+    ):
+        raise _plan_changed("The locked plan does not authorize rollback.")
+    binding = observation.binding
+    transaction_result = _ownership.rebind_persistent_transaction_for_recovery(
+        lease.owned_root,
+        binding=binding,
+    )
+    if not transaction_result.is_ok:
+        raise _plan_changed("The locked rollback target changed.")
+    transaction = transaction_result.unwrap()
+    path = None
+    live_access = None
+    live_store = None
+    quarantine_ticket = None
+    quarantine_transaction = None
+    recovery_access = None
+    recovery_store = None
+    ownership_proof = None
+    head = journal.head
+    try:
+        if observation.location is _ownership.TransactionLocation.LIVE:
+            if (
+                transaction.location is not _ownership.TransactionLocation.LIVE
+                or transaction.binding != binding
+                or transaction.ticket is not None
+                or type(transaction.claim) is not _ownership.TransactionPathClaim
+                or observation.journal_relative != binding.root_relative
+            ):
+                raise _plan_changed("The locked rollback target changed.")
+            path_result = lease.authority.prove_descendant(
+                lease.owned_root,
+                transaction.claim.relative,
+                expected_depth=3,
+            )
+            if not path_result.is_ok:
+                raise _plan_changed("The locked rollback target changed.")
+            path = path_result.unwrap()
+            live_access_result = _ownership.open_transaction_journal_access(
+                lease.owned_root,
+                transaction,
+            )
+            if not live_access_result.is_ok:
+                raise _plan_changed("The locked rollback journal changed.")
+            live_access = live_access_result.unwrap()
+            live_store = JournalStore(live_access, path)
+            live_access = None
+            loaded = live_store.load()
+        elif observation.location is _ownership.TransactionLocation.QUARANTINED:
+            ticket = transaction.ticket
+            if (
+                transaction.location is not _ownership.TransactionLocation.QUARANTINED
+                or transaction.binding != binding
+                or transaction.claim is not None
+                or type(ticket) is not _ownership.QuarantineTicket
+                or ticket.recovery_reference != binding.quarantine_relative
+                or observation.journal_relative != binding.quarantine_relative
+            ):
+                raise _plan_changed("The locked rollback target changed.")
+            recovery_access_result = (
+                _ownership.open_quarantined_recovery_journal_access(
+                    lease.owned_root,
+                    transaction,
+                )
+            )
+            if not recovery_access_result.is_ok:
+                raise _plan_changed("The locked rollback journal changed.")
+            recovery_access = recovery_access_result.unwrap()
+            recovery_store = JournalStore.from_quarantined_recovery(recovery_access)
+            recovery_access = None
+            loaded = recovery_store.load()
+        else:
+            raise _plan_changed("The locked rollback target changed.")
+        if loaded.head != journal.head or tuple(
+            record.record_digest for record in loaded.records
+        ) != tuple(record.record_digest for record in journal.records):
+            raise _plan_changed("The locked rollback journal changed.")
+
+        lease.consume_execution()
+        action_index = plan.next_action_index
+        while action_index < len(plan.rollback_actions):
+            action = plan.rollback_actions[action_index]
+            initial_event = journal.records[-1].rollback_event
+            current_intent = (
+                head.state is JournalState.ROLLBACK_ACTION_INTENT
+                and head.record_digest == journal.head.record_digest
+                and initial_event is not None
+                and initial_event.action_index == action_index
+            )
+            if not current_intent:
+                if live_store is None:
+                    raise _plan_changed("The rollback intent location changed.")
+                head = live_store.append(
+                    head,
+                    JournalTransition(
+                        JournalState.ROLLBACK_ACTION_INTENT,
+                        rollback_event=JournalRollbackEvent(
+                            action_index=action_index,
+                            action_digest=action.action_digest,
+                        ),
+                    ),
+                )
+
+            if action.action == "retain":
+                if live_store is None:
+                    raise _plan_changed("A retained rollback action moved.")
+                head = live_store.append(
+                    head,
+                    JournalTransition(
+                        JournalState.ROLLBACK_ACTION_COMPLETED,
+                        rollback_event=JournalRollbackEvent(
+                            action_index=action_index,
+                            action_digest=action.action_digest,
+                            outcome="retained",
+                        ),
+                    ),
+                )
+            else:
+                if recovery_store is None:
+                    if (
+                        live_store is None
+                        or path is None
+                        or type(transaction.claim)
+                        is not _ownership.TransactionPathClaim
+                    ):
+                        raise _plan_changed("The root rollback authority changed.")
+                    proof_result = _ownership.prove_transaction_owned(
+                        path,
+                        claim=transaction.claim,
+                    )
+                    if not proof_result.is_ok:
+                        raise _plan_changed("The root rollback authority changed.")
+                    ownership_proof = proof_result.unwrap()
+                    live_store.close()
+                    live_store = None
+                    transaction.close()
+                    quarantine_result = _ownership.quarantine_owned(
+                        ownership_proof,
+                        transaction_id=binding.transaction_id,
+                    )
+                    ownership_proof.close()
+                    ownership_proof = None
+                    if not quarantine_result.is_ok:
+                        error = quarantine_result.error
+                        raise ForgeError(
+                            "recovery.rollback_incomplete",
+                            14,
+                            "The exact transaction root could not be quarantined.",
+                            recovery_instructions=(
+                                error.recovery_instructions if error is not None else ()
+                            ),
+                        )
+                    quarantine_ticket = quarantine_result.unwrap()
+                    quarantine_result_rebound = (
+                        _ownership.rebind_persistent_transaction(
+                            lease.owned_root,
+                            binding=binding,
+                        )
+                    )
+                    if not quarantine_result_rebound.is_ok:
+                        raise ForgeError(
+                            "recovery.rollback_incomplete",
+                            14,
+                            "The quarantined transaction root could not be rebound.",
+                            recovery_instructions=(binding.quarantine_relative,),
+                        )
+                    quarantine_transaction = quarantine_result_rebound.unwrap()
+                    recovery_access_result = (
+                        _ownership.open_quarantined_recovery_journal_access(
+                            lease.owned_root,
+                            quarantine_transaction,
+                        )
+                    )
+                    if not recovery_access_result.is_ok:
+                        raise ForgeError(
+                            "recovery.rollback_incomplete",
+                            14,
+                            "The quarantined rollback journal could not be reopened.",
+                            recovery_instructions=(binding.quarantine_relative,),
+                        )
+                    recovery_access = recovery_access_result.unwrap()
+                    recovery_store = JournalStore.from_quarantined_recovery(
+                        recovery_access
+                    )
+                    recovery_access = None
+                head = recovery_store.append_recovery(
+                    head,
+                    JournalTransition(
+                        JournalState.ROLLBACK_ACTION_COMPLETED,
+                        rollback_event=JournalRollbackEvent(
+                            action_index=action_index,
+                            action_digest=action.action_digest,
+                            outcome="quarantined",
+                            observed_identity=action.expected_identity,
+                            recovery_reference=binding.quarantine_relative,
+                        ),
+                    ),
+                )
+            action_index += 1
+
+        if head.state is not JournalState.ROLLED_BACK:
+            if recovery_store is None:
+                raise _plan_changed("The terminal rollback location changed.")
+            head = recovery_store.append_recovery(
+                head,
+                JournalTransition(JournalState.ROLLED_BACK),
+            )
+        if head.state is not JournalState.ROLLED_BACK:
+            raise ForgeError(
+                "recovery.rollback_incomplete",
+                14,
+                "The rollback terminal record was not durable.",
+                recovery_instructions=(binding.quarantine_relative,),
+            )
+
+        if recovery_store is not None:
+            recovery_store.close()
+            recovery_store = None
+        if recovery_access is not None:
+            recovery_access.close()
+            recovery_access = None
+        if quarantine_transaction is not None:
+            quarantine_transaction.close()
+            quarantine_transaction = None
+        if quarantine_ticket is not None:
+            quarantine_ticket.close()
+            quarantine_ticket = None
+        if path is not None:
+            path.close()
+            path = None
+
+        cleanup_snapshot = observe_recovery_snapshot(
+            authority=lease.authority,
+            owned_root=lease.owned_root,
+        )
+        cleanup_plan = plan_recovery(cleanup_snapshot)
+        if (
+            cleanup_plan.disposition is not RecoveryDisposition.CLEANUP_PENDING
+            or cleanup_plan.transaction_ids != plan.transaction_ids
+        ):
+            raise ForgeError(
+                "recovery.rollback_incomplete",
+                14,
+                "The terminal rollback cleanup plan is contradictory.",
+                recovery_instructions=(binding.quarantine_relative,),
+            )
+        return _execute_cleanup_pending(
+            lease,
+            cleanup_snapshot,
+            cleanup_plan,
+            consume_lease=False,
+            executed_disposition=RecoveryDisposition.ROLLBACK_CANDIDATE,
+            completed_action_count=len(plan.rollback_actions),
+        )
+    finally:
+        _close_all_recovery_resources(
+            (
+                recovery_store.close
+                if recovery_store is not None
+                else recovery_access.close
+                if recovery_access is not None
+                else None
+            ),
+            (
+                quarantine_transaction.close
+                if quarantine_transaction is not None
+                else None
+            ),
+            quarantine_ticket.close if quarantine_ticket is not None else None,
+            (
+                live_store.close
+                if live_store is not None
+                else live_access.close
+                if live_access is not None
+                else None
+            ),
+            path.close if path is not None else None,
+            ownership_proof.close if ownership_proof is not None else None,
+            transaction.close,
+        )
+
+
+def execute_recovery(locked: LockedRecoveryPlan) -> RecoveryResult:
+    """Consume one exact rollback or cleanup plan after locked reproduction."""
+
+    if type(locked) is not LockedRecoveryPlan:
+        raise TypeError("execute_recovery requires LockedRecoveryPlan")
+    lease = _active_locked_lease(locked)
+    try:
+        with lease.guard:
+            lease.require_open_locked()
+            snapshot, plan = _reproduce_locked_evidence(
+                lease.plan,
+                authority=lease.authority,
+                owned_root=lease.owned_root,
+            )
+            if plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE:
+                return _execute_rollback_candidate(lease, snapshot, plan)
+            if plan.disposition is not RecoveryDisposition.CLEANUP_PENDING:
+                raise ForgeError(
+                    "recovery.operator_conflict",
+                    14,
+                    "The locked recovery plan does not authorize cleanup.",
+                )
+            return _execute_cleanup_pending(
+                lease,
+                snapshot,
+                plan,
+                consume_lease=True,
+                executed_disposition=RecoveryDisposition.CLEANUP_PENDING,
+                completed_action_count=0,
+            )
+    finally:
+        locked.close()

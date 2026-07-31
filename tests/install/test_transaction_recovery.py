@@ -2429,6 +2429,20 @@ def test_recovery_plan_rejects_digest_equivalent_type_tampering() -> None:
     plan._require_valid()
 
 
+def test_recovery_result_rejects_raw_string_disposition() -> None:
+    import zagrosi_forge.install.recovery as recovery
+
+    with pytest.raises(ValueError, match="recovery result"):
+        recovery.RecoveryResult(
+            executed_disposition="cleanup_pending",  # type: ignore[arg-type]
+            final_disposition=recovery.RecoveryDisposition.NO_RECOVERY,
+            transaction_ids=("tx-0123456789abcdef0123456789abcdef",),
+            completed_action_count=1,
+            cleanup_removed=True,
+            recovery_references=(".zagrosi/quarantine/recovery",),
+        )
+
+
 @pytest.mark.parametrize(
     ("first_terminal", "second_terminal", "expected_disposition"),
     (
@@ -5063,10 +5077,16 @@ def test_prepared_rejects_portable_rollback_path_collision(tmp_path: Path) -> No
         owned.close()
 
 
-def _quarantine_after_root_rollback_intent(tmp_path: Path):
+def _quarantine_after_root_rollback_intent(
+    tmp_path: Path,
+    *,
+    bind_current_config: bool = False,
+    include_authority: bool = False,
+):
     import zagrosi_forge.install.ownership as ownership
     from zagrosi_forge.install.journal import JournalState, JournalTransition
     from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import observe_current_config_identity
 
     authority = PlatformPathAuthority()
     store, proof, owned, _directory, binding = _store(
@@ -5079,6 +5099,14 @@ def _quarantine_after_root_rollback_intent(tmp_path: Path):
     quarantine_rebound = None
     try:
         prepared = _prepared(binding)
+        if bind_current_config:
+            prepared = _bind_prepared_to_current_config(
+                prepared,
+                observe_current_config_identity(
+                    authority=authority,
+                    owned_root=owned,
+                ),
+            )
         root_action = prepared.rollback_actions[-1]
         root_index = len(prepared.rollback_actions) - 1
         head = store.create_prepared(prepared)
@@ -5115,7 +5143,7 @@ def _quarantine_after_root_rollback_intent(tmp_path: Path):
             binding=binding,
         ).unwrap()
 
-        return (
+        result = (
             prepared,
             head,
             owned,
@@ -5123,6 +5151,7 @@ def _quarantine_after_root_rollback_intent(tmp_path: Path):
             quarantine_ticket,
             quarantine_rebound,
         )
+        return (*result, authority) if include_authority else result
     except BaseException:
         if quarantine_rebound is not None:
             quarantine_rebound.close()
@@ -6004,5 +6033,1480 @@ def test_delete_token_rolled_back_cleanup_plan_is_idempotent(
     finally:
         if rebound is not None:
             rebound.close()
+        ticket.close()
+        owned.close()
+
+
+def test_locked_cleanup_recovery_survives_restart_and_converges_to_no_recovery(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    _authority, owned, _binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    restarted = None
+    locked = None
+    try:
+        ticket.close()
+        owned.close()
+        authority = PlatformPathAuthority()
+        restarted = authority.bootstrap_forge_root(
+            tmp_path / "codex-home",
+            runner=_runner(),
+        ).unwrap()
+        pending = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=restarted,
+            )
+        )
+        assert pending.disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        assert pending.transaction_ids == (prepared.transaction_id,)
+        locked = recovery.lock_recovery_plan(
+            pending,
+            authority=authority,
+            owned_root=restarted,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        recovery.execute_recovery(locked)
+
+        assert locked.closed
+        completed = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=restarted,
+            )
+        )
+        assert completed.disposition is recovery.RecoveryDisposition.NO_RECOVERY
+        assert completed.transaction_ids == ()
+    finally:
+        if locked is not None and not locked.closed:
+            locked.close()
+        if restarted is not None:
+            restarted.close()
+        ticket.close()
+        owned.close()
+
+
+@pytest.mark.parametrize("drift", ("location", "anchor"))
+def test_locked_cleanup_recovery_rejects_post_lock_drift_without_mutation(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+
+    authority, owned, binding, _prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    plugins = tmp_path / "codex-home" / "plugins"
+    transaction_store = plugins / ".zagrosi" / "transactions"
+    locked = None
+    try:
+        ticket.close()
+        pending = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            pending,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        if drift == "location":
+            quarantine = plugins / binding.quarantine_relative
+            live = plugins / binding.root_relative
+            quarantine.rename(live)
+        else:
+            anchor = plugins / binding.claim_relative
+            original_identity = (anchor.stat().st_dev, anchor.stat().st_ino)
+            replacement = _write_private_file(
+                anchor.parent,
+                "replacement-anchor.json",
+                anchor.read_bytes(),
+            )
+            os.replace(replacement, anchor)
+            assert (anchor.stat().st_dev, anchor.stat().st_ino) != original_identity
+
+        preserved = tuple(
+            (
+                path.relative_to(transaction_store).as_posix(),
+                path.stat().st_dev,
+                path.stat().st_ino,
+                path.read_bytes(),
+            )
+            for path in sorted(transaction_store.rglob("*"))
+            if path.is_file()
+        )
+        with pytest.raises(ForgeError) as changed:
+            recovery.execute_recovery(locked)
+
+        assert changed.value.code == "transaction.plan_changed"
+        assert (
+            tuple(
+                (
+                    path.relative_to(transaction_store).as_posix(),
+                    path.stat().st_dev,
+                    path.stat().st_ino,
+                    path.read_bytes(),
+                )
+                for path in sorted(transaction_store.rglob("*"))
+                if path.is_file()
+            )
+            == preserved
+        )
+    finally:
+        if locked is not None and not locked.closed:
+            locked.close()
+        ticket.close()
+        owned.close()
+
+
+def test_execute_recovery_rejects_operator_conflict_and_is_one_shot(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    rollback_root = tmp_path / "operator-conflict"
+    cleanup_root = tmp_path / "cleanup-pending"
+    _private_directory(rollback_root)
+    _private_directory(cleanup_root)
+
+    rollback_authority = PlatformPathAuthority()
+    rollback_store, rollback_proof, rollback_owned, rollback_directory, binding = (
+        _store(
+            rollback_root,
+            authority=rollback_authority,
+        )
+    )
+    rollback_locked = None
+    cleanup_owned = None
+    cleanup_ticket = None
+    cleanup_locked = None
+    try:
+        prepared = _prepared(binding)
+        rollback_store.create_prepared(prepared)
+        rollback_plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=rollback_authority,
+                owned_root=rollback_owned,
+            )
+        )
+        assert (
+            rollback_plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+        )
+        rollback_locked = recovery.lock_recovery_plan(
+            rollback_plan,
+            authority=rollback_authority,
+            owned_root=rollback_owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+        preserved = tuple(
+            (path.name, path.stat().st_ino, path.read_bytes())
+            for path in sorted(rollback_directory.glob("journal-*.json"))
+        )
+
+        with pytest.raises(ForgeError) as conflict:
+            recovery.execute_recovery(rollback_locked)
+
+        assert conflict.value.code == "recovery.operator_conflict"
+        assert (
+            tuple(
+                (path.name, path.stat().st_ino, path.read_bytes())
+                for path in sorted(rollback_directory.glob("journal-*.json"))
+            )
+            == preserved
+        )
+        rollback_locked.close()
+
+        cleanup_authority, cleanup_owned, _binding, _prepared_record, cleanup_ticket = (
+            _completed_quarantined_rollback(cleanup_root)
+        )
+        cleanup_ticket.close()
+        cleanup_plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=cleanup_authority,
+                owned_root=cleanup_owned,
+            )
+        )
+        assert cleanup_plan.disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        cleanup_locked = recovery.lock_recovery_plan(
+            cleanup_plan,
+            authority=cleanup_authority,
+            owned_root=cleanup_owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        recovery.execute_recovery(cleanup_locked)
+
+        assert cleanup_locked.closed
+        with pytest.raises(ForgeError) as reused:
+            recovery.execute_recovery(cleanup_locked)
+        assert reused.value.code == "transaction.plan_changed"
+    finally:
+        if cleanup_locked is not None and not cleanup_locked.closed:
+            cleanup_locked.close()
+        if cleanup_ticket is not None:
+            cleanup_ticket.close()
+        if cleanup_owned is not None:
+            cleanup_owned.close()
+        if rollback_locked is not None and not rollback_locked.closed:
+            rollback_locked.close()
+        rollback_store.close()
+        rollback_proof.close()
+        rollback_owned.close()
+
+
+def _durable_rollback_events(directory: Path) -> tuple[tuple[object, object], ...]:
+    def event(record):
+        value = record["rollback_event"]
+        if isinstance(value, dict) and isinstance(value.get("observed_identity"), list):
+            value = {
+                **value,
+                "observed_identity": tuple(value["observed_identity"]),
+            }
+        return value
+
+    return tuple(
+        (
+            record["state"],
+            event(record),
+        )
+        for record in (
+            json.loads(path.read_bytes())
+            for path in sorted(directory.glob("journal-*.json"))
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    ("prepared", "retain-intent", "retain-completed", "root-intent-live"),
+)
+def test_execute_recovery_resumes_ordered_rollback_wal_and_cleans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    checkpoint: str,
+) -> None:
+    import zagrosi_forge.install.journal as journal
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, live, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    quarantine = tmp_path / "codex-home" / "plugins" / binding.quarantine_relative
+    locked = None
+    observed_before_quarantine: list[tuple[tuple[object, object], ...]] = []
+    observed_before_cleanup: list[tuple[tuple[object, object], ...]] = []
+    real_quarantine = ownership.quarantine_owned
+    real_cleanup = ownership.remove_quarantine
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared, _declared = _prepared_with_ordered_rollback(binding)
+        prepared = _bind_prepared_to_current_config(prepared, current)
+        retain_action, root_action = prepared.rollback_actions
+        head = store.create_prepared(prepared)
+        if checkpoint != "prepared":
+            head = store.append(
+                head,
+                journal.JournalTransition(
+                    journal.JournalState.ROLLBACK_ACTION_INTENT,
+                    rollback_event=_rollback_intent(retain_action, 0),
+                ),
+            )
+        if checkpoint in {"retain-completed", "root-intent-live"}:
+            head = store.append(
+                head,
+                journal.JournalTransition(
+                    journal.JournalState.ROLLBACK_ACTION_COMPLETED,
+                    rollback_event=_rollback_completion(
+                        retain_action,
+                        0,
+                        binding,
+                    ),
+                ),
+            )
+        if checkpoint == "root-intent-live":
+            head = store.append(
+                head,
+                journal.JournalTransition(
+                    journal.JournalState.ROLLBACK_ACTION_INTENT,
+                    rollback_event=_rollback_intent(root_action, 1),
+                ),
+            )
+        store.close()
+        proof.close()
+
+        expected_before_quarantine = (
+            (journal.JournalState.PREPARED.value, None),
+            (
+                journal.JournalState.ROLLBACK_ACTION_INTENT.value,
+                journal._rollback_event_projection(_rollback_intent(retain_action, 0)),
+            ),
+            (
+                journal.JournalState.ROLLBACK_ACTION_COMPLETED.value,
+                journal._rollback_event_projection(
+                    _rollback_completion(retain_action, 0, binding)
+                ),
+            ),
+            (
+                journal.JournalState.ROLLBACK_ACTION_INTENT.value,
+                journal._rollback_event_projection(_rollback_intent(root_action, 1)),
+            ),
+        )
+        expected_before_cleanup = expected_before_quarantine + (
+            (
+                journal.JournalState.ROLLBACK_ACTION_COMPLETED.value,
+                journal._rollback_event_projection(
+                    _rollback_completion(root_action, 1, binding)
+                ),
+            ),
+            (journal.JournalState.ROLLED_BACK.value, None),
+        )
+
+        def observe_quarantine(*args, **kwargs):
+            observed_before_quarantine.append(_durable_rollback_events(live))
+            result = real_quarantine(*args, **kwargs)
+            assert result.is_ok
+            assert quarantine.is_dir()
+            return result
+
+        def observe_cleanup(ticket, **kwargs):
+            assert ticket.recovery_reference == binding.quarantine_relative
+            observed_before_cleanup.append(_durable_rollback_events(quarantine))
+            return real_cleanup(ticket, **kwargs)
+
+        monkeypatch.setattr(ownership, "quarantine_owned", observe_quarantine)
+        monkeypatch.setattr(ownership, "remove_quarantine", observe_cleanup)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        expected_index = {
+            "prepared": 0,
+            "retain-intent": 0,
+            "retain-completed": 1,
+            "root-intent-live": 1,
+        }[checkpoint]
+        assert plan.disposition is recovery.RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert plan.rollback_actions == prepared.rollback_actions
+        assert plan.next_action_index == expected_index
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        recovery.execute_recovery(locked)
+
+        assert locked.closed
+        assert observed_before_quarantine == [expected_before_quarantine]
+        assert observed_before_cleanup == [expected_before_cleanup]
+        assert not live.exists()
+        assert not quarantine.exists()
+        completed = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert completed.disposition is recovery.RecoveryDisposition.NO_RECOVERY
+        assert completed.transaction_ids == ()
+    finally:
+        if locked is not None and not locked.closed:
+            locked.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_execute_recovery_completes_quarantined_root_intent_without_requarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.journal as journal
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+
+    (
+        prepared,
+        _head,
+        owned,
+        binding,
+        quarantine_ticket,
+        quarantine_rebound,
+        authority,
+    ) = _quarantine_after_root_rollback_intent(
+        tmp_path,
+        bind_current_config=True,
+        include_authority=True,
+    )
+    quarantine = tmp_path / "codex-home" / "plugins" / binding.quarantine_relative
+    locked = None
+    observed_before_cleanup: list[tuple[tuple[object, object], ...]] = []
+    real_cleanup = ownership.remove_quarantine
+    try:
+        quarantine_rebound.close()
+        quarantine_ticket.close()
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+
+        def reject_requarantine(*_args, **_kwargs):
+            raise AssertionError(
+                "quarantined root intent must not be quarantined again"
+            )
+
+        def observe_cleanup(ticket, **kwargs):
+            observed_before_cleanup.append(_durable_rollback_events(quarantine))
+            return real_cleanup(ticket, **kwargs)
+
+        monkeypatch.setattr(ownership, "quarantine_owned", reject_requarantine)
+        monkeypatch.setattr(ownership, "remove_quarantine", observe_cleanup)
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert plan.disposition is recovery.RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert plan.next_action_index == root_index
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        recovery.execute_recovery(locked)
+
+        assert locked.closed
+        assert observed_before_cleanup == [
+            (
+                (journal.JournalState.PREPARED.value, None),
+                (
+                    journal.JournalState.ROLLBACK_ACTION_INTENT.value,
+                    journal._rollback_event_projection(
+                        _rollback_intent(root_action, root_index)
+                    ),
+                ),
+                (
+                    journal.JournalState.ROLLBACK_ACTION_COMPLETED.value,
+                    journal._rollback_event_projection(
+                        _rollback_completion(root_action, root_index, binding)
+                    ),
+                ),
+                (journal.JournalState.ROLLED_BACK.value, None),
+            )
+        ]
+        assert not quarantine.exists()
+        completed = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert completed.disposition is recovery.RecoveryDisposition.NO_RECOVERY
+        assert completed.transaction_ids == ()
+    finally:
+        if locked is not None and not locked.closed:
+            locked.close()
+        quarantine_rebound.close()
+        quarantine_ticket.close()
+        owned.close()
+
+
+def test_execute_recovery_serializes_revalidate_and_close_around_one_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from threading import Event, Thread
+
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+
+    authority, owned, _binding, _prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    locked = None
+    effect_started = Event()
+    effect_allowed = Event()
+    revalidate_started = Event()
+    revalidate_finished = Event()
+    close_started = Event()
+    close_finished = Event()
+    effect_calls: list[object] = []
+    release_calls: list[object] = []
+    execute_errors: list[BaseException] = []
+    revalidate_errors: list[BaseException] = []
+    close_errors: list[BaseException] = []
+    execute_thread = revalidate_thread = close_thread = None
+    real_cleanup = ownership.remove_quarantine
+    real_release = recovery.HeldInstallLock.release
+    try:
+        ticket.close()
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        def blocking_cleanup(selected, **kwargs):
+            effect_calls.append(selected)
+            effect_started.set()
+            if not effect_allowed.wait(2):
+                raise AssertionError("cleanup effect was not released")
+            return real_cleanup(selected, **kwargs)
+
+        def record_release(held) -> None:
+            release_calls.append(held)
+            real_release(held)
+
+        def execute() -> None:
+            try:
+                recovery.execute_recovery(locked)
+            except BaseException as exc:
+                execute_errors.append(exc)
+
+        def revalidate() -> None:
+            revalidate_started.set()
+            try:
+                locked.revalidate()
+            except BaseException as exc:
+                revalidate_errors.append(exc)
+            finally:
+                revalidate_finished.set()
+
+        def close() -> None:
+            close_started.set()
+            try:
+                locked.close()
+            except BaseException as exc:
+                close_errors.append(exc)
+            finally:
+                close_finished.set()
+
+        monkeypatch.setattr(ownership, "remove_quarantine", blocking_cleanup)
+        monkeypatch.setattr(recovery.HeldInstallLock, "release", record_release)
+        execute_thread = Thread(target=execute)
+        execute_thread.start()
+        assert effect_started.wait(2)
+        revalidate_thread = Thread(target=revalidate)
+        close_thread = Thread(target=close)
+        revalidate_thread.start()
+        close_thread.start()
+        assert revalidate_started.wait(2)
+        assert close_started.wait(2)
+
+        assert not revalidate_finished.wait(0.1)
+        assert not close_finished.wait(0.1)
+        effect_allowed.set()
+        for thread in (execute_thread, revalidate_thread, close_thread):
+            thread.join(2)
+
+        assert all(
+            not thread.is_alive()
+            for thread in (execute_thread, revalidate_thread, close_thread)
+        )
+        assert execute_errors == []
+        assert close_errors == []
+        assert len(revalidate_errors) == 1
+        assert isinstance(revalidate_errors[0], ForgeError)
+        assert revalidate_errors[0].code == "transaction.plan_changed"
+        assert len(effect_calls) == 1
+        assert len(release_calls) == 1
+        assert locked.closed
+        completed = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert completed.disposition is recovery.RecoveryDisposition.NO_RECOVERY
+    finally:
+        effect_allowed.set()
+        for thread in (execute_thread, revalidate_thread, close_thread):
+            if thread is not None:
+                thread.join(2)
+        monkeypatch.setattr(recovery.HeldInstallLock, "release", real_release)
+        if locked is not None and not locked.closed:
+            locked.close()
+        ticket.close()
+        owned.close()
+
+
+def test_execute_recovery_resumes_after_failure_between_quarantine_and_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.journal as journal
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError, Result
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _live, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    quarantine = tmp_path / "codex-home" / "plugins" / binding.quarantine_relative
+    failed_locked = resumed_locked = None
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+        store.create_prepared(prepared)
+        store.close()
+        proof.close()
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        failed_locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        with monkeypatch.context() as context:
+
+            def fail_after_quarantine(_owned, _transaction):
+                assert quarantine.is_dir()
+                assert _durable_rollback_events(quarantine) == (
+                    (journal.JournalState.PREPARED.value, None),
+                    (
+                        journal.JournalState.ROLLBACK_ACTION_INTENT.value,
+                        journal._rollback_event_projection(
+                            _rollback_intent(root_action, root_index)
+                        ),
+                    ),
+                )
+                return Result.failure(
+                    ForgeError(
+                        "ownership.unowned",
+                        13,
+                        "Injected after durable root quarantine.",
+                        recovery_instructions=(binding.quarantine_relative,),
+                    )
+                )
+
+            context.setattr(
+                ownership,
+                "open_quarantined_recovery_journal_access",
+                fail_after_quarantine,
+            )
+            with pytest.raises(ForgeError) as interrupted:
+                recovery.execute_recovery(failed_locked)
+
+        assert interrupted.value.code == "recovery.rollback_incomplete"
+        assert interrupted.value.exit_category == 14
+        assert interrupted.value.recovery_instructions == (binding.quarantine_relative,)
+        assert failed_locked.closed
+        assert _durable_rollback_events(quarantine) == (
+            (journal.JournalState.PREPARED.value, None),
+            (
+                journal.JournalState.ROLLBACK_ACTION_INTENT.value,
+                journal._rollback_event_projection(
+                    _rollback_intent(root_action, root_index)
+                ),
+            ),
+        )
+        resumable = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert resumable.disposition is recovery.RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert resumable.next_action_index == root_index
+        resumed_locked = recovery.lock_recovery_plan(
+            resumable,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        recovery.execute_recovery(resumed_locked)
+
+        assert resumed_locked.closed
+        completed = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert completed.disposition is recovery.RecoveryDisposition.NO_RECOVERY
+    finally:
+        for locked in (resumed_locked, failed_locked):
+            if locked is not None and not locked.closed:
+                locked.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_execute_recovery_closes_root_proof_when_live_journal_close_always_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.journal as journal
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    class InjectedCloseFailure(BaseException):
+        pass
+
+    authority = PlatformPathAuthority()
+    store, setup_proof, owned, _live, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    locked = None
+    captured_proofs: list[object] = []
+    injected_close_count = 0
+    real_prove = ownership.prove_transaction_owned
+    real_close = journal.JournalStore.close
+    try:
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        store.close()
+        setup_proof.close()
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        def capture_proof(*args, **kwargs):
+            result = real_prove(*args, **kwargs)
+            if result.is_ok:
+                captured_proofs.append(result.unwrap())
+            return result
+
+        def fail_every_close_after_proof(selected):
+            nonlocal injected_close_count
+            if captured_proofs:
+                injected_close_count += 1
+                raise InjectedCloseFailure
+            return real_close(selected)
+
+        monkeypatch.setattr(ownership, "prove_transaction_owned", capture_proof)
+        monkeypatch.setattr(
+            journal.JournalStore,
+            "close",
+            fail_every_close_after_proof,
+        )
+
+        with pytest.raises(InjectedCloseFailure):
+            recovery.execute_recovery(locked)
+
+        assert injected_close_count >= 2
+        assert len(captured_proofs) == 1
+        assert captured_proofs[0]._closed  # type: ignore[attr-defined]
+        assert locked.closed
+        monkeypatch.setattr(journal.JournalStore, "close", real_close)
+        resumable = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert resumable.disposition is recovery.RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert resumable.next_action_index == len(prepared.rollback_actions) - 1
+    finally:
+        monkeypatch.setattr(journal.JournalStore, "close", real_close)
+        if locked is not None and not locked.closed:
+            locked.close()
+        store.close()
+        setup_proof.close()
+        owned.close()
+
+
+def test_plan_changed_preserves_creation_intent_before_recovery_consumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zagrosi_forge.install.journal import JournalStore
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError, Result
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    class InjectedCreationInterrupt(BaseException):
+        pass
+
+    transaction_id = "tx-0123456789abcdef0123456789abcdef"
+    home = tmp_path / "codex-home"
+    _private_directory(home)
+    authority = PlatformPathAuthority()
+    owned = authority.bootstrap_forge_root(home, runner=_runner()).unwrap()
+    store = None
+    setup_proof = None
+    rebound = None
+    locked = None
+    lease = None
+    recovery_rebind_calls: list[object] = []
+    real_rebind = ownership.rebind_persistent_transaction_for_recovery
+    claims = home / "plugins/.zagrosi/transactions/claims"
+    evidence_paths: tuple[Path, ...] = ()
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_finish_transaction_creation_intent",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    InjectedCreationInterrupt
+                ),
+            )
+            with pytest.raises(InjectedCreationInterrupt):
+                ownership.create_persistent_transaction_root(
+                    owned,
+                    transaction_id=transaction_id,
+                )
+
+        binding = ownership.load_persistent_transaction_binding(
+            owned,
+            transaction_id=transaction_id,
+        ).unwrap()
+        rebound = ownership.rebind_persistent_transaction_for_recovery(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert rebound.claim is not None
+        setup_proof = authority.prove_descendant(
+            owned,
+            rebound.claim.relative,
+            expected_depth=3,
+        ).unwrap()
+        access = ownership.open_transaction_journal_access(
+            owned,
+            rebound,
+        ).unwrap()
+        store = JournalStore(access, setup_proof)
+        rebound.close()
+        rebound = None
+
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        store.create_prepared(prepared)
+        store.close()
+        setup_proof.close()
+
+        evidence_paths = (
+            claims
+            / ownership._transaction_creation_reservation_component(transaction_id),
+            claims / ownership._transaction_creation_intent_component(transaction_id),
+        )
+        before = tuple(
+            (
+                path.stat().st_dev,
+                path.stat().st_ino,
+                path.read_bytes(),
+            )
+            for path in evidence_paths
+        )
+
+        plan = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+        lease = recovery._active_locked_lease(locked)
+
+        def observe_effect_free_rebind(*args, **kwargs):
+            recovery_rebind_calls.append(kwargs["binding"])
+            assert not lease._execution_consumed
+            assert (
+                tuple(
+                    (
+                        path.stat().st_dev,
+                        path.stat().st_ino,
+                        path.read_bytes(),
+                    )
+                    for path in evidence_paths
+                )
+                == before
+            )
+            return real_rebind(*args, **kwargs)
+
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "rebind_persistent_transaction_for_recovery",
+                observe_effect_free_rebind,
+            )
+            context.setattr(
+                ownership,
+                "open_transaction_journal_access",
+                lambda *_args, **_kwargs: Result.failure(
+                    ForgeError(
+                        "ownership.unowned",
+                        13,
+                        "Injected journal drift after effect-free rebind.",
+                    )
+                ),
+            )
+            with pytest.raises(ForgeError) as changed:
+                recovery.execute_recovery(locked)
+
+        assert changed.value.code == "transaction.plan_changed"
+        assert recovery_rebind_calls == [binding]
+        assert lease is not None
+        assert not lease._execution_consumed
+        assert (
+            tuple(
+                (
+                    path.stat().st_dev,
+                    path.stat().st_ino,
+                    path.read_bytes(),
+                )
+                for path in evidence_paths
+            )
+            == before
+        )
+        assert locked.closed
+    finally:
+        if locked is not None and not locked.closed:
+            locked.close()
+        if rebound is not None:
+            rebound.close()
+        if store is not None:
+            store.close()
+        if setup_proof is not None:
+            setup_proof.close()
+        owned.close()
+
+
+def test_execute_recovery_cleanup_failure_remains_resumable_category_14(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from zagrosi_forge.install.journal import JournalState
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError, Result
+
+    authority, owned, binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    failed_locked = resumed_locked = None
+    try:
+        ticket.close()
+        terminal_events = _durable_rollback_events(
+            tmp_path / "codex-home" / "plugins" / binding.quarantine_relative
+        )
+        assert terminal_events[-1][0] == JournalState.ROLLED_BACK.value
+        pending = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        failed_locked = recovery.lock_recovery_plan(
+            pending,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "remove_quarantine",
+                lambda _ticket, **_kwargs: Result.failure(
+                    ForgeError(
+                        "ownership.cleanup_incomplete",
+                        13,
+                        "Injected terminal cleanup failure.",
+                        recovery_instructions=(binding.quarantine_relative,),
+                    )
+                ),
+            )
+            with pytest.raises(ForgeError) as incomplete:
+                recovery.execute_recovery(failed_locked)
+
+        assert incomplete.value.code == "recovery.cleanup_incomplete"
+        assert incomplete.value.exit_category == 14
+        assert incomplete.value.recovery_instructions == (binding.quarantine_relative,)
+        assert failed_locked.closed
+        resumable = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert resumable.disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        assert resumable.transaction_ids == (prepared.transaction_id,)
+        resumed_locked = recovery.lock_recovery_plan(
+            resumable,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        recovery.execute_recovery(resumed_locked)
+
+        assert resumed_locked.closed
+        completed = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        assert completed.disposition is recovery.RecoveryDisposition.NO_RECOVERY
+    finally:
+        for locked in (resumed_locked, failed_locked):
+            if locked is not None and not locked.closed:
+                locked.close()
+        ticket.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX final-unlink fault injection")
+def test_execute_recovery_resumes_cleanup_after_final_unlink_process_death(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+
+    authority, owned, binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    quarantine = tmp_path / "codex-home" / "plugins" / binding.quarantine_relative
+    failed_locked = resumed_locked = None
+    try:
+        ticket.close()
+        pending = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        failed_locked = recovery.lock_recovery_plan(
+            pending,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        with monkeypatch.context() as context:
+
+            def fail_after_final_unlink(*_args, **_kwargs):
+                assert not quarantine.exists()
+                raise OSError("injected after exact final unlink")
+
+            context.setattr(
+                ownership,
+                "_publish_transaction_cleanup_complete",
+                fail_after_final_unlink,
+            )
+            with pytest.raises(ForgeError) as incomplete:
+                recovery.execute_recovery(failed_locked)
+
+        assert incomplete.value.code == "recovery.cleanup_incomplete"
+        assert incomplete.value.exit_category == 14
+        assert incomplete.value.recovery_instructions == (binding.quarantine_relative,)
+        assert failed_locked.closed
+        assert not quarantine.exists()
+
+        restarted_snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        assert restarted_snapshot.journals == ()
+        resumable = recovery.plan_recovery(restarted_snapshot)
+        assert resumable.disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        assert resumable.transaction_ids == (prepared.transaction_id,)
+        assert resumable.rollback_actions == ()
+        resumed_locked = recovery.lock_recovery_plan(
+            resumable,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        result = recovery.execute_recovery(resumed_locked)
+
+        assert result.final_disposition is recovery.RecoveryDisposition.NO_RECOVERY
+        assert result.recovery_references == (binding.quarantine_relative,)
+        assert resumed_locked.closed
+        assert (
+            recovery.plan_recovery(
+                recovery.observe_recovery_snapshot(
+                    authority=authority,
+                    owned_root=owned,
+                )
+            ).disposition
+            is recovery.RecoveryDisposition.NO_RECOVERY
+        )
+    finally:
+        for locked in (resumed_locked, failed_locked):
+            if locked is not None and not locked.closed:
+                locked.close()
+        ticket.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cleanup-WAL fault injection")
+def test_recovery_snapshot_binds_cleanup_wal_phase_and_complete_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+
+    authority, owned, _binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    original_complete = ownership._publish_transaction_cleanup_complete
+    original_retire = ownership._retire_recovery_cleanup_phase
+    complete_locked = None
+    try:
+        ticket.close()
+        terminal = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        authorized = ownership.authorize_recovery_cleanup(
+            owned,
+            observation=terminal._observations[0],
+            journal=terminal.journals[0],
+        ).unwrap()
+        authorized_snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        authorized_plan = recovery.plan_recovery(authorized_snapshot)
+
+        assert authorized_snapshot.journals == ()
+        assert authorized_snapshot._cleanup_observations[0].phase == "AUTHORIZED"
+        assert (
+            authorized_plan.disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        )
+        assert authorized_plan.transaction_ids == (prepared.transaction_id,)
+
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_publish_transaction_cleanup_complete",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    OSError("injected after exact final unlink")
+                ),
+            )
+            assert not ownership.resume_recovery_cleanup(owned, authorized).is_ok
+
+        finalizing_snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        finalizing_plan = recovery.plan_recovery(finalizing_snapshot)
+
+        assert finalizing_snapshot.journals == ()
+        assert finalizing_snapshot._cleanup_observations[0].phase == "FINALIZING"
+        assert finalizing_snapshot._cleanup_observations[0].current_reference is None
+        assert (
+            finalizing_plan.disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        )
+        assert finalizing_plan.transaction_ids == (prepared.transaction_id,)
+        assert finalizing_plan.plan_digest != authorized_plan.plan_digest
+        with pytest.raises(ForgeError) as changed:
+            recovery.lock_recovery_plan(
+                authorized_plan,
+                authority=authority,
+                owned_root=owned,
+                runner=_runner(),
+                timeout_seconds=0.1,
+            )
+        assert changed.value.code == "transaction.plan_changed"
+
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_retire_recovery_cleanup_phase",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    OSError("injected after durable cleanup completion")
+                ),
+            )
+            assert not ownership.resume_recovery_cleanup(owned, authorized).is_ok
+
+        complete_snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        complete_plan = recovery.plan_recovery(complete_snapshot)
+
+        assert complete_snapshot.journals == ()
+        assert complete_snapshot._cleanup_observations[0].phase == "COMPLETE"
+        assert complete_snapshot._cleanup_observations[0].current_reference is None
+        assert complete_plan.disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        assert complete_plan.transaction_ids == (prepared.transaction_id,)
+        assert complete_plan.plan_digest not in {
+            authorized_plan.plan_digest,
+            finalizing_plan.plan_digest,
+        }
+
+        complete_locked = recovery.lock_recovery_plan(
+            complete_plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+        result = recovery.execute_recovery(complete_locked)
+
+        assert result.final_disposition is recovery.RecoveryDisposition.NO_RECOVERY
+        assert complete_locked.closed
+        assert (
+            recovery.plan_recovery(
+                recovery.observe_recovery_snapshot(
+                    authority=authority,
+                    owned_root=owned,
+                )
+            ).disposition
+            is recovery.RecoveryDisposition.NO_RECOVERY
+        )
+    finally:
+        monkeypatch.setattr(
+            ownership,
+            "_publish_transaction_cleanup_complete",
+            original_complete,
+        )
+        monkeypatch.setattr(
+            ownership,
+            "_retire_recovery_cleanup_phase",
+            original_retire,
+        )
+        if complete_locked is not None and not complete_locked.closed:
+            complete_locked.close()
+        ticket.close()
+        owned.close()
+
+
+def test_execute_recovery_accepts_lost_cleanup_success_only_after_empty_reobserve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError, Result
+
+    authority, owned, binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    locked = None
+    real_resume = ownership.resume_recovery_cleanup
+    resume_calls: list[object] = []
+    try:
+        ticket.close()
+        pending = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            pending,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        def lose_success_response(selected_root, authorization):
+            resume_calls.append(authorization)
+            completed = real_resume(selected_root, authorization).unwrap()
+            assert completed.removed
+            return Result.failure(
+                ForgeError(
+                    "ownership.cleanup_incomplete",
+                    13,
+                    "Injected lost cleanup response.",
+                    recovery_instructions=(binding.quarantine_relative,),
+                )
+            )
+
+        monkeypatch.setattr(
+            ownership,
+            "resume_recovery_cleanup",
+            lose_success_response,
+        )
+
+        result = recovery.execute_recovery(locked)
+
+        assert (
+            result.executed_disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        )
+        assert result.final_disposition is recovery.RecoveryDisposition.NO_RECOVERY
+        assert result.transaction_ids == (prepared.transaction_id,)
+        assert result.cleanup_removed
+        assert result.recovery_references == (binding.quarantine_relative,)
+        assert len(resume_calls) == 1
+        assert locked.closed
+    finally:
+        monkeypatch.setattr(
+            ownership,
+            "resume_recovery_cleanup",
+            real_resume,
+        )
+        if locked is not None and not locked.closed:
+            locked.close()
+        ticket.close()
+        owned.close()
+
+
+def test_execute_recovery_resumes_durable_complete_before_wal_retirement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+
+    authority, owned, binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    locked = resumed_locked = None
+    original_retire = ownership._retire_recovery_cleanup_phase
+    try:
+        ticket.close()
+        pending = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        locked = recovery.lock_recovery_plan(
+            pending,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+
+        monkeypatch.setattr(
+            ownership,
+            "_retire_recovery_cleanup_phase",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("injected after durable cleanup completion")
+            ),
+        )
+        with pytest.raises(ForgeError) as incomplete:
+            recovery.execute_recovery(locked)
+
+        assert incomplete.value.code == "recovery.cleanup_incomplete"
+        assert incomplete.value.exit_category == 14
+        assert incomplete.value.recovery_instructions == (binding.quarantine_relative,)
+        assert locked.closed
+
+        complete_snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        assert complete_snapshot._cleanup_observations[0].phase == "COMPLETE"
+        complete_plan = recovery.plan_recovery(complete_snapshot)
+        assert complete_plan.disposition is recovery.RecoveryDisposition.CLEANUP_PENDING
+        assert complete_plan.transaction_ids == (prepared.transaction_id,)
+
+        monkeypatch.setattr(
+            ownership,
+            "_retire_recovery_cleanup_phase",
+            original_retire,
+        )
+        resumed_locked = recovery.lock_recovery_plan(
+            complete_plan,
+            authority=authority,
+            owned_root=owned,
+            runner=_runner(),
+            timeout_seconds=0.1,
+        )
+        result = recovery.execute_recovery(resumed_locked)
+
+        assert result.final_disposition is recovery.RecoveryDisposition.NO_RECOVERY
+        assert result.transaction_ids == (prepared.transaction_id,)
+        assert result.recovery_references == (binding.quarantine_relative,)
+        assert resumed_locked.closed
+    finally:
+        monkeypatch.setattr(
+            ownership,
+            "_retire_recovery_cleanup_phase",
+            original_retire,
+        )
+        for selected in (resumed_locked, locked):
+            if selected is not None and not selected.closed:
+                selected.close()
         ticket.close()
         owned.close()
