@@ -16,6 +16,7 @@ import re
 import stat
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Never, cast
+import unicodedata
 
 from . import paths as _paths
 from .contracts import (
@@ -31,11 +32,15 @@ from .policies import LIMIT_POLICY
 
 if TYPE_CHECKING:
     from .atomic_file import ConfigRecoveryDescriptor
-    from .ownership import PendingTransactionObservation
+    from .ownership import (
+        PendingTransactionObservation,
+        TransactionJournalAccess,
+        _QuarantinedRecoveryJournalWriter,
+    )
 
 
 JOURNAL_SCHEMA_DIGEST = (
-    "a9e78030123ef3ff1c9b8940c526245252f5b0c857ad76a0910bd2f08616cde6"
+    "c692c731e3a068d1204e292112205d4f320c246f5059056c662acc0c68c64994"
 )
 JOURNAL_SCHEMA_VERSION = "1.0"
 JOURNAL_WRITER_VERSION = "0.2.0"
@@ -54,6 +59,7 @@ _RECORD_TOKEN = object()
 _HEAD_TOKEN = object()
 _LOADED_TOKEN = object()
 _STORE_TOKEN = object()
+_RECOVERY_APPEND_TOKEN = object()
 
 
 def _error(code: str, message: str) -> ForgeError:
@@ -110,6 +116,14 @@ def _validated_reference(value: object) -> str:
     if not result.is_ok or result.unwrap().value != value:
         raise ValueError("relative path")
     return value
+
+
+def _portable_reference_key(value: str) -> str:
+    reference = _validated_reference(value)
+    return "/".join(
+        unicodedata.normalize("NFKC", component).casefold()
+        for component in reference.split("/")
+    )
 
 
 def _freeze(value: object) -> object:
@@ -306,6 +320,42 @@ class RollbackAction:
         ):
             raise ValueError("rollback identity")
 
+    @property
+    def action_digest(self) -> str:
+        """Bind one rollback ordinal to its exact immutable action."""
+
+        return hashlib.sha256(
+            _render(
+                {
+                    "action": self.action,
+                    "expected_identity": self.expected_identity,
+                    "relative_path": self.relative_path,
+                },
+                final_newline=False,
+            )
+        ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class JournalRollbackEvent:
+    action_index: int
+    action_digest: str
+    outcome: str | None = None
+    observed_identity: FileIdentity | None = None
+    recovery_reference: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.action_index) is not int
+            or self.action_index < 0
+            or not _valid_digest(self.action_digest)
+            or self.outcome not in {None, "quarantined", "retained"}
+            or not _valid_file_identity(self.observed_identity, optional=True)
+        ):
+            raise ValueError("rollback event")
+        if self.recovery_reference is not None:
+            _validated_reference(self.recovery_reference)
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedTransaction:
@@ -371,17 +421,15 @@ class PreparedTransaction:
                 key=lambda item: (item.role, item.relative_path),
             )
         )
-        rollback = tuple(
-            sorted(
-                self.rollback_actions,
-                key=lambda item: (item.action, item.relative_path),
-            )
-        )
+        rollback = self.rollback_actions
         if (
             len({(item.role, item.relative_path) for item in identities})
             != len(identities)
             or len({(item.role, item.relative_path) for item in owned}) != len(owned)
             or len({item.relative_path for item in rollback}) != len(rollback)
+            or len({_portable_reference_key(item.relative_path) for item in rollback})
+            != len(rollback)
+            or len(rollback) > _MAX_ROLLBACK_ACTIONS
             or not all(
                 any(
                     path.relative_path == action.relative_path
@@ -416,6 +464,8 @@ class PreparedTransaction:
             len(root_rollbacks) != 1
             or root_rollbacks[0].action != "quarantine-if-owned"
             or root_rollbacks[0].expected_identity != owned_roots[0].expected_identity
+            or rollback[-1] != root_rollbacks[0]
+            or any(action.action != "retain" for action in rollback[:-1])
         ):
             raise ValueError("persistent transaction rollback")
         if (
@@ -485,6 +535,8 @@ class JournalState(str, Enum):
     CONFIG_COMMITTED = "CONFIG_COMMITTED"
     RECEIPT_COMMITTED = "RECEIPT_COMMITTED"
     FINALIZED = "FINALIZED"
+    ROLLBACK_ACTION_INTENT = "ROLLBACK_ACTION_INTENT"
+    ROLLBACK_ACTION_COMPLETED = "ROLLBACK_ACTION_COMPLETED"
     ROLLED_BACK = "ROLLED_BACK"
     RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 
@@ -511,6 +563,9 @@ _PRE_COMMIT = frozenset(
         JournalState.COMMIT_INTENT,
     }
 )
+_MAX_ROLLBACK_ACTIONS = (
+    LIMIT_POLICY.value("journal_records") - len(_PRE_COMMIT) - 1
+) // 2
 _TERMINAL = frozenset(
     {
         JournalState.FINALIZED,
@@ -530,6 +585,7 @@ class JournalTransition:
     cache_result: JournalPathIdentity | None = None
     config_result: JournalConfigIdentity | None = None
     receipt_result: JournalPathIdentity | None = None
+    rollback_event: JournalRollbackEvent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, JournalState):
@@ -549,6 +605,7 @@ class JournalTransition:
                 (self.cache_result, JournalPathIdentity),
                 (self.config_result, JournalConfigIdentity),
                 (self.receipt_result, JournalPathIdentity),
+                (self.rollback_event, JournalRollbackEvent),
             )
         ):
             raise ValueError("journal transition result")
@@ -573,6 +630,7 @@ class JournalRecord:
     verification_evidence_digest: str | None
     config_recovery: Mapping[str, object] | None
     committed_config: JournalConfigIdentity | None
+    rollback_event: JournalRollbackEvent | None
     record: Mapping[str, object]
     raw_size: int
     _binding_digest: str
@@ -592,6 +650,7 @@ class JournalRecord:
         verification_evidence_digest: str | None,
         config_recovery: Mapping[str, object] | None,
         committed_config: JournalConfigIdentity | None,
+        rollback_event: JournalRollbackEvent | None,
         record: Mapping[str, object],
         raw_size: int,
         _token: object,
@@ -613,6 +672,7 @@ class JournalRecord:
         )
         object.__setattr__(self, "config_recovery", config_recovery)
         object.__setattr__(self, "committed_config", committed_config)
+        object.__setattr__(self, "rollback_event", rollback_event)
         object.__setattr__(self, "record", record)
         object.__setattr__(self, "raw_size", raw_size)
         _require_journal_record(self)
@@ -758,6 +818,7 @@ _RECORD_KEYS = frozenset(
         "prepared_receipt",
         "previous_record_digest",
         "record_digest",
+        "rollback_event",
         "rollback_actions",
         "runner_provenance",
         "schema_digest",
@@ -837,6 +898,18 @@ def _rollback_projection(value: RollbackAction) -> Mapping[str, object]:
     }
 
 
+def _rollback_event_projection(
+    value: JournalRollbackEvent,
+) -> Mapping[str, object]:
+    return {
+        "action_digest": value.action_digest,
+        "action_index": value.action_index,
+        "observed_identity": value.observed_identity,
+        "outcome": value.outcome,
+        "recovery_reference": value.recovery_reference,
+    }
+
+
 def _prepared_projection(value: PreparedTransaction) -> Mapping[str, object]:
     return {
         "before_config": _config_projection(value.before_config),
@@ -876,8 +949,12 @@ def _journal_record_binding_projection(
         "prepared": _prepared_projection(value.prepared),
         "previous_record_digest": value.previous_record_digest,
         "raw_size": value.raw_size,
-        "record": value.record,
         "record_digest": value.record_digest,
+        "rollback_event": (
+            None
+            if value.rollback_event is None
+            else _rollback_event_projection(value.rollback_event)
+        ),
         "sequence": value.sequence,
         "state": value.state.value,
         "transaction_id": value.transaction_id,
@@ -912,6 +989,10 @@ def _require_journal_record(value: JournalRecord) -> None:
         or (
             value.committed_config is not None
             and type(value.committed_config) is not JournalConfigIdentity
+        )
+        or (
+            value.rollback_event is not None
+            and type(value.rollback_event) is not JournalRollbackEvent
         )
         or type(value.record) is not MappingProxyType
         or set(value.record) != _RECORD_KEYS
@@ -962,14 +1043,32 @@ def _require_journal_record(value: JournalRecord) -> None:
     committed_config = (
         None if committed_value is None else _parse_config(committed_value)
     )
-    if _json_value(value.config_recovery) != _json_value(config_recovery) or (
-        None
-        if value.committed_config is None
-        else _json_value(_config_projection(value.committed_config))
-    ) != (
-        None
-        if committed_config is None
-        else _json_value(_config_projection(committed_config))
+    rollback_value = value.record["rollback_event"]
+    rollback_event = (
+        None if rollback_value is None else _parse_rollback_event(rollback_value)
+    )
+    if (
+        _json_value(value.config_recovery) != _json_value(config_recovery)
+        or (
+            None
+            if value.committed_config is None
+            else _json_value(_config_projection(value.committed_config))
+        )
+        != (
+            None
+            if committed_config is None
+            else _json_value(_config_projection(committed_config))
+        )
+        or (
+            None
+            if value.rollback_event is None
+            else _json_value(_rollback_event_projection(value.rollback_event))
+        )
+        != (
+            None
+            if rollback_event is None
+            else _json_value(_rollback_event_projection(rollback_event))
+        )
     ):
         raise ValueError("journal transition evidence")
 
@@ -1047,6 +1146,7 @@ def _record_projection(
         "minimum_reader_version": JOURNAL_MINIMUM_READER_VERSION,
         "policy_version": JOURNAL_POLICY_VERSION,
         "previous_record_digest": previous_record_digest,
+        "rollback_event": None,
         "schema_digest": JOURNAL_SCHEMA_DIGEST,
         "schema_version": JOURNAL_SCHEMA_VERSION,
         "sequence": sequence,
@@ -1145,6 +1245,38 @@ def _parse_rollback(value: object) -> RollbackAction:
     )
 
 
+def _parse_rollback_event(value: object) -> JournalRollbackEvent:
+    record = _exact_mapping(
+        value,
+        frozenset(
+            {
+                "action_digest",
+                "action_index",
+                "observed_identity",
+                "outcome",
+                "recovery_reference",
+            }
+        ),
+        field="rollback event",
+    )
+    outcome = record["outcome"]
+    recovery_reference = record["recovery_reference"]
+    if outcome is not None and type(outcome) is not str:
+        raise ValueError("rollback event outcome")
+    if recovery_reference is not None and type(recovery_reference) is not str:
+        raise ValueError("rollback recovery reference")
+    return JournalRollbackEvent(
+        action_index=cast(int, record["action_index"]),
+        action_digest=cast(str, record["action_digest"]),
+        outcome=outcome,
+        observed_identity=_decoded_identity(
+            record["observed_identity"],
+            optional=True,
+        ),
+        recovery_reference=recovery_reference,
+    )
+
+
 def _parse_sequence(value: object, parser: Any) -> tuple[Any, ...]:
     if not isinstance(value, (list, tuple)) or not value:
         raise ValueError("journal sequence")
@@ -1221,9 +1353,269 @@ def _transition_allowed(before: JournalState, after: JournalState) -> bool:
         return False
     if _FORWARD.get(before) is after:
         return True
+    if after is JournalState.ROLLBACK_ACTION_INTENT:
+        return before in _PRE_COMMIT or before is JournalState.ROLLBACK_ACTION_COMPLETED
+    if after is JournalState.ROLLBACK_ACTION_COMPLETED:
+        return before is JournalState.ROLLBACK_ACTION_INTENT
     if after is JournalState.ROLLED_BACK:
-        return before in _PRE_COMMIT
+        return before is JournalState.ROLLBACK_ACTION_COMPLETED
     return after is JournalState.RECOVERY_REQUIRED
+
+
+def _expected_quarantine_reference(
+    action: RollbackAction,
+    *,
+    transaction_id: str,
+) -> str:
+    relative = _validated_reference(action.relative_path)
+    parent, separator, _leaf = relative.rpartition("/")
+    destination = (
+        ".zagrosi-quarantine-"
+        + hashlib.sha256(f"{transaction_id}\0{relative}".encode()).hexdigest()[:24]
+    )
+    recovery = f"{parent}/{destination}" if separator else destination
+    return _validated_reference(recovery)
+
+
+def _rollback_transition_event_valid(
+    previous: JournalRecord,
+    state: JournalState,
+    event: JournalRollbackEvent | None,
+) -> bool:
+    actions = previous.prepared.rollback_actions
+    if state is JournalState.ROLLBACK_ACTION_INTENT:
+        if event is None or event.outcome is not None:
+            return False
+        if event.observed_identity is not None or event.recovery_reference is not None:
+            return False
+        if previous.state in _PRE_COMMIT:
+            expected_index = 0
+        elif (
+            previous.state is JournalState.ROLLBACK_ACTION_COMPLETED
+            and previous.rollback_event is not None
+        ):
+            expected_index = previous.rollback_event.action_index + 1
+        else:
+            return False
+        return (
+            expected_index < len(actions)
+            and event.action_index == expected_index
+            and hmac.compare_digest(
+                event.action_digest,
+                actions[expected_index].action_digest,
+            )
+        )
+    if state is JournalState.ROLLBACK_ACTION_COMPLETED:
+        intent = previous.rollback_event
+        if (
+            event is None
+            or intent is None
+            or event.action_index != intent.action_index
+            or not hmac.compare_digest(event.action_digest, intent.action_digest)
+            or event.action_index >= len(actions)
+        ):
+            return False
+        action = actions[event.action_index]
+        if not hmac.compare_digest(event.action_digest, action.action_digest):
+            return False
+        if action.action == "retain":
+            return (
+                event.outcome == "retained"
+                and event.observed_identity is None
+                and event.recovery_reference is None
+            )
+        return (
+            event.outcome == "quarantined"
+            and event.observed_identity == action.expected_identity
+            and event.recovery_reference
+            == _expected_quarantine_reference(
+                action,
+                transaction_id=previous.transaction_id,
+            )
+        )
+    if state is JournalState.ROLLED_BACK:
+        completed = previous.rollback_event
+        return (
+            event is None
+            and completed is not None
+            and completed.action_index == len(actions) - 1
+        )
+    return event is None
+
+
+def _rollback_event_advances(
+    previous: JournalRecord,
+    current: JournalRecord,
+) -> bool:
+    return _rollback_transition_event_valid(
+        previous,
+        current.state,
+        current.rollback_event,
+    )
+
+
+def _transition_requires_quarantined_recovery(
+    previous: JournalRecord,
+    state: JournalState,
+    event: JournalRollbackEvent | None,
+) -> bool:
+    root_index = len(previous.prepared.rollback_actions) - 1
+    root_action = previous.prepared.rollback_actions[root_index]
+    if root_action.action != "quarantine-if-owned":
+        return False
+    if state is JournalState.ROLLBACK_ACTION_COMPLETED:
+        return event is not None and event.action_index == root_index
+    previous_event = previous.rollback_event
+    return (
+        state is JournalState.ROLLED_BACK
+        and previous.state is JournalState.ROLLBACK_ACTION_COMPLETED
+        and previous_event is not None
+        and previous_event.action_index == root_index
+    )
+
+
+def _rollback_completion_event(
+    action: RollbackAction,
+    *,
+    action_index: int,
+    transaction_id: str,
+) -> JournalRollbackEvent:
+    if action.action == "retain":
+        return JournalRollbackEvent(
+            action_index=action_index,
+            action_digest=action.action_digest,
+            outcome="retained",
+        )
+    return JournalRollbackEvent(
+        action_index=action_index,
+        action_digest=action.action_digest,
+        outcome="quarantined",
+        observed_identity=action.expected_identity,
+        recovery_reference=_expected_quarantine_reference(
+            action,
+            transaction_id=transaction_id,
+        ),
+    )
+
+
+def _next_rollback_record_projection(
+    current: Mapping[str, object],
+    *,
+    state: JournalState,
+    event: JournalRollbackEvent | None,
+) -> dict[str, object]:
+    domain = {key: value for key, value in current.items() if key != "record_digest"}
+    embedded_digest = current.get("record_digest")
+    current_digest = (
+        embedded_digest
+        if _valid_digest(embedded_digest)
+        else hashlib.sha256(_render(domain, final_newline=False)).hexdigest()
+    )
+    sequence = domain.get("sequence")
+    if type(sequence) is not int:
+        raise _corrupt("The transaction journal sequence is invalid.")
+    domain.update(
+        {
+            "previous_record_digest": current_digest,
+            "rollback_event": (
+                None if event is None else _rollback_event_projection(event)
+            ),
+            "sequence": sequence + 1,
+            "state": state.value,
+        }
+    )
+    return domain
+
+
+def _required_rollback_suffix_bytes(
+    record: Mapping[str, object],
+    prepared: PreparedTransaction,
+) -> int:
+    try:
+        state = JournalState(cast(str, record["state"]))
+        actions = prepared.rollback_actions
+        if state in _PRE_COMMIT:
+            action_index = 0
+            completion_pending = False
+        elif state is JournalState.ROLLBACK_ACTION_INTENT:
+            event = _parse_rollback_event(record["rollback_event"])
+            action_index = event.action_index
+            completion_pending = True
+        elif state is JournalState.ROLLBACK_ACTION_COMPLETED:
+            event = _parse_rollback_event(record["rollback_event"])
+            action_index = event.action_index + 1
+            completion_pending = False
+        else:
+            return 0
+        if action_index < 0 or action_index > len(actions):
+            raise ValueError("rollback suffix index")
+
+        current = record
+        required = 0
+
+        def append_projection(
+            next_state: JournalState,
+            next_event: JournalRollbackEvent | None,
+        ) -> None:
+            nonlocal current, required
+            current = _next_rollback_record_projection(
+                current,
+                state=next_state,
+                event=next_event,
+            )
+            raw = _seal_record(current)
+            if len(raw) > LIMIT_POLICY.value("journal_record_bytes"):
+                raise _limit()
+            required += len(raw)
+
+        if completion_pending:
+            append_projection(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                _rollback_completion_event(
+                    actions[action_index],
+                    action_index=action_index,
+                    transaction_id=prepared.transaction_id,
+                ),
+            )
+            action_index += 1
+        while action_index < len(actions):
+            action = actions[action_index]
+            append_projection(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                JournalRollbackEvent(
+                    action_index=action_index,
+                    action_digest=action.action_digest,
+                ),
+            )
+            append_projection(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                _rollback_completion_event(
+                    action,
+                    action_index=action_index,
+                    transaction_id=prepared.transaction_id,
+                ),
+            )
+            action_index += 1
+        append_projection(JournalState.ROLLED_BACK, None)
+        return required
+    except ForgeError:
+        raise
+    except (KeyError, TypeError, ValueError):
+        raise _corrupt("The transaction rollback reserve is invalid.") from None
+
+
+def _require_rollback_capacity(
+    record: Mapping[str, object],
+    prepared: PreparedTransaction,
+    *,
+    current_size: int,
+    raw_size: int,
+) -> None:
+    required = _required_rollback_suffix_bytes(record, prepared)
+    if raw_size > LIMIT_POLICY.value(
+        "journal_record_bytes"
+    ) or current_size + raw_size + required > LIMIT_POLICY.value("journal_total_bytes"):
+        raise _limit()
 
 
 def _identities_advance(
@@ -1342,6 +1734,8 @@ def _state_evidence_advances(
     previous: JournalRecord,
     current: JournalRecord,
 ) -> bool:
+    if not _rollback_event_advances(previous, current):
+        return False
     before = previous.identities
     after = current.identities
     if current.state is JournalState.SOURCE_PUBLISHED:
@@ -1549,6 +1943,11 @@ def _decode_record(
             if record["committed_config"] is None
             else _parse_config(record["committed_config"])
         )
+        rollback_event = (
+            None
+            if record["rollback_event"] is None
+            else _parse_rollback_event(record["rollback_event"])
+        )
         if state is JournalState.PREPARED and config_recovery is not None:
             raise ValueError("early config recovery")
         if _json_value(_prepared_projection(prepared)) != {
@@ -1576,6 +1975,7 @@ def _decode_record(
             verification_evidence_digest=prepared.verification_evidence_digest,
             config_recovery=config_recovery,
             committed_config=committed_config,
+            rollback_event=rollback_event,
             record=cast(Mapping[str, object], _freeze(record)),
             raw_size=len(raw),
             _token=_RECORD_TOKEN,
@@ -1600,6 +2000,7 @@ def _records_form_chain(records: tuple[JournalRecord, ...]) -> bool:
         or records[0].verification_evidence_digest is not None
         or records[0].config_recovery is not None
         or records[0].committed_config is not None
+        or records[0].rollback_event is not None
     ):
         return False
     static_keys = _RECORD_KEYS - {
@@ -1608,6 +2009,7 @@ def _records_form_chain(records: tuple[JournalRecord, ...]) -> bool:
         "config_recovery",
         "previous_record_digest",
         "record_digest",
+        "rollback_event",
         "sequence",
         "state",
         "verification_evidence_digest",
@@ -1661,6 +2063,8 @@ def _records_form_chain(records: tuple[JournalRecord, ...]) -> bool:
 class JournalStore:
     """A sealed journal writer bound to one persistent transaction capability."""
 
+    _access: TransactionJournalAccess | _QuarantinedRecoveryJournalWriter
+
     __slots__ = (
         "_access",
         "_access_digest",
@@ -1670,6 +2074,7 @@ class JournalStore:
         "_descriptor",
         "_filesystem_guard",
         "_path",
+        "_recovery_only",
         "_seal",
         "_writer",
     )
@@ -1755,13 +2160,110 @@ class JournalStore:
         self._filesystem_guard = journal_access._filesystem_guard
         self._path = path
         self._writer = writer
+        self._recovery_only = False
         self._closed = False
         self._seal = _STORE_TOKEN
+
+    @classmethod
+    def from_quarantined_recovery(cls, access: object) -> JournalStore:
+        """Consume exact authority for the final quarantined rollback records."""
+
+        from . import ownership as _ownership
+
+        if (
+            cls is not JournalStore
+            or type(access) is not _ownership.QuarantinedRecoveryJournalAccess
+        ):
+            raise TypeError(
+                "Quarantined recovery requires exact recovery journal access"
+            )
+        recovery_access = access
+        binding = recovery_access.binding
+        if (
+            not _ownership._persistent_binding_invariants(binding)
+            or recovery_access.location
+            is not _ownership.TransactionLocation.QUARANTINED
+            or recovery_access.journal_relative != binding.quarantine_relative
+        ):
+            raise TypeError("Quarantined recovery journal binding does not match")
+        schema = (
+            resources.files("zagrosi_forge.install")
+            .joinpath(_SCHEMA_RESOURCE)
+            .read_bytes()
+        )
+        if hashlib.sha256(schema).hexdigest() != JOURNAL_SCHEMA_DIGEST:
+            raise _unsupported()
+
+        transferred: _ownership._QuarantinedRecoveryJournalWriter | None = None
+        writer: _paths.OwnedDirectoryWriter | None = None
+        descriptor = 0 if os.name == "nt" else -1
+        try:
+            recovery_access._require_recovery_journal_access()
+            transferred = recovery_access._take_recovery_writer()
+            transferred._require_recovery_journal_access()
+            writer = transferred._take_directory_writer()
+            writer._require_open()
+            descriptor = transferred._duplicate_journal_descriptor(write=True)
+            binding_projection = cast(
+                Mapping[str, object],
+                _freeze(_json_value(binding.canonical_projection())),
+            )
+            binding_digest = hashlib.sha256(
+                _render(binding_projection, final_newline=False)
+            ).hexdigest()
+            access_digest = hashlib.sha256(
+                _render(
+                    {
+                        "binding_digest": binding_digest,
+                        "journal_relative": transferred.journal_relative,
+                        "location": transferred.location.value,
+                        "purpose": "quarantined-root-rollback-completion-v1",
+                        "transaction_id": binding.transaction_id,
+                    },
+                    final_newline=False,
+                )
+            ).hexdigest()
+            transferred._require_recovery_journal_access()
+            writer._require_open()
+        except BaseException:
+            if writer is not None:
+                writer.close()
+            if os.name == "nt":
+                if descriptor:
+                    _paths._windows_close(descriptor)
+            elif descriptor >= 0:
+                os.close(descriptor)
+            if transferred is not None:
+                transferred.close()
+            raise
+
+        store = cls.__new__(cls)
+        store._access = transferred
+        store._access_digest = access_digest
+        store._binding = binding_projection
+        store._binding_digest = binding_digest
+        store._descriptor = descriptor
+        store._filesystem_guard = transferred._filesystem_guard
+        store._path = None
+        store._writer = writer
+        store._recovery_only = True
+        store._closed = False
+        store._seal = _STORE_TOKEN
+        return store
 
     def _require_open(self, *, write: bool = False) -> None:
         if self._closed or self._seal is not _STORE_TOKEN:
             raise _corrupt("The transaction journal capability is closed.")
         try:
+            from . import ownership as _ownership
+
+            expected_access_type = (
+                _ownership._QuarantinedRecoveryJournalWriter
+                if self._recovery_only
+                else _ownership.TransactionJournalAccess
+            )
+            if type(self._access) is not expected_access_type:
+                raise _corrupt("The transaction journal authority changed.")
             self._access._require_journal_access(write=write)
             if self._writer is not None:
                 self._writer._require_open()
@@ -1817,8 +2319,6 @@ class JournalStore:
             raise _corrupt("The transaction journal sequence contains a gap.")
         if len(selected) > LIMIT_POLICY.value("journal_records"):
             raise _limit()
-        if len(selected) > len(JournalState):
-            raise _corrupt("The transaction journal contains too many transitions.")
         self._require_open()
         return tuple(name for _index, name in selected)
 
@@ -1992,6 +2492,50 @@ class JournalStore:
         _raw, observations = self._read_record_set()
         return observations
 
+    def _location_matches_rollback_progress(
+        self,
+        records: tuple[JournalRecord, ...],
+    ) -> bool:
+        from . import ownership as _ownership
+
+        if not records:
+            return True
+        prepared = records[0].prepared
+        root_index = len(prepared.rollback_actions) - 1
+        root_action = prepared.rollback_actions[root_index]
+        root_intent_observed = any(
+            record.state is JournalState.ROLLBACK_ACTION_INTENT
+            and record.rollback_event is not None
+            and record.rollback_event.action_index == root_index
+            and hmac.compare_digest(
+                record.rollback_event.action_digest,
+                root_action.action_digest,
+            )
+            for record in records
+        )
+        root_completion_observed = any(
+            record.state is JournalState.ROLLBACK_ACTION_COMPLETED
+            and record.rollback_event is not None
+            and record.rollback_event.action_index == root_index
+            and hmac.compare_digest(
+                record.rollback_event.action_digest,
+                root_action.action_digest,
+            )
+            for record in records
+        )
+        if self._access.location is _ownership.TransactionLocation.LIVE:
+            return (
+                self._access.journal_relative
+                == cast(str, self._binding["root_relative"])
+                and not root_completion_observed
+            )
+        return (
+            self._access.location is _ownership.TransactionLocation.QUARANTINED
+            and self._access.journal_relative
+            != cast(str, self._binding["root_relative"])
+            and root_intent_observed
+        )
+
     def _read_records(
         self,
     ) -> tuple[
@@ -2009,6 +2553,10 @@ class JournalStore:
         rendered = tuple(records)
         if rendered and not _records_form_chain(rendered):
             raise _corrupt("The transaction journal chain is invalid.")
+        if not self._location_matches_rollback_progress(rendered):
+            raise _corrupt(
+                "The transaction journal location conflicts with rollback progress."
+            )
         self._require_open()
         return rendered, observations
 
@@ -2108,6 +2656,11 @@ class JournalStore:
     def create_prepared(self, prepared: PreparedTransaction) -> JournalHead:
         """Publish and fsync the unique PREPARED record before other effects."""
 
+        if self._recovery_only:
+            raise _error(
+                "ownership.unowned",
+                "Quarantined recovery cannot create a transaction journal.",
+            )
         self._require_open(write=True)
         if type(prepared) is not PreparedTransaction:
             raise TypeError("create_prepared requires PreparedTransaction")
@@ -2125,12 +2678,40 @@ class JournalStore:
             previous_record_digest=_ZERO_DIGEST,
         )
         raw = _seal_record(record)
+        _require_rollback_capacity(
+            record,
+            prepared,
+            current_size=0,
+            raw_size=len(raw),
+        )
         self._publish(raw, sequence=0, current_size=0)
         return self.load().head
 
     def append(self, head: JournalHead, transition: JournalTransition) -> JournalHead:
+        """Append one general transition to a live transaction journal."""
+
+        if self._recovery_only:
+            raise _error(
+                "ownership.unowned",
+                "Quarantined recovery cannot append general journal transitions.",
+            )
+        return self._append(head, transition)
+
+    def _append(
+        self,
+        head: JournalHead,
+        transition: JournalTransition,
+        *,
+        _token: object | None = None,
+    ) -> JournalHead:
         """Append exactly one valid transition after revalidating the durable head."""
 
+        recovery_append = self._recovery_only and _token is _RECOVERY_APPEND_TOKEN
+        if self._recovery_only and not recovery_append:
+            raise _error(
+                "ownership.unowned",
+                "Quarantined recovery requires its restricted append authority.",
+            )
         self._require_open(write=True)
         if type(head) is not JournalHead or type(transition) is not JournalTransition:
             raise TypeError("append requires a loaded head and transition")
@@ -2141,6 +2722,19 @@ class JournalStore:
             or head.transaction_binding_digest != self._binding_digest
             or head != loaded.head
             or not _transition_allowed(current.state, transition.state)
+            or not _rollback_transition_event_valid(
+                current,
+                transition.state,
+                transition.rollback_event,
+            )
+            or (
+                not recovery_append
+                and _transition_requires_quarantined_recovery(
+                    current,
+                    transition.state,
+                    transition.rollback_event,
+                )
+            )
         ):
             raise _corrupt("The requested transaction journal transition is invalid.")
         prepared = _prepared_from_record(current.record)
@@ -2257,14 +2851,97 @@ class JournalStore:
                 "committed_config": committed_config,
                 "config_recovery": config_recovery,
                 "previous_record_digest": current.record_digest,
+                "rollback_event": (
+                    None
+                    if transition.rollback_event is None
+                    else _rollback_event_projection(transition.rollback_event)
+                ),
                 "sequence": current.sequence + 1,
                 "state": transition.state.value,
                 "verification_evidence_digest": evidence,
             }
         )
         raw = _seal_record(record)
+        _require_rollback_capacity(
+            record,
+            prepared,
+            current_size=loaded.byte_size,
+            raw_size=len(raw),
+        )
         self._publish(raw, sequence=current.sequence + 1, current_size=loaded.byte_size)
         return self.load().head
+
+    def append_recovery(
+        self,
+        head: JournalHead,
+        transition: JournalTransition,
+    ) -> JournalHead:
+        """Append only the final root-quarantine completion and terminal record."""
+
+        if not self._recovery_only:
+            raise _error(
+                "ownership.unowned",
+                "Live journal authority cannot use quarantined recovery append.",
+            )
+        self._require_open(write=True)
+        if type(head) is not JournalHead or type(transition) is not JournalTransition:
+            raise TypeError("append_recovery requires a loaded head and transition")
+        loaded = self.load()
+        current = loaded.records[-1]
+        root_index = len(current.prepared.rollback_actions) - 1
+        root_action = current.prepared.rollback_actions[root_index]
+        current_event = current.rollback_event
+        requested_event = transition.rollback_event
+        access_reference = self._access.journal_relative
+        binding_reference = self._binding.get("quarantine_relative")
+        exact_root = (
+            root_action.action == "quarantine-if-owned"
+            and root_action.relative_path
+            == f".zagrosi/transactions/{current.transaction_id}"
+            and access_reference == binding_reference
+        )
+        completion_allowed = (
+            current.state is JournalState.ROLLBACK_ACTION_INTENT
+            and transition.state is JournalState.ROLLBACK_ACTION_COMPLETED
+            and current_event is not None
+            and requested_event is not None
+            and exact_root
+            and current_event.action_index == root_index
+            and hmac.compare_digest(
+                current_event.action_digest,
+                root_action.action_digest,
+            )
+            and requested_event.action_index == root_index
+            and hmac.compare_digest(
+                requested_event.action_digest,
+                root_action.action_digest,
+            )
+            and requested_event.outcome == "quarantined"
+            and requested_event.observed_identity == root_action.expected_identity
+            and requested_event.recovery_reference == access_reference
+        )
+        terminal_allowed = (
+            current.state is JournalState.ROLLBACK_ACTION_COMPLETED
+            and transition.state is JournalState.ROLLED_BACK
+            and current_event is not None
+            and requested_event is None
+            and exact_root
+            and current_event.action_index == root_index
+            and hmac.compare_digest(
+                current_event.action_digest,
+                root_action.action_digest,
+            )
+            and current_event.outcome == "quarantined"
+            and current_event.observed_identity == root_action.expected_identity
+            and current_event.recovery_reference == access_reference
+        )
+        if not (completion_allowed or terminal_allowed):
+            raise _corrupt("The quarantined recovery journal transition is invalid.")
+        return self._append(
+            head,
+            transition,
+            _token=_RECOVERY_APPEND_TOKEN,
+        )
 
     def close(self) -> None:
         if self._closed:

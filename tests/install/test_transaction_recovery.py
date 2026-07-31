@@ -346,6 +346,105 @@ def _prepared(binding, *, effective_id: str = "zagrosi"):
     )
 
 
+def _prepared_with_ordered_rollback(binding):
+    return _prepared_with_rollback_action_count(binding, 2)
+
+
+def _prepared_with_rollback_action_count(binding, count: int):
+    from zagrosi_forge.install.journal import RollbackAction, TransactionOwnedPath
+
+    prepared = _prepared(binding)
+    snapshot = next(
+        path
+        for path in prepared.transaction_owned_paths
+        if path.role == "config-snapshot"
+    )
+    retained_paths = (
+        snapshot,
+        *(
+            TransactionOwnedPath(
+                role=f"rollback-slot-{index:02d}",
+                relative_path=(
+                    f"{binding.root_relative}/rollback-slot-{index:02d}.retained"
+                ),
+                expected_identity=None,
+            )
+            for index in range(1, count - 1)
+        ),
+    )
+    retained_actions = tuple(
+        RollbackAction(
+            action="retain",
+            relative_path=path.relative_path,
+            expected_identity=path.expected_identity,
+        )
+        for path in retained_paths
+    )
+    root_quarantine = next(
+        action
+        for action in prepared.rollback_actions
+        if action.relative_path == binding.root_relative
+    )
+    declared = retained_actions + (root_quarantine,)
+    additional_owned = retained_paths[1:]
+    return (
+        replace(
+            prepared,
+            transaction_owned_paths=(
+                prepared.transaction_owned_paths + additional_owned
+            ),
+            rollback_actions=declared,
+        ),
+        declared,
+    )
+
+
+def _rollback_intent(action, index: int):
+    from zagrosi_forge.install.journal import JournalRollbackEvent
+
+    return JournalRollbackEvent(
+        action_index=index,
+        action_digest=action.action_digest,
+    )
+
+
+def _rollback_completion(action, index: int, binding):
+    from zagrosi_forge.install.journal import JournalRollbackEvent
+
+    if action.action == "retain":
+        return JournalRollbackEvent(
+            action_index=index,
+            action_digest=action.action_digest,
+            outcome="retained",
+        )
+    return JournalRollbackEvent(
+        action_index=index,
+        action_digest=action.action_digest,
+        outcome="quarantined",
+        observed_identity=action.expected_identity,
+        recovery_reference=binding.quarantine_relative,
+    )
+
+
+def _append_rollback_pair(store, head, action, index: int, binding):
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+
+    head = store.append(
+        head,
+        JournalTransition(
+            JournalState.ROLLBACK_ACTION_INTENT,
+            rollback_event=_rollback_intent(action, index),
+        ),
+    )
+    return store.append(
+        head,
+        JournalTransition(
+            JournalState.ROLLBACK_ACTION_COMPLETED,
+            rollback_event=_rollback_completion(action, index, binding),
+        ),
+    )
+
+
 def _source_result(prepared, *, identity=(20, 31)):
     return replace(
         next(item for item in prepared.identities if item.role == "source-generation"),
@@ -694,7 +793,17 @@ def test_quarantined_journal_reopens_read_only_without_mutation(tmp_path: Path) 
     access = None
     reopened_store = None
     try:
-        head = store.create_prepared(_prepared(binding))
+        prepared = _prepared(binding)
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+        head = store.create_prepared(prepared)
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
         store.close()
 
         live_rebound = rebind_persistent_transaction(owned, binding=binding).unwrap()
@@ -830,6 +939,7 @@ def test_journal_record_has_closed_complete_v1_projection(tmp_path: Path) -> Non
             "prepared_receipt",
             "previous_record_digest",
             "record_digest",
+            "rollback_event",
             "rollback_actions",
             "runner_provenance",
             "schema_digest",
@@ -1793,14 +1903,18 @@ def test_loaded_journal_rejects_forged_decoded_rollback_authority(
             expected_identity=(99, 100),
         )
         foreign_action = RollbackAction(
-            action="quarantine-if-owned",
+            action="retain",
             relative_path=foreign_path.relative_path,
             expected_identity=foreign_path.expected_identity,
         )
         forged = replace(
             prepared,
             transaction_owned_paths=prepared.transaction_owned_paths + (foreign_path,),
-            rollback_actions=prepared.rollback_actions + (foreign_action,),
+            rollback_actions=(
+                *prepared.rollback_actions[:-1],
+                foreign_action,
+                prepared.rollback_actions[-1],
+            ),
         )
 
         with pytest.raises(TypeError):
@@ -1923,6 +2037,33 @@ def test_actual_journal_quota_excess_is_stable_and_preserves_all(
             )
             == before
         )
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_prepared_reserves_complete_rollback_wal_before_publication(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_rollback_action_count(binding, 12)
+        prepared = replace(
+            prepared,
+            runner_provenance=replace(
+                prepared.runner_provenance,
+                origin="x" * 400_000,
+            ),
+        )
+
+        with pytest.raises(ForgeError) as raised:
+            store.create_prepared(prepared)
+
+        assert raised.value.code == "journal.limit_exceeded"
+        assert not tuple(directory.glob("journal*"))
     finally:
         store.close()
         proof.close()
@@ -2519,6 +2660,7 @@ def test_recovery_plan_rejects_missing_transaction_root_rollback_authority(
                 disposition=plan.disposition,
                 transaction_ids=plan.transaction_ids,
                 rollback_actions=(retain_only,),
+                next_action_index=plan.next_action_index,
                 error_code=plan.error_code,
                 _token=recovery._PLAN_TOKEN,
             )
@@ -2560,7 +2702,11 @@ def test_recovery_preserves_valid_internal_receipt_reference_domain(
         prepared = replace(
             prepared,
             transaction_owned_paths=prepared.transaction_owned_paths + (retained,),
-            rollback_actions=prepared.rollback_actions + (retain,),
+            rollback_actions=(
+                *prepared.rollback_actions[:-1],
+                retain,
+                prepared.rollback_actions[-1],
+            ),
         )
         store.create_prepared(prepared)
 
@@ -2743,7 +2889,11 @@ def test_recovery_observation_digest_binds_transaction_location(
 ) -> None:
     import zagrosi_forge.install.recovery as recovery
     from zagrosi_forge.install.contracts import ForgeError
-    from zagrosi_forge.install.journal import load_pending
+    from zagrosi_forge.install.journal import (
+        JournalState,
+        JournalTransition,
+        load_pending,
+    )
     from zagrosi_forge.install.lock import acquire_install_lock
     from zagrosi_forge.install.ownership import (
         discover_pending_transactions,
@@ -2772,7 +2922,18 @@ def test_recovery_observation_digest_binds_transaction_location(
             owned_root=owned,
         )
         prepared = _bind_prepared_to_current_config(_prepared(binding), current)
-        store.create_prepared(prepared)
+        head = store.create_prepared(prepared)
+        root_action = prepared.rollback_actions[-1]
+        store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(
+                    root_action,
+                    len(prepared.rollback_actions) - 1,
+                ),
+            ),
+        )
         live_snapshot = observe_recovery_snapshot(
             authority=authority,
             owned_root=owned,
@@ -3928,6 +4089,1597 @@ def test_locked_recovery_rejects_mismatched_authority_before_lock_creation(
                 timeout_seconds=0.1,
             )
         assert not lock_path.exists()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_persistent_transaction_quarantine_rename_is_durable_before_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    rebound = None
+    path = None
+    ticket = None
+    events: list[str] = []
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        store.close()
+        proof.close()
+
+        rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert rebound.claim is not None
+        path = authority.prove_descendant(
+            owned,
+            rebound.claim.relative,
+            expected_depth=3,
+        ).unwrap()
+        cleanup = ownership.prove_transaction_owned(
+            path,
+            claim=rebound.claim,
+        ).unwrap()
+
+        if os.name == "nt":
+            durable_rename = ownership._durable_windows_directory_rename
+
+            def record_durable_rename(*args, **kwargs) -> None:
+                durable_rename(*args, **kwargs)
+                events.extend(("rename", "flush"))
+
+            monkeypatch.setattr(
+                ownership,
+                "_durable_windows_directory_rename",
+                record_durable_rename,
+            )
+        else:
+            exclusive_rename = ownership._exclusive_rename
+            fsync = ownership.os.fsync
+
+            def record_rename(*args, **kwargs) -> None:
+                exclusive_rename(*args, **kwargs)
+                events.append("rename")
+
+            def record_fsync(descriptor: int) -> None:
+                fsync(descriptor)
+                events.append("flush")
+
+            monkeypatch.setattr(ownership, "_exclusive_rename", record_rename)
+            monkeypatch.setattr(ownership.os, "fsync", record_fsync)
+
+        ticket = ownership.quarantine_owned(
+            cleanup,
+            transaction_id=prepared.transaction_id,
+        ).unwrap()
+
+        assert events == ["rename", "flush"]
+        assert ticket.recovery_reference == binding.quarantine_relative
+    finally:
+        if ticket is not None:
+            ticket.close()
+        if path is not None:
+            path.close()
+        if rebound is not None:
+            rebound.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_quarantine_flush_failure_retains_exact_recovery_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    rebound = None
+    path = None
+    try:
+        prepared = _prepared(binding)
+        store.create_prepared(prepared)
+        store.close()
+        proof.close()
+
+        rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert rebound.claim is not None
+        path = authority.prove_descendant(
+            owned,
+            rebound.claim.relative,
+            expected_depth=3,
+        ).unwrap()
+        cleanup = ownership.prove_transaction_owned(
+            path,
+            claim=rebound.claim,
+        ).unwrap()
+
+        def fail_flush(*_args: object) -> None:
+            raise OSError("injected quarantine flush failure")
+
+        if os.name == "nt":
+            monkeypatch.setattr(
+                ownership,
+                "_windows_flush_directory_binding",
+                fail_flush,
+            )
+        else:
+            monkeypatch.setattr(ownership.os, "fsync", fail_flush)
+
+        result = ownership.quarantine_owned(
+            cleanup,
+            transaction_id=prepared.transaction_id,
+        )
+
+        assert not result.is_ok
+        assert result.error is not None
+        assert result.error.code == "ownership.quarantine_conflict"
+        assert result.error.recovery_instructions == (binding.quarantine_relative,)
+        assert (directory.parents[2] / binding.quarantine_relative).is_dir()
+    finally:
+        if path is not None:
+            path.close()
+        if rebound is not None:
+            rebound.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_prepared_preserves_declared_rollback_order(tmp_path: Path) -> None:
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, declared = _prepared_with_ordered_rollback(binding)
+
+        assert prepared.rollback_actions == declared
+        assert prepared.rollback_actions[-1].relative_path == binding.root_relative
+        assert prepared.rollback_actions[-1].action == "quarantine-if-owned"
+        assert not tuple(directory.glob("journal*"))
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_prepared_rejects_transaction_root_quarantine_before_final_action(
+    tmp_path: Path,
+) -> None:
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, declared = _prepared_with_ordered_rollback(binding)
+
+        with pytest.raises(ValueError, match="persistent transaction rollback"):
+            replace(
+                prepared,
+                rollback_actions=(declared[-1],) + declared[:-1],
+            )
+
+        assert not tuple(directory.glob("journal*"))
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_prepared_rejects_non_root_quarantine_rollback_action(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import RollbackAction, TransactionOwnedPath
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        candidate = TransactionOwnedPath(
+            role="candidate-stage",
+            relative_path=f"{binding.root_relative}/candidate-stage",
+            expected_identity=(binding.transaction_identity[0], 987654),
+        )
+        action = RollbackAction(
+            action="quarantine-if-owned",
+            relative_path=candidate.relative_path,
+            expected_identity=candidate.expected_identity,
+        )
+
+        with pytest.raises(ValueError, match="persistent transaction rollback"):
+            replace(
+                prepared,
+                transaction_owned_paths=(
+                    *prepared.transaction_owned_paths,
+                    candidate,
+                ),
+                rollback_actions=(action, prepared.rollback_actions[-1]),
+            )
+
+        assert not tuple(directory.glob("journal*"))
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_rollback_completion_requires_matching_durable_intent(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_ordered_rollback(binding)
+        head = store.create_prepared(prepared)
+        action = prepared.rollback_actions[0]
+
+        with pytest.raises(ForgeError) as raised:
+            store.append(
+                head,
+                JournalTransition(
+                    JournalState.ROLLBACK_ACTION_COMPLETED,
+                    rollback_event=_rollback_completion(action, 0, binding),
+                ),
+            )
+
+        assert raised.value.code == "journal.corrupt"
+        assert not (directory / "journal-00000001.json").exists()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_live_journal_cannot_claim_final_root_quarantine_completion(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+        head = store.create_prepared(prepared)
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
+        before = tuple(
+            (path.name, path.read_bytes())
+            for path in sorted(directory.glob("journal*"))
+        )
+
+        with pytest.raises(ForgeError) as raised:
+            store.append(
+                head,
+                JournalTransition(
+                    JournalState.ROLLBACK_ACTION_COMPLETED,
+                    rollback_event=_rollback_completion(
+                        root_action,
+                        root_index,
+                        binding,
+                    ),
+                ),
+            )
+
+        assert raised.value.code == "journal.corrupt"
+        assert (
+            tuple(
+                (path.name, path.read_bytes())
+                for path in sorted(directory.glob("journal*"))
+            )
+            == before
+        )
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_live_private_append_cannot_enable_quarantined_recovery(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+        head = store.create_prepared(prepared)
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
+        before = tuple(
+            (path.name, path.read_bytes())
+            for path in sorted(directory.glob("journal*"))
+        )
+
+        with pytest.raises(TypeError):
+            store._append(
+                head,
+                JournalTransition(
+                    JournalState.ROLLBACK_ACTION_COMPLETED,
+                    rollback_event=_rollback_completion(
+                        root_action,
+                        root_index,
+                        binding,
+                    ),
+                ),
+                quarantined_recovery=True,  # type: ignore[call-arg]
+            )
+
+        assert (
+            tuple(
+                (path.name, path.read_bytes())
+                for path in sorted(directory.glob("journal*"))
+            )
+            == before
+        )
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_live_journal_rejects_resealed_final_root_completion(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.journal as journal
+    from zagrosi_forge.install.contracts import ForgeError
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+        head = store.create_prepared(prepared)
+        store.append(
+            head,
+            journal.JournalTransition(
+                journal.JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
+        intent = json.loads((directory / "journal-00000001.json").read_bytes())
+        completion = {
+            key: value for key, value in intent.items() if key != "record_digest"
+        }
+        completion.update(
+            {
+                "previous_record_digest": intent["record_digest"],
+                "rollback_event": journal._rollback_event_projection(
+                    _rollback_completion(
+                        root_action,
+                        root_index,
+                        binding,
+                    )
+                ),
+                "sequence": 2,
+                "state": journal.JournalState.ROLLBACK_ACTION_COMPLETED.value,
+            }
+        )
+        _write_private_file(
+            directory,
+            "journal-00000002.json",
+            journal._seal_record(completion),
+        )
+        before = tuple(
+            (path.name, path.read_bytes())
+            for path in sorted(directory.glob("journal*"))
+        )
+
+        with pytest.raises(ForgeError) as raised:
+            store.load()
+
+        assert raised.value.code == "journal.corrupt"
+        assert (
+            tuple(
+                (path.name, path.read_bytes())
+                for path in sorted(directory.glob("journal*"))
+            )
+            == before
+        )
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_canonical_quarantine_requires_durable_root_intent(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import JournalStore
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    live_rebound = None
+    path = None
+    quarantine_ticket = None
+    quarantine_rebound = None
+    quarantined_store = None
+    access = None
+    try:
+        store.create_prepared(_prepared(binding))
+        store.close()
+        proof.close()
+
+        live_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert live_rebound.claim is not None
+        path = authority.prove_descendant(
+            owned,
+            live_rebound.claim.relative,
+            expected_depth=3,
+        ).unwrap()
+        cleanup = ownership.prove_transaction_owned(
+            path,
+            claim=live_rebound.claim,
+        ).unwrap()
+        quarantine_ticket = ownership.quarantine_owned(
+            cleanup,
+            transaction_id=binding.transaction_id,
+        ).unwrap()
+        quarantine_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        access = ownership.open_transaction_journal_access(
+            owned,
+            quarantine_rebound,
+        ).unwrap()
+        quarantined_store = JournalStore(access)
+        access = None
+
+        with pytest.raises(ForgeError) as raised:
+            quarantined_store.load()
+
+        assert raised.value.code == "journal.corrupt"
+    finally:
+        if quarantined_store is not None:
+            quarantined_store.close()
+        elif access is not None:
+            access.close()
+        if path is not None:
+            path.close()
+        if live_rebound is not None:
+            live_rebound.close()
+        if quarantine_rebound is not None:
+            quarantine_rebound.close()
+        if quarantine_ticket is not None:
+            quarantine_ticket.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("gap", "duplicate", "wrong-digest", "reordered-action"),
+)
+def test_rollback_wal_rejects_noncontiguous_or_unbound_progress(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import (
+        JournalRollbackEvent,
+        JournalState,
+        JournalTransition,
+    )
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_ordered_rollback(binding)
+        head = store.create_prepared(prepared)
+        actions = prepared.rollback_actions
+
+        if corruption == "duplicate":
+            head = _append_rollback_pair(store, head, actions[0], 0, binding)
+            event = _rollback_completion(actions[0], 0, binding)
+            state = JournalState.ROLLBACK_ACTION_COMPLETED
+            rejected_sequence = 3
+        elif corruption == "gap":
+            event = _rollback_intent(actions[1], 1)
+            state = JournalState.ROLLBACK_ACTION_INTENT
+            rejected_sequence = 1
+        elif corruption == "reordered-action":
+            event = _rollback_intent(actions[1], 0)
+            state = JournalState.ROLLBACK_ACTION_INTENT
+            rejected_sequence = 1
+        else:
+            action_digest = actions[0].action_digest
+            wrong_digest = ("0" if action_digest[0] != "0" else "1") + action_digest[1:]
+            event = JournalRollbackEvent(
+                action_index=0,
+                action_digest=wrong_digest,
+            )
+            state = JournalState.ROLLBACK_ACTION_INTENT
+            rejected_sequence = 1
+
+        with pytest.raises(ForgeError) as raised:
+            store.append(
+                head,
+                JournalTransition(state, rollback_event=event),
+            )
+
+        assert raised.value.code == "journal.corrupt"
+        assert not (directory / f"journal-{rejected_sequence:08d}.json").exists()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.parametrize(
+    ("changed", "value"),
+    (
+        ("outcome", "retained"),
+        ("observed_identity", (91, 92)),
+        ("recovery_reference", ".zagrosi/quarantine/forged"),
+    ),
+)
+def test_rollback_intent_rejects_completion_evidence(
+    tmp_path: Path,
+    changed: str,
+    value: object,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import (
+        JournalRollbackEvent,
+        JournalState,
+        JournalTransition,
+    )
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_ordered_rollback(binding)
+        head = store.create_prepared(prepared)
+        action = prepared.rollback_actions[0]
+        arguments = {
+            "action_index": 0,
+            "action_digest": action.action_digest,
+            changed: value,
+        }
+        event = JournalRollbackEvent(**arguments)
+
+        with pytest.raises(ForgeError) as raised:
+            store.append(
+                head,
+                JournalTransition(
+                    JournalState.ROLLBACK_ACTION_INTENT,
+                    rollback_event=event,
+                ),
+            )
+
+        assert raised.value.code == "journal.corrupt"
+        assert not (directory / "journal-00000001.json").exists()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_rolled_back_requires_every_declared_action_completion(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_ordered_rollback(binding)
+        head = store.create_prepared(prepared)
+        head = _append_rollback_pair(
+            store,
+            head,
+            prepared.rollback_actions[0],
+            0,
+            binding,
+        )
+
+        with pytest.raises(ForgeError) as raised:
+            store.append(head, JournalTransition(JournalState.ROLLED_BACK))
+        assert raised.value.code == "journal.corrupt"
+        assert not (directory / "journal-00000003.json").exists()
+
+        root_index = len(prepared.rollback_actions) - 1
+        root_action = prepared.rollback_actions[root_index]
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
+        store.close()
+        quarantine_ticket, recovery_store = _open_recovery_store_after_quarantine(
+            owned,
+            proof,
+            binding,
+        )
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                rollback_event=_rollback_completion(
+                    root_action,
+                    root_index,
+                    binding,
+                ),
+            ),
+        )
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(JournalState.ROLLED_BACK),
+        )
+
+        assert head.state is JournalState.ROLLED_BACK
+        assert head.sequence == 2 * len(prepared.rollback_actions) + 1
+    finally:
+        if recovery_store is not None:
+            recovery_store.close()
+        if quarantine_ticket is not None:
+            quarantine_ticket.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_plan_resumes_at_first_incomplete_rollback_action(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        plan_recovery,
+    )
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    quarantine_ticket = None
+    recovery_store = None
+    try:
+        prepared, _declared = _prepared_with_ordered_rollback(binding)
+        head = store.create_prepared(prepared)
+        head = _append_rollback_pair(
+            store,
+            head,
+            prepared.rollback_actions[0],
+            0,
+            binding,
+        )
+
+        plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(store.load(),),
+                current_config=prepared.before_config,
+            )
+        )
+
+        assert plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert plan.rollback_actions == prepared.rollback_actions
+        assert plan.next_action_index == 1
+
+        root_index = len(prepared.rollback_actions) - 1
+        root_action = prepared.rollback_actions[root_index]
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
+        store.close()
+        quarantine_ticket, recovery_store = _open_recovery_store_after_quarantine(
+            owned,
+            proof,
+            binding,
+        )
+        recovery_store.append_recovery(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                rollback_event=_rollback_completion(
+                    root_action,
+                    root_index,
+                    binding,
+                ),
+            ),
+        )
+        completed_plan = plan_recovery(
+            RecoverySnapshot(
+                journals=(recovery_store.load(),),
+                current_config=prepared.before_config,
+            )
+        )
+
+        assert completed_plan.disposition is RecoveryDisposition.ROLLBACK_CANDIDATE
+        assert completed_plan.rollback_actions == prepared.rollback_actions
+        assert completed_plan.next_action_index == len(prepared.rollback_actions)
+    finally:
+        if recovery_store is not None:
+            recovery_store.close()
+        if quarantine_ticket is not None:
+            quarantine_ticket.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_completed_rollback_record_validates_against_closed_schema(
+    tmp_path: Path,
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    from zagrosi_forge.install.journal import JournalState
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_ordered_rollback(binding)
+        head = store.create_prepared(prepared)
+        _append_rollback_pair(
+            store,
+            head,
+            prepared.rollback_actions[0],
+            0,
+            binding,
+        )
+        record = json.loads((directory / "journal-00000002.json").read_bytes())
+        schema_path = (
+            Path(__file__).parents[2]
+            / "src/zagrosi_forge/install/schemas/transaction-journal-v1.schema.json"
+        )
+        validator = Draft202012Validator(json.loads(schema_path.read_bytes()))
+
+        validator.validate(record)
+        assert record["state"] == JournalState.ROLLBACK_ACTION_COMPLETED.value
+        assert record["rollback_event"] == {
+            "action_digest": prepared.rollback_actions[0].action_digest,
+            "action_index": 0,
+            "observed_identity": None,
+            "outcome": "retained",
+            "recovery_reference": None,
+        }
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_repeated_rollback_events_load_beyond_state_enum_count(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+    from zagrosi_forge.install.policies import LIMIT_POLICY
+
+    store, proof, owned, _directory, binding = _store(tmp_path)
+    quarantine_ticket = None
+    recovery_store = None
+    try:
+        prepared, _declared = _prepared_with_rollback_action_count(binding, 8)
+        head = store.create_prepared(prepared)
+        for index, action in enumerate(prepared.rollback_actions[:-1]):
+            head = _append_rollback_pair(store, head, action, index, binding)
+
+        root_index = len(prepared.rollback_actions) - 1
+        root_action = prepared.rollback_actions[root_index]
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
+        store.close()
+        quarantine_ticket, recovery_store = _open_recovery_store_after_quarantine(
+            owned,
+            proof,
+            binding,
+        )
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                rollback_event=_rollback_completion(
+                    root_action,
+                    root_index,
+                    binding,
+                ),
+            ),
+        )
+        loaded = recovery_store.load()
+
+        assert len(loaded.records) == 1 + 2 * len(prepared.rollback_actions)
+        assert len(loaded.records) > len(JournalState)
+        assert len(loaded.records) < LIMIT_POLICY.value("journal_records")
+        assert tuple(record.sequence for record in loaded.records) == tuple(
+            range(len(loaded.records))
+        )
+        assert loaded.head == head
+    finally:
+        if recovery_store is not None:
+            recovery_store.close()
+        if quarantine_ticket is not None:
+            quarantine_ticket.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_rollback_action_limit_matches_closed_schema(tmp_path: Path) -> None:
+    from jsonschema import Draft202012Validator, ValidationError
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_rollback_action_count(binding, 12)
+        store.create_prepared(prepared)
+        record = json.loads((directory / "journal-00000000.json").read_bytes())
+        schema_path = (
+            Path(__file__).parents[2]
+            / "src/zagrosi_forge/install/schemas/transaction-journal-v1.schema.json"
+        )
+        schema = json.loads(schema_path.read_bytes())
+        validator = Draft202012Validator(schema)
+
+        assert schema["properties"]["rollback_actions"]["maxItems"] == 12
+        validator.validate(record)
+        with pytest.raises(ValueError, match="prepared transaction paths"):
+            _prepared_with_rollback_action_count(binding, 13)
+
+        oversized = {
+            **record,
+            "rollback_actions": record["rollback_actions"]
+            + [record["rollback_actions"][0]],
+        }
+        with pytest.raises(ValidationError):
+            validator.validate(oversized)
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_resealed_rollback_event_tamper_preserves_canonical_chain(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_ordered_rollback(binding)
+        head = store.create_prepared(prepared)
+        _append_rollback_pair(
+            store,
+            head,
+            prepared.rollback_actions[0],
+            0,
+            binding,
+        )
+        completed = directory / "journal-00000002.json"
+
+        def tamper(value):
+            event = {
+                **value["rollback_event"],
+                "action_digest": prepared.rollback_actions[1].action_digest,
+            }
+            return {**value, "rollback_event": event}
+
+        _rewrite(completed, tamper)
+        retained = tuple(
+            (path.name, path.stat().st_ino, path.read_bytes())
+            for path in sorted(directory.glob("journal-*.json"))
+        )
+
+        with pytest.raises(ForgeError) as raised:
+            store.load()
+
+        assert raised.value.code == "journal.corrupt"
+        assert (
+            tuple(
+                (path.name, path.stat().st_ino, path.read_bytes())
+                for path in sorted(directory.glob("journal-*.json"))
+            )
+            == retained
+        )
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_prepared_rejects_portable_rollback_path_collision(tmp_path: Path) -> None:
+    from zagrosi_forge.install.journal import RollbackAction, TransactionOwnedPath
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared = _prepared(binding)
+        colliding = tuple(
+            TransactionOwnedPath(
+                role=f"collision-{index}",
+                relative_path=relative,
+                expected_identity=None,
+            )
+            for index, relative in enumerate(("stages/Candidate", "stages/candidate"))
+        )
+        actions = tuple(
+            RollbackAction(
+                action="retain",
+                relative_path=item.relative_path,
+                expected_identity=None,
+            )
+            for item in colliding
+        )
+
+        with pytest.raises(ValueError, match="prepared transaction paths"):
+            replace(
+                prepared,
+                transaction_owned_paths=(
+                    *prepared.transaction_owned_paths,
+                    *colliding,
+                ),
+                rollback_actions=(
+                    *actions,
+                    prepared.rollback_actions[-1],
+                ),
+            )
+
+        assert not tuple(directory.glob("journal*"))
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def _quarantine_after_root_rollback_intent(tmp_path: Path):
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    live_rebound = None
+    path = None
+    quarantine_ticket = None
+    quarantine_rebound = None
+    try:
+        prepared = _prepared(binding)
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+        head = store.create_prepared(prepared)
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
+        store.close()
+        proof.close()
+
+        live_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert live_rebound.claim is not None
+        path = authority.prove_descendant(
+            owned,
+            live_rebound.claim.relative,
+            expected_depth=3,
+        ).unwrap()
+        cleanup = ownership.prove_transaction_owned(
+            path,
+            claim=live_rebound.claim,
+        ).unwrap()
+        quarantine_ticket = ownership.quarantine_owned(
+            cleanup,
+            transaction_id=prepared.transaction_id,
+        ).unwrap()
+        quarantine_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+
+        return (
+            prepared,
+            head,
+            owned,
+            binding,
+            quarantine_ticket,
+            quarantine_rebound,
+        )
+    except BaseException:
+        if quarantine_rebound is not None:
+            quarantine_rebound.close()
+        if quarantine_ticket is not None:
+            quarantine_ticket.close()
+        owned.close()
+        raise
+    finally:
+        if path is not None:
+            path.close()
+        if live_rebound is not None:
+            live_rebound.close()
+        store.close()
+        proof.close()
+
+
+def _open_recovery_store_after_quarantine(
+    owned,
+    proof,
+    binding,
+):
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.journal import JournalStore
+
+    live_rebound = None
+    quarantine_ticket = None
+    quarantine_rebound = None
+    access = None
+    recovery_store = None
+    try:
+        live_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert live_rebound.claim is not None
+        cleanup = ownership.prove_transaction_owned(
+            proof,
+            claim=live_rebound.claim,
+        ).unwrap()
+        quarantine_ticket = ownership.quarantine_owned(
+            cleanup,
+            transaction_id=binding.transaction_id,
+        ).unwrap()
+        quarantine_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        access = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        ).unwrap()
+        recovery_store = JournalStore.from_quarantined_recovery(access)
+        access = None
+        quarantine_rebound.close()
+        quarantine_rebound = None
+        return quarantine_ticket, recovery_store
+    except BaseException:
+        if recovery_store is not None:
+            recovery_store.close()
+        elif access is not None:
+            access.close()
+        if quarantine_ticket is not None:
+            quarantine_ticket.close()
+        raise
+    finally:
+        if quarantine_rebound is not None:
+            quarantine_rebound.close()
+        if live_rebound is not None:
+            live_rebound.close()
+
+
+def test_quarantined_recovery_journal_completes_exact_root_action_then_rollback(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.journal import (
+        JournalState,
+        JournalStore,
+        JournalTransition,
+    )
+
+    (
+        prepared,
+        head,
+        owned,
+        binding,
+        quarantine_ticket,
+        quarantine_rebound,
+    ) = _quarantine_after_root_rollback_intent(tmp_path)
+    access = None
+    recovery_store = None
+    try:
+        access = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        ).unwrap()
+        recovery_store = JournalStore.from_quarantined_recovery(access)
+        access = None
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                rollback_event=_rollback_completion(
+                    root_action,
+                    root_index,
+                    binding,
+                ),
+            ),
+        )
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(JournalState.ROLLED_BACK),
+        )
+
+        loaded = recovery_store.load()
+        assert head.state is JournalState.ROLLED_BACK
+        assert loaded.head == head
+        assert tuple(record.state for record in loaded.records[-3:]) == (
+            JournalState.ROLLBACK_ACTION_INTENT,
+            JournalState.ROLLBACK_ACTION_COMPLETED,
+            JournalState.ROLLED_BACK,
+        )
+    finally:
+        if recovery_store is not None:
+            recovery_store.close()
+        elif access is not None:
+            access.close()
+        quarantine_rebound.close()
+        quarantine_ticket.close()
+        owned.close()
+
+
+def test_quarantined_recovery_access_consumes_source_ticket_once(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    (
+        _prepared,
+        _head,
+        owned,
+        _binding,
+        quarantine_ticket,
+        quarantine_rebound,
+    ) = _quarantine_after_root_rollback_intent(tmp_path)
+    first_access = None
+    unexpected_second_access = None
+    try:
+        first_access = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        ).unwrap()
+        second = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        )
+        if second.is_ok:
+            unexpected_second_access = second.unwrap()
+
+        assert not second.is_ok
+        assert second.error is not None
+        assert second.error.code == "ownership.unowned"
+    finally:
+        if unexpected_second_access is not None:
+            unexpected_second_access.close()
+        if first_access is not None:
+            first_access.close()
+        quarantine_rebound.close()
+        quarantine_ticket.close()
+        owned.close()
+
+
+def test_transferred_recovery_store_survives_source_rebound_close(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.journal import (
+        JournalState,
+        JournalStore,
+        JournalTransition,
+    )
+
+    (
+        prepared,
+        head,
+        owned,
+        binding,
+        quarantine_ticket,
+        quarantine_rebound,
+    ) = _quarantine_after_root_rollback_intent(tmp_path)
+    access = None
+    recovery_store = None
+    later_rebound = None
+    try:
+        access = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        ).unwrap()
+        recovery_store = JournalStore.from_quarantined_recovery(access)
+        access = None
+        quarantine_rebound.close()
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                rollback_event=_rollback_completion(
+                    root_action,
+                    root_index,
+                    binding,
+                ),
+            ),
+        )
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(JournalState.ROLLED_BACK),
+        )
+        assert head.state is JournalState.ROLLED_BACK
+        recovery_store.close()
+        recovery_store = None
+
+        later_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert later_rebound.location is ownership.TransactionLocation.QUARANTINED
+        assert later_rebound.ticket is not None
+    finally:
+        if later_rebound is not None:
+            later_rebound.close()
+        if recovery_store is not None:
+            recovery_store.close()
+        elif access is not None:
+            access.close()
+        quarantine_rebound.close()
+        quarantine_ticket.close()
+        owned.close()
+
+
+@pytest.mark.parametrize("cleanup_state", ("intent", "complete"))
+def test_quarantined_recovery_access_rejects_started_cleanup(
+    tmp_path: Path,
+    cleanup_state: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    (
+        _prepared,
+        _head,
+        owned,
+        binding,
+        quarantine_ticket,
+        quarantine_rebound,
+    ) = _quarantine_after_root_rollback_intent(tmp_path)
+    transaction_store = None
+    unexpected_access = None
+    try:
+        transaction_store = ownership._open_transaction_store(
+            owned,
+            create=False,
+        )
+        intent = ownership._publish_transaction_cleanup_intent(
+            transaction_store,
+            binding,
+        )
+        if cleanup_state == "complete":
+            ownership._publish_transaction_cleanup_complete(
+                transaction_store,
+                binding,
+                delete_component=intent.delete_component,
+            )
+        transaction_store.close()
+        transaction_store = None
+
+        result = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        )
+        if result.is_ok:
+            unexpected_access = result.unwrap()
+
+        assert not result.is_ok
+        assert result.error is not None
+        assert result.error.code == "ownership.unowned"
+        assert result.error.recovery_instructions == (binding.quarantine_relative,)
+    finally:
+        if unexpected_access is not None:
+            unexpected_access.close()
+        if transaction_store is not None:
+            transaction_store.close()
+        quarantine_rebound.close()
+        quarantine_ticket.close()
+        owned.close()
+
+
+def test_quarantined_recovery_access_rechecks_cleanup_after_ticket_transfer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    (
+        _prepared,
+        _head,
+        owned,
+        binding,
+        quarantine_ticket,
+        quarantine_rebound,
+    ) = _quarantine_after_root_rollback_intent(tmp_path)
+    original_take = ownership.QuarantineTicket._take_authority
+    published = False
+
+    def take_then_publish_cleanup(selected):
+        nonlocal published
+        root, namespace = original_take(selected)
+        transaction_store = ownership._open_transaction_store(
+            owned,
+            create=False,
+        )
+        try:
+            ownership._publish_transaction_cleanup_intent(
+                transaction_store,
+                binding,
+            )
+            published = True
+        finally:
+            transaction_store.close()
+        return root, namespace
+
+    monkeypatch.setattr(
+        ownership.QuarantineTicket,
+        "_take_authority",
+        take_then_publish_cleanup,
+    )
+    unexpected_access = None
+    try:
+        result = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        )
+        if result.is_ok:
+            unexpected_access = result.unwrap()
+
+        assert published
+        assert not result.is_ok
+        assert result.error is not None
+        assert result.error.code == "ownership.unowned"
+        assert result.error.recovery_instructions == (binding.quarantine_relative,)
+    finally:
+        if unexpected_access is not None:
+            unexpected_access.close()
+        quarantine_rebound.close()
+        quarantine_ticket.close()
+        owned.close()
+
+
+def test_quarantined_recovery_authority_rejects_every_other_mutation(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import (
+        JournalState,
+        JournalStore,
+        JournalTransition,
+    )
+
+    (
+        prepared,
+        head,
+        owned,
+        binding,
+        quarantine_ticket,
+        quarantine_rebound,
+    ) = _quarantine_after_root_rollback_intent(tmp_path)
+    generic_access = None
+    generic_store = None
+    recovery_access = None
+    recovery_store = None
+    quarantined_directory = (
+        tmp_path / "codex-home" / "plugins" / binding.quarantine_relative
+    )
+    root_action = prepared.rollback_actions[-1]
+    root_index = len(prepared.rollback_actions) - 1
+    exact_completion = JournalTransition(
+        JournalState.ROLLBACK_ACTION_COMPLETED,
+        rollback_event=_rollback_completion(
+            root_action,
+            root_index,
+            binding,
+        ),
+    )
+    try:
+        before = tuple(
+            (path.name, path.read_bytes())
+            for path in sorted(quarantined_directory.glob("journal*"))
+        )
+        generic_access = ownership.open_transaction_journal_access(
+            owned,
+            quarantine_rebound,
+        ).unwrap()
+        generic_store = JournalStore(generic_access)
+        generic_access = None
+        with pytest.raises(ForgeError) as generic_error:
+            generic_store.append(head, exact_completion)
+        assert generic_error.value.code == "ownership.unowned"
+        generic_store.close()
+        generic_store = None
+
+        recovery_access = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        ).unwrap()
+        recovery_store = JournalStore.from_quarantined_recovery(recovery_access)
+        recovery_access = None
+
+        with pytest.raises(ForgeError) as create_error:
+            recovery_store.create_prepared(prepared)
+        assert create_error.value.code == "ownership.unowned"
+        with pytest.raises(ForgeError) as append_error:
+            recovery_store.append(head, exact_completion)
+        assert append_error.value.code == "ownership.unowned"
+        with pytest.raises(ForgeError) as direct_terminal_error:
+            recovery_store.append_recovery(
+                head,
+                JournalTransition(JournalState.ROLLED_BACK),
+            )
+        assert direct_terminal_error.value.code == "journal.corrupt"
+        with pytest.raises(ForgeError) as forward_error:
+            recovery_store.append_recovery(
+                head,
+                JournalTransition(JournalState.STAGED),
+            )
+        assert forward_error.value.code == "journal.corrupt"
+        wrong_completion = replace(
+            exact_completion.rollback_event,
+            recovery_reference=f"{binding.quarantine_relative}-wrong",
+        )
+        with pytest.raises(ForgeError) as completion_error:
+            recovery_store.append_recovery(
+                head,
+                JournalTransition(
+                    JournalState.ROLLBACK_ACTION_COMPLETED,
+                    rollback_event=wrong_completion,
+                ),
+            )
+        assert completion_error.value.code == "journal.corrupt"
+        assert (
+            tuple(
+                (path.name, path.read_bytes())
+                for path in sorted(quarantined_directory.glob("journal*"))
+            )
+            == before
+        )
+    finally:
+        if recovery_store is not None:
+            recovery_store.close()
+        elif recovery_access is not None:
+            recovery_access.close()
+        if generic_store is not None:
+            generic_store.close()
+        elif generic_access is not None:
+            generic_access.close()
+        quarantine_rebound.close()
+        quarantine_ticket.close()
+        owned.close()
+
+
+def test_prepared_reserves_exact_remaining_rollback_wal_before_publication(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.journal as journal
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.policies import LIMIT_POLICY
+
+    store, proof, owned, directory, binding = _store(tmp_path)
+    try:
+        prepared, _declared = _prepared_with_rollback_action_count(binding, 12)
+        baseline_record = journal._record_projection(
+            prepared,
+            transaction_binding=store._binding,
+            state=journal.JournalState.PREPARED,
+            sequence=0,
+            previous_record_digest=journal._ZERO_DIGEST,
+        )
+        baseline_raw = journal._seal_record(baseline_record)
+        record_limit = LIMIT_POLICY.value("journal_record_bytes")
+        target_size = record_limit - 1024
+        padding = (
+            target_size - len(baseline_raw) + len(prepared.runner_provenance.origin)
+        )
+        prepared = replace(
+            prepared,
+            runner_provenance=replace(
+                prepared.runner_provenance,
+                origin="x" * padding,
+            ),
+        )
+        prepared_record = journal._record_projection(
+            prepared,
+            transaction_binding=store._binding,
+            state=journal.JournalState.PREPARED,
+            sequence=0,
+            previous_record_digest=journal._ZERO_DIGEST,
+        )
+        projected_records = [journal._seal_record(prepared_record)]
+
+        def project(
+            state: journal.JournalState,
+            rollback_event=None,
+        ) -> None:
+            previous = json.loads(projected_records[-1])
+            record = {
+                key: value for key, value in previous.items() if key != "record_digest"
+            }
+            record.update(
+                {
+                    "previous_record_digest": previous["record_digest"],
+                    "rollback_event": (
+                        None
+                        if rollback_event is None
+                        else journal._rollback_event_projection(rollback_event)
+                    ),
+                    "sequence": previous["sequence"] + 1,
+                    "state": state.value,
+                }
+            )
+            projected_records.append(journal._seal_record(record))
+
+        for index, action in enumerate(prepared.rollback_actions):
+            project(
+                journal.JournalState.ROLLBACK_ACTION_INTENT,
+                _rollback_intent(action, index),
+            )
+            project(
+                journal.JournalState.ROLLBACK_ACTION_COMPLETED,
+                _rollback_completion(action, index, binding),
+            )
+        project(journal.JournalState.ROLLED_BACK)
+
+        assert len(prepared.rollback_actions) == 12
+        assert len(projected_records) == 1 + 2 * 12 + 1
+        assert target_size <= len(projected_records[0]) < record_limit
+        assert all(len(raw) <= record_limit for raw in projected_records)
+        assert sum(map(len, projected_records)) > LIMIT_POLICY.value(
+            "journal_total_bytes"
+        )
+
+        with pytest.raises(ForgeError) as raised:
+            store.create_prepared(prepared)
+        assert raised.value.code == "journal.limit_exceeded"
+        assert not tuple(directory.glob("journal*"))
     finally:
         store.close()
         proof.close()

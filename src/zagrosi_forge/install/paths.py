@@ -846,6 +846,13 @@ def _windows_write(handle: int, raw: bytes) -> None:
         handle, buffer, len(raw), ctypes.byref(written), None
     ) or int(written.value) != len(raw):
         raise _windows_error(_windows_last_error())
+    _windows_flush(handle)
+
+
+def _windows_flush(handle: int) -> None:
+    from ctypes import wintypes
+
+    kernel32 = _windows_dll("kernel32")
     kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
     kernel32.FlushFileBuffers.restype = wintypes.BOOL
     if not kernel32.FlushFileBuffers(handle):
@@ -4160,6 +4167,7 @@ class OwnedDirectoryWriter:
                 raise _error("path.identity_changed", "A destination ancestor changed.")
             _windows_rename_handle(handle, parent, reference.components[-1])
             published = True
+            _windows_flush(handle)
         finally:
             if handle:
                 if not published:

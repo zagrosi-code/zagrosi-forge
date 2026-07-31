@@ -15,7 +15,7 @@
     "candidate_relation_digest", "before_config", "candidate_config",
     "committed_config", "config_transaction_digest", "config_recovery",
     "identities", "transaction_owned_paths", "rollback_actions",
-    "prepared_receipt", "verification_evidence_digest"
+    "rollback_event", "prepared_receipt", "verification_evidence_digest"
   ],
   "properties": {
     "schema_version": {"const": "1.0"},
@@ -58,6 +58,7 @@
         "PREPARED", "STAGED", "VERIFIED", "SOURCE_PUBLISHED",
         "CACHE_PUBLISHED", "PUBLISHED", "COMMIT_INTENT",
         "CONFIG_COMMITTED", "RECEIPT_COMMITTED", "FINALIZED",
+        "ROLLBACK_ACTION_INTENT", "ROLLBACK_ACTION_COMPLETED",
         "ROLLED_BACK", "RECOVERY_REQUIRED"
       ]
     },
@@ -128,8 +129,14 @@
       "items": {"$ref": "#/$defs/ownedPath"}
     },
     "rollback_actions": {
-      "type": "array", "minItems": 1,
+      "type": "array", "minItems": 1, "maxItems": 12,
       "items": {"$ref": "#/$defs/rollbackAction"}
+    },
+    "rollback_event": {
+      "oneOf": [
+        {"$ref": "#/$defs/rollbackEvent"},
+        {"type": "null"}
+      ]
     },
     "prepared_receipt": {"$ref": "#/$defs/preparedReceipt"},
     "verification_evidence_digest": {
@@ -167,7 +174,9 @@
           "state": {
             "enum": [
               "PREPARED", "STAGED", "VERIFIED", "SOURCE_PUBLISHED",
-              "CACHE_PUBLISHED", "PUBLISHED", "COMMIT_INTENT", "ROLLED_BACK"
+              "CACHE_PUBLISHED", "PUBLISHED", "COMMIT_INTENT",
+              "ROLLBACK_ACTION_INTENT", "ROLLBACK_ACTION_COMPLETED",
+              "ROLLED_BACK"
             ]
           }
         },
@@ -186,6 +195,62 @@
       },
       "then": {
         "properties": {"committed_config": {"$ref": "#/$defs/configIdentity"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": ["ROLLBACK_ACTION_INTENT", "ROLLBACK_ACTION_COMPLETED"]
+          }
+        },
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {"rollback_event": {"$ref": "#/$defs/rollbackEvent"}}
+      },
+      "else": {"properties": {"rollback_event": {"type": "null"}}}
+    },
+    {
+      "if": {
+        "properties": {"state": {"const": "ROLLBACK_ACTION_INTENT"}},
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {
+          "rollback_event": {
+            "allOf": [
+              {"$ref": "#/$defs/rollbackEvent"},
+              {
+                "properties": {
+                  "observed_identity": {"type": "null"},
+                  "outcome": {"type": "null"},
+                  "recovery_reference": {"type": "null"}
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"state": {"const": "ROLLBACK_ACTION_COMPLETED"}},
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {
+          "rollback_event": {
+            "allOf": [
+              {"$ref": "#/$defs/rollbackEvent"},
+              {
+                "properties": {
+                  "outcome": {"enum": ["quarantined", "retained"]}
+                }
+              }
+            ]
+          }
+        }
       }
     }
   ],
@@ -277,6 +342,30 @@
           }
         }
       ]
+    },
+    "rollbackEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_index", "action_digest", "outcome",
+        "observed_identity", "recovery_reference"
+      ],
+      "properties": {
+        "action_index": {"type": "integer", "minimum": 0},
+        "action_digest": {"$ref": "#/$defs/digest"},
+        "outcome": {
+          "enum": [null, "quarantined", "retained"]
+        },
+        "observed_identity": {
+          "oneOf": [{"$ref": "#/$defs/fileIdentity"}, {"type": "null"}]
+        },
+        "recovery_reference": {
+          "oneOf": [
+            {"$ref": "#/$defs/rollbackRecoveryReference"},
+            {"type": "null"}
+          ]
+        }
+      }
     },
     "configRecovery": {
       "type": "object",
@@ -390,6 +479,10 @@
     "recoveryReference": {
       "type": "string", "minLength": 1, "maxLength": 240,
       "pattern": "^\\.zagrosi-config-(?:backup|tx)-[0-9a-f]{24}\\.[a-z]+$"
+    },
+    "rollbackRecoveryReference": {
+      "type": "string", "minLength": 1, "maxLength": 240,
+      "pattern": "^(?:[^/]+/)*\\.zagrosi-quarantine-[0-9a-f]{24}$"
     },
     "windowsAuthorization": {
       "type": "array",

@@ -102,6 +102,8 @@ _PERSISTENT_BINDING_TOKEN = object()
 _PERSISTENT_ROOT_TOKEN = object()
 _REBOUND_TRANSACTION_TOKEN = object()
 _TRANSACTION_JOURNAL_ACCESS_TOKEN = object()
+_QUARANTINED_RECOVERY_JOURNAL_ACCESS_TOKEN = object()
+_QUARANTINED_RECOVERY_JOURNAL_WRITER_TOKEN = object()
 _PENDING_TRANSACTION_OBSERVATION_TOKEN = object()
 
 
@@ -543,10 +545,14 @@ def _durable_windows_directory_rename(
     parent: int,
     destination: str,
     expected_identity: tuple[int, int],
+    *,
+    after_rename: Callable[[], None] | None = None,
 ) -> None:
     """Publish and flush one exact directory namespace binding."""
 
-    _paths._windows_rename_handle(source, parent, destination)
+    _windows_rename_handle(source, parent, destination)
+    if after_rename is not None:
+        after_rename()
     _windows_flush_directory_binding(parent, destination, expected_identity)
 
 
@@ -3735,6 +3741,551 @@ class TransactionJournalAccess:
         raise TypeError("ownership capabilities are not serializable")
 
 
+def _quarantined_recovery_ticket_is_live(
+    ticket: object,
+    binding: PersistentTransactionBinding,
+    journal_relative: str,
+) -> bool:
+    if (
+        type(ticket) is not QuarantineTicket
+        or not _persistent_binding_invariants(binding)
+        or journal_relative != binding.quarantine_relative
+    ):
+        return False
+    selected = ticket
+    try:
+        with selected._lock:
+            namespace = selected._namespace
+            root = selected._root
+            return (
+                not selected._closed
+                and not selected._used
+                and selected._binding == binding
+                and selected._recovery_reference == journal_relative
+                and selected._identity == binding.transaction_identity
+                and selected._root_identity == binding.plugins_identity
+                and namespace is not None
+                and root != (0 if os.name == "nt" else -1)
+                and _native_identity(root) == binding.plugins_identity
+                and namespace._validate_namespace_binding()
+                and _native_identity(namespace._plugins_descriptor)
+                == binding.plugins_identity
+                and _native_identity(namespace._control_descriptor)
+                == binding.control_identity
+            )
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _quarantined_recovery_authority_is_valid(
+    root: int,
+    namespace: _paths._NamespaceCapability | None,
+    binding: PersistentTransactionBinding,
+) -> bool:
+    try:
+        return (
+            namespace is not None
+            and root != (0 if os.name == "nt" else -1)
+            and _native_identity(root) == binding.plugins_identity
+            and namespace._validate_namespace_binding()
+            and _native_identity(namespace._plugins_descriptor)
+            == binding.plugins_identity
+            and _native_identity(namespace._control_descriptor)
+            == binding.control_identity
+        )
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        return False
+
+
+def _quarantined_recovery_cleanup_is_absent(
+    store: _TransactionStore,
+    binding: PersistentTransactionBinding,
+) -> bool:
+    try:
+        return (
+            _load_transaction_cleanup_record(store, binding, complete=False) is None
+            and _load_transaction_cleanup_record(store, binding, complete=True) is None
+            and _transaction_journal_records_are_valid(store, binding)
+            and _transaction_store_namespace_is_valid(store)
+        )
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        return False
+
+
+class _QuarantinedRecoveryJournalWriter:
+    """Transferred writer authority for one exact quarantined recovery journal."""
+
+    _binding: PersistentTransactionBinding
+    _closed: bool
+    _descriptor: int
+    _directory_writer_taken: bool
+    _filesystem_guard: _paths.FilesystemGuard
+    _journal_relative: str
+    _lock: LockType
+    _namespace: _paths._NamespaceCapability | None
+    _origin: _paths._AuthorityOrigin
+    _seal: object
+    _store: _TransactionStore | None
+    _ticket_namespace: _paths._NamespaceCapability | None
+    _ticket_root: int
+
+    __slots__ = (
+        "_binding",
+        "_closed",
+        "_descriptor",
+        "_directory_writer_taken",
+        "_filesystem_guard",
+        "_journal_relative",
+        "_lock",
+        "_namespace",
+        "_origin",
+        "_seal",
+        "_store",
+        "_ticket_namespace",
+        "_ticket_root",
+    )
+
+    def __init__(
+        self,
+        *,
+        binding: PersistentTransactionBinding,
+        journal_relative: str,
+        descriptor: int,
+        store: _TransactionStore,
+        namespace: _paths._NamespaceCapability,
+        filesystem_guard: _paths.FilesystemGuard,
+        origin: _paths._AuthorityOrigin,
+        ticket_root: int,
+        ticket_namespace: _paths._NamespaceCapability,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _QUARANTINED_RECOVERY_JOURNAL_WRITER_TOKEN
+            or not _persistent_binding_invariants(binding)
+            or journal_relative != binding.quarantine_relative
+            or type(store) is not _TransactionStore
+            or type(namespace) is not _paths._NamespaceCapability
+            or type(origin) is not _paths._AuthorityOrigin
+            or type(ticket_namespace) is not _paths._NamespaceCapability
+            or not _quarantined_recovery_authority_is_valid(
+                ticket_root,
+                ticket_namespace,
+                binding,
+            )
+        ):
+            raise TypeError(
+                "quarantined recovery journal writers are transferred internally"
+            )
+        object.__setattr__(self, "_binding", binding)
+        object.__setattr__(self, "_journal_relative", journal_relative)
+        object.__setattr__(self, "_descriptor", descriptor)
+        object.__setattr__(self, "_store", store)
+        object.__setattr__(self, "_namespace", namespace)
+        object.__setattr__(self, "_filesystem_guard", filesystem_guard)
+        object.__setattr__(self, "_origin", origin)
+        object.__setattr__(self, "_ticket_root", ticket_root)
+        object.__setattr__(self, "_ticket_namespace", ticket_namespace)
+        object.__setattr__(self, "_directory_writer_taken", False)
+        object.__setattr__(self, "_closed", False)
+        object.__setattr__(self, "_lock", Lock())
+        object.__setattr__(self, "_seal", _QUARANTINED_RECOVERY_JOURNAL_WRITER_TOKEN)
+
+    @property
+    def binding(self) -> PersistentTransactionBinding:
+        return self._binding
+
+    @property
+    def location(self) -> TransactionLocation:
+        return TransactionLocation.QUARANTINED
+
+    @property
+    def journal_relative(self) -> str:
+        return self._journal_relative
+
+    def _validate_locked(self) -> None:
+        binding = self._binding
+        namespace = self._namespace
+        store = self._store
+        try:
+            if (
+                self._closed
+                or self._seal is not _QUARANTINED_RECOVERY_JOURNAL_WRITER_TOKEN
+                or not _persistent_binding_invariants(binding)
+                or self._journal_relative != binding.quarantine_relative
+                or type(self._directory_writer_taken) is not bool
+                or not _quarantined_recovery_authority_is_valid(
+                    self._ticket_root,
+                    self._ticket_namespace,
+                    binding,
+                )
+                or namespace is None
+                or store is None
+                or not namespace._validate_namespace_binding()
+                or _native_identity(namespace._plugins_descriptor)
+                != binding.plugins_identity
+                or _native_identity(namespace._control_descriptor)
+                != binding.control_identity
+                or not _transaction_journal_store_is_valid(
+                    store,
+                    binding,
+                    self._filesystem_guard,
+                )
+                or not _transaction_journal_records_are_valid(store, binding)
+                or not _quarantined_recovery_cleanup_is_absent(store, binding)
+                or not _transaction_journal_location_is_valid(
+                    store,
+                    self._descriptor,
+                    binding,
+                    self._journal_relative,
+                    self._filesystem_guard,
+                )
+                or not namespace._validate_namespace_binding()
+                or not _transaction_store_namespace_is_valid(store)
+            ):
+                raise _transaction_journal_identity_error(binding)
+        except (AttributeError, ForgeError, OSError, TypeError, ValueError) as exc:
+            if (
+                isinstance(exc, ForgeError)
+                and exc.code == "ownership.identity_mismatch"
+            ):
+                raise
+            raise _transaction_journal_identity_error(binding) from None
+
+    def _require_recovery_journal_access(self) -> None:
+        with self._lock:
+            self._validate_locked()
+
+    def _require_journal_access(self, *, write: bool) -> None:
+        if type(write) is not bool:
+            raise _transaction_journal_identity_error(self._binding)
+        self._require_recovery_journal_access()
+
+    def _duplicate_journal_descriptor(self, *, write: bool) -> int:
+        if type(write) is not bool:
+            raise _transaction_journal_identity_error(self._binding)
+        with self._lock:
+            self._validate_locked()
+            duplicate = (
+                _paths._windows_duplicate(self._descriptor)
+                if os.name == "nt"
+                else os.dup(self._descriptor)
+            )
+            try:
+                self._validate_locked()
+                if _native_identity(duplicate) != self._binding.transaction_identity:
+                    raise _transaction_journal_identity_error(self._binding)
+                return duplicate
+            except BaseException:
+                _close_native(duplicate)
+                raise
+
+    def _take_directory_writer(self) -> _paths.OwnedDirectoryWriter:
+        with self._lock:
+            self._validate_locked()
+            if self._directory_writer_taken:
+                raise _error(
+                    "ownership.unowned",
+                    "The quarantined recovery journal writer was already transferred.",
+                    recovery=(self._binding.quarantine_relative,),
+                )
+            namespace = self._namespace
+            if namespace is None:
+                raise _transaction_journal_identity_error(self._binding)
+            descriptor = 0 if os.name == "nt" else -1
+            writer_namespace: _paths._NamespaceCapability | None = None
+            writer: _paths.OwnedDirectoryWriter | None = None
+            try:
+                descriptor = (
+                    _paths._windows_duplicate(self._descriptor)
+                    if os.name == "nt"
+                    else os.dup(self._descriptor)
+                )
+                writer_namespace = _paths._duplicate_namespace_capability(
+                    namespace._home_descriptor,
+                    namespace._plugins_descriptor,
+                    namespace._control_descriptor,
+                    home_identity=namespace._home_identity,
+                    plugins_identity=namespace._plugins_identity,
+                    control_identity=namespace._control_identity,
+                    filesystem_guard=self._filesystem_guard,
+                    windows=os.name == "nt",
+                )
+                writer = _paths.OwnedDirectoryWriter(
+                    descriptor,
+                    self._binding.transaction_identity,
+                    writer_namespace,
+                    self._filesystem_guard,
+                    self._origin,
+                    windows=os.name == "nt",
+                    _token=_paths._CAPABILITY_TOKEN,
+                )
+                descriptor = 0 if os.name == "nt" else -1
+                writer_namespace = None
+                writer._require_open()
+                self._validate_locked()
+                object.__setattr__(self, "_directory_writer_taken", True)
+                return writer
+            except BaseException:
+                if writer is not None:
+                    writer.close()
+                elif writer_namespace is not None:
+                    writer_namespace.close()
+                if os.name == "nt" and descriptor:
+                    _paths._windows_close(descriptor)
+                elif os.name != "nt" and descriptor >= 0:
+                    os.close(descriptor)
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            descriptor = self._descriptor
+            store = self._store
+            namespace = self._namespace
+            ticket_root = self._ticket_root
+            ticket_namespace = self._ticket_namespace
+            object.__setattr__(self, "_descriptor", 0 if os.name == "nt" else -1)
+            object.__setattr__(self, "_store", None)
+            object.__setattr__(self, "_namespace", None)
+            object.__setattr__(self, "_ticket_root", 0 if os.name == "nt" else -1)
+            object.__setattr__(self, "_ticket_namespace", None)
+            object.__setattr__(self, "_closed", True)
+            _close_native(descriptor)
+            if store is not None:
+                store.close()
+            if namespace is not None:
+                namespace.close()
+            _close_native(ticket_root)
+            if ticket_namespace is not None:
+                ticket_namespace.close()
+
+    def __enter__(self) -> _QuarantinedRecoveryJournalWriter:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise AttributeError("quarantined recovery journal writers are read-only")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("ownership capabilities are not serializable")
+
+
+class QuarantinedRecoveryJournalAccess:
+    """One-shot authority for journal completion after exact root quarantine."""
+
+    _binding: PersistentTransactionBinding
+    _closed: bool
+    _descriptor: int
+    _filesystem_guard: _paths.FilesystemGuard
+    _journal_relative: str
+    _lock: LockType
+    _namespace: _paths._NamespaceCapability | None
+    _origin: _paths._AuthorityOrigin
+    _seal: object
+    _store: _TransactionStore | None
+    _ticket_namespace: _paths._NamespaceCapability | None
+    _ticket_root: int
+    _transferred: bool
+
+    __slots__ = (
+        "_binding",
+        "_closed",
+        "_descriptor",
+        "_filesystem_guard",
+        "_journal_relative",
+        "_lock",
+        "_namespace",
+        "_origin",
+        "_seal",
+        "_store",
+        "_ticket_namespace",
+        "_ticket_root",
+        "_transferred",
+    )
+
+    def __init__(
+        self,
+        *,
+        binding: PersistentTransactionBinding,
+        journal_relative: str,
+        descriptor: int,
+        store: _TransactionStore,
+        namespace: _paths._NamespaceCapability,
+        filesystem_guard: _paths.FilesystemGuard,
+        origin: _paths._AuthorityOrigin,
+        ticket_root: int,
+        ticket_namespace: _paths._NamespaceCapability,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _QUARANTINED_RECOVERY_JOURNAL_ACCESS_TOKEN
+            or not _persistent_binding_invariants(binding)
+            or journal_relative != binding.quarantine_relative
+            or type(store) is not _TransactionStore
+            or type(namespace) is not _paths._NamespaceCapability
+            or type(origin) is not _paths._AuthorityOrigin
+            or type(ticket_namespace) is not _paths._NamespaceCapability
+            or not _quarantined_recovery_authority_is_valid(
+                ticket_root,
+                ticket_namespace,
+                binding,
+            )
+        ):
+            raise TypeError(
+                "quarantined recovery journal access is created only by "
+                "ownership authority"
+            )
+        object.__setattr__(self, "_binding", binding)
+        object.__setattr__(self, "_journal_relative", journal_relative)
+        object.__setattr__(self, "_descriptor", descriptor)
+        object.__setattr__(self, "_store", store)
+        object.__setattr__(self, "_namespace", namespace)
+        object.__setattr__(self, "_filesystem_guard", filesystem_guard)
+        object.__setattr__(self, "_origin", origin)
+        object.__setattr__(self, "_ticket_root", ticket_root)
+        object.__setattr__(self, "_ticket_namespace", ticket_namespace)
+        object.__setattr__(self, "_transferred", False)
+        object.__setattr__(self, "_closed", False)
+        object.__setattr__(self, "_lock", Lock())
+        object.__setattr__(self, "_seal", _QUARANTINED_RECOVERY_JOURNAL_ACCESS_TOKEN)
+
+    @property
+    def binding(self) -> PersistentTransactionBinding:
+        return self._binding
+
+    @property
+    def location(self) -> TransactionLocation:
+        return TransactionLocation.QUARANTINED
+
+    @property
+    def journal_relative(self) -> str:
+        return self._journal_relative
+
+    def _validate_locked(self) -> None:
+        binding = self._binding
+        namespace = self._namespace
+        store = self._store
+        try:
+            if (
+                self._closed
+                or self._transferred
+                or self._seal is not _QUARANTINED_RECOVERY_JOURNAL_ACCESS_TOKEN
+                or not _persistent_binding_invariants(binding)
+                or self._journal_relative != binding.quarantine_relative
+                or not _quarantined_recovery_authority_is_valid(
+                    self._ticket_root,
+                    self._ticket_namespace,
+                    binding,
+                )
+                or namespace is None
+                or store is None
+                or not namespace._validate_namespace_binding()
+                or _native_identity(namespace._plugins_descriptor)
+                != binding.plugins_identity
+                or _native_identity(namespace._control_descriptor)
+                != binding.control_identity
+                or not _transaction_journal_store_is_valid(
+                    store,
+                    binding,
+                    self._filesystem_guard,
+                )
+                or not _transaction_journal_records_are_valid(store, binding)
+                or not _quarantined_recovery_cleanup_is_absent(store, binding)
+                or not _transaction_journal_location_is_valid(
+                    store,
+                    self._descriptor,
+                    binding,
+                    self._journal_relative,
+                    self._filesystem_guard,
+                )
+                or not namespace._validate_namespace_binding()
+                or not _transaction_store_namespace_is_valid(store)
+            ):
+                raise _transaction_journal_identity_error(binding)
+        except (AttributeError, ForgeError, OSError, TypeError, ValueError) as exc:
+            if (
+                isinstance(exc, ForgeError)
+                and exc.code == "ownership.identity_mismatch"
+            ):
+                raise
+            raise _transaction_journal_identity_error(binding) from None
+
+    def _require_recovery_journal_access(self) -> None:
+        with self._lock:
+            self._validate_locked()
+
+    def _take_recovery_writer(self) -> _QuarantinedRecoveryJournalWriter:
+        with self._lock:
+            self._validate_locked()
+            store = self._store
+            namespace = self._namespace
+            ticket_namespace = self._ticket_namespace
+            if store is None or namespace is None:
+                raise _transaction_journal_identity_error(self._binding)
+            if ticket_namespace is None:
+                raise _transaction_journal_identity_error(self._binding)
+            writer = _QuarantinedRecoveryJournalWriter(
+                binding=self._binding,
+                journal_relative=self._journal_relative,
+                descriptor=self._descriptor,
+                store=store,
+                namespace=namespace,
+                filesystem_guard=self._filesystem_guard,
+                origin=self._origin,
+                ticket_root=self._ticket_root,
+                ticket_namespace=ticket_namespace,
+                _token=_QUARANTINED_RECOVERY_JOURNAL_WRITER_TOKEN,
+            )
+            writer._require_recovery_journal_access()
+            object.__setattr__(self, "_descriptor", 0 if os.name == "nt" else -1)
+            object.__setattr__(self, "_store", None)
+            object.__setattr__(self, "_namespace", None)
+            object.__setattr__(self, "_ticket_root", 0 if os.name == "nt" else -1)
+            object.__setattr__(self, "_ticket_namespace", None)
+            object.__setattr__(self, "_transferred", True)
+            object.__setattr__(self, "_closed", True)
+            return writer
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            descriptor = self._descriptor
+            store = self._store
+            namespace = self._namespace
+            ticket_root = self._ticket_root
+            ticket_namespace = self._ticket_namespace
+            object.__setattr__(self, "_descriptor", 0 if os.name == "nt" else -1)
+            object.__setattr__(self, "_store", None)
+            object.__setattr__(self, "_namespace", None)
+            object.__setattr__(self, "_ticket_root", 0 if os.name == "nt" else -1)
+            object.__setattr__(self, "_ticket_namespace", None)
+            object.__setattr__(self, "_closed", True)
+            _close_native(descriptor)
+            if store is not None:
+                store.close()
+            if namespace is not None:
+                namespace.close()
+            _close_native(ticket_root)
+            if ticket_namespace is not None:
+                ticket_namespace.close()
+
+    def __enter__(self) -> QuarantinedRecoveryJournalAccess:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def __setattr__(self, _name: str, _value: object) -> Never:
+        raise AttributeError("quarantined recovery journal access is read-only")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("ownership capabilities are not serializable")
+
+
 def _read_transaction_record_if_present(
     store: _TransactionStore, component: str
 ) -> tuple[bytes, tuple[int, int]] | None:
@@ -5782,6 +6333,154 @@ def _transaction_journal_source(
     )
 
 
+def open_quarantined_recovery_journal_access(
+    owned_root: OwnedRoot,
+    transaction: ReboundTransaction,
+) -> Result[QuarantinedRecoveryJournalAccess]:
+    """Retain one-shot write authority for an exactly quarantined journal."""
+
+    store: _TransactionStore | None = None
+    namespace: _paths._NamespaceCapability | None = None
+    descriptor = 0 if os.name == "nt" else -1
+    ticket_root = 0 if os.name == "nt" else -1
+    ticket_namespace: _paths._NamespaceCapability | None = None
+    access: QuarantinedRecoveryJournalAccess | None = None
+    binding: PersistentTransactionBinding | None = None
+    try:
+        if (
+            not isinstance(owned_root, OwnedRoot)
+            or type(transaction) is not ReboundTransaction
+        ):
+            raise _error(
+                "ownership.unowned",
+                "Quarantined recovery journal authority is invalid.",
+            )
+        rebound = transaction
+        binding = rebound.binding
+        ticket = rebound.ticket
+        if (
+            rebound.location is not TransactionLocation.QUARANTINED
+            or rebound.claim is not None
+            or type(ticket) is not QuarantineTicket
+            or not _quarantined_recovery_ticket_is_live(
+                ticket,
+                binding,
+                binding.quarantine_relative,
+            )
+        ):
+            raise _error(
+                "ownership.unowned",
+                "Quarantined recovery journal authority is invalid.",
+                recovery=(binding.quarantine_relative,),
+            )
+        store = _open_transaction_store(owned_root, create=False)
+        namespace = owned_root._duplicate_namespace_capability()
+        component = binding.quarantine_relative.rsplit("/", 1)[-1]
+        if store.windows:
+            descriptor = _open_windows_transaction_location(
+                store,
+                component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+                write=True,
+            )
+            if not descriptor:
+                raise _transaction_journal_identity_error(binding)
+        else:
+            descriptor = _open_posix_transaction_location(
+                store,
+                component,
+                expected_identity=binding.transaction_identity,
+                filesystem_guard=owned_root._filesystem_guard,
+            )
+            if descriptor < 0:
+                raise _transaction_journal_identity_error(binding)
+        if (
+            not _quarantined_recovery_cleanup_is_absent(store, binding)
+            or not _transaction_journal_location_is_valid(
+                store,
+                descriptor,
+                binding,
+                binding.quarantine_relative,
+                owned_root._filesystem_guard,
+            )
+            or not _quarantined_recovery_ticket_is_live(
+                ticket,
+                binding,
+                binding.quarantine_relative,
+            )
+        ):
+            raise _transaction_journal_identity_error(binding)
+        ticket_root, ticket_namespace = ticket._take_authority()
+        if (
+            not _quarantined_recovery_authority_is_valid(
+                ticket_root,
+                ticket_namespace,
+                binding,
+            )
+            or not _quarantined_recovery_cleanup_is_absent(store, binding)
+            or not _transaction_journal_location_is_valid(
+                store,
+                descriptor,
+                binding,
+                binding.quarantine_relative,
+                owned_root._filesystem_guard,
+            )
+        ):
+            raise _transaction_journal_identity_error(binding)
+        if ticket_namespace is None:
+            raise _transaction_journal_identity_error(binding)
+        access = QuarantinedRecoveryJournalAccess(
+            binding=binding,
+            journal_relative=binding.quarantine_relative,
+            descriptor=descriptor,
+            store=store,
+            namespace=namespace,
+            filesystem_guard=owned_root._filesystem_guard,
+            origin=owned_root._origin,
+            ticket_root=ticket_root,
+            ticket_namespace=ticket_namespace,
+            _token=_QUARANTINED_RECOVERY_JOURNAL_ACCESS_TOKEN,
+        )
+        ticket_root = 0 if store.windows else -1
+        ticket_namespace = None
+        descriptor = 0 if store.windows else -1
+        store = None
+        namespace = None
+        access._require_recovery_journal_access()
+        return Result.success(access)
+    except (AttributeError, ForgeError, OSError, TypeError, ValueError):
+        if access is not None:
+            access.close()
+        recovery = (
+            (binding.quarantine_relative,)
+            if binding is not None and _persistent_binding_invariants(binding)
+            else ()
+        )
+        return Result.failure(
+            _error(
+                "ownership.unowned",
+                "Quarantined recovery journal authority cannot be retained.",
+                recovery=recovery,
+            )
+        )
+    finally:
+        if ticket_namespace is not None:
+            ticket_namespace.close()
+        if os.name == "nt" and ticket_root:
+            _close_native(ticket_root)
+        elif os.name != "nt" and ticket_root >= 0:
+            _close_native(ticket_root)
+        if namespace is not None:
+            namespace.close()
+        if os.name == "nt" and descriptor:
+            _close_native(descriptor)
+        elif os.name != "nt" and descriptor >= 0:
+            _close_native(descriptor)
+        if store is not None:
+            store.close()
+
+
 def open_transaction_journal_access(
     owned_root: OwnedRoot,
     transaction: PersistentTransactionRoot | ReboundTransaction,
@@ -7555,8 +8254,18 @@ def _quarantine_windows(
                     "The ownership proof containment changed.",
                 )
             )
-        _windows_rename_handle(source, parent, destination)
-        renamed = True
+
+        def mark_renamed() -> None:
+            nonlocal renamed
+            renamed = True
+
+        _durable_windows_directory_rename(
+            source,
+            parent,
+            destination,
+            proof.identity,
+            after_rename=mark_renamed,
+        )
         moved = _paths._windows_open_child(
             parent, destination, directory=True, delete_access=True
         )
@@ -7668,6 +8377,7 @@ def quarantine_owned(
             )
         _exclusive_rename(parent, reference.components[-1], destination)
         renamed = True
+        os.fsync(parent)
         moved = os.open(destination, _directory_flags(), dir_fd=parent)
         if _identity(moved) != proof.identity:
             raise OSError(errno.ESTALE, "quarantined identity changed")

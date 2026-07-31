@@ -1600,6 +1600,85 @@ def test_owned_directory_writer_is_sealed_nested_exact_and_mode_normalized(
         owned.close()
 
 
+def test_windows_owned_writer_flushes_after_rename_and_preserves_published_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.paths as paths
+
+    class FakeWindowsWriter:
+        _identity = (1, 2)
+        _filesystem_guard = staticmethod(lambda _handle: True)
+
+        def _open_windows_parents(
+            self,
+            _components: tuple[str, ...],
+        ) -> tuple[list[int], list[tuple[int, str, tuple[int, int]]]]:
+            return [101], []
+
+        def _require_open(self) -> None:
+            events.append("require-open")
+
+    events: list[str] = []
+    renamed = False
+    rolled_back = False
+
+    monkeypatch.setattr(paths, "_windows_create_private_file", lambda *_args: 202)
+    monkeypatch.setattr(
+        paths,
+        "_windows_handle_status",
+        lambda _handle: type(
+            "Status",
+            (),
+            {
+                "identity": (1, 3),
+                "is_directory": False,
+                "is_reparse": False,
+                "link_count": 1,
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        paths,
+        "_windows_private_authorization",
+        lambda _handle, *, exact: exact,
+    )
+    monkeypatch.setattr(
+        paths,
+        "_windows_write",
+        lambda _handle, _raw: events.append("write"),
+    )
+
+    def rename(_source: int, _parent: int, _destination: str) -> None:
+        nonlocal renamed
+        renamed = True
+        events.append("rename")
+
+    def fail_flush(_handle: int) -> None:
+        events.append("flush")
+        raise OSError(errno.EIO, "injected post-rename flush failure")
+
+    def rollback(_handle: int) -> None:
+        nonlocal rolled_back
+        rolled_back = True
+
+    monkeypatch.setattr(paths, "_windows_rename_handle", rename)
+    monkeypatch.setattr(paths, "_windows_flush", fail_flush)
+    monkeypatch.setattr(paths, "_windows_rollback_created_directory", rollback)
+    monkeypatch.setattr(paths, "_windows_close", lambda _handle: None)
+
+    with pytest.raises(OSError, match="post-rename flush"):
+        paths.OwnedDirectoryWriter._write_windows(
+            FakeWindowsWriter(),  # type: ignore[arg-type]
+            _reference("journal-00000000.json"),
+            b"sealed",
+            0o600,
+        )
+
+    assert events == ["write", "require-open", "rename", "flush"]
+    assert renamed
+    assert not rolled_back
+
+
 def test_owned_directory_writer_rejects_traversal_links_collisions_and_reuse(
     tmp_path: Path,
 ) -> None:

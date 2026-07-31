@@ -39,7 +39,7 @@ _PLAN_TOKEN = object()
 _LOCKED_PLAN_TOKEN = object()
 _LIVE_OBSERVATION_TOKEN = object()
 _TRANSACTION_ID = re.compile(r"tx-[0-9a-f]{32}\Z")
-_ROLLBACK_STATES = frozenset(
+_PRECOMMIT_ROLLBACK_STATES = frozenset(
     {
         JournalState.PREPARED.value,
         JournalState.STAGED.value,
@@ -48,6 +48,12 @@ _ROLLBACK_STATES = frozenset(
         JournalState.CACHE_PUBLISHED.value,
         JournalState.PUBLISHED.value,
         JournalState.COMMIT_INTENT.value,
+    }
+)
+_ROLLBACK_STATES = _PRECOMMIT_ROLLBACK_STATES | frozenset(
+    {
+        JournalState.ROLLBACK_ACTION_INTENT.value,
+        JournalState.ROLLBACK_ACTION_COMPLETED.value,
     }
 )
 _NO_RECOVERY_STATES = frozenset(
@@ -89,6 +95,7 @@ class _JournalCapture(NamedTuple):
     before_config: _ConfigCapture
     candidate_config: _ConfigCapture
     rollback_actions: tuple[_RollbackCapture, ...]
+    next_action_index: int | None
 
 
 class _SnapshotCapture(NamedTuple):
@@ -148,6 +155,7 @@ def _journal_projection(journal: _JournalCapture) -> dict[str, object]:
         "rollback_actions": tuple(
             _rollback_capture_projection(action) for action in journal.rollback_actions
         ),
+        "next_action_index": journal.next_action_index,
         "transaction_id": journal.transaction_id,
     }
 
@@ -212,7 +220,23 @@ def _capture_journal(journal: LoadedJournal) -> _JournalCapture:
             )
             for action in prepared.rollback_actions
         ),
+        next_action_index=_next_rollback_action_index(journal),
     )
+
+
+def _next_rollback_action_index(journal: LoadedJournal) -> int | None:
+    head = journal.records[-1]
+    if head.state.value in _PRECOMMIT_ROLLBACK_STATES:
+        return 0
+    if head.state is JournalState.ROLLBACK_ACTION_INTENT:
+        if head.rollback_event is None:
+            raise ValueError("rollback intent evidence")
+        return head.rollback_event.action_index
+    if head.state is JournalState.ROLLBACK_ACTION_COMPLETED:
+        if head.rollback_event is None:
+            raise ValueError("rollback completion evidence")
+        return head.rollback_event.action_index + 1
+    return None
 
 
 def _capture_snapshot(
@@ -296,6 +320,7 @@ def _captured_root_rollback_is_exact(
         len(roots) == 1
         and roots[0].action == "quarantine-if-owned"
         and roots[0].expected_identity is not None
+        and actions[-1] == roots[0]
     )
 
 
@@ -310,6 +335,7 @@ def _planned_root_rollback_is_exact(
         len(roots) == 1
         and roots[0].action == "quarantine-if-owned"
         and roots[0].expected_identity is not None
+        and actions[-1] == roots[0]
     )
 
 
@@ -321,7 +347,7 @@ def _portable_collision_key(value: str) -> str:
 
 
 def _valid_journal_capture(value: object) -> bool:
-    return (
+    if not (
         type(value) is _JournalCapture
         and type(value.transaction_id) is str
         and _TRANSACTION_ID.fullmatch(value.transaction_id) is not None
@@ -342,7 +368,17 @@ def _valid_journal_capture(value: object) -> bool:
             value.rollback_actions,
             transaction_id=value.transaction_id,
         )
-    )
+    ):
+        return False
+    if value.head_state in _ROLLBACK_STATES:
+        if type(value.next_action_index) is not int:
+            return False
+        if value.head_state in _PRECOMMIT_ROLLBACK_STATES:
+            return value.next_action_index == 0
+        if value.head_state == JournalState.ROLLBACK_ACTION_INTENT.value:
+            return 0 <= value.next_action_index < len(value.rollback_actions)
+        return 1 <= value.next_action_index <= len(value.rollback_actions)
+    return value.next_action_index is None
 
 
 def _valid_snapshot_capture(value: object) -> bool:
@@ -491,12 +527,14 @@ def _plan_projection(
     disposition: RecoveryDisposition,
     transaction_ids: tuple[str, ...],
     rollback_actions: tuple[RollbackAction, ...],
+    next_action_index: int | None,
     error_code: str | None,
 ) -> dict[str, object]:
     return {
         "disposition": disposition.value,
         "error_code": error_code,
         "recovery_policy_version": RECOVERY_POLICY_VERSION,
+        "next_action_index": next_action_index,
         "rollback_actions": tuple(
             _rollback_projection(action) for action in rollback_actions
         ),
@@ -511,6 +549,7 @@ def _valid_plan_fields(
     disposition: object,
     transaction_ids: object,
     rollback_actions: object,
+    next_action_index: object,
     error_code: object,
 ) -> bool:
     if (
@@ -541,6 +580,7 @@ def _valid_plan_fields(
             )
             for item in rollback_actions
         )
+        or (next_action_index is not None and type(next_action_index) is not int)
         or (error_code is not None and type(error_code) is not str)
     ):
         return False
@@ -555,11 +595,18 @@ def _valid_plan_fields(
     if len(collision_keys) != len(set(collision_keys)):
         return False
     if disposition is RecoveryDisposition.NO_RECOVERY:
-        return not transaction_ids and not rollback_actions and error_code is None
+        return (
+            not transaction_ids
+            and not rollback_actions
+            and next_action_index is None
+            and error_code is None
+        )
     if disposition is RecoveryDisposition.ROLLBACK_CANDIDATE:
         return (
             len(transaction_ids) == 1
             and bool(rollback_actions)
+            and type(next_action_index) is int
+            and 0 <= next_action_index <= len(rollback_actions)
             and _planned_root_rollback_is_exact(
                 rollback_actions,
                 transaction_id=transaction_ids[0],
@@ -570,6 +617,7 @@ def _valid_plan_fields(
         disposition is RecoveryDisposition.OPERATOR_CONFLICT
         and bool(transaction_ids)
         and not rollback_actions
+        and next_action_index is None
         and error_code == "recovery.operator_conflict"
     )
 
@@ -583,6 +631,7 @@ class RecoveryPlan:
     disposition: RecoveryDisposition
     transaction_ids: tuple[str, ...]
     rollback_actions: tuple[RollbackAction, ...]
+    next_action_index: int | None
     error_code: str | None
     _seal: object
 
@@ -593,6 +642,7 @@ class RecoveryPlan:
         disposition: RecoveryDisposition,
         transaction_ids: tuple[str, ...],
         rollback_actions: tuple[RollbackAction, ...],
+        next_action_index: int | None,
         error_code: str | None,
         _token: object,
     ) -> None:
@@ -601,6 +651,7 @@ class RecoveryPlan:
             disposition=disposition,
             transaction_ids=transaction_ids,
             rollback_actions=rollback_actions,
+            next_action_index=next_action_index,
             error_code=error_code,
         ):
             raise TypeError("RecoveryPlan is created only by plan_recovery")
@@ -609,6 +660,7 @@ class RecoveryPlan:
             disposition=disposition,
             transaction_ids=transaction_ids,
             rollback_actions=rollback_actions,
+            next_action_index=next_action_index,
             error_code=error_code,
         )
         plan_digest = hashlib.sha256(canonical_json_bytes(domain)).hexdigest()
@@ -617,6 +669,7 @@ class RecoveryPlan:
         object.__setattr__(self, "disposition", disposition)
         object.__setattr__(self, "transaction_ids", transaction_ids)
         object.__setattr__(self, "rollback_actions", rollback_actions)
+        object.__setattr__(self, "next_action_index", next_action_index)
         object.__setattr__(self, "error_code", error_code)
         object.__setattr__(self, "_seal", _PLAN_TOKEN)
 
@@ -627,6 +680,7 @@ class RecoveryPlan:
                 disposition=self.disposition,
                 transaction_ids=self.transaction_ids,
                 rollback_actions=self.rollback_actions,
+                next_action_index=self.next_action_index,
                 error_code=self.error_code,
             ):
                 raise TypeError
@@ -635,6 +689,7 @@ class RecoveryPlan:
                 disposition=self.disposition,
                 transaction_ids=self.transaction_ids,
                 rollback_actions=self.rollback_actions,
+                next_action_index=self.next_action_index,
                 error_code=self.error_code,
             )
             expected = hashlib.sha256(canonical_json_bytes(domain)).hexdigest()
@@ -690,6 +745,7 @@ def _make_plan(
     disposition: RecoveryDisposition,
     transaction_ids: tuple[str, ...],
     rollback_actions: tuple[RollbackAction, ...],
+    next_action_index: int | None,
     error_code: str | None,
 ) -> RecoveryPlan:
     snapshot._require_valid()
@@ -704,6 +760,7 @@ def _make_plan(
         disposition=disposition,
         transaction_ids=transaction_ids,
         rollback_actions=rollback_actions,
+        next_action_index=next_action_index,
         error_code=error_code,
         _token=_PLAN_TOKEN,
     )
@@ -733,6 +790,7 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             disposition=RecoveryDisposition.NO_RECOVERY,
             transaction_ids=(),
             rollback_actions=(),
+            next_action_index=None,
             error_code=None,
         )
 
@@ -749,6 +807,7 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             disposition=RecoveryDisposition.NO_RECOVERY,
             transaction_ids=(),
             rollback_actions=(),
+            next_action_index=None,
             error_code=None,
         )
     if len(capture.journals) != 1:
@@ -759,6 +818,7 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             disposition=RecoveryDisposition.OPERATOR_CONFLICT,
             transaction_ids=all_transaction_ids,
             rollback_actions=(),
+            next_action_index=None,
             error_code="recovery.operator_conflict",
         )
     journal = capture.journals[0]
@@ -772,6 +832,7 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             rollback_actions=tuple(
                 _rollback_action(action) for action in journal.rollback_actions
             ),
+            next_action_index=journal.next_action_index,
             error_code=None,
         )
     return _make_plan(
@@ -781,6 +842,7 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
         disposition=RecoveryDisposition.OPERATOR_CONFLICT,
         transaction_ids=(journal.transaction_id,),
         rollback_actions=(),
+        next_action_index=None,
         error_code="recovery.operator_conflict",
     )
 
