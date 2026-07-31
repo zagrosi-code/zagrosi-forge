@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import hmac
+import json
 import re
 from threading import Lock
-from typing import TYPE_CHECKING, Callable, NamedTuple, Never
+from typing import TYPE_CHECKING, Callable, cast, NamedTuple, Never
 import unicodedata
 from weakref import finalize, WeakKeyDictionary, WeakSet
 
@@ -36,10 +37,11 @@ if TYPE_CHECKING:
     from .ownership import (
         PendingTransactionObservation,
         RecoveryCleanupObservation,
+        RecoveryFinalizationObservation,
     )
 
 
-RECOVERY_POLICY_VERSION = "1.1"
+RECOVERY_POLICY_VERSION = "1.2"
 _SNAPSHOT_TOKEN = object()
 _PLAN_TOKEN = object()
 _LOCKED_PLAN_TOKEN = object()
@@ -74,6 +76,7 @@ _NO_RECOVERY_STATES = frozenset(
 class RecoveryDisposition(str, Enum):
     NO_RECOVERY = "no_recovery"
     ROLLBACK_CANDIDATE = "rollback_candidate"
+    FINALIZE_COMMITTED = "finalize_committed"
     CLEANUP_PENDING = "cleanup_pending"
     OPERATOR_CONFLICT = "operator_conflict"
 
@@ -98,12 +101,17 @@ class _JournalCapture(NamedTuple):
     transaction_id: str
     plan_digest: str
     head_digest: str
+    head_sequence: int
     head_state: str
+    access_digest: str
+    evidence_digest: str
     journal_location: str | None
     journal_relative: str | None
     record_digests: tuple[str, ...]
     before_config: _ConfigCapture
     candidate_config: _ConfigCapture
+    committed_config: _ConfigCapture | None
+    recovery_candidate_identity: tuple[int, int] | None
     rollback_actions: tuple[_RollbackCapture, ...]
     next_action_index: int | None
 
@@ -124,9 +132,21 @@ class _CleanupCapture(NamedTuple):
     authorization_digest: str
 
 
+class _FinalizationCapture(NamedTuple):
+    transaction_id: str
+    journal_state: str
+    receipt_status: str
+    observation_digest: str
+    journal_access_digest: str
+    journal_evidence_digest: str
+    journal_head_sequence: int
+    journal_head_record_digest: str
+
+
 class _SnapshotCapture(NamedTuple):
     journals: tuple[_JournalCapture, ...]
     cleanup_observations: tuple[_CleanupCapture, ...]
+    finalization_observations: tuple[_FinalizationCapture, ...]
     current_config: _ConfigCapture | None
     inventory_digest: str | None
 
@@ -175,11 +195,16 @@ def _journal_projection(journal: _JournalCapture) -> dict[str, object]:
     return {
         "before_config": _config_projection(journal.before_config),
         "candidate_config": _config_projection(journal.candidate_config),
+        "committed_config": _config_projection(journal.committed_config),
+        "evidence_digest": journal.evidence_digest,
+        "access_digest": journal.access_digest,
         "head_digest": journal.head_digest,
+        "head_sequence": journal.head_sequence,
         "head_state": journal.head_state,
         "journal_location": journal.journal_location,
         "journal_relative": journal.journal_relative,
         "journal_plan_digest": journal.plan_digest,
+        "recovery_candidate_identity": journal.recovery_candidate_identity,
         "record_digests": journal.record_digests,
         "rollback_actions": tuple(
             _rollback_capture_projection(action) for action in journal.rollback_actions
@@ -207,6 +232,21 @@ def _cleanup_projection(cleanup: _CleanupCapture) -> dict[str, object]:
     }
 
 
+def _finalization_projection(
+    finalization: _FinalizationCapture,
+) -> dict[str, object]:
+    return {
+        "journal_access_digest": finalization.journal_access_digest,
+        "journal_evidence_digest": finalization.journal_evidence_digest,
+        "journal_head_record_digest": finalization.journal_head_record_digest,
+        "journal_head_sequence": finalization.journal_head_sequence,
+        "journal_state": finalization.journal_state,
+        "observation_digest": finalization.observation_digest,
+        "receipt_status": finalization.receipt_status,
+        "transaction_id": finalization.transaction_id,
+    }
+
+
 def _snapshot_projection(capture: _SnapshotCapture) -> dict[str, object]:
     return {
         "cleanup_observation_digests": tuple(
@@ -214,6 +254,12 @@ def _snapshot_projection(capture: _SnapshotCapture) -> dict[str, object]:
                 canonical_json_bytes(_cleanup_projection(cleanup))
             ).hexdigest()
             for cleanup in capture.cleanup_observations
+        ),
+        "finalization_observation_digests": tuple(
+            hashlib.sha256(
+                canonical_json_bytes(_finalization_projection(finalization))
+            ).hexdigest()
+            for finalization in capture.finalization_observations
         ),
         "current_config": _config_projection(capture.current_config),
         "inventory_digest": capture.inventory_digest,
@@ -254,6 +300,24 @@ def _capture_optional_config(
     return None if identity is None else _capture_config(identity)
 
 
+def _capture_optional_identity(
+    value: object,
+) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if not _valid_optional_identity(value):
+        raise ValueError("recovery file identity")
+    return cast(tuple[int, int], value)
+
+
+def _valid_optional_identity(value: object) -> bool:
+    return value is None or (
+        type(value) is tuple
+        and len(value) == 2
+        and all(type(component) is int and component >= 0 for component in value)
+    )
+
+
 def _capture_journal(
     journal: LoadedJournal,
     observation: object | None,
@@ -274,16 +338,28 @@ def _capture_journal(
         journal_relative = observation.journal_relative
     record = journal.records[-1]
     prepared = record.prepared
+    recovery_candidate_identity = (
+        None
+        if record.config_recovery is None
+        else _capture_optional_identity(
+            record.config_recovery.get("candidate_identity")
+        )
+    )
     return _JournalCapture(
         transaction_id=record.transaction_id,
         plan_digest=record.plan_digest,
         head_digest=record.record_digest,
+        head_sequence=record.sequence,
         head_state=record.state.value,
+        access_digest=journal.access_digest,
+        evidence_digest=journal._binding_digest,
         journal_location=journal_location,
         journal_relative=journal_relative,
         record_digests=tuple(item.record_digest for item in journal.records),
         before_config=_capture_config(prepared.before_config),
         candidate_config=_capture_config(prepared.candidate_config),
+        committed_config=_capture_optional_config(record.committed_config),
+        recovery_candidate_identity=recovery_candidate_identity,
         rollback_actions=tuple(
             _RollbackCapture(
                 action=action.action,
@@ -329,6 +405,34 @@ def _capture_cleanup_observation(
     return captured
 
 
+def _capture_finalization_observation(
+    observation: object,
+) -> _FinalizationCapture:
+    from . import ownership as _ownership
+
+    if (
+        type(observation) is not _ownership.RecoveryFinalizationObservation
+        or observation._seal is not _ownership._RECOVERY_FINALIZATION_OBSERVATION_TOKEN
+    ):
+        raise ValueError("recovery finalization observation")
+    observation._require_valid()
+    evidence = observation._capture
+    captured = _FinalizationCapture(
+        transaction_id=evidence.transaction_id,
+        journal_state=evidence.journal_state,
+        receipt_status=evidence.receipt_status,
+        observation_digest=observation.observation_digest,
+        journal_access_digest=evidence.journal_access_digest,
+        journal_evidence_digest=evidence.journal_evidence_digest,
+        journal_head_sequence=evidence.journal_head_sequence,
+        journal_head_record_digest=evidence.journal_head_record_digest,
+    )
+    observation._require_valid()
+    if evidence != observation._capture:
+        raise ValueError("recovery finalization observation")
+    return captured
+
+
 def _next_rollback_action_index(journal: LoadedJournal) -> int | None:
     head = journal.records[-1]
     if head.state.value in _PRECOMMIT_ROLLBACK_STATES:
@@ -347,6 +451,7 @@ def _next_rollback_action_index(journal: LoadedJournal) -> int | None:
 def _capture_snapshot(
     journals: tuple[LoadedJournal, ...],
     cleanup_observations: tuple[object, ...] | None,
+    finalization_observations: tuple[object, ...] | None,
     current_config: JournalConfigIdentity | None,
     inventory_digest: str | None,
     observations: tuple[object, ...] | None,
@@ -367,6 +472,14 @@ def _capture_snapshot(
             else tuple(
                 _capture_cleanup_observation(observation)
                 for observation in cleanup_observations
+            )
+        ),
+        finalization_observations=(
+            ()
+            if finalization_observations is None
+            else tuple(
+                _capture_finalization_observation(observation)
+                for observation in finalization_observations
             )
         ),
         current_config=_capture_optional_config(current_config),
@@ -476,8 +589,12 @@ def _valid_journal_capture(value: object) -> bool:
         and _TRANSACTION_ID.fullmatch(value.transaction_id) is not None
         and _valid_digest(value.plan_digest)
         and _valid_digest(value.head_digest)
+        and type(value.head_sequence) is int
+        and value.head_sequence >= 0
         and type(value.head_state) is str
         and value.head_state in {state.value for state in JournalState}
+        and _valid_digest(value.access_digest)
+        and _valid_digest(value.evidence_digest)
         and (
             (value.journal_location is None and value.journal_relative is None)
             or (
@@ -492,6 +609,11 @@ def _valid_journal_capture(value: object) -> bool:
         and value.record_digests[-1] == value.head_digest
         and _valid_config_capture(value.before_config)
         and _valid_config_capture(value.candidate_config)
+        and (
+            value.committed_config is None
+            or _valid_config_capture(value.committed_config)
+        )
+        and _valid_optional_identity(value.recovery_candidate_identity)
         and value.before_config.target_metadata_digest is None
         and value.candidate_config.target_metadata_digest is not None
         and _valid_rollback_captures(value.rollback_actions)
@@ -499,6 +621,31 @@ def _valid_journal_capture(value: object) -> bool:
             value.rollback_actions,
             transaction_id=value.transaction_id,
         )
+    ):
+        return False
+    committed_states = {
+        JournalState.CONFIG_COMMITTED.value,
+        JournalState.RECEIPT_COMMITTED.value,
+        JournalState.FINALIZED.value,
+    }
+    if value.head_state != JournalState.RECOVERY_REQUIRED.value and (
+        value.committed_config is not None
+    ) != (value.head_state in committed_states):
+        return False
+    states_requiring_config_recovery = {
+        JournalState.STAGED.value,
+        JournalState.VERIFIED.value,
+        JournalState.SOURCE_PUBLISHED.value,
+        JournalState.CACHE_PUBLISHED.value,
+        JournalState.PUBLISHED.value,
+        JournalState.COMMIT_INTENT.value,
+        JournalState.CONFIG_COMMITTED.value,
+        JournalState.RECEIPT_COMMITTED.value,
+        JournalState.FINALIZED.value,
+    }
+    if (
+        value.head_state in states_requiring_config_recovery
+        and value.recovery_candidate_identity is None
     ):
         return False
     if value.head_state in _ROLLBACK_STATES:
@@ -538,17 +685,66 @@ def _valid_cleanup_capture(value: object) -> bool:
     )
 
 
+def _valid_finalization_capture(value: object) -> bool:
+    return (
+        type(value) is _FinalizationCapture
+        and type(value.transaction_id) is str
+        and _TRANSACTION_ID.fullmatch(value.transaction_id) is not None
+        and value.journal_state
+        in {
+            JournalState.COMMIT_INTENT.value,
+            JournalState.CONFIG_COMMITTED.value,
+            JournalState.RECEIPT_COMMITTED.value,
+        }
+        and value.receipt_status in {"absent", "matching"}
+        and (
+            value.journal_state != JournalState.COMMIT_INTENT.value
+            or value.receipt_status == "absent"
+        )
+        and (
+            value.journal_state != JournalState.RECEIPT_COMMITTED.value
+            or value.receipt_status == "matching"
+        )
+        and _valid_digest(value.observation_digest)
+        and _valid_digest(value.journal_access_digest)
+        and _valid_digest(value.journal_evidence_digest)
+        and type(value.journal_head_sequence) is int
+        and value.journal_head_sequence >= 0
+        and _valid_digest(value.journal_head_record_digest)
+    )
+
+
+def _finalization_matches_journal(
+    finalization: _FinalizationCapture,
+    journal: _JournalCapture,
+) -> bool:
+    return (
+        finalization.transaction_id == journal.transaction_id
+        and finalization.journal_state == journal.head_state
+        and finalization.journal_access_digest == journal.access_digest
+        and finalization.journal_evidence_digest == journal.evidence_digest
+        and finalization.journal_head_sequence == journal.head_sequence
+        and finalization.journal_head_record_digest == journal.head_digest
+        and journal.journal_location == "live"
+    )
+
+
 def _valid_snapshot_capture(value: object) -> bool:
     if (
         type(value) is not _SnapshotCapture
         or type(value.journals) is not tuple
         or type(value.cleanup_observations) is not tuple
+        or type(value.finalization_observations) is not tuple
         or len(value.journals) + len(value.cleanup_observations)
         > LIMIT_POLICY.value("journal_records")
         or any(not _valid_journal_capture(journal) for journal in value.journals)
         or any(
             not _valid_cleanup_capture(cleanup)
             for cleanup in value.cleanup_observations
+        )
+        or any(
+            not _valid_finalization_capture(finalization)
+            for finalization in value.finalization_observations
         )
         or (
             value.current_config is not None
@@ -564,6 +760,9 @@ def _valid_snapshot_capture(value: object) -> bool:
     cleanup_ids = tuple(
         cleanup.transaction_id for cleanup in value.cleanup_observations
     )
+    finalization_ids = tuple(
+        finalization.transaction_id for finalization in value.finalization_observations
+    )
     captured_locations = tuple(
         journal.journal_location is not None for journal in value.journals
     )
@@ -572,7 +771,24 @@ def _valid_snapshot_capture(value: object) -> bool:
         and len(set(transaction_ids)) == len(transaction_ids)
         and cleanup_ids == tuple(sorted(cleanup_ids))
         and len(set(cleanup_ids)) == len(cleanup_ids)
+        and finalization_ids == tuple(sorted(finalization_ids))
+        and len(set(finalization_ids)) == len(finalization_ids)
         and not set(transaction_ids).intersection(cleanup_ids)
+        and set(finalization_ids).issubset(transaction_ids)
+        and not set(finalization_ids).intersection(cleanup_ids)
+        and (
+            not value.finalization_observations
+            or (
+                len(value.journals) == 1
+                and len(value.finalization_observations) == 1
+                and not value.cleanup_observations
+                and value.current_config is not None
+                and _finalization_matches_journal(
+                    value.finalization_observations[0],
+                    value.journals[0],
+                )
+            )
+        )
         and (
             (
                 value.inventory_digest is None
@@ -587,6 +803,7 @@ def _valid_snapshot_capture(value: object) -> bool:
 def _stable_snapshot_capture(
     journals: tuple[LoadedJournal, ...],
     cleanup_observations: tuple[object, ...] | None,
+    finalization_observations: tuple[object, ...] | None,
     current_config: JournalConfigIdentity | None,
     inventory_digest: str | None,
     observations: tuple[object, ...] | None,
@@ -612,12 +829,24 @@ def _stable_snapshot_capture(
             cleanup_observations is not None and type(cleanup_observations) is not tuple
         )
         or (
+            finalization_observations is not None
+            and type(finalization_observations) is not tuple
+        )
+        or (
             inventory_digest is None
-            and (observations is not None or cleanup_observations is not None)
+            and (
+                observations is not None
+                or cleanup_observations is not None
+                or finalization_observations is not None
+            )
         )
         or (
             inventory_digest is not None
-            and (observations is None or cleanup_observations is None)
+            and (
+                observations is None
+                or cleanup_observations is None
+                or finalization_observations is None
+            )
         )
     ):
         raise TypeError("RecoverySnapshot evidence is invalid")
@@ -628,6 +857,7 @@ def _stable_snapshot_capture(
                     observations,
                     journals,
                     cleanup_observations or (),
+                    finalization_observations or (),
                 ),
                 inventory_digest,
             ):
@@ -639,6 +869,7 @@ def _stable_snapshot_capture(
         captured = _capture_snapshot(
             journals,
             cleanup_observations,
+            finalization_observations,
             current_config,
             inventory_digest,
             observations,
@@ -653,6 +884,7 @@ def _stable_snapshot_capture(
                     observations,
                     journals,
                     cleanup_observations or (),
+                    finalization_observations or (),
                 ),
                 inventory_digest,
             ):
@@ -660,6 +892,7 @@ def _stable_snapshot_capture(
         confirmed = _capture_snapshot(
             journals,
             cleanup_observations,
+            finalization_observations,
             current_config,
             inventory_digest,
             observations,
@@ -686,6 +919,7 @@ class RecoverySnapshot:
     _inventory_digest: str | None
     _observations: tuple[object, ...] | None
     _cleanup_observations: tuple[object, ...] | None
+    _finalization_observations: tuple[object, ...] | None
     _observation_seal: object | None
     _seal: object
 
@@ -697,6 +931,7 @@ class RecoverySnapshot:
         _inventory_digest: str | None = None,
         _observations: tuple[object, ...] | None = None,
         _cleanup_observations: tuple[object, ...] | None = None,
+        _finalization_observations: tuple[object, ...] | None = None,
         _observation_token: object | None = None,
     ) -> None:
         if (
@@ -704,6 +939,7 @@ class RecoverySnapshot:
             and (
                 _observations is not None
                 or _cleanup_observations is not None
+                or _finalization_observations is not None
                 or _observation_token is not None
             )
         ) or (
@@ -712,6 +948,7 @@ class RecoverySnapshot:
                 not _valid_digest(_inventory_digest)
                 or type(_observations) is not tuple
                 or type(_cleanup_observations) is not tuple
+                or type(_finalization_observations) is not tuple
                 or _observation_token is not _LIVE_OBSERVATION_TOKEN
             )
         ):
@@ -721,6 +958,7 @@ class RecoverySnapshot:
         capture = _stable_snapshot_capture(
             journals,
             _cleanup_observations,
+            _finalization_observations,
             current_config,
             _inventory_digest,
             _observations,
@@ -739,6 +977,11 @@ class RecoverySnapshot:
         )
         object.__setattr__(
             self,
+            "_finalization_observations",
+            _finalization_observations,
+        )
+        object.__setattr__(
+            self,
             "_observation_seal",
             (_LIVE_OBSERVATION_TOKEN if _inventory_digest is not None else None),
         )
@@ -749,6 +992,7 @@ class RecoverySnapshot:
             capture = _stable_snapshot_capture(
                 self.journals,
                 self._cleanup_observations,
+                self._finalization_observations,
                 self.current_config,
                 self._inventory_digest,
                 self._observations,
@@ -763,6 +1007,7 @@ class RecoverySnapshot:
                 and (
                     self._observations is not None
                     or self._cleanup_observations is not None
+                    or self._finalization_observations is not None
                     or self._observation_seal is not None
                 )
             )
@@ -772,6 +1017,7 @@ class RecoverySnapshot:
                     not _valid_digest(self._inventory_digest)
                     or type(self._observations) is not tuple
                     or type(self._cleanup_observations) is not tuple
+                    or type(self._finalization_observations) is not tuple
                     or self._observation_seal is not _LIVE_OBSERVATION_TOKEN
                 )
             )
@@ -877,6 +1123,13 @@ def _valid_plan_fields(
                 rollback_actions,
                 transaction_id=transaction_ids[0],
             )
+            and error_code is None
+        )
+    if disposition is RecoveryDisposition.FINALIZE_COMMITTED:
+        return (
+            len(transaction_ids) == 1
+            and not rollback_actions
+            and next_action_index is None
             and error_code is None
         )
     if disposition is RecoveryDisposition.CLEANUP_PENDING:
@@ -1062,6 +1315,50 @@ def _journal_disposition(
     return RecoveryDisposition.OPERATOR_CONFLICT
 
 
+def _current_config_is_committed_candidate(
+    journal: _JournalCapture,
+    current_config: _ConfigCapture | None,
+) -> bool:
+    if current_config is None:
+        return False
+    if journal.head_state == JournalState.COMMIT_INTENT.value:
+        candidate = journal.candidate_config
+        return (
+            journal.recovery_candidate_identity is not None
+            and current_config.parent_identity == candidate.parent_identity
+            and current_config.leaf_identity == journal.recovery_candidate_identity
+            and current_config.byte_digest == candidate.byte_digest
+            and current_config.semantic_digest == candidate.semantic_digest
+            and current_config.target_metadata_digest
+            == candidate.target_metadata_digest
+        )
+    return (
+        journal.head_state
+        in {
+            JournalState.CONFIG_COMMITTED.value,
+            JournalState.RECEIPT_COMMITTED.value,
+        }
+        and journal.committed_config is not None
+        and current_config == journal.committed_config
+    )
+
+
+def _journal_disposition_with_finalization(
+    journal: _JournalCapture,
+    current_config: _ConfigCapture | None,
+    finalization: _FinalizationCapture | None,
+) -> RecoveryDisposition:
+    baseline = _journal_disposition(journal, current_config)
+    if (
+        baseline is RecoveryDisposition.OPERATOR_CONFLICT
+        and finalization is not None
+        and _finalization_matches_journal(finalization, journal)
+        and _current_config_is_committed_candidate(journal, current_config)
+    ):
+        return RecoveryDisposition.FINALIZE_COMMITTED
+    return baseline
+
+
 def _rollback_action(capture: _RollbackCapture) -> RollbackAction:
     return RollbackAction(
         action=capture.action,
@@ -1127,8 +1424,16 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             error_code=None,
         )
 
+    finalization_by_transaction = {
+        finalization.transaction_id: finalization
+        for finalization in capture.finalization_observations
+    }
     journal_decisions = tuple(
-        _journal_disposition(journal, capture.current_config)
+        _journal_disposition_with_finalization(
+            journal,
+            capture.current_config,
+            finalization_by_transaction.get(journal.transaction_id),
+        )
         for journal in capture.journals
     )
     journal_transaction_ids = tuple(
@@ -1201,6 +1506,17 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
             next_action_index=journal.next_action_index,
             error_code=None,
         )
+    if journal_decisions[0] is RecoveryDisposition.FINALIZE_COMMITTED:
+        return _make_plan(
+            snapshot,
+            capture,
+            capture_digest,
+            disposition=RecoveryDisposition.FINALIZE_COMMITTED,
+            transaction_ids=(journal.transaction_id,),
+            rollback_actions=(),
+            next_action_index=None,
+            error_code=None,
+        )
     if journal_decisions[0] is RecoveryDisposition.CLEANUP_PENDING:
         return _make_plan(
             snapshot,
@@ -1267,6 +1583,7 @@ def _observed_inventory_digest(
     observations: tuple[object, ...],
     journals: tuple[LoadedJournal, ...],
     cleanup_observations: tuple[object, ...] = (),
+    finalization_observations: tuple[object, ...] = (),
 ) -> str:
     from . import ownership as _ownership
 
@@ -1274,6 +1591,7 @@ def _observed_inventory_digest(
         type(observations) is not tuple
         or type(journals) is not tuple
         or type(cleanup_observations) is not tuple
+        or type(finalization_observations) is not tuple
         or len(observations) != len(journals)
         or len(journals) + len(cleanup_observations)
         > LIMIT_POLICY.value("journal_records")
@@ -1356,11 +1674,34 @@ def _observed_inventory_digest(
             _capture_cleanup_observation(observation)
             for observation in cleanup_observations
         )
+        finalization_captures = tuple(
+            _capture_finalization_observation(observation)
+            for observation in finalization_observations
+        )
         cleanup_ids = tuple(cleanup.transaction_id for cleanup in cleanup_captures)
+        finalization_ids = tuple(
+            finalization.transaction_id for finalization in finalization_captures
+        )
         if (
             cleanup_ids != tuple(sorted(cleanup_ids))
             or len(set(cleanup_ids)) != len(cleanup_ids)
             or set(cleanup_ids).intersection(observation_ids)
+            or finalization_ids != tuple(sorted(finalization_ids))
+            or len(set(finalization_ids)) != len(finalization_ids)
+            or not set(finalization_ids).issubset(observation_ids)
+            or set(finalization_ids).intersection(cleanup_ids)
+            or (
+                bool(finalization_captures)
+                and (
+                    len(finalization_captures) != 1
+                    or len(journals) != 1
+                    or bool(cleanup_captures)
+                    or not _finalization_matches_journal(
+                        finalization_captures[0],
+                        _capture_journal(journals[0], observations[0]),
+                    )
+                )
+            )
         ):
             raise ValueError
         for journal in journals:
@@ -1375,6 +1716,12 @@ def _observed_inventory_digest(
                         canonical_json_bytes(_cleanup_projection(cleanup))
                     ).hexdigest()
                     for cleanup in cleanup_captures
+                ),
+                "finalization_observation_digests": tuple(
+                    hashlib.sha256(
+                        canonical_json_bytes(_finalization_projection(finalization))
+                    ).hexdigest()
+                    for finalization in finalization_captures
                 ),
                 "observation_digests": tuple(observation_digests),
             }
@@ -1428,46 +1775,266 @@ def observe_current_config_identity(
     return second
 
 
+def _eligible_finalization_pair(
+    observations: tuple[object, ...],
+    journals: tuple[LoadedJournal, ...],
+    cleanup_observations: tuple[object, ...],
+) -> tuple[PendingTransactionObservation, LoadedJournal] | None:
+    from . import ownership as _ownership
+
+    if len(observations) != 1 or len(journals) != 1 or cleanup_observations:
+        return None
+    observation = observations[0]
+    journal = journals[0]
+    if (
+        type(observation) is not _ownership.PendingTransactionObservation
+        or observation._seal is not _ownership._PENDING_TRANSACTION_OBSERVATION_TOKEN
+        or observation.location is not _ownership.TransactionLocation.LIVE
+        or journal.records[-1].state
+        not in {
+            JournalState.COMMIT_INTENT,
+            JournalState.CONFIG_COMMITTED,
+            JournalState.RECEIPT_COMMITTED,
+        }
+    ):
+        return None
+    return observation, journal
+
+
+def _journal_identity_is_committed_candidate(
+    journal: LoadedJournal,
+    current: JournalConfigIdentity | None,
+) -> bool:
+    if current is None:
+        return False
+    captured = _capture_journal(journal, None)
+    return _current_config_is_committed_candidate(
+        captured,
+        _capture_config(current),
+    )
+
+
+def _observe_recovery_config_once(
+    *,
+    authority: PlatformPathAuthority,
+    owned_root: OwnedRoot,
+    journal: LoadedJournal,
+) -> JournalConfigIdentity | None:
+    from . import atomic_file
+
+    proof = authority.prove_config_path(owned_root).unwrap()
+    reopened: atomic_file.ReopenedConfigRecovery | None = None
+    try:
+        snapshotted = snapshot_config(proof)
+        if not snapshotted.is_ok:
+            return None
+        snapshot = snapshotted.unwrap()
+        snapshot._require_valid()
+        base = JournalConfigIdentity(
+            parent_identity=snapshot.parent_identity,
+            leaf_identity=snapshot.leaf_identity,
+            byte_digest=snapshot.byte_digest,
+            semantic_digest=snapshot.semantic_digest,
+            metadata_fingerprint=snapshot.metadata_fingerprint,
+            snapshot_digest=snapshot.snapshot_digest,
+            target_metadata_digest=None,
+        )
+        head = journal.records[-1]
+        if head.config_recovery is None:
+            return base
+        try:
+            descriptor = atomic_file.decode_config_recovery_descriptor(
+                json.loads(canonical_json_bytes(head.config_recovery))
+            ).unwrap()
+            reopened = atomic_file.reopen_config_recovery(
+                proof,
+                descriptor,
+            ).unwrap()
+            relation = atomic_file.classify_reopened_config_recovery(reopened).unwrap()
+        except (ForgeError, TypeError, ValueError):
+            return base
+        if relation is not atomic_file.ConfigCommitState.CANDIDATE:
+            return base
+        candidate = JournalConfigIdentity(
+            parent_identity=snapshot.parent_identity,
+            leaf_identity=snapshot.leaf_identity,
+            byte_digest=snapshot.byte_digest,
+            semantic_digest=snapshot.semantic_digest,
+            metadata_fingerprint=snapshot.metadata_fingerprint,
+            snapshot_digest=snapshot.snapshot_digest,
+            target_metadata_digest=descriptor.target_metadata_digest,
+        )
+        return (
+            candidate
+            if _journal_identity_is_committed_candidate(journal, candidate)
+            else base
+        )
+    finally:
+        _close_all_recovery_resources(
+            None if reopened is None else reopened.close,
+            proof.close,
+        )
+
+
+def _observe_inventory_current_config(
+    *,
+    authority: PlatformPathAuthority,
+    owned_root: OwnedRoot,
+    observations: tuple[object, ...],
+    journals: tuple[LoadedJournal, ...],
+    cleanup_observations: tuple[object, ...],
+) -> JournalConfigIdentity | None:
+    pair = _eligible_finalization_pair(
+        observations,
+        journals,
+        cleanup_observations,
+    )
+    if pair is None:
+        return observe_current_config_identity(
+            authority=authority,
+            owned_root=owned_root,
+        )
+    first = _observe_recovery_config_once(
+        authority=authority,
+        owned_root=owned_root,
+        journal=pair[1],
+    )
+    second = _observe_recovery_config_once(
+        authority=authority,
+        owned_root=owned_root,
+        journal=pair[1],
+    )
+    if first != second:
+        raise _plan_changed("The current config changed while it was observed.")
+    return second
+
+
+def _observe_finalization_inventory(
+    owned_root: OwnedRoot,
+    *,
+    observations: tuple[object, ...],
+    journals: tuple[LoadedJournal, ...],
+    cleanup_observations: tuple[object, ...],
+    current_config: JournalConfigIdentity | None,
+) -> tuple[RecoveryFinalizationObservation, ...]:
+    from . import ownership as _ownership
+
+    pair = _eligible_finalization_pair(
+        observations,
+        journals,
+        cleanup_observations,
+    )
+    if pair is None or not _journal_identity_is_committed_candidate(
+        pair[1],
+        current_config,
+    ):
+        return ()
+    observed = _ownership.observe_recovery_finalization(
+        owned_root,
+        observation=pair[0],
+        journal=pair[1],
+    )
+    if not observed.is_ok:
+        return ()
+    finalization = observed.unwrap()
+    finalization._require_valid()
+    return (finalization,)
+
+
 def observe_recovery_snapshot(
     *,
     authority: PlatformPathAuthority,
     owned_root: OwnedRoot,
 ) -> RecoverySnapshot:
-    """Observe one stable, effect-free rollback snapshot from live authorities."""
+    """Observe one stable, effect-free recovery snapshot from live authorities."""
 
     if not _matching_path_authority(authority, owned_root):
         raise TypeError("recovery observation requires matching path authority")
     first_inventory = _discover_inventory(owned_root)
     first_cleanup_inventory = _discover_cleanup_inventory(owned_root)
     first_journals = load_pending(owned_root)
-    first_config = observe_current_config_identity(
+    first_config = _observe_inventory_current_config(
         authority=authority,
         owned_root=owned_root,
+        observations=first_inventory,
+        journals=first_journals,
+        cleanup_observations=first_cleanup_inventory,
+    )
+    first_finalization = _observe_finalization_inventory(
+        owned_root,
+        observations=first_inventory,
+        journals=first_journals,
+        cleanup_observations=first_cleanup_inventory,
+        current_config=first_config,
     )
     second_inventory = _discover_inventory(owned_root)
     second_cleanup_inventory = _discover_cleanup_inventory(owned_root)
     second_journals = load_pending(owned_root)
-    second_config = observe_current_config_identity(
+    second_config = _observe_inventory_current_config(
         authority=authority,
         owned_root=owned_root,
+        observations=second_inventory,
+        journals=second_journals,
+        cleanup_observations=second_cleanup_inventory,
+    )
+    second_finalization = _observe_finalization_inventory(
+        owned_root,
+        observations=second_inventory,
+        journals=second_journals,
+        cleanup_observations=second_cleanup_inventory,
+        current_config=second_config,
     )
     final_inventory = _discover_inventory(owned_root)
     final_cleanup_inventory = _discover_cleanup_inventory(owned_root)
+    final_journals = load_pending(owned_root)
+    final_config = _observe_inventory_current_config(
+        authority=authority,
+        owned_root=owned_root,
+        observations=final_inventory,
+        journals=final_journals,
+        cleanup_observations=final_cleanup_inventory,
+    )
+    final_finalization = _observe_finalization_inventory(
+        owned_root,
+        observations=final_inventory,
+        journals=final_journals,
+        cleanup_observations=final_cleanup_inventory,
+        current_config=final_config,
+    )
+    confirmed_inventory = _discover_inventory(owned_root)
+    confirmed_cleanup_inventory = _discover_cleanup_inventory(owned_root)
+    confirmed_journals = load_pending(owned_root)
+    confirmed_config = _observe_inventory_current_config(
+        authority=authority,
+        owned_root=owned_root,
+        observations=confirmed_inventory,
+        journals=confirmed_journals,
+        cleanup_observations=confirmed_cleanup_inventory,
+    )
     try:
         first_inventory_digest = _observed_inventory_digest(
             first_inventory,
             first_journals,
             first_cleanup_inventory,
+            first_finalization,
         )
         second_inventory_digest = _observed_inventory_digest(
             second_inventory,
             second_journals,
             second_cleanup_inventory,
+            second_finalization,
         )
         final_inventory_digest = _observed_inventory_digest(
             final_inventory,
-            second_journals,
+            final_journals,
             final_cleanup_inventory,
+            final_finalization,
+        )
+        confirmed_inventory_digest = _observed_inventory_digest(
+            confirmed_inventory,
+            confirmed_journals,
+            confirmed_cleanup_inventory,
+            final_finalization,
         )
     except TypeError:
         raise _plan_changed(
@@ -1478,18 +2045,28 @@ def observe_recovery_snapshot(
         or second_inventory != final_inventory
         or first_cleanup_inventory != second_cleanup_inventory
         or second_cleanup_inventory != final_cleanup_inventory
+        or final_cleanup_inventory != confirmed_cleanup_inventory
+        or first_finalization != second_finalization
+        or second_finalization != final_finalization
         or first_inventory_digest != second_inventory_digest
         or second_inventory_digest != final_inventory_digest
+        or final_inventory_digest != confirmed_inventory_digest
         or first_journals != second_journals
+        or second_journals != final_journals
+        or final_journals != confirmed_journals
         or first_config != second_config
+        or second_config != final_config
+        or final_config != confirmed_config
+        or final_inventory != confirmed_inventory
     ):
         raise _plan_changed("Recovery evidence changed while it was observed.")
     return RecoverySnapshot(
-        journals=second_journals,
-        current_config=second_config,
-        _inventory_digest=final_inventory_digest,
-        _observations=final_inventory,
-        _cleanup_observations=final_cleanup_inventory,
+        journals=confirmed_journals,
+        current_config=confirmed_config,
+        _inventory_digest=confirmed_inventory_digest,
+        _observations=confirmed_inventory,
+        _cleanup_observations=confirmed_cleanup_inventory,
+        _finalization_observations=final_finalization,
         _observation_token=_LIVE_OBSERVATION_TOKEN,
     )
 
@@ -1567,7 +2144,12 @@ def _journal_execution_evidence(
         raise _plan_changed("The locked cleanup evidence changed.")
     try:
         if not hmac.compare_digest(
-            _observed_inventory_digest((observation,), (journal,)),
+            _observed_inventory_digest(
+                (observation,),
+                (journal,),
+                (),
+                snapshot._finalization_observations or (),
+            ),
             snapshot._inventory_digest or "",
         ):
             raise ValueError
@@ -1620,7 +2202,12 @@ def _cleanup_execution_evidence(
             or _capture_cleanup_observation(cleanup_observation)
             != snapshot._capture.cleanup_observations[0]
             or not hmac.compare_digest(
-                _observed_inventory_digest((), (), (cleanup_observation,)),
+                _observed_inventory_digest(
+                    (),
+                    (),
+                    (cleanup_observation,),
+                    snapshot._finalization_observations or (),
+                ),
                 snapshot._inventory_digest or "",
             )
         ):

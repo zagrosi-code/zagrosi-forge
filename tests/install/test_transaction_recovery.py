@@ -67,6 +67,24 @@ def _reference(raw: str):
     return validate_reference(raw, role="test", limits=LIMIT_POLICY).unwrap()
 
 
+def _path_identity(path: Path) -> tuple[int, int]:
+    if os.name != "nt":
+        status = path.stat(follow_symlinks=False)
+        return status.st_dev, status.st_ino
+
+    import zagrosi_forge.install.paths as paths
+
+    parent = paths._windows_open_path(os.fspath(path.parent))
+    child = 0
+    try:
+        child = paths._windows_open_child(parent, path.name, directory=None)
+        return paths._windows_handle_status(child).identity
+    finally:
+        if child:
+            paths._windows_close(child)
+        paths._windows_close(parent)
+
+
 def _identity():
     from zagrosi_forge.install.contracts import InstallIdentity
 
@@ -583,6 +601,232 @@ def _bind_prepared_to_current_config(prepared, current):
         candidate_config=candidate,
         prepared_receipt=receipt,
     )
+
+
+def _finalizable_live_transaction(
+    tmp_path: Path,
+    *,
+    state,
+):
+    import zagrosi_forge.install.atomic_file as atomic_file
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.config import snapshot_config
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.journal import (
+        JournalConfigIdentity,
+        JournalPathIdentity,
+        JournalState,
+        JournalTransition,
+    )
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from tests.install.test_codex_config import _atomic_inputs
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    identity = _identity()
+    source_relative = (
+        f"sources/zagrosi/zagrosi-forge/{identity.install_version}/marketplace"
+    )
+    cache_relative = f"cache/zagrosi/zagrosi-forge/{identity.install_version}"
+    source_plan = authority.plan_owned_path(
+        owned,
+        _reference(source_relative),
+        expected_depth=5,
+    ).unwrap()
+    config_proof = authority.prove_config_path(owned).unwrap()
+    committed = None
+    try:
+        before_snapshot = snapshot_config(config_proof).unwrap()
+        candidate = _atomic_inputs(before_snapshot, identity, source_plan)
+        atomic = atomic_file.prepare_atomic_candidate(
+            config_proof,
+            before_snapshot,
+            candidate,
+            atomic_file.begin_config_transaction(binding.transaction_id),
+        ).unwrap()
+        descriptor = atomic_file.acknowledge_config_preparation(atomic).unwrap()
+
+        root = tmp_path / "codex-home" / "plugins"
+        source = root / source_relative
+        cache = root / cache_relative
+        source.mkdir(parents=True)
+        cache.mkdir(parents=True)
+        source_manifest = (
+            source / "plugins/zagrosi-forge/.codex-plugin/bundle-manifest.json"
+        )
+        cache_manifest = cache / ".codex-plugin/bundle-manifest.json"
+        source_manifest.parent.mkdir(parents=True)
+        cache_manifest.parent.mkdir(parents=True)
+        source_manifest.write_bytes(b"finalization-source-manifest\n")
+        cache_manifest.write_bytes(b"finalization-cache-manifest\n")
+        source_digest = hashlib.sha256(source_manifest.read_bytes()).hexdigest()
+        cache_digest = hashlib.sha256(cache_manifest.read_bytes()).hexdigest()
+
+        before = JournalConfigIdentity(
+            parent_identity=before_snapshot.parent_identity,
+            leaf_identity=before_snapshot.leaf_identity,
+            byte_digest=before_snapshot.byte_digest,
+            semantic_digest=before_snapshot.semantic_digest,
+            metadata_fingerprint=before_snapshot.metadata_fingerprint,
+            snapshot_digest=before_snapshot.snapshot_digest,
+            target_metadata_digest=None,
+        )
+        candidate_config = JournalConfigIdentity(
+            parent_identity=before_snapshot.parent_identity,
+            leaf_identity=None,
+            byte_digest=candidate.byte_digest,
+            semantic_digest=candidate.semantic_digest,
+            metadata_fingerprint=candidate.metadata_fingerprint,
+            snapshot_digest=candidate.snapshot_digest,
+            target_metadata_digest=descriptor.target_metadata_digest,
+        )
+        prepared = _prepared(binding)
+        receipt = _prepared_receipt(
+            identity,
+            binding.transaction_id,
+            before.byte_digest,
+            candidate_config.byte_digest,
+        )
+        receipt["source"] = {
+            "relative_path": source_relative,
+            "manifest_digest": source_digest,
+        }
+        receipt["cache"] = {
+            "relative_path": cache_relative,
+            "manifest_digest": cache_digest,
+        }
+        receipt.pop("record_digest", None)
+        receipt["record_digest"] = hashlib.sha256(
+            canonical_json_bytes(receipt)
+        ).hexdigest()
+        transaction_root = next(
+            item for item in prepared.identities if item.role == "transaction-root"
+        )
+        source_initial = replace(
+            next(
+                item for item in prepared.identities if item.role == "source-generation"
+            ),
+            relative_path=source_relative,
+            parent_identity=_path_identity(source.parent),
+            leaf_identity=None,
+            content_digest=source_digest,
+        )
+        cache_initial = replace(
+            next(
+                item for item in prepared.identities if item.role == "cache-generation"
+            ),
+            relative_path=cache_relative,
+            parent_identity=_path_identity(cache.parent),
+            leaf_identity=None,
+            content_digest=cache_digest,
+        )
+        prepared = replace(
+            prepared,
+            before_config=before,
+            candidate_config=candidate_config,
+            identities=(transaction_root, source_initial, cache_initial),
+            prepared_receipt=receipt,
+        )
+
+        head = store.create_prepared(prepared)
+        for transition in (
+            JournalTransition(JournalState.STAGED, config_recovery=descriptor),
+            JournalTransition(
+                JournalState.VERIFIED,
+                verification_evidence_digest="f" * 64,
+            ),
+            JournalTransition(
+                JournalState.SOURCE_PUBLISHED,
+                source_result=replace(
+                    source_initial,
+                    leaf_identity=_path_identity(source),
+                ),
+            ),
+            JournalTransition(
+                JournalState.CACHE_PUBLISHED,
+                cache_result=replace(
+                    cache_initial,
+                    leaf_identity=_path_identity(cache),
+                ),
+            ),
+            JournalTransition(JournalState.PUBLISHED),
+            JournalTransition(JournalState.COMMIT_INTENT),
+        ):
+            head = store.append(head, transition)
+
+        committed = atomic_file.commit_atomic_candidate(
+            atomic,
+            expected=before_snapshot,
+        ).unwrap()
+        assert committed.state is atomic_file.ConfigCommitState.CANDIDATE
+        current_proof = authority.prove_config_path(owned).unwrap()
+        try:
+            current_snapshot = snapshot_config(current_proof).unwrap()
+        finally:
+            current_proof.close()
+        current = JournalConfigIdentity(
+            parent_identity=current_snapshot.parent_identity,
+            leaf_identity=current_snapshot.leaf_identity,
+            byte_digest=current_snapshot.byte_digest,
+            semantic_digest=current_snapshot.semantic_digest,
+            metadata_fingerprint=current_snapshot.metadata_fingerprint,
+            snapshot_digest=current_snapshot.snapshot_digest,
+            target_metadata_digest=descriptor.target_metadata_digest,
+        )
+        if state in {
+            JournalState.CONFIG_COMMITTED,
+            JournalState.RECEIPT_COMMITTED,
+        }:
+            head = store.append(
+                head,
+                JournalTransition(
+                    JournalState.CONFIG_COMMITTED,
+                    config_result=current,
+                ),
+            )
+        if state is JournalState.RECEIPT_COMMITTED:
+            prepared_raw = canonical_json_bytes(
+                prepared.prepared_receipt,
+                final_newline=True,
+            )
+            ownership.publish_committed_receipt(
+                owned,
+                raw=prepared_raw,
+            ).unwrap()
+            receipt_reference = ownership.committed_receipt_reference(
+                prepared.effective_marketplace_id,
+                prepared.install_identity,
+            )
+            receipt_path = root / receipt_reference.value
+            store.append(
+                head,
+                JournalTransition(
+                    JournalState.RECEIPT_COMMITTED,
+                    receipt_result=JournalPathIdentity(
+                        role="committed-receipt",
+                        relative_path=receipt_reference.value,
+                        parent_identity=_path_identity(receipt_path.parent),
+                        leaf_identity=_path_identity(receipt_path),
+                        content_digest=hashlib.sha256(prepared_raw).hexdigest(),
+                    ),
+                ),
+            )
+        committed.recovery.close()
+        committed = None
+        return authority, owned, store, proof, current
+    except BaseException:
+        store.close()
+        proof.close()
+        owned.close()
+        raise
+    finally:
+        if committed is not None:
+            committed.recovery.close()
+        config_proof.close()
+        source_plan.close()
 
 
 def _record_bytes(record: Mapping[str, object]) -> bytes:
@@ -2814,6 +3058,683 @@ def test_historical_publication_does_not_authorize_recovery_finalization(
         assert plan.transaction_ids == (prepared.transaction_id,)
         assert plan.rollback_actions == ()
         assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        "COMMIT_INTENT",
+        "CONFIG_COMMITTED",
+        "RECEIPT_COMMITTED",
+    ),
+)
+def test_live_candidate_recovery_uses_fresh_finalization_evidence(
+    tmp_path: Path,
+    state: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState(state),
+    )
+    try:
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+
+        def reject_effect(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("pure committed recovery planning used live authority")
+
+        with monkeypatch.context() as effects:
+            effects.setattr(
+                ownership,
+                "observe_recovery_finalization",
+                reject_effect,
+            )
+            effects.setattr(recovery, "load_pending", reject_effect)
+            plan = recovery.plan_recovery(snapshot)
+
+        assert snapshot.current_config == current
+        assert plan.disposition is recovery.RecoveryDisposition.FINALIZE_COMMITTED
+        assert plan.transaction_ids == (
+            snapshot.journals[0].records[-1].transaction_id,
+        )
+        assert plan.rollback_actions == ()
+        assert plan.next_action_index is None
+        assert plan.error_code is None
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_structural_candidate_snapshot_cannot_finalize_with_historical_publication(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState
+
+    _authority, owned, store, proof, current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    try:
+        journal = store.load()
+        pending = ownership.discover_pending_transactions(owned).unwrap()
+        fresh = ownership.observe_recovery_finalization(
+            owned,
+            observation=pending[0],
+            journal=journal,
+        ).unwrap()
+
+        plan = recovery.plan_recovery(
+            recovery.RecoverySnapshot(
+                journals=(journal,),
+                current_config=current,
+            )
+        )
+
+        assert fresh.transaction_id == journal.records[-1].transaction_id
+        assert plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == (fresh.transaction_id,)
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.parametrize("generation", ("source", "cache"))
+def test_live_candidate_with_stable_generation_mismatch_requires_operator(
+    tmp_path: Path,
+    generation: str,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    identity = _identity()
+    root = tmp_path / "codex-home" / "plugins"
+    manifests = {
+        "source": (
+            root
+            / "sources/zagrosi/zagrosi-forge"
+            / identity.install_version
+            / "marketplace/plugins/zagrosi-forge/.codex-plugin/"
+            "bundle-manifest.json"
+        ),
+        "cache": (
+            root
+            / "cache/zagrosi/zagrosi-forge"
+            / identity.install_version
+            / ".codex-plugin/bundle-manifest.json"
+        ),
+    }
+    try:
+        manifest = manifests[generation]
+        original = manifest.read_bytes()
+        manifest.write_bytes(b"stable-mismatched-finalization-manifest\n")
+
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        plan = recovery.plan_recovery(snapshot)
+
+        assert manifest.read_bytes() != original
+        assert snapshot._finalization_observations == ()
+        assert plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == (
+            snapshot.journals[0].records[-1].transaction_id,
+        )
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.parametrize(
+    ("state", "receipt_relation"),
+    (
+        ("COMMIT_INTENT", "unexpected"),
+        ("RECEIPT_COMMITTED", "missing"),
+    ),
+)
+def test_live_candidate_with_stable_receipt_mismatch_requires_operator(
+    tmp_path: Path,
+    state: str,
+    receipt_relation: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState(state),
+    )
+    try:
+        journal = store.load()
+        prepared = journal.records[0].prepared
+        assert prepared is not None
+        reference = ownership.committed_receipt_reference(
+            prepared.effective_marketplace_id,
+            prepared.install_identity,
+        )
+        receipt = tmp_path / "codex-home" / "plugins" / reference.value
+        if receipt_relation == "unexpected":
+            ownership.publish_committed_receipt(
+                owned,
+                raw=canonical_json_bytes(
+                    prepared.prepared_receipt,
+                    final_newline=True,
+                ),
+            ).unwrap()
+            assert receipt.is_file()
+        else:
+            receipt.chmod(0o600)
+            receipt.unlink()
+            assert not receipt.exists()
+
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        plan = recovery.plan_recovery(snapshot)
+
+        assert snapshot._finalization_observations == ()
+        assert plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == (prepared.transaction_id,)
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.parametrize(
+    ("receipt_relation", "expected_disposition"),
+    (
+        ("matching", "finalize_committed"),
+        ("wrong", "operator_conflict"),
+    ),
+)
+def test_config_committed_crash_window_classifies_existing_receipt(
+    tmp_path: Path,
+    receipt_relation: str,
+    expected_disposition: str,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.CONFIG_COMMITTED,
+    )
+    try:
+        journal = store.load()
+        prepared = journal.records[0].prepared
+        assert prepared is not None
+        receipt = json.loads(canonical_json_bytes(prepared.prepared_receipt))
+        if receipt_relation == "wrong":
+            receipt["created_at"] = "2026-07-18T00:00:00Z"
+            receipt.pop("record_digest", None)
+            receipt["record_digest"] = hashlib.sha256(
+                canonical_json_bytes(receipt)
+            ).hexdigest()
+        ownership.publish_committed_receipt(
+            owned,
+            raw=canonical_json_bytes(receipt, final_newline=True),
+        ).unwrap()
+
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        plan = recovery.plan_recovery(snapshot)
+
+        assert plan.disposition.value == expected_disposition
+        if receipt_relation == "matching":
+            assert len(snapshot._finalization_observations or ()) == 1
+            assert snapshot._finalization_observations[0].receipt_status == "matching"
+            assert plan.error_code is None
+        else:
+            assert snapshot._finalization_observations == ()
+            assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX config metadata drift")
+def test_live_candidate_same_bytes_with_metadata_drift_requires_operator(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    config = tmp_path / "codex-home" / "config.toml"
+    try:
+        raw = config.read_bytes()
+        config.chmod(0o640)
+
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        plan = recovery.plan_recovery(snapshot)
+
+        assert config.read_bytes() == raw
+        assert snapshot.current_config is None
+        assert snapshot._finalization_observations == ()
+        assert plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_live_candidate_same_bytes_with_leaf_replacement_requires_operator(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    home = tmp_path / "codex-home"
+    config = home / "config.toml"
+    displaced = home / "displaced-config.toml"
+    try:
+        raw = config.read_bytes()
+        original_identity = _path_identity(config)
+        config.rename(displaced)
+        _write_private_file(home, "config.toml", raw)
+
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        plan = recovery.plan_recovery(snapshot)
+
+        assert config.read_bytes() == raw
+        assert _path_identity(config) != original_identity
+        assert snapshot.current_config is not None
+        assert snapshot.current_config.leaf_identity == _path_identity(config)
+        assert snapshot.current_config.target_metadata_digest is None
+        assert snapshot._finalization_observations == ()
+        assert plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_config_observation_closes_proof_after_reopen_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.atomic_file as atomic_file
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState
+    from zagrosi_forge.install.paths import ConfigPathProof
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    journal = store.load()
+    original_reopened_close = atomic_file.ReopenedConfigRecovery.close
+    original_proof_close = ConfigPathProof.close
+    closes: list[str] = []
+
+    def fail_reopened_close(reopened: atomic_file.ReopenedConfigRecovery) -> None:
+        closes.append("reopened")
+        original_reopened_close(reopened)
+        raise OSError("injected reopened config close failure")
+
+    def close_proof(config_proof: ConfigPathProof) -> None:
+        closes.append("proof")
+        original_proof_close(config_proof)
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                atomic_file.ReopenedConfigRecovery,
+                "close",
+                fail_reopened_close,
+            )
+            context.setattr(ConfigPathProof, "close", close_proof)
+
+            with pytest.raises(
+                OSError,
+                match="injected reopened config close failure",
+            ):
+                recovery._observe_recovery_config_once(
+                    authority=authority,
+                    owned_root=owned,
+                    journal=journal,
+                )
+
+        assert closes == ["reopened", "proof"]
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_finalization_observation_disagreement_requires_fresh_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError, Result
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    original = ownership.observe_recovery_finalization
+    calls = 0
+
+    def disagree_once(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        observed = original(*args, **kwargs)
+        if calls == 2:
+            return Result.failure(
+                ForgeError(
+                    "ownership.identity_mismatch",
+                    13,
+                    "Injected stable finalization mismatch.",
+                )
+            )
+        return observed
+
+    try:
+        monkeypatch.setattr(
+            ownership,
+            "observe_recovery_finalization",
+            disagree_once,
+        )
+
+        with pytest.raises(ForgeError) as changed:
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+
+        assert changed.value.code == "transaction.plan_changed"
+        assert calls == 3
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_config_replacement_after_finalization_observation_requires_fresh_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    home = tmp_path / "codex-home"
+    config = home / "config.toml"
+    original_identity = _path_identity(config)
+    original = ownership.observe_recovery_finalization
+    calls = 0
+
+    def replace_after_third_observation(*args: object, **kwargs: object):
+        nonlocal calls
+        observed = original(*args, **kwargs)
+        calls += 1
+        if calls == 3:
+            raw = config.read_bytes()
+            config.rename(home / "displaced-after-finalization.toml")
+            _write_private_file(home, "config.toml", raw)
+        return observed
+
+    try:
+        monkeypatch.setattr(
+            ownership,
+            "observe_recovery_finalization",
+            replace_after_third_observation,
+        )
+
+        with pytest.raises(ForgeError) as changed:
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+
+        assert changed.value.code == "transaction.plan_changed"
+        assert calls == 3
+        assert _path_identity(config) != original_identity
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_finalization_evidence_requires_live_snapshot_minting_and_cross_binding(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState
+
+    authority, owned, store, proof, current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    try:
+        journal = store.load()
+        pending = ownership.discover_pending_transactions(owned).unwrap()
+        finalization = ownership.observe_recovery_finalization(
+            owned,
+            observation=pending[0],
+            journal=journal,
+        ).unwrap()
+        with pytest.raises(TypeError, match="live recovery snapshots"):
+            recovery.RecoverySnapshot(
+                journals=(journal,),
+                current_config=current,
+                _finalization_observations=(finalization,),
+            )
+
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        original_capture = snapshot._capture
+        observed = original_capture.finalization_observations[0]
+        changed = observed._replace(
+            journal_head_sequence=observed.journal_head_sequence + 1,
+        )
+        object.__setattr__(
+            snapshot,
+            "_capture",
+            original_capture._replace(finalization_observations=(changed,)),
+        )
+        try:
+            with pytest.raises(TypeError, match="RecoverySnapshot"):
+                snapshot._require_valid()
+        finally:
+            object.__setattr__(snapshot, "_capture", original_capture)
+        snapshot._require_valid()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_second_live_journal_blocks_committed_finalization(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState, JournalStore
+
+    authority, owned, store, proof, _current = _finalizable_live_transaction(
+        tmp_path,
+        state=JournalState.COMMIT_INTENT,
+    )
+    created = ownership.create_persistent_transaction_root(
+        owned,
+        transaction_id="tx-" + "b" * 32,
+    ).unwrap()
+    second_proof = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    second_store = JournalStore(
+        ownership.open_transaction_journal_access(owned, created).unwrap(),
+        second_proof,
+    )
+    try:
+        second_store.create_prepared(_prepared(created.binding))
+
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        plan = recovery.plan_recovery(snapshot)
+
+        assert len(snapshot.journals) == 2
+        assert snapshot._finalization_observations == ()
+        assert plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == tuple(
+            sorted(journal.records[-1].transaction_id for journal in snapshot.journals)
+        )
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        second_store.close()
+        second_proof.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_private_live_snapshot_token_cannot_be_forged() -> None:
+    import zagrosi_forge.install.recovery as recovery
+
+    with pytest.raises(TypeError, match="live recovery snapshots"):
+        recovery.RecoverySnapshot(
+            journals=(),
+            current_config=None,
+            _inventory_digest="0" * 64,
+            _observations=(),
+            _cleanup_observations=(),
+            _finalization_observations=(),
+            _observation_token=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    "previous_state",
+    (
+        "PREPARED",
+        "CONFIG_COMMITTED",
+        "RECEIPT_COMMITTED",
+    ),
+)
+def test_recovery_required_preserves_optional_committed_config_as_conflict(
+    tmp_path: Path,
+    previous_state: str,
+) -> None:
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalState, JournalTransition
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+
+    if previous_state == "PREPARED":
+        authority = PlatformPathAuthority()
+        store, proof, owned, _directory, binding = _store(
+            tmp_path,
+            authority=authority,
+        )
+        current = recovery.observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(
+            _prepared(binding),
+            current,
+        )
+        head = store.create_prepared(prepared)
+    else:
+        authority, owned, store, proof, current = _finalizable_live_transaction(
+            tmp_path,
+            state=JournalState(previous_state),
+        )
+        head = store.load().head
+    try:
+        store.append(
+            head,
+            JournalTransition(JournalState.RECOVERY_REQUIRED),
+        )
+        journal = store.load()
+        assert (journal.records[-1].committed_config is not None) == (
+            previous_state != "PREPARED"
+        )
+
+        structural = recovery.plan_recovery(
+            recovery.RecoverySnapshot(
+                journals=(journal,),
+                current_config=current,
+            )
+        )
+        live = recovery.plan_recovery(
+            recovery.observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+
+        for plan in (structural, live):
+            assert plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+            assert plan.transaction_ids == (journal.records[-1].transaction_id,)
+            assert plan.rollback_actions == ()
+            assert plan.error_code == "recovery.operator_conflict"
     finally:
         store.close()
         proof.close()
@@ -5869,6 +6790,67 @@ def test_rolled_back_quarantine_remains_cleanup_pending_until_exact_removal(
         assert completed_plan.error_code is None
     finally:
         ticket.close()
+        owned.close()
+
+
+def test_cleanup_wal_and_different_live_journal_require_operator(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    import zagrosi_forge.install.recovery as recovery
+    from zagrosi_forge.install.journal import JournalStore, load_pending
+
+    authority, owned, _binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    second_proof = None
+    second_store = None
+    try:
+        ticket.close()
+        pending = ownership.discover_pending_transactions(owned).unwrap()
+        journals = load_pending(owned)
+        assert len(pending) == len(journals) == 1
+        ownership.authorize_recovery_cleanup(
+            owned,
+            observation=pending[0],
+            journal=journals[0],
+        ).unwrap()
+
+        created = ownership.create_persistent_transaction_root(
+            owned,
+            transaction_id="tx-" + "b" * 32,
+        ).unwrap()
+        second_proof = authority.prove_descendant(
+            owned,
+            created.claim.relative,
+            expected_depth=3,
+        ).unwrap()
+        second_store = JournalStore(
+            ownership.open_transaction_journal_access(owned, created).unwrap(),
+            second_proof,
+        )
+        second_store.create_prepared(_prepared(created.binding))
+
+        snapshot = recovery.observe_recovery_snapshot(
+            authority=authority,
+            owned_root=owned,
+        )
+        plan = recovery.plan_recovery(snapshot)
+
+        assert len(snapshot.journals) == 1
+        assert len(snapshot._cleanup_observations or ()) == 1
+        assert snapshot._finalization_observations == ()
+        assert plan.disposition is recovery.RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == tuple(
+            sorted((prepared.transaction_id, created.binding.transaction_id))
+        )
+        assert plan.rollback_actions == ()
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        if second_store is not None:
+            second_store.close()
+        if second_proof is not None:
+            second_proof.close()
         owned.close()
 
 
