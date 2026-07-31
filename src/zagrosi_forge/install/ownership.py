@@ -37,7 +37,7 @@ from .paths import OpenedRegularFile, OwnedRoot, PathProof, SafeRelativePath
 from .policies import LIMIT_POLICY
 
 if TYPE_CHECKING:
-    from .journal import LoadedJournal
+    from .journal import JournalPathIdentity, LoadedJournal
 
 
 RECEIPT_SCHEMA_DIGEST = (
@@ -122,6 +122,7 @@ _QUARANTINED_RECOVERY_JOURNAL_WRITER_TOKEN = object()
 _PENDING_TRANSACTION_OBSERVATION_TOKEN = object()
 _RECOVERY_CLEANUP_AUTHORIZATION_TOKEN = object()
 _RECOVERY_CLEANUP_OBSERVATION_TOKEN = object()
+_RECOVERY_FINALIZATION_OBSERVATION_TOKEN = object()
 
 
 def _error(code: str, message: str, *, recovery: tuple[str, ...] = ()) -> ForgeError:
@@ -194,6 +195,21 @@ def _close_native(descriptor: int) -> None:
         os.close(descriptor)
     else:
         _paths._windows_close(descriptor)
+
+
+def _close_all_native_descriptors(*descriptors: int) -> None:
+    empty = 0 if os.name == "nt" else -1
+    first_failure: BaseException | None = None
+    for descriptor in descriptors:
+        if descriptor == empty:
+            continue
+        try:
+            _close_native(descriptor)
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+    if first_failure is not None:
+        raise first_failure
 
 
 def _windows_open_raw_child(
@@ -581,15 +597,23 @@ def _windows_private_file(handle: int) -> bool:
 
 
 def _windows_open_parent(root: int, components: tuple[str, ...]) -> int:
+    empty = 0
     current = _paths._windows_duplicate(root)
+    child = empty
     try:
         for component in components:
             child = _paths._windows_open_child(current, component, directory=True)
-            _paths._windows_close(current)
+            previous = current
+            current = empty
+            _close_native(previous)
             current = child
+            child = empty
         return current
     except BaseException:
-        _paths._windows_close(current)
+        try:
+            _close_all_native_descriptors(child, current)
+        except BaseException:
+            pass
         raise
 
 
@@ -600,10 +624,11 @@ def _windows_open_private_directory_chain(
     volume: int,
     create_missing: bool = True,
 ) -> int:
+    empty = 0
     current = _paths._windows_duplicate(root)
+    child = empty
     try:
         for component in components:
-            child = 0
             try:
                 try:
                     child = _paths._windows_open_child(
@@ -626,14 +651,18 @@ def _windows_open_private_directory_chain(
                         "The receipt parent is not privately owned.",
                     )
             except BaseException:
-                if child:
-                    _paths._windows_close(child)
                 raise
-            _paths._windows_close(current)
+            previous = current
+            current = empty
+            _close_native(previous)
             current = child
+            child = empty
         return current
     except BaseException:
-        _paths._windows_close(current)
+        try:
+            _close_all_native_descriptors(child, current)
+        except BaseException:
+            pass
         raise
 
 
@@ -679,15 +708,23 @@ def _directory_flags() -> int:
 
 
 def _open_parent(root: int, components: tuple[str, ...]) -> int:
+    empty = -1
     current = os.dup(root)
+    child = empty
     try:
         for component in components:
             child = os.open(component, _directory_flags(), dir_fd=current)
-            os.close(current)
+            previous = current
+            current = empty
+            _close_native(previous)
             current = child
+            child = empty
         return current
     except BaseException:
-        os.close(current)
+        try:
+            _close_all_native_descriptors(child, current)
+        except BaseException:
+            pass
         raise
 
 
@@ -1588,6 +1625,208 @@ class RecoveryCleanupObservation:
 
     def __reduce__(self) -> Never:
         raise TypeError("recovery cleanup observations are not serializable")
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryGenerationCapture:
+    relative_path: str
+    parent_identity: tuple[int, int]
+    leaf_identity: tuple[int, int]
+    manifest_relative: str
+    manifest_parent_identity: tuple[int, int]
+    manifest_identity: tuple[int, int]
+    manifest_digest: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RecoveryFinalizationCapture:
+    transaction_id: str
+    journal_state: str
+    journal_access_digest: str
+    journal_evidence_digest: str
+    journal_head_sequence: int
+    journal_head_record_digest: str
+    source: _RecoveryGenerationCapture
+    cache: _RecoveryGenerationCapture
+    receipt_status: str
+    receipt_relative: str
+    receipt_control_identity: tuple[int, int]
+    receipt_existing_depth: int
+    receipt_ancestor_identity: tuple[int, int]
+    receipt_parent_identity: tuple[int, int] | None
+    receipt_identity: tuple[int, int] | None
+    receipt_digest: str | None
+    prepared_receipt_digest: str
+
+
+def _recovery_generation_capture_invariants(
+    capture: object,
+) -> bool:
+    return (
+        type(capture) is _RecoveryGenerationCapture
+        and type(capture.relative_path) is str
+        and bool(capture.relative_path)
+        and _file_identity_invariants(capture.parent_identity)
+        and _file_identity_invariants(capture.leaf_identity)
+        and type(capture.manifest_relative) is str
+        and capture.manifest_relative.startswith(f"{capture.relative_path}/")
+        and _file_identity_invariants(capture.manifest_parent_identity)
+        and _file_identity_invariants(capture.manifest_identity)
+        and type(capture.manifest_digest) is str
+        and _DIGEST.fullmatch(capture.manifest_digest) is not None
+    )
+
+
+def _recovery_finalization_capture_invariants(
+    capture: object,
+) -> bool:
+    if (
+        type(capture) is not _RecoveryFinalizationCapture
+        or _PERSISTENT_TRANSACTION.fullmatch(capture.transaction_id) is None
+        or capture.journal_state
+        not in {"COMMIT_INTENT", "CONFIG_COMMITTED", "RECEIPT_COMMITTED"}
+        or _DIGEST.fullmatch(capture.journal_access_digest) is None
+        or _DIGEST.fullmatch(capture.journal_evidence_digest) is None
+        or type(capture.journal_head_sequence) is not int
+        or capture.journal_head_sequence < 0
+        or _DIGEST.fullmatch(capture.journal_head_record_digest) is None
+        or not _recovery_generation_capture_invariants(capture.source)
+        or not _recovery_generation_capture_invariants(capture.cache)
+        or capture.source.relative_path == capture.cache.relative_path
+        or capture.receipt_status not in {"absent", "matching"}
+        or type(capture.receipt_relative) is not str
+        or not capture.receipt_relative.startswith(".zagrosi/")
+        or not _file_identity_invariants(capture.receipt_control_identity)
+        or type(capture.receipt_existing_depth) is not int
+        or capture.receipt_existing_depth < 0
+        or not _file_identity_invariants(capture.receipt_ancestor_identity)
+        or _DIGEST.fullmatch(capture.prepared_receipt_digest) is None
+    ):
+        return False
+    components = capture.receipt_relative.split("/")
+    if (
+        any(not component for component in components)
+        or len(components) < 3
+        or capture.receipt_existing_depth > len(components) - 2
+    ):
+        return False
+    if capture.receipt_status == "absent":
+        return (
+            capture.receipt_parent_identity is None
+            and capture.receipt_identity is None
+            and capture.receipt_digest is None
+        )
+    return (
+        capture.receipt_existing_depth == len(components) - 2
+        and _file_identity_invariants(capture.receipt_parent_identity)
+        and capture.receipt_ancestor_identity == capture.receipt_parent_identity
+        and _file_identity_invariants(capture.receipt_identity)
+        and type(capture.receipt_digest) is str
+        and capture.receipt_digest == capture.prepared_receipt_digest
+    )
+
+
+def _recovery_finalization_projection(
+    capture: _RecoveryFinalizationCapture,
+) -> dict[str, object]:
+    def generation(value: _RecoveryGenerationCapture) -> dict[str, object]:
+        return {
+            "leaf_identity": value.leaf_identity,
+            "manifest_digest": value.manifest_digest,
+            "manifest_identity": value.manifest_identity,
+            "manifest_parent_identity": value.manifest_parent_identity,
+            "manifest_relative": value.manifest_relative,
+            "parent_identity": value.parent_identity,
+            "relative_path": value.relative_path,
+        }
+
+    return {
+        "cache": generation(capture.cache),
+        "journal_access_digest": capture.journal_access_digest,
+        "journal_evidence_digest": capture.journal_evidence_digest,
+        "journal_head_record_digest": capture.journal_head_record_digest,
+        "journal_head_sequence": capture.journal_head_sequence,
+        "journal_state": capture.journal_state,
+        "prepared_receipt_digest": capture.prepared_receipt_digest,
+        "receipt_ancestor_identity": capture.receipt_ancestor_identity,
+        "receipt_control_identity": capture.receipt_control_identity,
+        "receipt_digest": capture.receipt_digest,
+        "receipt_existing_depth": capture.receipt_existing_depth,
+        "receipt_identity": capture.receipt_identity,
+        "receipt_parent_identity": capture.receipt_parent_identity,
+        "receipt_relative": capture.receipt_relative,
+        "receipt_status": capture.receipt_status,
+        "source": generation(capture.source),
+        "transaction_id": capture.transaction_id,
+    }
+
+
+def _recovery_finalization_observation_digest(
+    capture: _RecoveryFinalizationCapture,
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(_recovery_finalization_projection(capture))
+    ).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class RecoveryFinalizationObservation:
+    """Sealed effect-free evidence for one exact committed recovery candidate."""
+
+    transaction_id: str
+    journal_state: str
+    receipt_status: str
+    observation_digest: str
+    _capture: _RecoveryFinalizationCapture
+    _seal: object
+
+    def __init__(
+        self,
+        *,
+        capture: _RecoveryFinalizationCapture,
+        _token: object,
+    ) -> None:
+        if (
+            _token is not _RECOVERY_FINALIZATION_OBSERVATION_TOKEN
+            or not _recovery_finalization_capture_invariants(capture)
+        ):
+            raise TypeError(
+                "recovery finalization observations are loaded only by ownership authority"
+            )
+        object.__setattr__(self, "transaction_id", capture.transaction_id)
+        object.__setattr__(self, "journal_state", capture.journal_state)
+        object.__setattr__(self, "receipt_status", capture.receipt_status)
+        object.__setattr__(
+            self,
+            "observation_digest",
+            _recovery_finalization_observation_digest(capture),
+        )
+        object.__setattr__(self, "_capture", capture)
+        object.__setattr__(
+            self,
+            "_seal",
+            _RECOVERY_FINALIZATION_OBSERVATION_TOKEN,
+        )
+
+    def _require_valid(self) -> None:
+        try:
+            valid = _recovery_finalization_capture_invariants(self._capture)
+            expected = _recovery_finalization_observation_digest(self._capture)
+        except (AttributeError, TypeError, ValueError):
+            valid = False
+            expected = ""
+        if (
+            not valid
+            or self._seal is not _RECOVERY_FINALIZATION_OBSERVATION_TOKEN
+            or self.transaction_id != self._capture.transaction_id
+            or self.journal_state != self._capture.journal_state
+            or self.receipt_status != self._capture.receipt_status
+            or self.observation_digest != expected
+        ):
+            raise TypeError("recovery finalization observation changed")
+
+    def __reduce__(self) -> Never:
+        raise TypeError("recovery finalization observations are not serializable")
 
 
 class TransactionPathClaim:
@@ -2615,18 +2854,25 @@ def _recovery_cleanup_binding_digest(
     ).hexdigest()
 
 
-def _recovery_cleanup_access_digest(
+def _transaction_journal_access_digest(
     binding: PersistentTransactionBinding,
     *,
     location: TransactionLocation,
     journal_relative: str,
 ) -> str:
+    valid_relative = (
+        location is TransactionLocation.LIVE
+        and journal_relative == binding.root_relative
+    ) or (
+        location is TransactionLocation.QUARANTINED
+        and _persistent_cleanup_reference_is_valid(binding, journal_relative)
+    )
     if (
         not _persistent_binding_invariants(binding)
-        or location is not TransactionLocation.QUARANTINED
-        or not _persistent_cleanup_reference_is_valid(binding, journal_relative)
+        or type(location) is not TransactionLocation
+        or not valid_relative
     ):
-        raise ValueError("recovery cleanup observation")
+        raise ValueError("transaction journal access")
     return hashlib.sha256(
         canonical_json_bytes(
             {
@@ -2637,6 +2883,24 @@ def _recovery_cleanup_access_digest(
             }
         )
     ).hexdigest()
+
+
+def _recovery_cleanup_access_digest(
+    binding: PersistentTransactionBinding,
+    *,
+    location: TransactionLocation,
+    journal_relative: str,
+) -> str:
+    if (
+        location is not TransactionLocation.QUARANTINED
+        or not _persistent_cleanup_reference_is_valid(binding, journal_relative)
+    ):
+        raise ValueError("recovery cleanup observation")
+    return _transaction_journal_access_digest(
+        binding,
+        location=location,
+        journal_relative=journal_relative,
+    )
 
 
 def _recovery_cleanup_record_bytes(
@@ -7438,6 +7702,984 @@ def discover_pending_transactions(
             store.close()
 
 
+@dataclass(slots=True)
+class _OpenRecoveryGeneration:
+    capture: _RecoveryGenerationCapture
+    parent: int
+    leaf: int
+    manifest: OpenedRegularFile | None
+
+    def close(self) -> None:
+        first_failure: BaseException | None = None
+        manifest = self.manifest
+        self.manifest = None
+        if manifest is not None:
+            try:
+                manifest.close()
+            except BaseException as exc:
+                first_failure = exc
+        empty = 0 if os.name == "nt" else -1
+        for attribute in ("leaf", "parent"):
+            descriptor = cast(int, getattr(self, attribute))
+            if descriptor == empty:
+                continue
+            setattr(self, attribute, empty)
+            try:
+                _close_native(descriptor)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            raise first_failure
+
+
+@dataclass(slots=True)
+class _OpenRecoveryReceipt:
+    status: str
+    control_identity: tuple[int, int]
+    existing_depth: int
+    ancestor_identity: tuple[int, int]
+    parent_identity: tuple[int, int] | None
+    identity: tuple[int, int] | None
+    digest: str | None
+    opened: OpenedRegularFile | None
+    ancestor: int
+
+    def close(self) -> None:
+        first_failure: BaseException | None = None
+        opened = self.opened
+        self.opened = None
+        if opened is not None:
+            try:
+                opened.close()
+            except BaseException as exc:
+                first_failure = exc
+        empty = 0 if os.name == "nt" else -1
+        ancestor = self.ancestor
+        self.ancestor = empty
+        if ancestor != empty:
+            try:
+                _close_native(ancestor)
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            raise first_failure
+
+
+def _recovery_source_root(owned_root: OwnedRoot) -> _paths.SourceRoot:
+    descriptor = owned_root._duplicate_descriptor()
+    selected: _paths.SourceRoot | None = None
+    try:
+        source_type = (
+            _paths._WindowsSourceRoot if os.name == "nt" else _paths.SourceRoot
+        )
+        selected = source_type(
+            descriptor,
+            owned_root.absolute_ancestry,
+            owned_root._filesystem_guard,
+            owned_root._origin,
+            _token=_paths._CAPABILITY_TOKEN,
+        )
+        descriptor = 0 if os.name == "nt" else -1
+        selected._require_open()
+        return selected
+    except BaseException:
+        if selected is not None:
+            selected.close()
+        elif (os.name == "nt" and descriptor) or (os.name != "nt" and descriptor >= 0):
+            _close_native(descriptor)
+        raise
+
+
+def _open_recovery_generation(
+    owned_root: OwnedRoot,
+    source_root: _paths.SourceRoot,
+    *,
+    relative_path: str,
+    expected_parent_identity: tuple[int, int],
+    expected_leaf_identity: tuple[int, int],
+    expected_manifest_digest: str,
+    manifest_relative: str,
+) -> _OpenRecoveryGeneration:
+    reference = _paths.validate_reference(
+        relative_path,
+        role="recovery-generation",
+        limits=LIMIT_POLICY,
+    ).unwrap()
+    manifest_reference = _paths.validate_reference(
+        manifest_relative,
+        role="recovery-manifest",
+        limits=LIMIT_POLICY,
+    ).unwrap()
+    parent = leaf = 0 if os.name == "nt" else -1
+    manifest: OpenedRegularFile | None = None
+    try:
+        root = owned_root._duplicate_descriptor()
+        try:
+            parent = (
+                _windows_open_parent(root, reference.components[:-1])
+                if os.name == "nt"
+                else _open_parent(root, reference.components[:-1])
+            )
+        finally:
+            _close_native(root)
+        leaf = (
+            _windows_open_raw_child(
+                parent,
+                reference.components[-1],
+                directory=True,
+            )
+            if os.name == "nt"
+            else os.open(reference.components[-1], _directory_flags(), dir_fd=parent)
+        )
+        parent_identity = _native_identity(parent)
+        leaf_identity = _native_identity(leaf)
+        if os.name == "nt":
+            windows_leaf_status = _paths._windows_handle_status(leaf)
+            valid_leaf = (
+                windows_leaf_status.is_directory
+                and not windows_leaf_status.is_reparse
+                and windows_leaf_status.identity[0] == owned_root.identity[0]
+                and owned_root._filesystem_guard(leaf)
+                and _paths._windows_namespace_binds(
+                    parent,
+                    reference.components[-1],
+                    leaf_identity,
+                )
+            )
+        else:
+            posix_leaf_status = os.fstat(leaf)
+            valid_leaf = (
+                stat.S_ISDIR(posix_leaf_status.st_mode)
+                and posix_leaf_status.st_dev == owned_root.identity[0]
+                and posix_leaf_status.st_uid == os.geteuid()
+                and owned_root._filesystem_guard(leaf)
+                and _paths._posix_namespace_binds(
+                    parent,
+                    reference.components[-1],
+                    leaf_identity,
+                )
+            )
+        if (
+            not valid_leaf
+            or parent_identity != expected_parent_identity
+            or leaf_identity != expected_leaf_identity
+            or not owned_root._validate_live_descriptor()
+        ):
+            raise OSError(errno.ESTALE, "published generation identity changed")
+        manifest = source_root.open_regular_file(manifest_reference)
+        raw = manifest.read_bytes(limit=256 * 1024)
+        if (
+            manifest.root_identity != owned_root.identity
+            or hashlib.sha256(raw).hexdigest() != expected_manifest_digest
+        ):
+            raise OSError(errno.ESTALE, "published manifest identity changed")
+        capture = _RecoveryGenerationCapture(
+            relative_path=relative_path,
+            parent_identity=parent_identity,
+            leaf_identity=leaf_identity,
+            manifest_relative=manifest_relative,
+            manifest_parent_identity=manifest.parent_identity,
+            manifest_identity=manifest.identity,
+            manifest_digest=hashlib.sha256(raw).hexdigest(),
+        )
+        if not _recovery_generation_capture_invariants(capture):
+            raise OSError(errno.ESTALE, "published generation evidence changed")
+        opened = _OpenRecoveryGeneration(
+            capture=capture,
+            parent=parent,
+            leaf=leaf,
+            manifest=manifest,
+        )
+        parent = leaf = 0 if os.name == "nt" else -1
+        manifest = None
+        return opened
+    finally:
+        first_failure: BaseException | None = None
+        closing_manifest = manifest
+        manifest = None
+        if closing_manifest is not None:
+            try:
+                closing_manifest.close()
+            except BaseException as exc:
+                first_failure = exc
+        try:
+            _close_all_native_descriptors(leaf, parent)
+        except BaseException as exc:
+            if first_failure is None:
+                first_failure = exc
+        if first_failure is not None:
+            raise first_failure
+
+
+def _recovery_generation_is_current(
+    owned_root: OwnedRoot,
+    source_root: _paths.SourceRoot,
+    opened: _OpenRecoveryGeneration,
+) -> bool:
+    capture = opened.capture
+    manifest = opened.manifest
+    canonical_manifest: OpenedRegularFile | None = None
+    try:
+        if manifest is None:
+            return False
+        parent_identity = _native_identity(opened.parent)
+        leaf_identity = _native_identity(opened.leaf)
+        if os.name == "nt":
+            windows_parent_status = _paths._windows_handle_status(opened.parent)
+            windows_leaf_status = _paths._windows_handle_status(opened.leaf)
+            descriptors_valid = (
+                windows_parent_status.is_directory
+                and not windows_parent_status.is_reparse
+                and windows_parent_status.identity[0] == owned_root.identity[0]
+                and windows_leaf_status.is_directory
+                and not windows_leaf_status.is_reparse
+                and windows_leaf_status.identity[0] == owned_root.identity[0]
+                and owned_root._filesystem_guard(opened.parent)
+                and owned_root._filesystem_guard(opened.leaf)
+            )
+        else:
+            posix_parent_status = os.fstat(opened.parent)
+            posix_leaf_status = os.fstat(opened.leaf)
+            descriptors_valid = (
+                stat.S_ISDIR(posix_parent_status.st_mode)
+                and posix_parent_status.st_dev == owned_root.identity[0]
+                and posix_parent_status.st_uid == os.geteuid()
+                and stat.S_ISDIR(posix_leaf_status.st_mode)
+                and posix_leaf_status.st_dev == owned_root.identity[0]
+                and posix_leaf_status.st_uid == os.geteuid()
+                and owned_root._filesystem_guard(opened.parent)
+                and owned_root._filesystem_guard(opened.leaf)
+            )
+        if (
+            not descriptors_valid
+            or parent_identity != capture.parent_identity
+            or leaf_identity != capture.leaf_identity
+            or manifest.identity != capture.manifest_identity
+            or manifest.parent_identity != capture.manifest_parent_identity
+            or hashlib.sha256(manifest.read_bytes(limit=256 * 1024)).hexdigest()
+            != capture.manifest_digest
+            or not owned_root._validate_live_descriptor()
+        ):
+            return False
+        component = capture.relative_path.rsplit("/", 1)[-1]
+        leaf_bound = (
+            _paths._windows_namespace_binds(
+                opened.parent,
+                component,
+                capture.leaf_identity,
+            )
+            if os.name == "nt"
+            else _paths._posix_namespace_binds(
+                opened.parent,
+                component,
+                capture.leaf_identity,
+            )
+        )
+        if not leaf_bound:
+            return False
+        manifest_reference = _paths.validate_reference(
+            capture.manifest_relative,
+            role="recovery-manifest",
+            limits=LIMIT_POLICY,
+        ).unwrap()
+        canonical_manifest = source_root.open_regular_file(manifest_reference)
+        canonical_raw = canonical_manifest.read_bytes(limit=256 * 1024)
+        return (
+            canonical_manifest.root_identity == owned_root.identity
+            and canonical_manifest.parent_identity == capture.manifest_parent_identity
+            and canonical_manifest.identity == capture.manifest_identity
+            and hashlib.sha256(canonical_raw).hexdigest() == capture.manifest_digest
+            and owned_root._validate_live_descriptor()
+        )
+    except (ForgeError, OSError, TypeError, ValueError):
+        return False
+    finally:
+        if canonical_manifest is not None:
+            canonical_manifest.close()
+
+
+def _native_path_is_missing(exc: OSError) -> bool:
+    return isinstance(exc, FileNotFoundError) or (
+        os.name == "nt" and getattr(exc, "winerror", None) in {2, 3}
+    )
+
+
+def _open_recovery_receipt_absence(
+    owned_root: OwnedRoot,
+    reference: _SafeReferenceSnapshot,
+) -> _OpenRecoveryReceipt:
+    empty = 0 if os.name == "nt" else -1
+    current = child = empty
+    parent_components = reference.components[1:-1]
+    if (
+        not reference.components
+        or reference.components[0] != ".zagrosi"
+        or not parent_components
+    ):
+        raise ValueError("committed receipt reference")
+    try:
+        current = owned_root._duplicate_control_descriptor()
+        if _native_identity(
+            current
+        ) != owned_root.control_identity or not owned_root._validate_control_descriptor(
+            current
+        ):
+            raise OSError(errno.ESTALE, "receipt control changed")
+        for depth, component in enumerate(parent_components):
+            try:
+                child = (
+                    _windows_open_raw_child(
+                        current,
+                        component,
+                        directory=True,
+                    )
+                    if os.name == "nt"
+                    else os.open(component, _directory_flags(), dir_fd=current)
+                )
+            except OSError as exc:
+                if not _native_path_is_missing(exc):
+                    raise
+                if not owned_root._validate_control_binding():
+                    raise OSError(errno.ESTALE, "receipt control changed") from None
+                selected = _OpenRecoveryReceipt(
+                    status="absent",
+                    control_identity=owned_root.control_identity,
+                    existing_depth=depth,
+                    ancestor_identity=_native_identity(current),
+                    parent_identity=None,
+                    identity=None,
+                    digest=None,
+                    opened=None,
+                    ancestor=current,
+                )
+                current = empty
+                return selected
+            child_identity = _native_identity(child)
+            if os.name == "nt":
+                status = _paths._windows_handle_status(child)
+                private = (
+                    status.identity[0] == owned_root.identity[0]
+                    and status.is_directory
+                    and not status.is_reparse
+                    and _paths._windows_private_directory(child, exact=True)
+                    and owned_root._filesystem_guard(child)
+                    and _paths._windows_namespace_binds(
+                        current,
+                        component,
+                        child_identity,
+                    )
+                )
+            else:
+                private = (
+                    _private_posix_receipt_parent(
+                        child,
+                        device=owned_root.identity[0],
+                    )
+                    and owned_root._filesystem_guard(child)
+                    and _paths._posix_namespace_binds(
+                        current,
+                        component,
+                        child_identity,
+                    )
+                )
+            if not private:
+                raise OSError(errno.EPERM, "receipt parent is not private")
+            previous = current
+            current = empty
+            _close_native(previous)
+            current = child
+            child = empty
+        leaf = reference.components[-1]
+        try:
+            if os.name == "nt":
+                child = _windows_open_raw_child(
+                    current,
+                    leaf,
+                    directory=None,
+                    read_data=True,
+                )
+            else:
+                os.stat(leaf, dir_fd=current, follow_symlinks=False)
+        except OSError as exc:
+            if not _native_path_is_missing(exc):
+                raise
+        else:
+            raise OSError(errno.EEXIST, "committed receipt appeared")
+        if not owned_root._validate_control_binding():
+            raise OSError(errno.ESTALE, "receipt control changed")
+        selected = _OpenRecoveryReceipt(
+            status="absent",
+            control_identity=owned_root.control_identity,
+            existing_depth=len(parent_components),
+            ancestor_identity=_native_identity(current),
+            parent_identity=None,
+            identity=None,
+            digest=None,
+            opened=None,
+            ancestor=current,
+        )
+        current = empty
+        return selected
+    finally:
+        _close_all_native_descriptors(child, current)
+
+
+def _recovery_receipt_absence_is_current(
+    owned_root: OwnedRoot,
+    opened: _OpenRecoveryReceipt,
+    reference: _SafeReferenceSnapshot,
+) -> bool:
+    empty = 0 if os.name == "nt" else -1
+    control = parent = probe = empty
+    parent_components = reference.components[1:-1]
+    try:
+        if (
+            opened.status != "absent"
+            or opened.opened is not None
+            or opened.ancestor == empty
+            or opened.control_identity != owned_root.control_identity
+            or opened.existing_depth < 0
+            or opened.existing_depth > len(parent_components)
+            or _native_identity(opened.ancestor) != opened.ancestor_identity
+        ):
+            return False
+        if os.name == "nt":
+            ancestor_status = _paths._windows_handle_status(opened.ancestor)
+            ancestor_private = (
+                ancestor_status.identity[0] == owned_root.identity[0]
+                and ancestor_status.is_directory
+                and not ancestor_status.is_reparse
+                and _paths._windows_private_directory(
+                    opened.ancestor,
+                    exact=True,
+                )
+                and owned_root._filesystem_guard(opened.ancestor)
+            )
+        else:
+            ancestor_private = _private_posix_receipt_parent(
+                opened.ancestor,
+                device=owned_root.identity[0],
+            ) and owned_root._filesystem_guard(opened.ancestor)
+        if not ancestor_private:
+            return False
+        control = owned_root._duplicate_control_descriptor()
+        if _native_identity(
+            control
+        ) != opened.control_identity or not owned_root._validate_control_descriptor(
+            control
+        ):
+            return False
+        if opened.existing_depth:
+            parent = (
+                _windows_open_private_directory_chain(
+                    control,
+                    parent_components[: opened.existing_depth],
+                    volume=owned_root.identity[0],
+                    create_missing=False,
+                )
+                if os.name == "nt"
+                else _open_private_directory_chain(
+                    control,
+                    parent_components[: opened.existing_depth],
+                    device=owned_root.identity[0],
+                    create_missing=False,
+                )
+            )
+        else:
+            parent = (
+                _paths._windows_duplicate(control)
+                if os.name == "nt"
+                else os.dup(control)
+            )
+        if _native_identity(parent) != opened.ancestor_identity:
+            return False
+        component = (
+            parent_components[opened.existing_depth]
+            if opened.existing_depth < len(parent_components)
+            else reference.components[-1]
+        )
+        try:
+            if os.name == "nt":
+                probe = _windows_open_raw_child(
+                    parent,
+                    component,
+                    directory=None,
+                    read_data=True,
+                )
+            else:
+                os.stat(component, dir_fd=parent, follow_symlinks=False)
+        except OSError as exc:
+            missing = _native_path_is_missing(exc)
+        else:
+            missing = False
+        return missing and owned_root._validate_control_binding()
+    except (ForgeError, OSError, TypeError, ValueError):
+        return False
+    finally:
+        _close_all_native_descriptors(probe, parent, control)
+
+
+def _recovery_receipt_is_current(
+    owned_root: OwnedRoot,
+    opened: _OpenRecoveryReceipt,
+    reference: _SafeReferenceSnapshot,
+    *,
+    expected_raw: bytes,
+) -> bool:
+    if opened.status == "absent":
+        return _recovery_receipt_absence_is_current(
+            owned_root,
+            opened,
+            reference,
+        )
+    duplicate = 0 if os.name == "nt" else -1
+    try:
+        if (
+            opened.status != "matching"
+            or opened.opened is None
+            or opened.control_identity != owned_root.control_identity
+            or opened.existing_depth != len(reference.components[1:-1])
+            or opened.ancestor_identity != opened.parent_identity
+        ):
+            return False
+        raw = opened.opened.read_bytes(limit=256 * 1024)
+        duplicate = opened.opened._duplicate_descriptor()
+        binding = _receipt_binding_state(
+            owned_root,
+            reference,
+            expected_parent_identity=opened.parent_identity,
+            retained_leaf=duplicate,
+        )
+        return (
+            raw == expected_raw
+            and opened.opened.root_identity == owned_root.identity
+            and opened.opened.parent_identity == opened.parent_identity
+            and opened.opened.identity == opened.identity
+            and hashlib.sha256(raw).hexdigest() == opened.digest
+            and _receipt_parent_chain_is_private(owned_root, reference)
+            and binding.valid
+        )
+    except (ForgeError, OSError, TypeError, ValueError):
+        return False
+    finally:
+        if (os.name == "nt" and duplicate) or (os.name != "nt" and duplicate >= 0):
+            _close_native(duplicate)
+
+
+def _open_recovery_receipt(
+    owned_root: OwnedRoot,
+    source_root: _paths.SourceRoot,
+    *,
+    reference: SafeRelativePath,
+    expected_raw: bytes,
+) -> _OpenRecoveryReceipt:
+    snapshot = _snapshot_safe_reference(reference)
+    if snapshot is None:
+        raise ValueError("committed receipt reference")
+    opened: OpenedRegularFile | None = None
+    try:
+        opened = source_root.open_regular_file(reference)
+    except ForgeError as exc:
+        if exc.code == "path.missing":
+            return _open_recovery_receipt_absence(owned_root, snapshot)
+        raise
+    duplicate = 0 if os.name == "nt" else -1
+    try:
+        raw = opened.read_bytes(limit=256 * 1024)
+        duplicate = opened._duplicate_descriptor()
+        binding = _receipt_binding_state(
+            owned_root,
+            snapshot,
+            expected_parent_identity=opened.parent_identity,
+            retained_leaf=duplicate,
+        )
+        if (
+            raw != expected_raw
+            or opened.root_identity != owned_root.identity
+            or not _private_receipt_descriptor(
+                duplicate,
+                device=owned_root.identity[0],
+            )
+            or not _receipt_parent_chain_is_private(owned_root, snapshot)
+            or not binding.valid
+        ):
+            raise OSError(errno.ESTALE, "committed receipt changed")
+        return _OpenRecoveryReceipt(
+            status="matching",
+            control_identity=owned_root.control_identity,
+            existing_depth=len(snapshot.components[1:-1]),
+            ancestor_identity=opened.parent_identity,
+            parent_identity=opened.parent_identity,
+            identity=opened.identity,
+            digest=hashlib.sha256(raw).hexdigest(),
+            opened=opened,
+            ancestor=0 if os.name == "nt" else -1,
+        )
+    except BaseException:
+        opened.close()
+        raise
+    finally:
+        if (os.name == "nt" and duplicate) or (os.name != "nt" and duplicate >= 0):
+            _close_native(duplicate)
+
+
+def _recovery_finalization_evidence(
+    observation: PendingTransactionObservation,
+    journal: LoadedJournal,
+) -> tuple[
+    PersistentTransactionBinding,
+    str,
+    str,
+    int,
+    str,
+    str,
+    JournalPathIdentity,
+    JournalPathIdentity,
+    bytes,
+    SafeRelativePath,
+]:
+    from .journal import JournalState, LoadedJournal as RuntimeLoadedJournal
+
+    if (
+        type(observation) is not PendingTransactionObservation
+        or observation._seal is not _PENDING_TRANSACTION_OBSERVATION_TOKEN
+        or type(journal) is not RuntimeLoadedJournal
+    ):
+        raise TypeError("recovery finalization evidence")
+    journal._require_valid()
+    binding = observation.binding
+    binding_digest = _recovery_cleanup_binding_digest(binding)
+    head = journal.records[-1]
+    if (
+        observation.location is not TransactionLocation.LIVE
+        or observation.journal_relative != binding.root_relative
+        or head.state
+        not in {
+            JournalState.COMMIT_INTENT,
+            JournalState.CONFIG_COMMITTED,
+            JournalState.RECEIPT_COMMITTED,
+        }
+        or head.transaction_id != binding.transaction_id
+        or journal.head.transaction_binding_digest != binding_digest
+        or journal.access_digest
+        != _transaction_journal_access_digest(
+            binding,
+            location=observation.location,
+            journal_relative=observation.journal_relative,
+        )
+        or _DIGEST.fullmatch(journal._binding_digest) is None
+        or head.verification_evidence_digest is None
+        or head.config_recovery is None
+    ):
+        raise ValueError("recovery finalization evidence")
+    prepared = head.prepared
+    source = tuple(item for item in head.identities if item.role == "source-generation")
+    cache = tuple(item for item in head.identities if item.role == "cache-generation")
+    receipt = tuple(
+        item for item in head.identities if item.role == "committed-receipt"
+    )
+    if (
+        len(source) != 1
+        or source[0].leaf_identity is None
+        or source[0].content_digest is None
+        or len(cache) != 1
+        or cache[0].leaf_identity is None
+        or cache[0].content_digest is None
+        or (
+            head.state is JournalState.RECEIPT_COMMITTED
+            and (
+                len(receipt) != 1
+                or receipt[0].leaf_identity is None
+                or receipt[0].content_digest is None
+            )
+        )
+        or (head.state is not JournalState.RECEIPT_COMMITTED and receipt)
+    ):
+        raise ValueError("recovery finalization evidence")
+    prepared_raw = canonical_json_bytes(
+        prepared.prepared_receipt,
+        final_newline=True,
+    )
+    decoded = _decode_committed_receipt(prepared_raw)
+    receipt_reference = committed_receipt_reference(
+        prepared.effective_marketplace_id,
+        prepared.install_identity,
+    )
+    captured = (
+        binding,
+        journal.access_digest,
+        journal._binding_digest,
+        journal.head.sequence,
+        journal.head.record_digest,
+        journal.head.state.value,
+        source[0],
+        cache[0],
+        prepared_raw,
+        receipt_reference,
+    )
+    journal._require_valid()
+    if (
+        decoded.source.relative_path != source[0].relative_path
+        or decoded.source.manifest_digest != source[0].content_digest
+        or decoded.cache.relative_path != cache[0].relative_path
+        or decoded.cache.manifest_digest != cache[0].content_digest
+        or captured[:6]
+        != (
+            observation.binding,
+            journal.access_digest,
+            journal._binding_digest,
+            journal.head.sequence,
+            journal.head.record_digest,
+            journal.head.state.value,
+        )
+    ):
+        raise ValueError("recovery finalization evidence")
+    return captured
+
+
+def observe_recovery_finalization(
+    owned_root: OwnedRoot,
+    *,
+    observation: PendingTransactionObservation,
+    journal: LoadedJournal,
+) -> Result[RecoveryFinalizationObservation]:
+    """Observe fresh committed generations and receipt state without effects."""
+
+    source_root: _paths.SourceRoot | None = None
+    first_source = first_cache = second_source = second_cache = None
+    first_receipt = second_receipt = None
+    try:
+        if not isinstance(owned_root, OwnedRoot):
+            raise TypeError("owned root")
+        (
+            _binding,
+            journal_access_digest,
+            journal_evidence_digest,
+            journal_head_sequence,
+            journal_head_record_digest,
+            journal_state,
+            source_identity,
+            cache_identity,
+            prepared_raw,
+            receipt_reference,
+        ) = _recovery_finalization_evidence(observation, journal)
+        if (
+            source_identity.leaf_identity is None
+            or source_identity.content_digest is None
+            or cache_identity.leaf_identity is None
+            or cache_identity.content_digest is None
+        ):
+            raise ValueError("recovery generation evidence")
+        prepared = journal.records[-1].prepared
+        source_manifest_relative = (
+            f"{source_identity.relative_path}/plugins/"
+            f"{prepared.install_identity.plugin_id}/"
+            ".codex-plugin/bundle-manifest.json"
+        )
+        cache_manifest_relative = (
+            f"{cache_identity.relative_path}/.codex-plugin/bundle-manifest.json"
+        )
+        receipt_snapshot = _snapshot_safe_reference(receipt_reference)
+        if receipt_snapshot is None:
+            raise ValueError("committed receipt reference")
+        source_root = _recovery_source_root(owned_root)
+        first_source = _open_recovery_generation(
+            owned_root,
+            source_root,
+            relative_path=source_identity.relative_path,
+            expected_parent_identity=source_identity.parent_identity,
+            expected_leaf_identity=source_identity.leaf_identity,
+            expected_manifest_digest=source_identity.content_digest,
+            manifest_relative=source_manifest_relative,
+        )
+        first_cache = _open_recovery_generation(
+            owned_root,
+            source_root,
+            relative_path=cache_identity.relative_path,
+            expected_parent_identity=cache_identity.parent_identity,
+            expected_leaf_identity=cache_identity.leaf_identity,
+            expected_manifest_digest=cache_identity.content_digest,
+            manifest_relative=cache_manifest_relative,
+        )
+        first_receipt = _open_recovery_receipt(
+            owned_root,
+            source_root,
+            reference=receipt_reference,
+            expected_raw=prepared_raw,
+        )
+        second_source = _open_recovery_generation(
+            owned_root,
+            source_root,
+            relative_path=source_identity.relative_path,
+            expected_parent_identity=source_identity.parent_identity,
+            expected_leaf_identity=source_identity.leaf_identity,
+            expected_manifest_digest=source_identity.content_digest,
+            manifest_relative=source_manifest_relative,
+        )
+        second_cache = _open_recovery_generation(
+            owned_root,
+            source_root,
+            relative_path=cache_identity.relative_path,
+            expected_parent_identity=cache_identity.parent_identity,
+            expected_leaf_identity=cache_identity.leaf_identity,
+            expected_manifest_digest=cache_identity.content_digest,
+            manifest_relative=cache_manifest_relative,
+        )
+        second_receipt = _open_recovery_receipt(
+            owned_root,
+            source_root,
+            reference=receipt_reference,
+            expected_raw=prepared_raw,
+        )
+        if (
+            first_source.capture != second_source.capture
+            or first_cache.capture != second_cache.capture
+            or not _recovery_generation_is_current(
+                owned_root,
+                source_root,
+                first_source,
+            )
+            or not _recovery_generation_is_current(
+                owned_root,
+                source_root,
+                first_cache,
+            )
+            or not _recovery_generation_is_current(
+                owned_root,
+                source_root,
+                second_source,
+            )
+            or not _recovery_generation_is_current(
+                owned_root,
+                source_root,
+                second_cache,
+            )
+            or not _recovery_receipt_is_current(
+                owned_root,
+                first_receipt,
+                receipt_snapshot,
+                expected_raw=prepared_raw,
+            )
+            or not _recovery_receipt_is_current(
+                owned_root,
+                second_receipt,
+                receipt_snapshot,
+                expected_raw=prepared_raw,
+            )
+            or (
+                first_receipt.status,
+                first_receipt.control_identity,
+                first_receipt.existing_depth,
+                first_receipt.ancestor_identity,
+                first_receipt.parent_identity,
+                first_receipt.identity,
+                first_receipt.digest,
+            )
+            != (
+                second_receipt.status,
+                second_receipt.control_identity,
+                second_receipt.existing_depth,
+                second_receipt.ancestor_identity,
+                second_receipt.parent_identity,
+                second_receipt.identity,
+                second_receipt.digest,
+            )
+        ):
+            raise OSError(errno.ESTALE, "recovery finalization evidence changed")
+        receipt_status = second_receipt.status
+        head = journal.records[-1]
+        receipt_items = tuple(
+            item for item in head.identities if item.role == "committed-receipt"
+        )
+        if (journal_state == "COMMIT_INTENT" and receipt_status != "absent") or (
+            journal_state == "RECEIPT_COMMITTED"
+            and (
+                receipt_status != "matching"
+                or len(receipt_items) != 1
+                or receipt_items[0].relative_path != receipt_reference.value
+                or receipt_items[0].parent_identity != second_receipt.parent_identity
+                or receipt_items[0].leaf_identity != second_receipt.identity
+                or receipt_items[0].content_digest != second_receipt.digest
+            )
+        ):
+            raise OSError(errno.ESTALE, "committed receipt state changed")
+        journal._require_valid()
+        if (
+            journal.records[-1] is not head
+            or journal.head.sequence != journal_head_sequence
+            or journal.head.record_digest != journal_head_record_digest
+            or not _recovery_receipt_is_current(
+                owned_root,
+                first_receipt,
+                receipt_snapshot,
+                expected_raw=prepared_raw,
+            )
+            or not _recovery_receipt_is_current(
+                owned_root,
+                second_receipt,
+                receipt_snapshot,
+                expected_raw=prepared_raw,
+            )
+        ):
+            raise OSError(errno.ESTALE, "recovery finalization evidence changed")
+        capture = _RecoveryFinalizationCapture(
+            transaction_id=head.transaction_id,
+            journal_state=journal_state,
+            journal_access_digest=journal_access_digest,
+            journal_evidence_digest=journal_evidence_digest,
+            journal_head_sequence=journal_head_sequence,
+            journal_head_record_digest=journal_head_record_digest,
+            source=second_source.capture,
+            cache=second_cache.capture,
+            receipt_status=receipt_status,
+            receipt_relative=receipt_reference.value,
+            receipt_control_identity=second_receipt.control_identity,
+            receipt_existing_depth=second_receipt.existing_depth,
+            receipt_ancestor_identity=second_receipt.ancestor_identity,
+            receipt_parent_identity=second_receipt.parent_identity,
+            receipt_identity=second_receipt.identity,
+            receipt_digest=second_receipt.digest,
+            prepared_receipt_digest=hashlib.sha256(prepared_raw).hexdigest(),
+        )
+        selected = RecoveryFinalizationObservation(
+            capture=capture,
+            _token=_RECOVERY_FINALIZATION_OBSERVATION_TOKEN,
+        )
+        selected._require_valid()
+        journal._require_valid()
+        return Result.success(selected)
+    except (ForgeError, OSError, TypeError, ValueError):
+        return Result.failure(
+            _error(
+                "ownership.identity_mismatch",
+                "Committed recovery evidence cannot be observed safely.",
+            )
+        )
+    finally:
+        resources = (
+            second_receipt,
+            second_cache,
+            second_source,
+            first_receipt,
+            first_cache,
+            first_source,
+            source_root,
+        )
+        first_failure: BaseException | None = None
+        for resource in resources:
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except BaseException as exc:
+                if first_failure is None:
+                    first_failure = exc
+        if first_failure is not None:
+            raise first_failure
+
+
 def _terminal_recovery_cleanup_evidence(
     observation: PendingTransactionObservation,
     journal: LoadedJournal,
@@ -9120,11 +10362,12 @@ def _open_private_directory_chain(
     device: int,
     create_missing: bool = True,
 ) -> int:
+    empty = -1
     current = os.dup(root)
+    child = empty
     try:
         for component in components:
             created = False
-            child = -1
             if create_missing:
                 try:
                     os.mkdir(component, 0o700, dir_fd=current)
@@ -9142,14 +10385,18 @@ def _open_private_directory_chain(
                     os.fsync(child)
                     os.fsync(current)
             except BaseException:
-                if child >= 0:
-                    os.close(child)
                 raise
-            os.close(current)
+            previous = current
+            current = empty
+            _close_native(previous)
             current = child
+            child = empty
         return current
     except BaseException:
-        os.close(current)
+        try:
+            _close_all_native_descriptors(child, current)
+        except BaseException:
+            pass
         raise
 
 
@@ -9192,14 +10439,7 @@ def _receipt_parent_chain_is_private(
     except (ForgeError, OSError):
         return False
     finally:
-        if os.name == "nt":
-            for handle in (parent, control):
-                if handle:
-                    _paths._windows_close(handle)
-        else:
-            for descriptor in (parent, control):
-                if descriptor >= 0:
-                    os.close(descriptor)
+        _close_all_native_descriptors(parent, control)
 
 
 @dataclass(frozen=True, slots=True)
@@ -9227,7 +10467,8 @@ def _receipt_binding_state(
     retained_leaf: int | None = None,
     expected_leaf_identity: tuple[int, int] | None = None,
 ) -> _ReceiptBindingState:
-    control = parent = canonical_leaf = -1
+    empty = 0 if os.name == "nt" else -1
+    control = parent = canonical_leaf = empty
     control_live = parent_bound = leaf_bound = leaf_private = False
     if (retained_leaf is None) == (expected_leaf_identity is None):
         return _ReceiptBindingState(False, False, False, False)
@@ -9288,9 +10529,7 @@ def _receipt_binding_state(
     except (ForgeError, OSError):
         pass
     finally:
-        for descriptor in (canonical_leaf, parent, control):
-            if descriptor >= 0:
-                _close_native(descriptor)
+        _close_all_native_descriptors(canonical_leaf, parent, control)
     try:
         control_live = control_live and owned_root._validate_control_binding()
     except (ForgeError, OSError):

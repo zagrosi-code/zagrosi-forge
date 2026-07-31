@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from dataclasses import replace
 import errno
 import hashlib
 import json
@@ -1988,6 +1989,710 @@ def _recovery_cleanup_fixture(
     journals = load_pending(owned)
     assert len(observations) == len(journals) == 1
     return owned, root, observations[0], journals[0]
+
+
+def _recovery_finalization_fixture(
+    tmp_path: Path,
+    *,
+    committed_receipt: bool = False,
+):
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+    from zagrosi_forge.install.journal import (
+        JournalPathIdentity,
+        JournalState,
+        JournalStore,
+        JournalTransition,
+    )
+    from tests.install.test_transaction_recovery import (
+        _config_recovery_descriptor,
+        _config_result,
+        _prepared,
+    )
+
+    authority, owned, root, created = _persistent_transaction(tmp_path)
+    identity = _install_identity()
+    source_relative = _source_relative(identity)
+    cache_relative = _cache_relative(identity)
+    source = root / source_relative
+    cache = root / cache_relative
+    source.mkdir(parents=True, mode=0o700)
+    cache.mkdir(parents=True, mode=0o700)
+    source_manifest = root / _manifest_relative(identity, "source")
+    cache_manifest = root / _manifest_relative(identity, "cache")
+    source_manifest.parent.mkdir(parents=True)
+    cache_manifest.parent.mkdir(parents=True)
+    source_manifest.write_bytes(b"recovery-source-manifest\n")
+    cache_manifest.write_bytes(b"recovery-cache-manifest\n")
+    source_digest = hashlib.sha256(source_manifest.read_bytes()).hexdigest()
+    cache_digest = hashlib.sha256(cache_manifest.read_bytes()).hexdigest()
+
+    prepared = _prepared(created.binding)
+    receipt = json.loads(canonical_json_bytes(prepared.prepared_receipt))
+    receipt["source"] = {
+        "relative_path": source_relative,
+        "manifest_digest": source_digest,
+    }
+    receipt["cache"] = {
+        "relative_path": cache_relative,
+        "manifest_digest": cache_digest,
+    }
+    receipt.pop("record_digest", None)
+    receipt["record_digest"] = hashlib.sha256(canonical_json_bytes(receipt)).hexdigest()
+    source_initial = replace(
+        next(item for item in prepared.identities if item.role == "source-generation"),
+        relative_path=source_relative,
+        parent_identity=_identity(source.parent),
+        leaf_identity=None,
+        content_digest=source_digest,
+    )
+    cache_initial = replace(
+        next(item for item in prepared.identities if item.role == "cache-generation"),
+        relative_path=cache_relative,
+        parent_identity=_identity(cache.parent),
+        leaf_identity=None,
+        content_digest=cache_digest,
+    )
+    transaction_root = next(
+        item for item in prepared.identities if item.role == "transaction-root"
+    )
+    prepared = replace(
+        prepared,
+        identities=(transaction_root, source_initial, cache_initial),
+        prepared_receipt=receipt,
+    )
+
+    live_proof = authority.prove_descendant(
+        owned,
+        created.claim.relative,
+        expected_depth=3,
+    ).unwrap()
+    store = JournalStore(
+        ownership.open_transaction_journal_access(owned, created).unwrap(),
+        live_proof,
+    )
+    descriptor = _config_recovery_descriptor(prepared.transaction_id)
+    head = store.create_prepared(prepared)
+    for transition in (
+        JournalTransition(JournalState.STAGED, config_recovery=descriptor),
+        JournalTransition(
+            JournalState.VERIFIED,
+            verification_evidence_digest="f" * 64,
+        ),
+        JournalTransition(
+            JournalState.SOURCE_PUBLISHED,
+            source_result=replace(
+                source_initial,
+                leaf_identity=_identity(source),
+            ),
+        ),
+        JournalTransition(
+            JournalState.CACHE_PUBLISHED,
+            cache_result=replace(
+                cache_initial,
+                leaf_identity=_identity(cache),
+            ),
+        ),
+        JournalTransition(JournalState.PUBLISHED),
+        JournalTransition(JournalState.COMMIT_INTENT),
+    ):
+        head = store.append(head, transition)
+    if committed_receipt:
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.CONFIG_COMMITTED,
+                config_result=_config_result(prepared, descriptor),
+            ),
+        )
+        prepared_raw = canonical_json_bytes(
+            prepared.prepared_receipt,
+            final_newline=True,
+        )
+        ownership.publish_committed_receipt(
+            owned,
+            raw=prepared_raw,
+        ).unwrap()
+        receipt_reference = ownership.committed_receipt_reference(
+            prepared.effective_marketplace_id,
+            prepared.install_identity,
+        )
+        receipt_path = root / receipt_reference.value
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.RECEIPT_COMMITTED,
+                receipt_result=JournalPathIdentity(
+                    role="committed-receipt",
+                    relative_path=receipt_reference.value,
+                    parent_identity=_identity(receipt_path.parent),
+                    leaf_identity=_identity(receipt_path),
+                    content_digest=hashlib.sha256(prepared_raw).hexdigest(),
+                ),
+            ),
+        )
+    observation = ownership.discover_pending_transactions(owned).unwrap()[0]
+    return (
+        ownership,
+        owned,
+        root,
+        store,
+        live_proof,
+        observation,
+        store.load(),
+    )
+
+
+def test_recovery_finalization_observation_binds_live_generations(
+    tmp_path: Path,
+) -> None:
+    import pickle
+
+    ownership, owned, _root, store, proof, observation, journal = (
+        _recovery_finalization_fixture(tmp_path)
+    )
+    try:
+        result = ownership.observe_recovery_finalization(
+            owned,
+            observation=observation,
+            journal=journal,
+        )
+
+        observed = result.unwrap()
+        assert observed.transaction_id == journal.records[-1].transaction_id
+        assert observed.journal_state == "COMMIT_INTENT"
+        assert observed.receipt_status == "absent"
+        assert len(observed.observation_digest) == 64
+        with pytest.raises(AttributeError):
+            observed.receipt_status = "matching"  # type: ignore[misc]
+        with pytest.raises(TypeError, match="not serializable"):
+            pickle.dumps(observed)
+        object.__setattr__(observed, "receipt_status", "matching")
+        with pytest.raises(TypeError, match="observation changed"):
+            observed._require_valid()
+        object.__setattr__(observed, "receipt_status", "absent")
+        observed._require_valid()
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_finalization_observation_accepts_exact_committed_receipt(
+    tmp_path: Path,
+) -> None:
+    ownership, owned, _root, store, proof, observation, journal = (
+        _recovery_finalization_fixture(
+            tmp_path,
+            committed_receipt=True,
+        )
+    )
+    try:
+        observed = ownership.observe_recovery_finalization(
+            owned,
+            observation=observation,
+            journal=journal,
+        ).unwrap()
+
+        assert observed.transaction_id == journal.records[-1].transaction_id
+        assert observed.journal_state == "RECEIPT_COMMITTED"
+        assert observed.receipt_status == "matching"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_finalization_rejects_receipt_ancestry_appearing_between_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ownership, owned, root, store, proof, observation, journal = (
+        _recovery_finalization_fixture(tmp_path)
+    )
+    original = ownership._open_recovery_receipt
+    calls = 0
+
+    def create_private_receipt_ancestry(*args: Any, **kwargs: Any):
+        nonlocal calls
+        opened = original(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            parent = root / ".zagrosi"
+            for component in (
+                "ownership",
+                "zagrosi",
+                "zagrosi-forge",
+            ):
+                parent = _private_test_directory(parent / component)
+        return opened
+
+    try:
+        monkeypatch.setattr(
+            ownership,
+            "_open_recovery_receipt",
+            create_private_receipt_ancestry,
+        )
+
+        result = ownership.observe_recovery_finalization(
+            owned,
+            observation=observation,
+            journal=journal,
+        )
+
+        assert _code(result) == "ownership.identity_mismatch"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_finalization_rejects_receipt_appearing_after_second_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zagrosi_forge.install.contracts import canonical_json_bytes
+
+    ownership, owned, _root, store, proof, observation, journal = (
+        _recovery_finalization_fixture(tmp_path)
+    )
+    original = ownership._recovery_generation_is_current
+    published = False
+    prepared_raw = canonical_json_bytes(
+        journal.records[-1].prepared.prepared_receipt,
+        final_newline=True,
+    )
+
+    def publish_receipt(*args: Any, **kwargs: Any) -> bool:
+        nonlocal published
+        if not published:
+            published = True
+            ownership.publish_committed_receipt(
+                owned,
+                raw=prepared_raw,
+            ).unwrap()
+        return original(*args, **kwargs)
+
+    try:
+        monkeypatch.setattr(
+            ownership,
+            "_recovery_generation_is_current",
+            publish_receipt,
+        )
+
+        result = ownership.observe_recovery_finalization(
+            owned,
+            observation=observation,
+            journal=journal,
+        )
+
+        assert _code(result) == "ownership.identity_mismatch"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX namespace replacement")
+def test_recovery_finalization_rejects_manifest_replaced_after_second_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ownership, owned, root, store, proof, observation, journal = (
+        _recovery_finalization_fixture(tmp_path)
+    )
+    original = ownership._open_recovery_receipt
+    calls = 0
+    manifest = root / _manifest_relative(_install_identity(), "source")
+
+    def replace_manifest(*args: Any, **kwargs: Any):
+        nonlocal calls
+        opened = original(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            original_parent = manifest.parent
+            retained_parent = original_parent.with_name("retained-.codex-plugin")
+            raw = manifest.read_bytes()
+            original_parent.replace(retained_parent)
+            original_parent.mkdir()
+            manifest.write_bytes(raw)
+        return opened
+
+    try:
+        monkeypatch.setattr(
+            ownership,
+            "_open_recovery_receipt",
+            replace_manifest,
+        )
+
+        result = ownership.observe_recovery_finalization(
+            owned,
+            observation=observation,
+            journal=journal,
+        )
+
+        assert _code(result) == "ownership.identity_mismatch"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX private-mode assertion")
+def test_recovery_finalization_rejects_untrusted_missing_receipt_parent(
+    tmp_path: Path,
+) -> None:
+    ownership, owned, root, store, proof, observation, journal = (
+        _recovery_finalization_fixture(tmp_path)
+    )
+    untrusted = root / ".zagrosi" / "ownership"
+    untrusted.mkdir(mode=0o755)
+    try:
+        result = ownership.observe_recovery_finalization(
+            owned,
+            observation=observation,
+            journal=journal,
+        )
+
+        assert _code(result) == "ownership.identity_mismatch"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX namespace replacement")
+def test_recovery_finalization_rejects_matching_receipt_parent_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ownership, owned, root, store, proof, observation, journal = (
+        _recovery_finalization_fixture(
+            tmp_path,
+            committed_receipt=True,
+        )
+    )
+    identity = _install_identity()
+    reference = ownership.committed_receipt_reference("zagrosi", identity)
+    receipt = root / reference.value
+    original = ownership._recovery_generation_is_current
+    swapped = False
+
+    def replace_receipt_parent(*args: Any, **kwargs: Any) -> bool:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            original_parent = receipt.parent
+            retained_parent = original_parent.with_name(
+                f"retained-{original_parent.name}"
+            )
+            raw = receipt.read_bytes()
+            original_parent.replace(retained_parent)
+            original_parent.mkdir(mode=0o700)
+            receipt.write_bytes(raw)
+            receipt.chmod(0o600)
+        return original(*args, **kwargs)
+
+    try:
+        monkeypatch.setattr(
+            ownership,
+            "_recovery_generation_is_current",
+            replace_receipt_parent,
+        )
+
+        result = ownership.observe_recovery_finalization(
+            owned,
+            observation=observation,
+            journal=journal,
+        )
+
+        assert _code(result) == "ownership.identity_mismatch"
+    finally:
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_open_recovery_generation_close_is_idempotent_after_native_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class _Manifest:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    manifest = _Manifest()
+    opened = ownership._OpenRecoveryGeneration(
+        capture=ownership._RecoveryGenerationCapture(
+            relative_path="cache/zagrosi/zagrosi-forge/1.0.0",
+            parent_identity=(1, 2),
+            leaf_identity=(1, 3),
+            manifest_relative=(
+                "cache/zagrosi/zagrosi-forge/1.0.0/.codex-plugin/bundle-manifest.json"
+            ),
+            manifest_parent_identity=(1, 4),
+            manifest_identity=(1, 5),
+            manifest_digest="a" * 64,
+        ),
+        parent=101,
+        leaf=102,
+        manifest=manifest,  # type: ignore[arg-type]
+    )
+    closed: list[int] = []
+
+    def fail_first_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        if descriptor == 102:
+            raise OSError("injected close failure")
+
+    monkeypatch.setattr(ownership, "_close_native", fail_first_close)
+
+    with pytest.raises(OSError, match="injected close failure"):
+        opened.close()
+
+    assert closed == [102, 101]
+    assert opened.leaf == (0 if os.name == "nt" else -1)
+    assert opened.parent == (0 if os.name == "nt" else -1)
+    opened.close()
+    assert closed == [102, 101]
+    assert manifest.close_calls == 1
+
+
+def test_recovery_generation_failure_attempts_every_resource_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ownership, owned, _root, store, proof, _observation, journal = (
+        _recovery_finalization_fixture(tmp_path)
+    )
+    source = next(
+        item
+        for item in journal.records[-1].identities
+        if item.role == "source-generation"
+    )
+    prepared = journal.records[-1].prepared
+    assert prepared is not None
+    source_root = ownership._recovery_source_root(owned)
+    native_closes: list[int] = []
+    manifest_closes = 0
+    original_native_close = ownership._close_native
+    original_manifest_close = ownership.OpenedRegularFile.close
+
+    def close_native(descriptor: int) -> None:
+        native_closes.append(descriptor)
+        original_native_close(descriptor)
+
+    def close_manifest_then_fail(opened: Any) -> None:
+        nonlocal manifest_closes
+        manifest_closes += 1
+        original_manifest_close(opened)
+        raise OSError("injected manifest close failure")
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(ownership, "_close_native", close_native)
+            context.setattr(
+                ownership,
+                "_recovery_generation_capture_invariants",
+                lambda _capture: False,
+            )
+            context.setattr(
+                ownership.OpenedRegularFile,
+                "close",
+                close_manifest_then_fail,
+            )
+
+            with pytest.raises(OSError, match="injected manifest close failure"):
+                ownership._open_recovery_generation(
+                    owned,
+                    source_root,
+                    relative_path=source.relative_path,
+                    expected_parent_identity=source.parent_identity,
+                    expected_leaf_identity=source.leaf_identity,
+                    expected_manifest_digest=source.content_digest,
+                    manifest_relative=(
+                        f"{source.relative_path}/plugins/"
+                        f"{prepared.install_identity.plugin_id}/"
+                        ".codex-plugin/bundle-manifest.json"
+                    ),
+                )
+
+        assert manifest_closes == 1
+        assert len(native_closes) == len(source.relative_path.split("/")) - 1 + 3
+    finally:
+        source_root.close()
+        store.close()
+        proof.close()
+        owned.close()
+
+
+def test_recovery_receipt_absence_transfer_closes_each_handle_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, root = _owned(tmp_path)
+    assert (root / ".zagrosi").is_dir()
+    _private_test_directory(root / ".zagrosi" / "ownership")
+    reference = ownership.committed_receipt_reference(
+        "zagrosi",
+        _install_identity(),
+    )
+    snapshot = ownership._snapshot_safe_reference(reference)
+    assert snapshot is not None
+    original_close = ownership._close_native
+    closes: list[int] = []
+
+    def close_then_fail_once(descriptor: int) -> None:
+        closes.append(descriptor)
+        original_close(descriptor)
+        if len(closes) == 1:
+            raise OSError("injected ancestry close failure")
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_close_native",
+                close_then_fail_once,
+            )
+            with pytest.raises(OSError, match="injected ancestry close failure"):
+                ownership._open_recovery_receipt_absence(
+                    owned,
+                    snapshot,
+                )
+
+        assert len(closes) == 2
+        assert len(set(closes)) == 2
+    finally:
+        owned.close()
+
+
+def test_recovery_receipt_absence_probe_attempts_every_handle_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, _root = _owned(tmp_path)
+    reference = ownership.committed_receipt_reference(
+        "zagrosi",
+        _install_identity(),
+    )
+    snapshot = ownership._snapshot_safe_reference(reference)
+    assert snapshot is not None
+    opened = ownership._open_recovery_receipt_absence(owned, snapshot)
+    original_close = ownership._close_native
+    closes: list[int] = []
+
+    def close_then_fail_once(descriptor: int) -> None:
+        closes.append(descriptor)
+        original_close(descriptor)
+        if len(closes) == 1:
+            raise OSError("injected absence probe close failure")
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_close_native",
+                close_then_fail_once,
+            )
+            with pytest.raises(OSError, match="injected absence probe close failure"):
+                ownership._recovery_receipt_absence_is_current(
+                    owned,
+                    opened,
+                    snapshot,
+                )
+
+        assert len(closes) == 2
+        assert len(set(closes)) == 2
+    finally:
+        opened.close()
+        owned.close()
+
+
+def test_recovery_receipt_absence_existing_depth_releases_transfer_handles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    _, owned, root = _owned(tmp_path)
+    _private_test_directory(root / ".zagrosi" / "ownership")
+    reference = ownership.committed_receipt_reference(
+        "zagrosi",
+        _install_identity(),
+    )
+    snapshot = ownership._snapshot_safe_reference(reference)
+    assert snapshot is not None
+    opened = ownership._open_recovery_receipt_absence(owned, snapshot)
+    assert opened.existing_depth == 1
+    original_close = ownership._close_native
+    closes: list[int] = []
+
+    def close_then_fail_once(descriptor: int) -> None:
+        closes.append(descriptor)
+        original_close(descriptor)
+        if len(closes) == 1:
+            raise OSError("injected private-chain transfer close failure")
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_close_native",
+                close_then_fail_once,
+            )
+            assert not ownership._recovery_receipt_absence_is_current(
+                owned,
+                opened,
+                snapshot,
+            )
+
+        assert len(closes) == 3
+        assert len(set(closes)) == 3
+    finally:
+        opened.close()
+        owned.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX descriptor transfer")
+def test_open_parent_close_failure_releases_untransferred_child_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    (tmp_path / "child").mkdir()
+    root = os.open(tmp_path, ownership._directory_flags())
+    original_close = ownership._close_native
+    closes: list[int] = []
+
+    def close_then_fail_once(descriptor: int) -> None:
+        closes.append(descriptor)
+        original_close(descriptor)
+        if len(closes) == 1:
+            raise OSError("injected parent transfer close failure")
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                "_close_native",
+                close_then_fail_once,
+            )
+            with pytest.raises(
+                OSError,
+                match="injected parent transfer close failure",
+            ):
+                ownership._open_parent(root, ("child",))
+
+        assert len(closes) == 2
+        assert len(set(closes)) == 2
+    finally:
+        os.close(root)
 
 
 def test_transaction_store_namespace_failure_closes_each_native_handle_once(
