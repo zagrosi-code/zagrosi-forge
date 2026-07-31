@@ -543,8 +543,8 @@ jobs:
             "windows-x86_64" { 33 }
             default { 5 }
           }
-          if ($Cases.Count -ne 182 -or $Failures.Count -ne 0 -or $Skips.Count -ne $ExpectedSkips) {
-            throw "authority hard gate requires 182 cases, zero failures/errors, and $ExpectedSkips platform skips"
+          if ($Cases.Count -ne 195 -or $Failures.Count -ne 0 -or $Skips.Count -ne $ExpectedSkips) {
+            throw "authority hard gate requires 195 cases, zero failures/errors, and $ExpectedSkips platform skips"
           }
 
       - name: Prove Codex cachebuster behavior
