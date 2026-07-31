@@ -5684,3 +5684,325 @@ def test_prepared_reserves_exact_remaining_rollback_wal_before_publication(
         store.close()
         proof.close()
         owned.close()
+
+
+def _completed_quarantined_rollback(tmp_path: Path):
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.journal import (
+        JournalState,
+        JournalStore,
+        JournalTransition,
+    )
+    from zagrosi_forge.install.paths import PlatformPathAuthority
+    from zagrosi_forge.install.recovery import observe_current_config_identity
+
+    authority = PlatformPathAuthority()
+    store, proof, owned, _directory, binding = _store(
+        tmp_path,
+        authority=authority,
+    )
+    live_rebound = None
+    path = None
+    quarantine_ticket = None
+    quarantine_rebound = None
+    access = None
+    recovery_store = None
+    try:
+        current = observe_current_config_identity(
+            authority=authority,
+            owned_root=owned,
+        )
+        prepared = _bind_prepared_to_current_config(_prepared(binding), current)
+        root_action = prepared.rollback_actions[-1]
+        root_index = len(prepared.rollback_actions) - 1
+        head = store.create_prepared(prepared)
+        head = store.append(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_INTENT,
+                rollback_event=_rollback_intent(root_action, root_index),
+            ),
+        )
+        store.close()
+        proof.close()
+
+        live_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert live_rebound.claim is not None
+        path = authority.prove_descendant(
+            owned,
+            live_rebound.claim.relative,
+            expected_depth=3,
+        ).unwrap()
+        cleanup = ownership.prove_transaction_owned(
+            path,
+            claim=live_rebound.claim,
+        ).unwrap()
+        quarantine_ticket = ownership.quarantine_owned(
+            cleanup,
+            transaction_id=prepared.transaction_id,
+        ).unwrap()
+        quarantine_rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        access = ownership.open_quarantined_recovery_journal_access(
+            owned,
+            quarantine_rebound,
+        ).unwrap()
+        recovery_store = JournalStore.from_quarantined_recovery(access)
+        access = None
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(
+                JournalState.ROLLBACK_ACTION_COMPLETED,
+                rollback_event=_rollback_completion(
+                    root_action,
+                    root_index,
+                    binding,
+                ),
+            ),
+        )
+        head = recovery_store.append_recovery(
+            head,
+            JournalTransition(JournalState.ROLLED_BACK),
+        )
+        assert head.state is JournalState.ROLLED_BACK
+        recovery_store.close()
+        recovery_store = None
+        quarantine_rebound.close()
+        quarantine_rebound = None
+        return authority, owned, binding, prepared, quarantine_ticket
+    except BaseException:
+        if quarantine_ticket is not None:
+            quarantine_ticket.close()
+        owned.close()
+        raise
+    finally:
+        if recovery_store is not None:
+            recovery_store.close()
+        elif access is not None:
+            access.close()
+        if quarantine_rebound is not None:
+            quarantine_rebound.close()
+        if path is not None:
+            path.close()
+        if live_rebound is not None:
+            live_rebound.close()
+        store.close()
+        proof.close()
+
+
+def test_rolled_back_quarantine_remains_cleanup_pending_until_exact_removal(
+    tmp_path: Path,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority, owned, binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    try:
+        pending_plan = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+
+        assert pending_plan.disposition is not RecoveryDisposition.NO_RECOVERY
+        assert pending_plan.disposition.value == "cleanup_pending"
+        assert pending_plan.transaction_ids == (prepared.transaction_id,)
+        assert pending_plan.rollback_actions == ()
+        assert pending_plan.next_action_index is None
+        assert pending_plan.error_code is None
+
+        removed = ownership.remove_quarantine(ticket).unwrap()
+        assert removed.removed
+        assert removed.recovery_reference == binding.quarantine_relative
+        completed_plan = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+
+        assert completed_plan.disposition is RecoveryDisposition.NO_RECOVERY
+        assert completed_plan.transaction_ids == ()
+        assert completed_plan.rollback_actions == ()
+        assert completed_plan.next_action_index is None
+        assert completed_plan.error_code is None
+    finally:
+        ticket.close()
+        owned.close()
+
+
+def test_unlocated_rolled_back_snapshot_cannot_assert_cleanup_completion(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.journal import load_pending
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        RecoverySnapshot,
+        observe_current_config_identity,
+        plan_recovery,
+    )
+
+    authority, owned, _binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    try:
+        structural = RecoverySnapshot(
+            journals=load_pending(owned),
+            current_config=observe_current_config_identity(
+                authority=authority,
+                owned_root=owned,
+            ),
+        )
+
+        plan = plan_recovery(structural)
+
+        assert plan.disposition is RecoveryDisposition.OPERATOR_CONFLICT
+        assert plan.transaction_ids == (prepared.transaction_id,)
+        assert plan.rollback_actions == ()
+        assert plan.next_action_index is None
+        assert plan.error_code == "recovery.operator_conflict"
+    finally:
+        ticket.close()
+        owned.close()
+
+
+def test_live_or_forged_rolled_back_terminal_is_rejected_and_preserved(
+    tmp_path: Path,
+) -> None:
+    from zagrosi_forge.install.contracts import ForgeError
+    from zagrosi_forge.install.recovery import observe_recovery_snapshot
+
+    authority, owned, binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    transaction_store = tmp_path / "codex-home" / "plugins"
+    quarantine = transaction_store / binding.quarantine_relative
+    directory = transaction_store / binding.root_relative
+    try:
+        quarantine.rename(directory)
+        live_preserved = tuple(
+            (path.name, path.stat().st_ino, path.read_bytes())
+            for path in sorted(directory.glob("journal-*.json"))
+        )
+        with pytest.raises(ForgeError) as live_error:
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        assert live_error.value.code == "journal.corrupt"
+        assert (
+            tuple(
+                (path.name, path.stat().st_ino, path.read_bytes())
+                for path in sorted(directory.glob("journal-*.json"))
+            )
+            == live_preserved
+        )
+        directory.rename(quarantine)
+
+        completed_record = quarantine / "journal-00000002.json"
+
+        def forge_completion(value):
+            return {
+                **value,
+                "rollback_event": {
+                    **value["rollback_event"],
+                    "recovery_reference": f"{binding.quarantine_relative}-forged",
+                },
+            }
+
+        _rewrite(completed_record, forge_completion)
+        preserved = tuple(
+            (path.name, path.stat().st_ino, path.read_bytes())
+            for path in sorted(quarantine.glob("journal-*.json"))
+        )
+        with pytest.raises(ForgeError) as raised:
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        assert raised.value.code == "journal.corrupt"
+        assert (
+            tuple(
+                (path.name, path.stat().st_ino, path.read_bytes())
+                for path in sorted(quarantine.glob("journal-*.json"))
+            )
+            == preserved
+        )
+    finally:
+        ticket.close()
+        owned.close()
+
+
+def test_delete_token_rolled_back_cleanup_plan_is_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+    from zagrosi_forge.install.recovery import (
+        RecoveryDisposition,
+        observe_recovery_snapshot,
+        plan_recovery,
+    )
+
+    authority, owned, binding, prepared, ticket = _completed_quarantined_rollback(
+        tmp_path
+    )
+    cleaner_name = "_clean_windows_directory" if os.name == "nt" else "_clean_directory"
+    rebound = None
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(
+                ownership,
+                cleaner_name,
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    OSError("injected before exact cleanup")
+                ),
+            )
+            failed = ownership.remove_quarantine(ticket)
+        assert not failed.is_ok
+        assert failed.error is not None
+        assert failed.error.code == "ownership.cleanup_incomplete"
+
+        rebound = ownership.rebind_persistent_transaction(
+            owned,
+            binding=binding,
+        ).unwrap()
+        assert rebound.location is ownership.TransactionLocation.QUARANTINED
+        assert rebound.ticket is not None
+
+        first = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+        second = plan_recovery(
+            observe_recovery_snapshot(
+                authority=authority,
+                owned_root=owned,
+            )
+        )
+
+        assert first.disposition is not RecoveryDisposition.NO_RECOVERY
+        assert first.disposition.value == "cleanup_pending"
+        assert first.transaction_ids == (prepared.transaction_id,)
+        assert first.rollback_actions == ()
+        assert first == second
+        assert first.plan_digest == second.plan_digest
+    finally:
+        if rebound is not None:
+            rebound.close()
+        ticket.close()
+        owned.close()

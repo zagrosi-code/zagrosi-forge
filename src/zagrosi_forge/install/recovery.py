@@ -67,6 +67,7 @@ _NO_RECOVERY_STATES = frozenset(
 class RecoveryDisposition(str, Enum):
     NO_RECOVERY = "no_recovery"
     ROLLBACK_CANDIDATE = "rollback_candidate"
+    CLEANUP_PENDING = "cleanup_pending"
     OPERATOR_CONFLICT = "operator_conflict"
 
 
@@ -91,6 +92,8 @@ class _JournalCapture(NamedTuple):
     plan_digest: str
     head_digest: str
     head_state: str
+    journal_location: str | None
+    journal_relative: str | None
     record_digests: tuple[str, ...]
     before_config: _ConfigCapture
     candidate_config: _ConfigCapture
@@ -150,6 +153,8 @@ def _journal_projection(journal: _JournalCapture) -> dict[str, object]:
         "candidate_config": _config_projection(journal.candidate_config),
         "head_digest": journal.head_digest,
         "head_state": journal.head_state,
+        "journal_location": journal.journal_location,
+        "journal_relative": journal.journal_relative,
         "journal_plan_digest": journal.plan_digest,
         "record_digests": journal.record_digests,
         "rollback_actions": tuple(
@@ -201,7 +206,24 @@ def _capture_optional_config(
     return None if identity is None else _capture_config(identity)
 
 
-def _capture_journal(journal: LoadedJournal) -> _JournalCapture:
+def _capture_journal(
+    journal: LoadedJournal,
+    observation: object | None,
+) -> _JournalCapture:
+    if observation is None:
+        journal_location = None
+        journal_relative = None
+    else:
+        from . import ownership as _ownership
+
+        if (
+            type(observation) is not _ownership.PendingTransactionObservation
+            or observation._seal
+            is not _ownership._PENDING_TRANSACTION_OBSERVATION_TOKEN
+        ):
+            raise ValueError("pending transaction observation")
+        journal_location = observation.location.value
+        journal_relative = observation.journal_relative
     record = journal.records[-1]
     prepared = record.prepared
     return _JournalCapture(
@@ -209,6 +231,8 @@ def _capture_journal(journal: LoadedJournal) -> _JournalCapture:
         plan_digest=record.plan_digest,
         head_digest=record.record_digest,
         head_state=record.state.value,
+        journal_location=journal_location,
+        journal_relative=journal_relative,
         record_digests=tuple(item.record_digest for item in journal.records),
         before_config=_capture_config(prepared.before_config),
         candidate_config=_capture_config(prepared.candidate_config),
@@ -243,9 +267,18 @@ def _capture_snapshot(
     journals: tuple[LoadedJournal, ...],
     current_config: JournalConfigIdentity | None,
     inventory_digest: str | None,
+    observations: tuple[object, ...] | None,
 ) -> _SnapshotCapture:
+    if observations is not None and len(observations) != len(journals):
+        raise ValueError("pending transaction observations")
     return _SnapshotCapture(
-        journals=tuple(_capture_journal(journal) for journal in journals),
+        journals=tuple(
+            _capture_journal(
+                journal,
+                None if observations is None else observations[index],
+            )
+            for index, journal in enumerate(journals)
+        ),
         current_config=_capture_optional_config(current_config),
         inventory_digest=inventory_digest,
     )
@@ -355,6 +388,14 @@ def _valid_journal_capture(value: object) -> bool:
         and _valid_digest(value.head_digest)
         and type(value.head_state) is str
         and value.head_state in {state.value for state in JournalState}
+        and (
+            (value.journal_location is None and value.journal_relative is None)
+            or (
+                value.journal_location in {"live", "quarantined"}
+                and type(value.journal_relative) is str
+                and bool(value.journal_relative)
+            )
+        )
         and type(value.record_digests) is tuple
         and bool(value.record_digests)
         and all(_valid_digest(digest) for digest in value.record_digests)
@@ -398,15 +439,24 @@ def _valid_snapshot_capture(value: object) -> bool:
     ):
         return False
     transaction_ids = tuple(journal.transaction_id for journal in value.journals)
-    return transaction_ids == tuple(sorted(transaction_ids)) and len(
-        set(transaction_ids)
-    ) == len(transaction_ids)
+    captured_locations = tuple(
+        journal.journal_location is not None for journal in value.journals
+    )
+    return (
+        transaction_ids == tuple(sorted(transaction_ids))
+        and len(set(transaction_ids)) == len(transaction_ids)
+        and (
+            (value.inventory_digest is None and not any(captured_locations))
+            or (value.inventory_digest is not None and all(captured_locations))
+        )
+    )
 
 
 def _stable_snapshot_capture(
     journals: tuple[LoadedJournal, ...],
     current_config: JournalConfigIdentity | None,
     inventory_digest: str | None,
+    observations: tuple[object, ...] | None,
 ) -> _SnapshotCapture:
     if (
         type(journals) is not tuple
@@ -417,19 +467,46 @@ def _stable_snapshot_capture(
             and type(current_config) is not JournalConfigIdentity
         )
         or (inventory_digest is not None and not _valid_digest(inventory_digest))
+        or (
+            observations is not None
+            and (type(observations) is not tuple or len(observations) != len(journals))
+        )
+        or (inventory_digest is None) != (observations is None)
     ):
         raise TypeError("RecoverySnapshot evidence is invalid")
     try:
+        if observations is not None:
+            if inventory_digest is None or not hmac.compare_digest(
+                _observed_inventory_digest(observations, journals),
+                inventory_digest,
+            ):
+                raise ValueError
         for journal in journals:
             journal._require_valid()
         if current_config is not None:
             current_config.__post_init__()
-        captured = _capture_snapshot(journals, current_config, inventory_digest)
+        captured = _capture_snapshot(
+            journals,
+            current_config,
+            inventory_digest,
+            observations,
+        )
         for journal in journals:
             journal._require_valid()
         if current_config is not None:
             current_config.__post_init__()
-        confirmed = _capture_snapshot(journals, current_config, inventory_digest)
+        if observations is not None:
+            if inventory_digest is None or not hmac.compare_digest(
+                _observed_inventory_digest(observations, journals),
+                inventory_digest,
+            ):
+                raise ValueError
+        confirmed = _capture_snapshot(
+            journals,
+            current_config,
+            inventory_digest,
+            observations,
+        )
         if (
             captured != confirmed
             or not _valid_snapshot_capture(captured)
@@ -450,6 +527,7 @@ class RecoverySnapshot:
     snapshot_digest: str
     _capture: _SnapshotCapture
     _inventory_digest: str | None
+    _observations: tuple[object, ...] | None
     _observation_seal: object | None
     _seal: object
 
@@ -459,12 +537,17 @@ class RecoverySnapshot:
         journals: tuple[LoadedJournal, ...],
         current_config: JournalConfigIdentity | None,
         _inventory_digest: str | None = None,
+        _observations: tuple[object, ...] | None = None,
         _observation_token: object | None = None,
     ) -> None:
-        if (_inventory_digest is None and _observation_token is not None) or (
+        if (
+            _inventory_digest is None
+            and (_observations is not None or _observation_token is not None)
+        ) or (
             _inventory_digest is not None
             and (
                 not _valid_digest(_inventory_digest)
+                or type(_observations) is not tuple
                 or _observation_token is not _LIVE_OBSERVATION_TOKEN
             )
         ):
@@ -475,6 +558,7 @@ class RecoverySnapshot:
             journals,
             current_config,
             _inventory_digest,
+            _observations,
         )
         digest = _snapshot_digest(capture)
         object.__setattr__(self, "journals", journals)
@@ -482,6 +566,7 @@ class RecoverySnapshot:
         object.__setattr__(self, "snapshot_digest", digest)
         object.__setattr__(self, "_capture", capture)
         object.__setattr__(self, "_inventory_digest", _inventory_digest)
+        object.__setattr__(self, "_observations", _observations)
         object.__setattr__(
             self,
             "_observation_seal",
@@ -495,17 +580,24 @@ class RecoverySnapshot:
                 self.journals,
                 self.current_config,
                 self._inventory_digest,
+                self._observations,
             )
             expected = _snapshot_digest(capture)
         except (AttributeError, TypeError, ValueError):
             raise TypeError("RecoverySnapshot authority changed") from None
         if (
             self._seal is not _SNAPSHOT_TOKEN
-            or (self._inventory_digest is None and self._observation_seal is not None)
+            or (
+                self._inventory_digest is None
+                and (
+                    self._observations is not None or self._observation_seal is not None
+                )
+            )
             or (
                 self._inventory_digest is not None
                 and (
                     not _valid_digest(self._inventory_digest)
+                    or type(self._observations) is not tuple
                     or self._observation_seal is not _LIVE_OBSERVATION_TOKEN
                 )
             )
@@ -613,6 +705,13 @@ def _valid_plan_fields(
             )
             and error_code is None
         )
+    if disposition is RecoveryDisposition.CLEANUP_PENDING:
+        return (
+            len(transaction_ids) == 1
+            and not rollback_actions
+            and next_action_index is None
+            and error_code is None
+        )
     return (
         disposition is RecoveryDisposition.OPERATOR_CONFLICT
         and bool(transaction_ids)
@@ -717,6 +816,10 @@ def _journal_disposition(
     journal: _JournalCapture,
     current_config: _ConfigCapture | None,
 ) -> RecoveryDisposition:
+    if journal.head_state == JournalState.ROLLED_BACK.value:
+        if journal.journal_location == "quarantined":
+            return RecoveryDisposition.CLEANUP_PENDING
+        return RecoveryDisposition.OPERATOR_CONFLICT
     if journal.head_state in _NO_RECOVERY_STATES:
         return RecoveryDisposition.NO_RECOVERY
     if journal.head_state == JournalState.RECOVERY_REQUIRED.value:
@@ -833,6 +936,17 @@ def plan_recovery(snapshot: RecoverySnapshot) -> RecoveryPlan:
                 _rollback_action(action) for action in journal.rollback_actions
             ),
             next_action_index=journal.next_action_index,
+            error_code=None,
+        )
+    if decisions[0] is RecoveryDisposition.CLEANUP_PENDING:
+        return _make_plan(
+            snapshot,
+            capture,
+            capture_digest,
+            disposition=RecoveryDisposition.CLEANUP_PENDING,
+            transaction_ids=(journal.transaction_id,),
+            rollback_actions=(),
+            next_action_index=None,
             error_code=None,
         )
     return _make_plan(
@@ -1073,6 +1187,7 @@ def observe_recovery_snapshot(
         journals=second_journals,
         current_config=second_config,
         _inventory_digest=final_inventory_digest,
+        _observations=final_inventory,
         _observation_token=_LIVE_OBSERVATION_TOKEN,
     )
 
