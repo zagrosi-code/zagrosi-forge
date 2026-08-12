@@ -751,6 +751,318 @@ def test_patch_scope_preserves_long_file_extensions(tmp_path: Path) -> None:
     assert scope["out_of_scope"] == []
 
 
+def test_patch_scope_preserves_supply_chain_artifact_extensions(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Exact ownership\n\n"
+        "```text\n"
+        "contracts/release-keyring.gpg\n"
+        "requirements/runtime.lock\n"
+        "terraform/data-plane/main.tf\n"
+        "terraform/data-plane/.terraform.lock.hcl\n"
+        "org-config.example.yaml\n"
+        "```\n\n"
+        "Run tests with `requirements/ci.lock`; it is not owned by this section.\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text(
+        "diff --git a/contracts/release-keyring.gpg b/contracts/release-keyring.gpg\n"
+        "+++ b/contracts/release-keyring.gpg\n"
+        "diff --git a/requirements/runtime.lock b/requirements/runtime.lock\n"
+        "+++ b/requirements/runtime.lock\n"
+        "diff --git a/terraform/data-plane/main.tf b/terraform/data-plane/main.tf\n"
+        "+++ b/terraform/data-plane/main.tf\n"
+        "diff --git a/terraform/data-plane/.terraform.lock.hcl b/terraform/data-plane/.terraform.lock.hcl\n"
+        "+++ b/terraform/data-plane/.terraform.lock.hcl\n"
+        "diff --git a/org-config.example.yaml b/org-config.example.yaml\n"
+        "+++ b/org-config.example.yaml\n"
+    )
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == [
+        "contracts/release-keyring.gpg",
+        "org-config.example.yaml",
+        "requirements/runtime.lock",
+        "terraform/data-plane/.terraform.lock.hcl",
+        "terraform/data-plane/main.tf",
+    ]
+    assert scope["out_of_scope"] == []
+
+
+def test_patch_scope_reads_name_only_supply_chain_diff(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Exact ownership\n\n"
+        "```text\n"
+        "contracts/release-keyring.gpg\n"
+        "requirements/runtime.lock\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.names"
+    diff_file.write_text("contracts/release-keyring.gpg\nrequirements/runtime.lock\n")
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["changed_files"] == [
+        "contracts/release-keyring.gpg",
+        "requirements/runtime.lock",
+    ]
+    assert scope["out_of_scope"] == []
+
+
+def test_implementation_drift_flags_name_only_unplanned_supply_chain_path(tmp_path: Path) -> None:
+    planning = tmp_path / "planning"
+    write_single_section_fixture(planning, "section-01-toolchain")
+    (planning / "sections" / "section-01-toolchain.md").write_text(
+        "# Section\n\n"
+        "## Exact ownership\n\n"
+        "```text\n"
+        "contracts/release-keyring.gpg\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.names"
+    diff_file.write_text("contracts/release-keyring.gpg\nrequirements/unplanned.lock\n")
+
+    result = run_raw(
+        "implementation-drift",
+        "--planning-dir",
+        str(planning),
+        "--diff-file",
+        str(diff_file),
+        "--strict",
+    )
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["changed_files"] == [
+        "contracts/release-keyring.gpg",
+        "requirements/unplanned.lock",
+    ]
+    assert payload["out_of_scope"] == ["requirements/unplanned.lock"]
+
+
+def test_section_metrics_use_only_explicit_ownership_block(tmp_path: Path) -> None:
+    planning = tmp_path / "planning"
+    write_single_section_fixture(planning, "section-01-toolchain")
+    (planning / "sections" / "section-01-toolchain.md").write_text(
+        "# Section 01: Toolchain\n\n"
+        "## Status, goal and exact ownership\n\n"
+        "This section owns exactly two paths:\n\n"
+        "```text\n"
+        "terraform/data-plane/main.tf\n"
+        "requirements/runtime.lock\n"
+        "```\n\n"
+        "## Tests first and implementation\n\n"
+        "Run `requirements/ci.lock` and verify acceptance.\n"
+    )
+
+    result = run_cmd("section-estimates", "--planning-dir", str(planning))
+
+    assert result["estimates"][0]["files"] == [
+        "requirements/runtime.lock",
+        "terraform/data-plane/main.tf",
+    ]
+
+
+def test_patch_scope_skips_semantic_data_ownership_heading(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Data ownership and lifecycle\n\n"
+        "Example producer location:\n\n"
+        "```text\n"
+        "src/unplanned.py\n"
+        "```\n\n"
+        "## Exact file ownership\n\n"
+        "This section owns exactly one path:\n\n"
+        "```text\n"
+        "src/planned.py\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text("diff --git a/src/planned.py b/src/planned.py\n+++ b/src/planned.py\n")
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == ["src/planned.py"]
+    assert scope["out_of_scope"] == []
+
+
+def test_patch_scope_skips_non_path_ownership_declaration(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Data ownership and lifecycle\n\n"
+        "This section owns exactly one record:\n\n"
+        "```text\n"
+        "customer\n"
+        "```\n\n"
+        "## Exact file ownership\n\n"
+        "This section owns exactly one path:\n\n"
+        "```text\n"
+        "src/planned.py\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text("diff --git a/src/planned.py b/src/planned.py\n+++ b/src/planned.py\n")
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == ["src/planned.py"]
+    assert scope["out_of_scope"] == []
+
+
+def test_patch_scope_uses_owned_paths_after_declaration(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Exact ownership\n\n"
+        "Observed status:\n\n"
+        "```text\n"
+        "ready\n"
+        "```\n\n"
+        "This section owns exactly one path:\n\n"
+        "```text\n"
+        "src/planned.py\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text("diff --git a/src/planned.py b/src/planned.py\n+++ b/src/planned.py\n")
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == ["src/planned.py"]
+    assert scope["out_of_scope"] == []
+
+
+def test_patch_scope_skips_unrelated_fence_before_owned_paths(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Exact ownership\n\n"
+        "Run the focused check first:\n\n"
+        "```sh\n"
+        "pytest tests/unrelated.py\n"
+        "```\n\n"
+        "The section owns exactly one path:\n\n"
+        "```text\n"
+        "contracts/release-keyring.gpg\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text(
+        "diff --git a/contracts/release-keyring.gpg b/contracts/release-keyring.gpg\n"
+        "+++ b/contracts/release-keyring.gpg\n"
+    )
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == ["contracts/release-keyring.gpg"]
+    assert scope["out_of_scope"] == []
+
+
+def test_patch_scope_accepts_indented_owned_paths(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Exact owned paths\n\n"
+        "This section owns exactly two paths:\n\n"
+        "    contracts/release-keyring.gpg\n"
+        "    org-config.example.yaml\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text(
+        "diff --git a/contracts/release-keyring.gpg b/contracts/release-keyring.gpg\n"
+        "+++ b/contracts/release-keyring.gpg\n"
+        "diff --git a/org-config.example.yaml b/org-config.example.yaml\n"
+        "+++ b/org-config.example.yaml\n"
+    )
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == ["contracts/release-keyring.gpg", "org-config.example.yaml"]
+
+
+def test_patch_scope_rejects_unsafe_owned_paths(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Exact ownership\n\n"
+        "```text\n"
+        "../outside/runtime.lock\n"
+        "/absolute/release-keyring.gpg\n"
+        "src//ambiguous.py\n"
+        "src/safe.py\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text("diff --git a/src/safe.py b/src/safe.py\n+++ b/src/safe.py\n")
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["declared_files"] == ["src/safe.py"]
+    assert scope["out_of_scope"] == []
+
+
+def test_patch_scope_filters_unsafe_inline_owned_paths(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Exact ownership\n\n"
+        "- `../outside.py`\n"
+        "- `/absolute.py`\n"
+        "- `src//ambiguous.py`\n"
+        "- `contracts/release-keyring.gpg`\n"
+        "- `requirements/runtime.lock`\n"
+        "- `src/safe.py`\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text(
+        "diff --git a/contracts/release-keyring.gpg b/contracts/release-keyring.gpg\n"
+        "+++ b/contracts/release-keyring.gpg\n"
+        "diff --git a/requirements/runtime.lock b/requirements/runtime.lock\n"
+        "+++ b/requirements/runtime.lock\n"
+        "diff --git a/src/safe.py b/src/safe.py\n"
+        "+++ b/src/safe.py\n"
+    )
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == [
+        "contracts/release-keyring.gpg",
+        "requirements/runtime.lock",
+        "src/safe.py",
+    ]
+    assert scope["out_of_scope"] == []
+
+
+def test_patch_scope_filters_unsafe_legacy_inline_paths(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "Modify `../outside.py`, `/absolute.py`, `src//ambiguous.py`, and `src/safe.py`.\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text("diff --git a/src/safe.py b/src/safe.py\n+++ b/src/safe.py\n")
+
+    scope = run_cmd("patch-scope", "--section-file", str(section_file), "--diff-file", str(diff_file), "--strict")
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == ["src/safe.py"]
+    assert scope["out_of_scope"] == []
+
+
 def test_patch_scope_accepts_declared_frontend_assets(tmp_path: Path) -> None:
     section_file = tmp_path / "section-01-ui.md"
     section_file.write_text("# Section\n\nUpdate `index.html`, `src/App.css`, and `public/logo.svg`.\n")

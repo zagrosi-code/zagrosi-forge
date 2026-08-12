@@ -34,6 +34,16 @@ REQ_ID_RE = re.compile(r"\bREQ-[A-Z0-9][A-Z0-9-]*\b")
 FILE_PATH_RE = re.compile(
     r"`?[\w./-]+\.(?:avif|css|gif|go|htm|html|ico|java|jpeg|jpg|js|json|jsx|less|md|php|png|py|rb|rs|sass|scss|sh|sql|svg|toml|ts|tsx|webp|yaml|yml)(?:`|\b)"
 )
+OWNED_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*//)[\w.-]+(?:/[\w.-]+)*$")
+OWNERSHIP_TITLE_RE = re.compile(
+    r"\b(?:exact(?:\s+(?:file|path))?\s+ownership|(?:file|path)\s+ownership|owned\s+(?:files|paths))\b",
+    re.IGNORECASE,
+)
+OWNERSHIP_DECLARATION_RE = re.compile(
+    r"\b(?:(?:this|the)\s+section|it)\s+owns\s+exactly(?:\s+\w+){0,3}\s+(?:files?|paths?)\b"
+    r"|\bonly these(?:\s+\w+){0,3}\s+paths?\s+may change\b",
+    re.IGNORECASE,
+)
 FORGE_META_START = "FORGE_META"
 LEGACY_META_START = "DEEP_META"
 REVIEW_BOARD_PASSES = [
@@ -1984,6 +1994,136 @@ def extract_file_paths(text: str) -> list[str]:
     return sorted(paths)
 
 
+def normalize_owned_path(value: str) -> str | None:
+    candidate = value.strip()
+    if len(candidate) >= 2 and candidate.startswith("`") and candidate.endswith("`"):
+        candidate = candidate[1:-1].strip()
+    candidate = candidate.removeprefix("./")
+    return candidate if OWNED_PATH_RE.fullmatch(candidate) else None
+
+
+def safe_legacy_file_paths(text: str) -> list[str]:
+    paths = {path for value in extract_file_paths(text) if (path := normalize_owned_path(value))}
+    return sorted(paths)
+
+
+def markdown_fence_opening(line: str) -> tuple[str, int, str] | None:
+    match = re.fullmatch(r" {0,3}(`{3,}|~{3,})([^\r\n]*)", line.rstrip("\r\n"))
+    if not match:
+        return None
+    marker = match.group(1)
+    info = match.group(2).strip()
+    language = info.split(maxsplit=1)[0].casefold() if info else ""
+    return marker[0], len(marker), language
+
+
+def markdown_fence_closes(line: str, marker: str, minimum: int) -> bool:
+    return bool(re.fullmatch(rf" {{0,3}}{re.escape(marker)}{{{minimum},}}[ \t]*", line.rstrip("\r\n")))
+
+
+def markdown_h2_sections(text: str) -> list[tuple[str, str]]:
+    lines = text.splitlines(keepends=True)
+    headings: list[tuple[int, str]] = []
+    active_fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        if active_fence:
+            if markdown_fence_closes(line, *active_fence):
+                active_fence = None
+            continue
+        opening = markdown_fence_opening(line)
+        if opening:
+            active_fence = opening[:2]
+            continue
+        heading = re.fullmatch(r"##[ \t]+(.+?)[ \t]*", line.rstrip("\r\n"))
+        if heading:
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", heading.group(1)).strip()
+            headings.append((index, title))
+
+    sections: list[tuple[str, str]] = []
+    for index, (line_number, title) in enumerate(headings):
+        end = headings[index + 1][0] if index + 1 < len(headings) else len(lines)
+        sections.append((title, "".join(lines[line_number + 1 : end])))
+    return sections
+
+
+def split_markdown_fences(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    blocks: list[tuple[str, list[str]]] = []
+    plain_lines: list[str] = []
+    active_fence: tuple[str, int, str] | None = None
+    block_lines: list[str] = []
+    for line in text.splitlines():
+        if active_fence:
+            marker, minimum, language = active_fence
+            if markdown_fence_closes(line, marker, minimum):
+                blocks.append((language, block_lines))
+                active_fence = None
+                block_lines = []
+            else:
+                block_lines.append(line)
+            continue
+        opening = markdown_fence_opening(line)
+        if opening:
+            active_fence = opening
+        else:
+            plain_lines.append(line)
+    return blocks, plain_lines
+
+
+def ownership_declaration_end(text: str) -> int | None:
+    active_fence: tuple[str, int] | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if active_fence:
+            if markdown_fence_closes(line, *active_fence):
+                active_fence = None
+        elif opening := markdown_fence_opening(line):
+            active_fence = opening[:2]
+        elif match := OWNERSHIP_DECLARATION_RE.search(line):
+            return offset + match.end()
+        offset += len(line)
+    return None
+
+
+def standalone_owned_path(line: str) -> str | None:
+    candidate = line.strip()
+    list_item = re.fullmatch(r"(?:[-*+]|\d+[.)])\s+(.+)", candidate)
+    if list_item:
+        candidate = list_item.group(1).strip()
+    return normalize_owned_path(candidate)
+
+
+def owned_paths_from_body(body: str) -> list[str]:
+    fenced_blocks, plain_lines = split_markdown_fences(body)
+    for language, lines in fenced_blocks:
+        if language not in {"", "text", "plaintext"}:
+            continue
+        paths = {path for line in lines if (path := standalone_owned_path(line))}
+        if paths:
+            return sorted(paths)
+
+    structured: set[str] = set()
+    for line in plain_lines:
+        is_indented = line.startswith(("    ", "\t"))
+        is_list_item = bool(re.match(r"\s*(?:[-*+]|\d+[.)])\s+", line))
+        if (is_indented or is_list_item) and (path := standalone_owned_path(line)):
+            structured.add(path)
+    return sorted(structured) if structured else safe_legacy_file_paths("\n".join(plain_lines))
+
+
+def extract_section_owned_paths(text: str) -> list[str]:
+    found_ownership_section = False
+    for title, body in markdown_h2_sections(text):
+        title_declares_ownership = bool(OWNERSHIP_TITLE_RE.search(title))
+        declaration_end = ownership_declaration_end(body)
+        if not (title_declares_ownership or declaration_end is not None):
+            continue
+        found_ownership_section = True
+        ownership_body = body[declaration_end:] if declaration_end is not None else body
+        if paths := owned_paths_from_body(ownership_body):
+            return paths
+    return [] if found_ownership_section else safe_legacy_file_paths(text)
+
+
 def parse_section_dependencies(index_text: str, sections: list[str]) -> dict[str, list[str]]:
     known = set(sections)
     dependencies = {section: [] for section in sections}
@@ -2059,7 +2199,7 @@ def implementation_recording_status(planning_dir: Path) -> dict[str, Any]:
 
 def section_metrics(section: str, path: Path, dependencies: dict[str, list[str]]) -> dict[str, Any]:
     text = read_text(path) if path.exists() else ""
-    files = extract_file_paths(text)
+    files = extract_section_owned_paths(text)
     words = word_count(text)
     dep_count = len(dependencies.get(section, []))
     risk_terms = ["security", "privacy", "auth", "permission", "migration", "data", "payment", "token", "secret"]
@@ -3749,18 +3889,26 @@ def parallel_plan(args: argparse.Namespace) -> int:
 
 
 def changed_files_from_diff(text: str) -> list[str]:
+    lines = text.splitlines()
+    is_unified_diff = any(
+        line.startswith(("diff --git ", "--- ", "+++ ", "@@ "))
+        for line in lines
+    )
+    if not is_unified_diff:
+        return sorted({
+            path
+            for line in lines
+            if (path := line.strip().removeprefix("./")) and path != "/dev/null"
+        })
+
     files: set[str] = set()
-    for line in text.splitlines():
+    for line in lines:
         if line.startswith("diff --git "):
             parts = line.split()
             if len(parts) >= 4:
                 files.add(parts[3].removeprefix("b/"))
         elif line.startswith("+++ b/"):
             files.add(line[6:].strip())
-        else:
-            stripped = line.strip().removeprefix("./")
-            if FILE_PATH_RE.fullmatch(stripped):
-                files.add(stripped.strip("`"))
     return sorted(file for file in files if file != "/dev/null")
 
 
@@ -3785,7 +3933,7 @@ def patch_scope(args: argparse.Namespace) -> int:
     section_file = resolve_path(args.section_file)
     if not section_file.exists():
         return print_json({"success": False, "error": f"Section file not found: {section_file}"}, 1)
-    declared = set(extract_file_paths(read_text(section_file)))
+    declared = set(extract_section_owned_paths(read_text(section_file)))
     if args.diff_file:
         diff_path = resolve_path(args.diff_file)
         if not diff_path.exists():
@@ -3838,7 +3986,7 @@ def commit_message(args: argparse.Namespace) -> int:
         subject = f"Implement {label}"
     text = read_text(section_file)
     req_ids = requirement_ids(text)
-    files = extract_file_paths(text)
+    files = extract_section_owned_paths(text)
     body_lines = []
     if req_ids:
         body_lines.append(f"Requirements: {', '.join(req_ids)}")
@@ -4477,7 +4625,7 @@ def implementation_packet(args: argparse.Namespace) -> int:
     section_text = read_text(section_path)
     reqs = requirement_ids(section_text)
     tests = test_names(section_text + "\n" + tdd_text)
-    files = extract_file_paths(section_text)
+    files = extract_section_owned_paths(section_text)
     content = (
         f"# Implementation Packet: {section}\n\n"
         f"Planning directory: `{planning_dir}`\n\n"
@@ -4963,7 +5111,7 @@ def implementation_drift(args: argparse.Namespace) -> int:
     planned_files = set()
     planned_tests = set()
     for section_path in section_files:
-        files = extract_file_paths(read_text(section_path))
+        files = extract_section_owned_paths(read_text(section_path))
         planned_files.update(files)
         planned_tests.update(file for file in files if contains_any(file, ["test", "spec"]))
     changed_tests = {file for file in changed if contains_any(file, ["test", "spec"])}
