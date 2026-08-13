@@ -89,6 +89,45 @@ def _private_test_directory(path: Path) -> Path:
     return path
 
 
+@pytest.mark.parametrize(
+    ("function_name", "structure_name"),
+    (
+        ("_darwin_local_filesystem", "_DarwinStatFs"),
+        ("_linux_local_filesystem", "_LinuxStatFs"),
+    ),
+)
+def test_filesystem_probe_reuses_static_abi_structure(
+    monkeypatch: pytest.MonkeyPatch,
+    function_name: str,
+    structure_name: str,
+) -> None:
+    import zagrosi_forge.install.paths as paths
+
+    class FailedProbe:
+        argtypes: list[object] = []
+        restype: object | None = None
+
+        def __call__(self, *_args: object) -> int:
+            return -1
+
+    class Libc:
+        fstatfs = FailedProbe()
+
+    structures: list[type[object]] = []
+
+    def capture_pointer(structure: type[object]) -> object:
+        structures.append(structure)
+        return object()
+
+    monkeypatch.setattr(paths.ctypes, "CDLL", lambda *_args, **_kwargs: Libc())
+    monkeypatch.setattr(paths.ctypes, "POINTER", capture_pointer)
+    probe = getattr(paths, function_name)
+
+    assert not probe(1)
+    assert not probe(1)
+    assert structures == [getattr(paths, structure_name)] * 2
+
+
 def _directory_link(target: Path, link: Path) -> None:
     if os.name != "nt":
         link.symlink_to(target, target_is_directory=True)

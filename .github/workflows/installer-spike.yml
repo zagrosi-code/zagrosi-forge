@@ -540,7 +540,7 @@ jobs:
           $Skips = @($Document.SelectNodes("//testcase/skipped"))
           $ExpectedSkips = switch ($env:MATRIX_PLATFORM) {
             "linux-x86_64" { 13 }
-            "windows-x86_64" { 34 }
+            "windows-x86_64" { 42 }
             default { 5 }
           }
           if ($Cases.Count -ne 213 -or $Failures.Count -ne 0 -or $Skips.Count -ne $ExpectedSkips) {

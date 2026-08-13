@@ -1400,35 +1400,59 @@ def _windows_rollback_created_directory(handle: int) -> None:
     )
 
 
-def _darwin_local_filesystem(handle: int) -> bool:
-    class Fsid(ctypes.Structure):
-        _fields_ = [("value", ctypes.c_int32 * 2)]
+class _DarwinFsid(ctypes.Structure):
+    _fields_ = [("value", ctypes.c_int32 * 2)]
 
-    class StatFs(ctypes.Structure):
-        _fields_ = [
-            ("block_size", ctypes.c_uint32),
-            ("io_size", ctypes.c_int32),
-            ("blocks", ctypes.c_uint64),
-            ("blocks_free", ctypes.c_uint64),
-            ("blocks_available", ctypes.c_uint64),
-            ("files", ctypes.c_uint64),
-            ("files_free", ctypes.c_uint64),
-            ("filesystem_id", Fsid),
-            ("owner", ctypes.c_uint32),
-            ("type", ctypes.c_uint32),
-            ("flags", ctypes.c_uint32),
-            ("subtype", ctypes.c_uint32),
-            ("type_name", ctypes.c_char * 16),
-            ("mounted_on", ctypes.c_char * 1024),
-            ("mounted_from", ctypes.c_char * 1024),
-            ("reserved", ctypes.c_uint32 * 8),
-        ]
+
+class _DarwinStatFs(ctypes.Structure):
+    _fields_ = [
+        ("block_size", ctypes.c_uint32),
+        ("io_size", ctypes.c_int32),
+        ("blocks", ctypes.c_uint64),
+        ("blocks_free", ctypes.c_uint64),
+        ("blocks_available", ctypes.c_uint64),
+        ("files", ctypes.c_uint64),
+        ("files_free", ctypes.c_uint64),
+        ("filesystem_id", _DarwinFsid),
+        ("owner", ctypes.c_uint32),
+        ("type", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("subtype", ctypes.c_uint32),
+        ("type_name", ctypes.c_char * 16),
+        ("mounted_on", ctypes.c_char * 1024),
+        ("mounted_from", ctypes.c_char * 1024),
+        ("reserved", ctypes.c_uint32 * 8),
+    ]
+
+
+class _LinuxFsid(ctypes.Structure):
+    _fields_ = [("value", ctypes.c_int * 2)]
+
+
+class _LinuxStatFs(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_long),
+        ("block_size", ctypes.c_long),
+        ("blocks", ctypes.c_ulong),
+        ("blocks_free", ctypes.c_ulong),
+        ("blocks_available", ctypes.c_ulong),
+        ("files", ctypes.c_ulong),
+        ("files_free", ctypes.c_ulong),
+        ("filesystem_id", _LinuxFsid),
+        ("name_length", ctypes.c_long),
+        ("fragment_size", ctypes.c_long),
+        ("flags", ctypes.c_long),
+        ("spare", ctypes.c_long * 4),
+    ]
+
+
+def _darwin_local_filesystem(handle: int) -> bool:
 
     libc = ctypes.CDLL(None, use_errno=True)
     fstatfs = libc.fstatfs
-    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(StatFs)]
+    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(_DarwinStatFs)]
     fstatfs.restype = ctypes.c_int
-    information = StatFs()
+    information = _DarwinStatFs()
     if fstatfs(handle, ctypes.byref(information)) != 0:
         return False
     filesystem = bytes(information.type_name).split(b"\0", 1)[0]
@@ -1436,30 +1460,11 @@ def _darwin_local_filesystem(handle: int) -> bool:
 
 
 def _linux_local_filesystem(handle: int) -> bool:
-    class Fsid(ctypes.Structure):
-        _fields_ = [("value", ctypes.c_int * 2)]
-
-    class StatFs(ctypes.Structure):
-        _fields_ = [
-            ("type", ctypes.c_long),
-            ("block_size", ctypes.c_long),
-            ("blocks", ctypes.c_ulong),
-            ("blocks_free", ctypes.c_ulong),
-            ("blocks_available", ctypes.c_ulong),
-            ("files", ctypes.c_ulong),
-            ("files_free", ctypes.c_ulong),
-            ("filesystem_id", Fsid),
-            ("name_length", ctypes.c_long),
-            ("fragment_size", ctypes.c_long),
-            ("flags", ctypes.c_long),
-            ("spare", ctypes.c_long * 4),
-        ]
-
     libc = ctypes.CDLL(None, use_errno=True)
     fstatfs = libc.fstatfs
-    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(StatFs)]
+    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(_LinuxStatFs)]
     fstatfs.restype = ctypes.c_int
-    information = StatFs()
+    information = _LinuxStatFs()
     if fstatfs(handle, ctypes.byref(information)) != 0:
         return False
     filesystem = int(information.type) & 0xFFFFFFFF

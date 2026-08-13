@@ -813,8 +813,7 @@ def test_receipt_publication_rejects_in_place_mutation_during_directory_flush(
         assert _code(publication) == "ownership.receipt_conflict"
         assert mutation_identity is not None
         assert receipt_path.read_bytes() == mutated_raw
-        status = receipt_path.stat()
-        assert (status.st_dev, status.st_ino) == mutation_identity
+        assert _identity(receipt_path) == mutation_identity
     finally:
         owned.close()
 
