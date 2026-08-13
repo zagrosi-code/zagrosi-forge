@@ -21,7 +21,32 @@ jobs:
       - name: Run tests
         run: |
           uv sync --locked --no-default-groups --group test
-          uv run --locked --no-sync python -m pytest
+          uv run --locked --no-sync python -m pytest \
+            --ignore=tests/install/test_transaction_recovery.py
+          uv run --locked --no-sync python - <<'PY'
+          import subprocess
+          import sys
+
+          module = "tests/install/test_transaction_recovery.py"
+          collected = subprocess.run(
+              [sys.executable, "-m", "pytest", "--collect-only", "-q", module],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          node_ids = [
+              line
+              for line in collected.stdout.splitlines()
+              if line.startswith(f"{module}::")
+          ]
+          if not node_ids:
+              raise SystemExit("transaction recovery collection was empty")
+          for offset in range(0, len(node_ids), 8):
+              subprocess.run(
+                  [sys.executable, "-m", "pytest", *node_ids[offset : offset + 8]],
+                  check=True,
+              )
+          PY
       - name: Run strict example gates
         run: |
           python scripts/zagrosi_skills.py lint-project-manifest --planning-dir examples/saas --strict
