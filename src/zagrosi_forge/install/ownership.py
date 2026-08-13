@@ -640,16 +640,23 @@ def _windows_open_private_directory_chain(
     *,
     volume: int,
     create_missing: bool = True,
+    write_final: bool = False,
 ) -> int:
+    """Open a private chain, optionally granting write data on its final handle."""
+
     empty = 0
     current = _paths._windows_duplicate(root)
     child = empty
     try:
-        for component in components:
+        for index, component in enumerate(components):
+            final_write = write_final and index == len(components) - 1
             try:
                 try:
                     child = _paths._windows_open_child(
-                        current, component, directory=True
+                        current,
+                        component,
+                        directory=True,
+                        write_data=final_write,
                     )
                 except OSError as exc:
                     if not isinstance(exc, FileNotFoundError) and getattr(
@@ -658,7 +665,27 @@ def _windows_open_private_directory_chain(
                         raise
                     if not create_missing:
                         raise
-                    child = _paths._windows_create_private_directory(current, component)
+                    if final_write:
+                        security_descriptor = (
+                            _paths._windows_private_security_descriptor()
+                        )
+                        try:
+                            child = _paths._windows_open_child(
+                                current,
+                                component,
+                                directory=True,
+                                write_data=True,
+                                delete_access=True,
+                                create=True,
+                                security_descriptor=security_descriptor,
+                            )
+                        finally:
+                            _paths._windows_local_free(security_descriptor)
+                    else:
+                        child = _paths._windows_create_private_directory(
+                            current,
+                            component,
+                        )
                 status = _paths._windows_handle_status(child)
                 if status.identity[
                     0
@@ -11673,7 +11700,10 @@ def _publish_windows_receipt(
             raise _error("ownership.unowned", "The receipt root is not trusted.")
         volume = _paths._windows_handle_status(control).identity[0]
         parent = _windows_open_private_directory_chain(
-            control, safe_reference.components[1:-1], volume=volume
+            control,
+            safe_reference.components[1:-1],
+            volume=volume,
+            write_final=True,
         )
         expected_parent_identity = _native_identity(parent)
         leaf = safe_reference.components[-1]

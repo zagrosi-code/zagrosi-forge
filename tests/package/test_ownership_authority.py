@@ -2728,7 +2728,12 @@ def test_recovery_generation_failure_attempts_every_resource_close(
     native_closes: list[int] = []
     manifest_closes = 0
     original_native_close = ownership._close_native
-    original_manifest_close = ownership.OpenedRegularFile.close
+    manifest_type = (
+        ownership._paths._WindowsOpenedRegularFile
+        if os.name == "nt"
+        else ownership.OpenedRegularFile
+    )
+    original_manifest_close = manifest_type.close
 
     def close_native(descriptor: int) -> None:
         native_closes.append(descriptor)
@@ -2749,7 +2754,7 @@ def test_recovery_generation_failure_attempts_every_resource_close(
                 lambda _capture: False,
             )
             context.setattr(
-                ownership.OpenedRegularFile,
+                manifest_type,
                 "close",
                 close_manifest_then_fail,
             )
@@ -3181,6 +3186,54 @@ def test_windows_directory_flush_converts_failing_ntstatus(
     assert ntdll.NtFlushBuffersFileEx.calls
     assert ntdll.NtFlushBuffersFileEx.calls[0][:4] == (17, 0, None, 0)
     assert ntdll.RtlNtStatusToDosError.calls == [(-1073741790,)]
+
+
+def test_windows_receipt_parent_requests_write_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import zagrosi_forge.install.ownership as ownership
+
+    class Status:
+        identity = (17, 18)
+
+    calls: list[tuple[str, dict[str, object]]] = []
+    descriptors = iter((31, 32))
+
+    def open_child(
+        _parent: int,
+        component: str,
+        **kwargs: object,
+    ) -> int:
+        calls.append((component, kwargs))
+        return next(descriptors)
+
+    monkeypatch.setattr(ownership._paths, "_windows_duplicate", lambda _root: 30)
+    monkeypatch.setattr(ownership._paths, "_windows_open_child", open_child)
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_handle_status",
+        lambda _descriptor: Status(),
+    )
+    monkeypatch.setattr(
+        ownership._paths,
+        "_windows_private_directory",
+        lambda _descriptor, *, exact: exact,
+    )
+    monkeypatch.setattr(ownership, "_close_native", lambda _descriptor: None)
+
+    handle = ownership._windows_open_private_directory_chain(
+        29,
+        ("ownership", "zagrosi-forge"),
+        volume=17,
+        create_missing=False,
+        write_final=True,
+    )
+
+    assert handle == 32
+    assert calls == [
+        ("ownership", {"directory": True, "write_data": False}),
+        ("zagrosi-forge", {"directory": True, "write_data": True}),
+    ]
 
 
 def test_windows_claim_publication_revalidation_is_tristate(
@@ -5440,6 +5493,7 @@ def test_persistent_cleanup_completion_must_remain_exact(
     ).unwrap()
     proof = ownership.prove_transaction_owned(path, claim=created.claim).unwrap()
     ticket = ownership.quarantine_owned(proof, transaction_id=transaction_id).unwrap()
+    path.close()
     assert ownership.remove_quarantine(ticket).unwrap().removed
     completion = (
         root / ".zagrosi/transactions/claims" / f"{transaction_id}.removed.json"
@@ -5455,7 +5509,6 @@ def test_persistent_cleanup_completion_must_remain_exact(
 
     assert _code(rebound) == "ownership.cleanup_incomplete"
     assert completion.exists()
-    path.close()
     owned.close()
 
 
