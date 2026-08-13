@@ -1,0 +1,100 @@
+{
+  "cases/preserve.toml": {
+    "protected_spans": [
+      "# protected leading comment\ntheme = \"dark\"\nsecret_token = \"CANARY-DO-NOT-LEAK\"\n\n[user]\nname = \"Ada\"\nnote = \"preserve exactly\"\n"
+    ],
+    "expected_unmanaged": {
+      "theme": "dark",
+      "secret_token": "CANARY-DO-NOT-LEAK",
+      "user": {
+        "name": "Ada",
+        "note": "preserve exactly"
+      }
+    }
+  },
+  "cases/complex-representation.toml": {
+    "protected_spans": [
+      "profile = { name = \"quoted\", flags = [1, 2, 3] }\ntool.\"odd key\".value = \"dotted\"\n\n[[servers]]\nname = \"one\"\n\n[[servers]]\nname = \"two\"\n"
+    ],
+    "expected_unmanaged": {
+      "profile": {
+        "name": "quoted",
+        "flags": [1, 2, 3]
+      },
+      "tool": {
+        "odd key": {
+          "value": "dotted"
+        }
+      },
+      "servers": [
+        {"name": "one"},
+        {"name": "two"}
+      ]
+    }
+  },
+  "cases/unicode-whitespace.toml": {
+    "protected_spans": [
+      "title   =   \"unusual spacing\" # دجلة\n\"spaced-key\" = \"雪\"\n\n[user]\ncity = \"بغداد\"\n"
+    ],
+    "expected_unmanaged": {
+      "title": "unusual spacing",
+      "spaced-key": "雪",
+      "user": {
+        "city": "بغداد"
+      }
+    }
+  },
+  "cases/managed-extra.toml": {
+    "scenario": "managed_no_op",
+    "protected_spans": [
+      "theme = \"dark\"\nsecret_token = \"CANARY-DO-NOT-LEAK\"\n",
+      "user_note = \"preserve me\"",
+      "user_flag = 17"
+    ],
+    "expected_unmanaged": {
+      "theme": "dark",
+      "secret_token": "CANARY-DO-NOT-LEAK",
+      "marketplaces": {
+        "zagrosi": {"user_note": "preserve me"}
+      },
+      "plugins": {
+        "zagrosi-forge@zagrosi": {"user_flag": 17}
+      }
+    }
+  },
+  "cases/managed-update.toml": {
+    "scenario": "managed_update",
+    "protected_spans": [
+      "# protected update fixture\ntheme = \"dark\"",
+      "[marketplaces.unrelated]\nsource_type = \"git\"\nsource = \"https://example.invalid/user-marketplace\"",
+      "# preserve managed-adjacent user comment\nuser_note = \"do not move\"",
+      "[plugins.\"other@unrelated\"]\nenabled = false",
+      "user_flag = 17"
+    ],
+    "expected_unmanaged": {
+      "theme": "dark",
+      "marketplaces": {
+        "unrelated": {
+          "source_type": "git",
+          "source": "https://example.invalid/user-marketplace"
+        },
+        "zagrosi": {"user_note": "do not move"}
+      },
+      "plugins": {
+        "other@unrelated": {"enabled": false},
+        "zagrosi-forge@zagrosi": {"user_flag": 17}
+      }
+    }
+  },
+  "cases/protected-adjacency.toml": {
+    "scenario": "unsupported",
+    "protected_spans": [
+      "[marketplaces]\n# COMMENT-BELONGS-TO-AFTER\n[after]\nvalue = \"preserve\"",
+      "[plugins]\n# COMMENT-BELONGS-TO-TAIL\n[tail]\nvalue = \"preserve\""
+    ],
+    "expected_unmanaged": {
+      "after": {"value": "preserve"},
+      "tail": {"value": "preserve"}
+    }
+  }
+}

@@ -1,0 +1,467 @@
+[
+  {
+    "path": ".agents/plugins/marketplace.json",
+    "sha256": "357bdde9a203e4f0346287a005a66d91f54f98a63cccc86d5f27e01dd4d75ec3",
+    "size": 343
+  },
+  {
+    "path": ".codex-plugin/plugin.json",
+    "sha256": "27d56d8a5eeab435917fc153a4ed820abbf197b031ba0f11ce5fa03e88e7d013",
+    "size": 1861
+  },
+  {
+    "path": ".codexignore",
+    "sha256": "d2a6140b870e483c108c6c505888df789e1ab11000746935ca99cf68a3be9a85",
+    "size": 214
+  },
+  {
+    "path": "LICENSE",
+    "sha256": "ac4be360be0ba0a93d7b941698a0852fadc31f5c40b0be378c4efcb46f662865",
+    "size": 1064
+  },
+  {
+    "path": "NOTICE.md",
+    "sha256": "d57a29ab670a70b8ff614d4fcf121956a5675c406be310e55c054674ed505f85",
+    "size": 1970
+  },
+  {
+    "path": "README.md",
+    "sha256": "70d99a62fb6f9e1252f253166966285496598c4946fd723b46745d0cad88dcd0",
+    "size": 13432
+  },
+  {
+    "path": "assets/icon.svg",
+    "sha256": "f9989a3a99d214f87654d5c78d243ab74fb59de773100c0511bc374340d98ed3",
+    "size": 982
+  },
+  {
+    "path": "assets/readme-hero.svg",
+    "sha256": "f6b19cdf38cdd1e608d405a878d3c1d9a67918e3157deeb754b442094504d6a9",
+    "size": 5666
+  },
+  {
+    "path": "assets/readme-workflow.svg",
+    "sha256": "605ae3a555918bd8b04dd2a0a5a94b1ea6254cd3dfa6680acd5a7f8b0ee8db04",
+    "size": 5600
+  },
+  {
+    "path": "component-inventory.json",
+    "sha256": "c70f45aed4c30ed575f4b6e8967476f39f8d36c3885d3b44320bc218ab670d6a",
+    "size": 156577
+  },
+  {
+    "path": "pyproject.toml",
+    "sha256": "fd7d3947b32394edfcfd5e37085e2175a67b99c041bab3063af27683d123b7dc",
+    "size": 910
+  },
+  {
+    "path": "scripts/deep_skills.py",
+    "sha256": "6e2aa68a161e5020f6df893891167ee5a8282a00e23760b7334bcc2b982de4c1",
+    "size": 184
+  },
+  {
+    "path": "scripts/zagrosi_skills.py",
+    "sha256": "78a86156cab05677d8b876ace00941d260a3bda288e612d6643630e97d823127",
+    "size": 266775
+  },
+  {
+    "path": "skills/zagrosi-implement/SKILL.md",
+    "sha256": "dde0e28b488567ebe6942cb2cd1502037f205ed9a96ae16789b7e668f323da19",
+    "size": 8628
+  },
+  {
+    "path": "skills/zagrosi-implement/agents/openai.yaml",
+    "sha256": "3787e8089ffb477b1a603417e61628746907dbbef478dfadeb32ef2f5f50fa6c",
+    "size": 247
+  },
+  {
+    "path": "skills/zagrosi-implement/references/section-update.md",
+    "sha256": "6e23cb7ecf86902f81df15f7dc760a17bb48e6a98817f14d7a545d0a57844a5e",
+    "size": 662
+  },
+  {
+    "path": "skills/zagrosi-implement/references/tdd-review-git.md",
+    "sha256": "e55c7da1f9576854812d5735d7f59dcafc1595e8ea8fc294f555479f090017e4",
+    "size": 1115
+  },
+  {
+    "path": "skills/zagrosi-plan/SKILL.md",
+    "sha256": "d8636d92138156273b1278424b807e2126c70f1d88a2834dcd545e2716884709",
+    "size": 12495
+  },
+  {
+    "path": "skills/zagrosi-plan/agents/openai.yaml",
+    "sha256": "8b8a20fcf3e2535a7efe955da118e309d52e7886c1ac135b6f2f8f973c1de7d2",
+    "size": 240
+  },
+  {
+    "path": "skills/zagrosi-plan/references/depth-standards.md",
+    "sha256": "f6a5af2bc91d43f6093a1d41b7b2427a52936cc48e8da7bdf3262d66e2e88e0a",
+    "size": 3238
+  },
+  {
+    "path": "skills/zagrosi-plan/references/domain-ai-products.md",
+    "sha256": "168cdaf68df1cb3debed95c6483f0e500abdc03a91b0dec1f6aa01659c2c1615",
+    "size": 1108
+  },
+  {
+    "path": "skills/zagrosi-plan/references/domain-auth.md",
+    "sha256": "20b6186b743b74db1e89c1ccdaf453683fd0cedd3bea0b6741ad664257271b41",
+    "size": 1265
+  },
+  {
+    "path": "skills/zagrosi-plan/references/domain-data-migration.md",
+    "sha256": "36b033eb8ac2917f718540872043cbaf22d0fd03db63168c17898cc1cd0e07ec",
+    "size": 1108
+  },
+  {
+    "path": "skills/zagrosi-plan/references/domain-frontend.md",
+    "sha256": "2fae40883da1790f1ff77d467fadaf5ce5f56eb9dbadc864cc3210fd5582afa9",
+    "size": 1174
+  },
+  {
+    "path": "skills/zagrosi-plan/references/domain-infra.md",
+    "sha256": "fa82b8c147cf7bb82ce1781949ca162a452250696dd5241153f348fd466549f5",
+    "size": 1036
+  },
+  {
+    "path": "skills/zagrosi-plan/references/domain-payments.md",
+    "sha256": "5ca5fd3b6f7f5ee06418a82eec6a1a584026f5d219c710b3045239bb26f32e4e",
+    "size": 1216
+  },
+  {
+    "path": "skills/zagrosi-plan/references/evaluation.md",
+    "sha256": "1325b498f1ee41af123b17721bca7a05edc638f8b643c9dbb71fc17197dbead7",
+    "size": 1395
+  },
+  {
+    "path": "skills/zagrosi-plan/references/plan-format.md",
+    "sha256": "54674a36a1e030d15caf101e1188a9c24d931a5a32108fa97713293860aecdf8",
+    "size": 1690
+  },
+  {
+    "path": "skills/zagrosi-plan/references/research.md",
+    "sha256": "71902e9107a69c8e6e5de8374ca068a79e061b85b46388ba3fcf49de07a7958f",
+    "size": 1432
+  },
+  {
+    "path": "skills/zagrosi-plan/references/review.md",
+    "sha256": "8cfb5187de61177104b23a956fd513a1d1c412b7bc04915c4682845bdc003a91",
+    "size": 1071
+  },
+  {
+    "path": "skills/zagrosi-plan/references/section-format.md",
+    "sha256": "fb74c5c229dc498b865c23c42cc3c842f7ae6b81a16dbb6ee4f8075636d2a9bc",
+    "size": 1609
+  },
+  {
+    "path": "skills/zagrosi-plan/references/workflow-contract.md",
+    "sha256": "aea447285e75cd4e017e733390e0a193a20cee874141e8467e18c9cdf35ba70d",
+    "size": 795
+  },
+  {
+    "path": "skills/zagrosi-project/SKILL.md",
+    "sha256": "6929b86700b578cea18aef1ca31c9389a356ba549bc80623b831959fc4d98c66",
+    "size": 7216
+  },
+  {
+    "path": "skills/zagrosi-project/agents/openai.yaml",
+    "sha256": "45c9df266d8e2ef8b41565fa531d54d07214160c0ca31e23789b9b96c655958a",
+    "size": 267
+  },
+  {
+    "path": "skills/zagrosi-project/references/interview.md",
+    "sha256": "c5d6873c1122c05188124932e3266cbc204fcdca2931bd5ca75fca2f1a627f82",
+    "size": 691
+  },
+  {
+    "path": "skills/zagrosi-project/references/manifest-format.md",
+    "sha256": "e2578d57c0110037cf8c9f4c7c92bd886c8d96821581efc14f0ac727fe2efb6b",
+    "size": 665
+  },
+  {
+    "path": "skills/zagrosi-project/references/spec-format.md",
+    "sha256": "4f5e27df42e09f42f54ee8fd26e05647f989f12e3d3cb620ed35065c2a45a01f",
+    "size": 516
+  },
+  {
+    "path": "skills/zagrosi-project/references/splitting.md",
+    "sha256": "ae2685734299ccebe7f6091aff1e9c55332c0b10196173e1fae140b8a0f4e1a9",
+    "size": 1134
+  },
+  {
+    "path": "skills/zagrosi-project/references/workflow-contract.md",
+    "sha256": "883acc30e0e1969510cfb4b3e21e46f638e60b9cfa51be451b24e064df611fe6",
+    "size": 649
+  },
+  {
+    "path": "src/zagrosi_forge/__init__.py",
+    "sha256": "d2c832b43a7fae22560bacc8f7e1d6de046bce06092ffedd316197ffc7dae54d",
+    "size": 73
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/__init__.py",
+    "sha256": "6264b954670b998c728eba28ffb174949fa4f3ea73a8ff092dce3a98b74f098d",
+    "size": 65
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit-LICENSE",
+    "sha256": "f2f9b460ba719da6626add264d3782f275a4ff7aab677beda08b330911e23adb",
+    "size": 1062
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/__init__.py",
+    "sha256": "6ade22b020cccb68ffe100bb2c89539dcdd24e4d4a35561a82307f6b129a419b",
+    "size": 1876
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/_compat.py",
+    "sha256": "7a1521d5d7466e4e9f65cfd586de32fa6c87abef5c20ad14558063efd5c790e4",
+    "size": 504
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/_types.py",
+    "sha256": "1b97a8fb50753af4bc309e83b7cd37a45397f0b6299853905f156eea71104987",
+    "size": 2732
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/_utils.py",
+    "sha256": "b827353a9fa9a8f80a896c9284ef5d9352fbbd1511ca561ee3dec1a0c64bb1da",
+    "size": 4483
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/api.py",
+    "sha256": "24972b4de6443ab01008c937c6ee205de19ddb071fb1cf2c8e4ef39adb4a171e",
+    "size": 8875
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/container.py",
+    "sha256": "30d66b790e1c7b385d91b8eab13c574a8c955d6b34b3239d0e30d1a0c73709b6",
+    "size": 35769
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/exceptions.py",
+    "sha256": "d5b58a0f077b65c93919b4d523380931f927c51a1a0752e570e900e598556e05",
+    "size": 5758
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/items.py",
+    "sha256": "d668a5f57c5c036f6c09622128132dac52bb460c3619552dceeb1c1a4ed9d50f",
+    "size": 69701
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/parser.py",
+    "sha256": "3caa9887d68a9324b47d03e8858b23a0c21e61b974215f2520447c157997104e",
+    "size": 41375
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/py.typed",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "size": 0
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/source.py",
+    "sha256": "93e316bf8f4bc785d8d04818e7a11c903ced1b42f2cc8cbca5f2841b995e75b4",
+    "size": 5240
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/toml_char.py",
+    "sha256": "fbc75fe92f6b102b786ea3829317a771e7d98dcc674e2d4a550eda3dc5cb9cc2",
+    "size": 1304
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/toml_document.py",
+    "sha256": "1f29e4f26e37f4c69a3027ed6290370800a89322cd245c11eb17eb3c62d6e2d0",
+    "size": 132
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/tomlkit/toml_file.py",
+    "sha256": "aa3575d3d16455b846d951a2a627164ab284aecd8563eb5ab8ab39c7fed484cd",
+    "size": 1708
+  },
+  {
+    "path": "src/zagrosi_forge/_vendor/vendor-receipt.json",
+    "sha256": "a48cf6741f68e6a3b967d60eb2668bab873b8c8b7bd2e9a1a6e6dd8661863e1c",
+    "size": 2725
+  },
+  {
+    "path": "src/zagrosi_forge/install/__init__.py",
+    "sha256": "08284ce093e9c291e37b49897ef1b3d53b6f29c3a497c966891d687acd814d9e",
+    "size": 1167
+  },
+  {
+    "path": "src/zagrosi_forge/install/artifacts.py",
+    "sha256": "d7b50bb5dda51cbbc8ce6bb8026a939617adabdd9f70cddb00a66104cadb4166",
+    "size": 127905
+  },
+  {
+    "path": "src/zagrosi_forge/install/atomic_file.py",
+    "sha256": "11ca7d7348175d66c4d7bd5c7d90241a50d8840d6ee5c083daa69e2055268c96",
+    "size": 208405
+  },
+  {
+    "path": "src/zagrosi_forge/install/bundle-policy.json",
+    "sha256": "7815fcbcc15348b5734038ec4e06962b065296045e34c63d44821d1e2b384a87",
+    "size": 6835
+  },
+  {
+    "path": "src/zagrosi_forge/install/bundle.py",
+    "sha256": "d08634be41bbe9e1c7116dc26b3e4f96984546a84f5ff549f541cb3e6fe82344",
+    "size": 73061
+  },
+  {
+    "path": "src/zagrosi_forge/install/config.py",
+    "sha256": "98a8d51342d907f7868217de68d1219bb7180d1daf79df24d02427dd93045fec",
+    "size": 64714
+  },
+  {
+    "path": "src/zagrosi_forge/install/contracts.py",
+    "sha256": "94b32592e7f0a9fb13a36766a4313ca015a3c1a2ccd7021605bba21b5688aadb",
+    "size": 32003
+  },
+  {
+    "path": "src/zagrosi_forge/install/diagnostics.py",
+    "sha256": "f709c8824ab4e69dc846daeae188f617a8ce0d19e93e7500cb973717b7bdd036",
+    "size": 9402
+  },
+  {
+    "path": "src/zagrosi_forge/install/journal.py",
+    "sha256": "ed05f01fd9b18de6538827bea3748b86fb8070d79f40b65d738bf5f89924c061",
+    "size": 113491
+  },
+  {
+    "path": "src/zagrosi_forge/install/legacy-install-catalog.json",
+    "sha256": "45ef63eaafbd03127c7fa9d225c3fd073082999a25ee26484fa30319fb21e992",
+    "size": 496
+  },
+  {
+    "path": "src/zagrosi_forge/install/limit-policy.json",
+    "sha256": "eeddb9b692b240aeb6ddd071af82655f3b916d313f97872afa3972c42c925931",
+    "size": 1317
+  },
+  {
+    "path": "src/zagrosi_forge/install/lock.py",
+    "sha256": "79df4c505d72bcf44ee47ff1410a6f298504cde43a5d7b2ee234c21a84c0ace6",
+    "size": 11648
+  },
+  {
+    "path": "src/zagrosi_forge/install/metadata.py",
+    "sha256": "15a501d5e1160d0b1ff8d8416f87527363dcc6bc30fb1464026b23cb17f3b36e",
+    "size": 51642
+  },
+  {
+    "path": "src/zagrosi_forge/install/native-isolation-policy.json",
+    "sha256": "7db8a07b71ff9ca3f80c4364aaf2c6b788162dd9e9f8cd54f40708484bf826f9",
+    "size": 499
+  },
+  {
+    "path": "src/zagrosi_forge/install/native-support-policy.json",
+    "sha256": "be27f4b95b0e0ae56ea65ae9e7b54ce57b7c559b75882621a573a79072e22081",
+    "size": 448
+  },
+  {
+    "path": "src/zagrosi_forge/install/ownership.py",
+    "sha256": "49644f81b21752be08368951481360f6c6f661a297d87eaca776f45c1480c0ed",
+    "size": 504009
+  },
+  {
+    "path": "src/zagrosi_forge/install/paths.py",
+    "sha256": "f96bd23b4ea520c5f8a8935cda6d0e80cf95ea3efdcf3a9d648e9926803c5ac5",
+    "size": 190494
+  },
+  {
+    "path": "src/zagrosi_forge/install/policies.py",
+    "sha256": "65f6c4e5242b6988222ab04b487cb3ee17d1a39377ea09d06cdc146c6b68f09f",
+    "size": 15536
+  },
+  {
+    "path": "src/zagrosi_forge/install/recovery-retention-policy.json",
+    "sha256": "694548275d92586ab0a69397b18677881a09acecd7a8ce22fa436267533deb60",
+    "size": 477
+  },
+  {
+    "path": "src/zagrosi_forge/install/recovery.py",
+    "sha256": "8586f1ccdfa4b4ea30b73a47ceec37c9fbad61a06d84bbf56593d46a7f508840",
+    "size": 139512
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/bundle-manifest-v1.schema.json",
+    "sha256": "403e2fe91a658705013a182efa226c745ac570ffde3fa81f64370e287c1bba84",
+    "size": 2038
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/bundle-policy-v1.schema.json",
+    "sha256": "f768ef3c46d7c1c38259f0c10c00ac5b5a955a8b595d7b8bea69908437de8d22",
+    "size": 4790
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/limit-policy-v1.schema.json",
+    "sha256": "a16877ff4755133f03f5bacc6fd88a061b49607945dc99d2efc4277218b895dc",
+    "size": 909
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/marketplace-v1.schema.json",
+    "sha256": "08d991a2a148fd5993445bd371e7e15b50df7e179712ce3a1fc1fd5736386280",
+    "size": 2346
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/native-isolation-policy-v1.schema.json",
+    "sha256": "dcdf065657cb09ca940efdc209a7e2c28b6bbf7bdb38316b37d3ae1f66d8014c",
+    "size": 1008
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/native-support-policy-v1.schema.json",
+    "sha256": "5c23d5106aeb96c00fd132193d3d0a52b055158486d443af01aba6df5a2a96c1",
+    "size": 1143
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/ownership-receipt-v1.schema.json",
+    "sha256": "4e110c2312c112652913e820c498c35e6c98be371dbf90a20d90e9ab636fb1a5",
+    "size": 3858
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/plugin-v1.schema.json",
+    "sha256": "334e841833bac20ed15eceabc0b7d83219283cb925bb36033f8856899d6dc88b",
+    "size": 4290
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/recovery-retention-policy-v1.schema.json",
+    "sha256": "f7b9245cb10205b7bb1eb21c95abfb241d79aeb86f2ad90be2dfc0e5e9d9bf50",
+    "size": 998
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/toolchain-lock-v1.schema.json",
+    "sha256": "606ca57ef9cd17dd6227fe9100dc6ed666a45138c1d3f1bd326ed11342bf463f",
+    "size": 817
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/transaction-journal-v1.schema.json",
+    "sha256": "c692c731e3a068d1204e292112205d4f320c246f5059056c662acc0c68c64994",
+    "size": 22481
+  },
+  {
+    "path": "src/zagrosi_forge/install/schemas/vendor-receipt-v1.schema.json",
+    "sha256": "c5e02631a7f8c804180863a9dc88c7aca054c07a62b3ee9dfeb1b08eac13e8c9",
+    "size": 913
+  },
+  {
+    "path": "src/zagrosi_forge/install/toolchain-lock.json",
+    "sha256": "a92132ebf64b0f1311d6227b74057cdae78bf7ff5b2ce41782f0b11f4bc26af1",
+    "size": 4795
+  },
+  {
+    "path": "src/zagrosi_forge/install/toolchain.py",
+    "sha256": "0288a261d1d4c450b442b69b56f81e94f1606d65dcd130b86b17cb647d7137cf",
+    "size": 7096
+  },
+  {
+    "path": "src/zagrosi_forge/install/vendor.py",
+    "sha256": "38c00392beba50fc1d3e43fddc1048e60cba8167d9921140f3884dcde933d1e6",
+    "size": 1503
+  },
+  {
+    "path": "src/zagrosi_forge/install/version.py",
+    "sha256": "a6983d3555f9c686c9a1a8099bfbbed3427091cac15c018422173d2847dd90d5",
+    "size": 1481
+  }
+]

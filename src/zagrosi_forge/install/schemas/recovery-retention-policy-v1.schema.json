@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zagrosi.dev/schemas/recovery-retention-policy-v1",
+  "title": "Zagrosi Forge Recovery Retention Policy v1",
+  "type": "object",
+  "required": ["schema_version", "schema_digest", "writer_version", "minimum_reader_version", "record_digest", "limit_policy_version", "policy_version", "generation_retention", "private_recovery", "backups"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "schema_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "writer_version": {"type": "string"},
+    "minimum_reader_version": {"type": "string"},
+    "record_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "limit_policy_version": {"const": "1.0"},
+    "policy_version": {"const": "1.0"},
+    "generation_retention": {"const": "unbounded"},
+    "private_recovery": {"type": "object"},
+    "backups": {"type": "object"}
+  },
+  "additionalProperties": false,
+  "x-limit-policy-version": "1.0"
+}

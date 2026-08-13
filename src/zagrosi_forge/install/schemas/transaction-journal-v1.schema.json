@@ -1,0 +1,610 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zagrosi.dev/schemas/transaction-journal-v1.schema.json",
+  "title": "Zagrosi Forge transaction journal record v1",
+  "x-limit-policy-version": "1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "schema_digest", "writer_version",
+    "minimum_reader_version", "record_digest", "state_machine_version",
+    "policy_version", "limit_policy_version", "transaction_id",
+    "effective_marketplace_id", "transaction_binding",
+    "plan_digest", "sequence", "previous_record_digest", "state",
+    "runner_provenance", "install_identity", "before_relation_digest",
+    "candidate_relation_digest", "before_config", "candidate_config",
+    "committed_config", "config_transaction_digest", "config_recovery",
+    "identities", "transaction_owned_paths", "rollback_actions",
+    "rollback_event", "prepared_receipt", "verification_evidence_digest"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "schema_digest": {"$ref": "#/$defs/digest"},
+    "writer_version": {"$ref": "#/$defs/version"},
+    "minimum_reader_version": {"$ref": "#/$defs/version"},
+    "record_digest": {"$ref": "#/$defs/digest"},
+    "state_machine_version": {"const": "1.0"},
+    "policy_version": {"const": "1.0"},
+    "limit_policy_version": {"const": "1.0"},
+    "transaction_id": {"type": "string", "pattern": "^tx-[0-9a-f]{32}$"},
+    "effective_marketplace_id": {"$ref": "#/$defs/identifier"},
+    "transaction_binding": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "transaction_id", "root_relative", "quarantine_relative",
+        "claim_relative", "plugins_identity", "control_identity",
+        "store_identity", "claims_identity", "transaction_identity",
+        "claim_identity", "claim_digest"
+      ],
+      "properties": {
+        "transaction_id": {"type": "string", "pattern": "^tx-[0-9a-f]{32}$"},
+        "root_relative": {"type": "string", "minLength": 1, "maxLength": 240},
+        "quarantine_relative": {"type": "string", "minLength": 1, "maxLength": 240},
+        "claim_relative": {"type": "string", "minLength": 1, "maxLength": 240},
+        "plugins_identity": {"$ref": "#/$defs/fileIdentity"},
+        "control_identity": {"$ref": "#/$defs/fileIdentity"},
+        "store_identity": {"$ref": "#/$defs/fileIdentity"},
+        "claims_identity": {"$ref": "#/$defs/fileIdentity"},
+        "transaction_identity": {"$ref": "#/$defs/fileIdentity"},
+        "claim_identity": {"$ref": "#/$defs/fileIdentity"},
+        "claim_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "plan_digest": {"$ref": "#/$defs/digest"},
+    "sequence": {"type": "integer", "minimum": 0},
+    "previous_record_digest": {"$ref": "#/$defs/digest"},
+    "state": {
+      "enum": [
+        "PREPARED", "STAGED", "VERIFIED", "SOURCE_PUBLISHED",
+        "CACHE_PUBLISHED", "PUBLISHED", "COMMIT_INTENT",
+        "CONFIG_COMMITTED", "RECEIPT_COMMITTED", "FINALIZED",
+        "ROLLBACK_ACTION_INTENT", "ROLLBACK_ACTION_COMPLETED",
+        "ROLLED_BACK", "RECOVERY_REQUIRED"
+      ]
+    },
+    "runner_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state", "origin", "artifact_digest", "runner_version",
+        "verification_authority", "policy_digest"
+      ],
+      "properties": {
+        "state": {"type": "string", "minLength": 1},
+        "origin": {"type": "string", "minLength": 1},
+        "artifact_digest": {"$ref": "#/$defs/digest"},
+        "runner_version": {"$ref": "#/$defs/version"},
+        "verification_authority": {"type": "string", "minLength": 1},
+        "policy_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "install_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "marketplace_id", "plugin_id", "base_version", "install_version",
+        "base_payload_digest", "rendered_payload_digest", "policy_digest",
+        "transformation_profile", "contract_versions"
+      ],
+      "properties": {
+        "marketplace_id": {"$ref": "#/$defs/identifier"},
+        "plugin_id": {"$ref": "#/$defs/identifier"},
+        "base_version": {"$ref": "#/$defs/version"},
+        "install_version": {"type": "string", "minLength": 1},
+        "base_payload_digest": {"$ref": "#/$defs/digest"},
+        "rendered_payload_digest": {"$ref": "#/$defs/digest"},
+        "policy_digest": {"$ref": "#/$defs/digest"},
+        "transformation_profile": {"type": "string", "minLength": 1},
+        "contract_versions": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "before_relation_digest": {
+      "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+    },
+    "candidate_relation_digest": {"$ref": "#/$defs/digest"},
+    "config_transaction_digest": {"$ref": "#/$defs/digest"},
+    "config_recovery": {
+      "oneOf": [
+        {"$ref": "#/$defs/configRecovery"},
+        {"type": "null"}
+      ]
+    },
+    "before_config": {"$ref": "#/$defs/configIdentity"},
+    "candidate_config": {"$ref": "#/$defs/configIdentity"},
+    "committed_config": {
+      "oneOf": [
+        {"$ref": "#/$defs/configIdentity"},
+        {"type": "null"}
+      ]
+    },
+    "identities": {
+      "type": "array", "minItems": 1,
+      "items": {"$ref": "#/$defs/pathIdentity"}
+    },
+    "transaction_owned_paths": {
+      "type": "array", "minItems": 1,
+      "items": {"$ref": "#/$defs/ownedPath"}
+    },
+    "rollback_actions": {
+      "type": "array", "minItems": 1, "maxItems": 12,
+      "items": {"$ref": "#/$defs/rollbackAction"}
+    },
+    "rollback_event": {
+      "oneOf": [
+        {"$ref": "#/$defs/rollbackEvent"},
+        {"type": "null"}
+      ]
+    },
+    "prepared_receipt": {"$ref": "#/$defs/preparedReceipt"},
+    "verification_evidence_digest": {
+      "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"state": {"const": "PREPARED"}},
+        "required": ["state"]
+      },
+      "then": {"properties": {"config_recovery": {"type": "null"}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "STAGED", "VERIFIED", "SOURCE_PUBLISHED",
+              "CACHE_PUBLISHED", "PUBLISHED", "COMMIT_INTENT",
+              "CONFIG_COMMITTED", "RECEIPT_COMMITTED", "FINALIZED"
+            ]
+          }
+        },
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {"config_recovery": {"$ref": "#/$defs/configRecovery"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "PREPARED", "STAGED", "VERIFIED", "SOURCE_PUBLISHED",
+              "CACHE_PUBLISHED", "PUBLISHED", "COMMIT_INTENT",
+              "ROLLBACK_ACTION_INTENT", "ROLLBACK_ACTION_COMPLETED",
+              "ROLLED_BACK"
+            ]
+          }
+        },
+        "required": ["state"]
+      },
+      "then": {"properties": {"committed_config": {"type": "null"}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": ["CONFIG_COMMITTED", "RECEIPT_COMMITTED", "FINALIZED"]
+          }
+        },
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {"committed_config": {"$ref": "#/$defs/configIdentity"}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": ["ROLLBACK_ACTION_INTENT", "ROLLBACK_ACTION_COMPLETED"]
+          }
+        },
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {"rollback_event": {"$ref": "#/$defs/rollbackEvent"}}
+      },
+      "else": {"properties": {"rollback_event": {"type": "null"}}}
+    },
+    {
+      "if": {
+        "properties": {"state": {"const": "ROLLBACK_ACTION_INTENT"}},
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {
+          "rollback_event": {
+            "allOf": [
+              {"$ref": "#/$defs/rollbackEvent"},
+              {
+                "properties": {
+                  "observed_identity": {"type": "null"},
+                  "outcome": {"type": "null"},
+                  "recovery_reference": {"type": "null"}
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"state": {"const": "ROLLBACK_ACTION_COMPLETED"}},
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {
+          "rollback_event": {
+            "allOf": [
+              {"$ref": "#/$defs/rollbackEvent"},
+              {
+                "properties": {
+                  "outcome": {"enum": ["quarantined", "retained"]}
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"
+    },
+    "fileIdentity": {
+      "type": "array", "prefixItems": [
+        {"type": "integer", "minimum": 0},
+        {"type": "integer", "minimum": 0}
+      ], "minItems": 2, "maxItems": 2
+    },
+    "configIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "parent_identity", "leaf_identity", "byte_digest", "semantic_digest",
+        "metadata_fingerprint", "snapshot_digest", "target_metadata_digest"
+      ],
+      "properties": {
+        "parent_identity": {"$ref": "#/$defs/fileIdentity"},
+        "leaf_identity": {
+          "oneOf": [{"$ref": "#/$defs/fileIdentity"}, {"type": "null"}]
+        },
+        "byte_digest": {"$ref": "#/$defs/digest"},
+        "semantic_digest": {"$ref": "#/$defs/digest"},
+        "metadata_fingerprint": {"$ref": "#/$defs/digest"},
+        "snapshot_digest": {"$ref": "#/$defs/digest"},
+        "target_metadata_digest": {
+          "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        }
+      }
+    },
+    "pathIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "role", "relative_path", "parent_identity", "leaf_identity",
+        "content_digest"
+      ],
+      "properties": {
+        "role": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+        "relative_path": {"type": "string", "minLength": 1, "maxLength": 240},
+        "parent_identity": {"$ref": "#/$defs/fileIdentity"},
+        "leaf_identity": {
+          "oneOf": [{"$ref": "#/$defs/fileIdentity"}, {"type": "null"}]
+        },
+        "content_digest": {
+          "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+        }
+      }
+    },
+    "ownedPath": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "relative_path", "expected_identity"],
+      "properties": {
+        "role": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+        "relative_path": {"type": "string", "minLength": 1, "maxLength": 240},
+        "expected_identity": {
+          "oneOf": [{"$ref": "#/$defs/fileIdentity"}, {"type": "null"}]
+        }
+      }
+    },
+    "rollbackAction": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "relative_path", "expected_identity"],
+      "properties": {
+        "action": {"enum": ["quarantine-if-owned", "retain"]},
+        "relative_path": {"type": "string", "minLength": 1, "maxLength": 240},
+        "expected_identity": {
+          "oneOf": [{"$ref": "#/$defs/fileIdentity"}, {"type": "null"}]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"action": {"const": "quarantine-if-owned"}},
+            "required": ["action"]
+          },
+          "then": {
+            "properties": {
+              "expected_identity": {"$ref": "#/$defs/fileIdentity"}
+            }
+          }
+        }
+      ]
+    },
+    "rollbackEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_index", "action_digest", "outcome",
+        "observed_identity", "recovery_reference"
+      ],
+      "properties": {
+        "action_index": {"type": "integer", "minimum": 0},
+        "action_digest": {"$ref": "#/$defs/digest"},
+        "outcome": {
+          "enum": [null, "quarantined", "retained"]
+        },
+        "observed_identity": {
+          "oneOf": [{"$ref": "#/$defs/fileIdentity"}, {"type": "null"}]
+        },
+        "recovery_reference": {
+          "oneOf": [
+            {"$ref": "#/$defs/rollbackRecoveryReference"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "configRecovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backup_identity", "backup_reference",
+        "backup_stage_metadata_digest", "backup_stage_reference",
+        "before_byte_digest", "before_identity", "before_mode",
+        "before_snapshot_digest", "candidate_byte_digest",
+        "candidate_identity", "candidate_reference",
+        "candidate_stage_metadata_digest", "descriptor_digest",
+        "descriptor_version", "displaced_identity", "displaced_reference",
+        "limit_policy_version", "metadata_fingerprint",
+        "metadata_policy_version", "parent_identity", "persistent_backup",
+        "platform", "retention_policy_version", "snapshot_identity",
+        "snapshot_reference", "snapshot_stage_metadata_digest",
+        "target_metadata_digest", "target_posix_mode",
+        "target_posix_xattrs", "target_windows_attributes",
+        "target_windows_authorization", "transaction_digest"
+      ],
+      "properties": {
+        "backup_identity": {"$ref": "#/$defs/optionalFileIdentity"},
+        "backup_reference": {"$ref": "#/$defs/recoveryReference"},
+        "backup_stage_metadata_digest": {"$ref": "#/$defs/optionalDigest"},
+        "backup_stage_reference": {"$ref": "#/$defs/recoveryReference"},
+        "before_byte_digest": {"$ref": "#/$defs/digest"},
+        "before_identity": {"$ref": "#/$defs/optionalFileIdentity"},
+        "before_mode": {"enum": [null, 384, 420]},
+        "before_snapshot_digest": {"$ref": "#/$defs/digest"},
+        "candidate_byte_digest": {"$ref": "#/$defs/digest"},
+        "candidate_identity": {"$ref": "#/$defs/fileIdentity"},
+        "candidate_reference": {"$ref": "#/$defs/recoveryReference"},
+        "candidate_stage_metadata_digest": {"$ref": "#/$defs/digest"},
+        "descriptor_digest": {"$ref": "#/$defs/digest"},
+        "descriptor_version": {"const": "1.0"},
+        "displaced_identity": {"$ref": "#/$defs/optionalFileIdentity"},
+        "displaced_reference": {"$ref": "#/$defs/recoveryReference"},
+        "limit_policy_version": {"const": "1.0"},
+        "metadata_fingerprint": {"$ref": "#/$defs/digest"},
+        "metadata_policy_version": {"const": "1.0"},
+        "parent_identity": {"$ref": "#/$defs/fileIdentity"},
+        "persistent_backup": {"type": "boolean"},
+        "platform": {"enum": ["posix", "windows"]},
+        "retention_policy_version": {"const": "1.0"},
+        "snapshot_identity": {"$ref": "#/$defs/fileIdentity"},
+        "snapshot_reference": {"$ref": "#/$defs/recoveryReference"},
+        "snapshot_stage_metadata_digest": {"$ref": "#/$defs/digest"},
+        "target_metadata_digest": {"$ref": "#/$defs/digest"},
+        "target_posix_mode": {"enum": [null, 384, 420]},
+        "target_posix_xattrs": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {"type": "string", "minLength": 1, "maxLength": 240},
+              {"$ref": "#/$defs/digest"}
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "target_windows_attributes": {
+          "oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+        },
+        "target_windows_authorization": {
+          "oneOf": [
+            {"$ref": "#/$defs/windowsAuthorization"},
+            {"type": "null"}
+          ]
+        },
+        "transaction_digest": {"$ref": "#/$defs/digest"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"platform": {"const": "posix"}},
+            "required": ["platform"]
+          },
+          "then": {
+            "properties": {
+              "target_posix_mode": {"enum": [384, 420]},
+              "target_windows_attributes": {"type": "null"},
+              "target_windows_authorization": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"platform": {"const": "windows"}},
+            "required": ["platform"]
+          },
+          "then": {
+            "properties": {
+              "target_posix_mode": {"type": "null"},
+              "target_posix_xattrs": {"maxItems": 0},
+              "target_windows_attributes": {"type": "integer", "minimum": 0},
+              "target_windows_authorization": {
+                "$ref": "#/$defs/windowsAuthorization"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "optionalDigest": {
+      "oneOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]
+    },
+    "optionalFileIdentity": {
+      "oneOf": [{"$ref": "#/$defs/fileIdentity"}, {"type": "null"}]
+    },
+    "recoveryReference": {
+      "type": "string", "minLength": 1, "maxLength": 240,
+      "pattern": "^\\.zagrosi-config-(?:backup|tx)-[0-9a-f]{24}\\.[a-z]+$"
+    },
+    "rollbackRecoveryReference": {
+      "type": "string", "minLength": 1, "maxLength": 240,
+      "pattern": "^(?:[^/]+/)*\\.zagrosi-quarantine-[0-9a-f]{24}$"
+    },
+    "windowsAuthorization": {
+      "type": "array",
+      "prefixItems": [
+        {"type": "string", "minLength": 1},
+        {"type": "string", "minLength": 1},
+        {"type": "string", "minLength": 1},
+        {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {"type": "string"}, {"type": "string"},
+              {"type": "string"}, {"type": "string"},
+              {"type": "string"}, {"type": "string"}
+            ],
+            "minItems": 6,
+            "maxItems": 6
+          }
+        }
+      ],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "preparedReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_kind", "schema_version", "schema_digest", "writer_version",
+        "minimum_reader_version", "record_digest", "state_machine_version",
+        "policy_version", "transformation_version",
+        "effective_marketplace_id", "identity", "transaction", "source",
+        "cache", "config", "tools", "created_at"
+      ],
+      "properties": {
+        "record_kind": {"const": "committed"},
+        "schema_version": {"const": "1.0"},
+        "schema_digest": {
+          "const": "4e110c2312c112652913e820c498c35e6c98be371dbf90a20d90e9ab636fb1a5"
+        },
+        "writer_version": {"const": "0.2.0"},
+        "minimum_reader_version": {"const": "0.2.0"},
+        "record_digest": {"$ref": "#/$defs/digest"},
+        "state_machine_version": {"const": "1.0"},
+        "policy_version": {"const": "1.0"},
+        "transformation_version": {"const": "plugin-v1"},
+        "effective_marketplace_id": {"$ref": "#/$defs/identifier"},
+        "identity": {"$ref": "#/$defs/preparedReceiptIdentity"},
+        "transaction": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "lineage"],
+          "properties": {
+            "id": {"$ref": "#/$defs/receiptTransactionId"},
+            "lineage": {
+              "type": "array", "minItems": 1, "uniqueItems": true,
+              "items": {"$ref": "#/$defs/receiptTransactionId"}
+            }
+          }
+        },
+        "source": {"$ref": "#/$defs/preparedReceiptGeneration"},
+        "cache": {"$ref": "#/$defs/preparedReceiptGeneration"},
+        "config": {
+          "type": "object", "additionalProperties": false,
+          "required": ["path_id", "before_digest", "after_digest"],
+          "properties": {
+            "path_id": {"const": "codex-config"},
+            "before_digest": {"$ref": "#/$defs/digest"},
+            "after_digest": {"$ref": "#/$defs/digest"}
+          }
+        },
+        "tools": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "installer_version", "python_version", "codex_version",
+            "platform", "verifier_version"
+          ],
+          "properties": {
+            "installer_version": {"const": "0.2.0"},
+            "python_version": {"$ref": "#/$defs/version"},
+            "codex_version": {"$ref": "#/$defs/version"},
+            "platform": {"enum": ["linux", "macos", "windows"]},
+            "verifier_version": {"$ref": "#/$defs/version"}
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        }
+      }
+    },
+    "preparedReceiptIdentity": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "marketplace_id", "plugin_id", "base_version", "install_version",
+        "base_payload_digest", "rendered_payload_digest", "policy_digest",
+        "transformation_profile", "contract_versions"
+      ],
+      "properties": {
+        "marketplace_id": {"$ref": "#/$defs/identifier"},
+        "plugin_id": {"const": "zagrosi-forge"},
+        "base_version": {"$ref": "#/$defs/version"},
+        "install_version": {"type": "string", "minLength": 1, "maxLength": 240},
+        "base_payload_digest": {"$ref": "#/$defs/digest"},
+        "rendered_payload_digest": {"$ref": "#/$defs/digest"},
+        "policy_digest": {"$ref": "#/$defs/digest"},
+        "transformation_profile": {"const": "plugin-v1"},
+        "contract_versions": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 240}
+        }
+      }
+    },
+    "preparedReceiptGeneration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["relative_path", "manifest_digest"],
+      "properties": {
+        "relative_path": {"type": "string", "minLength": 1, "maxLength": 240},
+        "manifest_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "receiptTransactionId": {
+      "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    }
+  }
+}

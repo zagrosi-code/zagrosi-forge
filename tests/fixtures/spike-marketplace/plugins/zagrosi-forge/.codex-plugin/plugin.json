@@ -1,0 +1,11 @@
+{
+  "name": "zagrosi-forge",
+  "version": "0.2.0",
+  "description": "Minimal positive Codex cachebuster fixture.",
+  "author": {
+    "name": "Zagrosi"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "scripts": "./scripts/"
+}

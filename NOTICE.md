@@ -37,3 +37,15 @@ Claude-specific workflow assumptions with Codex-native behavior:
 ## License
 
 Zagrosi Forge is distributed under the MIT License. See [LICENSE](LICENSE).
+
+## Vendored dependency
+
+Zagrosi Forge vendors the selected runtime tree from TOML Kit 0.15.0, licensed
+under MIT. The verified upstream source artifact is
+`https://files.pythonhosted.org/packages/51/db/03eaf4331631ef6b27d6e3c9b68c54dc6f0d63d87201fed600cc409307fd/tomlkit-0.15.0.tar.gz`
+with SHA-256
+`7d1a9ecba3086638211b13814ea79c90dd54dd11993564376f3aa92271f5c7a3`.
+Its copied license has SHA-256
+`f2f9b460ba719da6626add264d3782f275a4ff7aab677beda08b330911e23adb`.
+See `src/zagrosi_forge/_vendor/vendor-receipt.json` for the exact selected-file
+hashes and deterministic import transformation.

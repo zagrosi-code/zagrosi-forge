@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zagrosi.dev/schemas/native-support-policy-v1",
+  "title": "Zagrosi Forge Native Support Policy v1",
+  "type": "object",
+  "required": ["schema_version", "schema_digest", "writer_version", "minimum_reader_version", "record_digest", "limit_policy_version", "policy_version", "codex_versions", "platforms", "manifest_scripts_field"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "schema_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "writer_version": {"type": "string"},
+    "minimum_reader_version": {"type": "string"},
+    "record_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "limit_policy_version": {"const": "1.0"},
+    "policy_version": {"const": "1.0"},
+    "codex_versions": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
+    "platforms": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true},
+    "manifest_scripts_field": {"const": "accepted_no_execution_observed"}
+  },
+  "additionalProperties": false,
+  "x-limit-policy-version": "1.0"
+}

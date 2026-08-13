@@ -1,0 +1,11 @@
+theme = "dark"
+secret_token = "CANARY-DO-NOT-LEAK"
+
+[marketplaces.zagrosi]
+source_type = "local"
+source = "${SOURCE}"
+user_note = "preserve me"
+
+[plugins."zagrosi-forge@zagrosi"]
+enabled = true
+user_flag = 17

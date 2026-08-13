@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zagrosi.dev/schemas/marketplace-v1.schema.json",
+  "x-limit-policy-version": "1.0",
+  "type": "object",
+  "$defs": {
+    "unicodeScalarValue": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[^\\uD800-\\uDFFF]*$"},
+        {"type": "array", "items": {"$ref": "#/$defs/unicodeScalarValue"}},
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/unicodeScalarValue"}
+        },
+        {"type": ["number", "boolean", "null"]}
+      ]
+    }
+  },
+  "allOf": [{"$ref": "#/$defs/unicodeScalarValue"}],
+  "additionalProperties": false,
+  "required": ["name", "interface", "plugins"],
+  "properties": {
+    "name": {"const": "zagrosi", "type": "string"},
+    "interface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["displayName"],
+      "properties": {
+        "displayName": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "plugins": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "uniqueItems": true,
+      "contains": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {"name": {"const": "zagrosi-forge"}}
+      },
+      "minContains": 1,
+      "maxContains": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "source", "policy", "category"],
+        "properties": {
+          "name": {
+            "const": "zagrosi-forge",
+            "type": "string"
+          },
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source", "path"],
+            "properties": {
+              "source": {"const": "local", "type": "string"},
+              "path": {"const": "./", "type": "string"}
+            }
+          },
+          "policy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["installation", "authentication"],
+            "properties": {
+              "installation": {"const": "AVAILABLE", "type": "string"},
+              "authentication": {"const": "ON_INSTALL", "type": "string"}
+            }
+          },
+          "category": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      }
+    }
+  }
+}

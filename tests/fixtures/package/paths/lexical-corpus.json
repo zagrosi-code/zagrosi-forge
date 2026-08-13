@@ -1,0 +1,35 @@
+{
+  "invalid_components": [
+    {"code": "path.component_invalid", "value": ""},
+    {"code": "path.absolute", "value": "/absolute"},
+    {"code": "path.traversal", "value": "."},
+    {"code": "path.traversal", "value": ".."},
+    {"code": "path.component_invalid", "value": "two/parts"},
+    {"code": "path.component_invalid", "value": "two\\parts"},
+    {"code": "path.component_invalid", "value": "~"},
+    {"code": "path.component_invalid", "value": "line\nfeed"},
+    {"code": "path.component_invalid", "value": "nul\u0000byte"},
+    {"code": "path.component_invalid", "value": "UPPER"},
+    {"code": "path.component_invalid", "value": "leading-"},
+    {"code": "path.component_invalid", "value": "-trailing"}
+  ],
+  "invalid_windows_components": [
+    {"code": "path.windows_prefix", "value": "C:relative"},
+    {"code": "path.windows_prefix", "value": "C:\\absolute"},
+    {"code": "path.windows_prefix", "value": "\\\\server\\share"},
+    {"code": "path.windows_prefix", "value": "//server/share"},
+    {"code": "path.windows_prefix", "value": "\\\\?\\C:\\device"},
+    {"code": "path.windows_prefix", "value": "\\\\.\\NUL"},
+    {"code": "path.reserved", "value": "CON"},
+    {"code": "path.reserved", "value": "nul.txt"},
+    {"code": "path.reserved", "value": "COM1"},
+    {"code": "path.reserved", "value": "lpt9.log"},
+    {"code": "path.reserved", "value": "file:stream"},
+    {"code": "path.reserved", "value": "trailing."},
+    {"code": "path.reserved", "value": "trailing "}
+  ],
+  "reference_collisions": [
+    ["Skills/Readme.md", "skills/readme.md"],
+    ["café/asset.txt", "café/asset.txt"]
+  ]
+}

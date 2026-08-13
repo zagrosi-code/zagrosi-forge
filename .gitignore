@@ -7,7 +7,6 @@ build/
 planning/
 *.egg-info/
 *.pyc
-uv.lock
 .zagrosi-project/
 .deep-project/
 zagrosi_plan_config.json

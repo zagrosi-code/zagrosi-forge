@@ -1,0 +1,7 @@
+[project]
+name = "zagrosi-forge"
+version = "0.2.0"
+
+[build-system]
+requires = ["uv_build==0.11.28"]
+build-backend = "uv_build"

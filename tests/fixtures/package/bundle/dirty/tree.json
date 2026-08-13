@@ -1,0 +1,16 @@
+{
+  ".git/objects/secret.txt": "ZAGROSI_DIRTY_SECRET_GIT\n",
+  ".pytest_cache/v/cache/secret": "ZAGROSI_DIRTY_SECRET_PYTEST\n",
+  ".ruff_cache/secret": "ZAGROSI_DIRTY_SECRET_RUFF\n",
+  ".venv/lib/secret.py": "ZAGROSI_DIRTY_SECRET_VENV\n",
+  "build/secret.txt": "ZAGROSI_DIRTY_SECRET_BUILD\n",
+  "dist/secret.whl": "ZAGROSI_DIRTY_SECRET_DIST\n",
+  "examples/secret.md": "ZAGROSI_DIRTY_SECRET_EXAMPLES\n",
+  "planning/secret.md": "ZAGROSI_DIRTY_SECRET_PLANNING\n",
+  "reports/secret.txt": "ZAGROSI_DIRTY_SECRET_REPORTS\n",
+  "secrets/token.txt": "ZAGROSI_DIRTY_SECRET_TOKEN\n",
+  "src/zagrosi_forge/install/__pycache__/secret.pyc": "ZAGROSI_DIRTY_SECRET_BYTECODE\n",
+  "tests/secret.py": "ZAGROSI_DIRTY_SECRET_TESTS\n",
+  "unknown-secret.txt": "ZAGROSI_DIRTY_SECRET_UNKNOWN\n",
+  "uv.lock": "ZAGROSI_DIRTY_SECRET_LOCK\n"
+}

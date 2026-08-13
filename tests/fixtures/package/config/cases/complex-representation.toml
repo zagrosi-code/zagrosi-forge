@@ -1,0 +1,8 @@
+profile = { name = "quoted", flags = [1, 2, 3] }
+tool."odd key".value = "dotted"
+
+[[servers]]
+name = "one"
+
+[[servers]]
+name = "two"

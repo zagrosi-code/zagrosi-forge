@@ -1,0 +1,7 @@
+[marketplaces.zagrosi]
+source_type = "local"
+source = "${CHECKOUT}"
+extra = true
+
+[plugins."zagrosi-forge@zagrosi"]
+enabled = true

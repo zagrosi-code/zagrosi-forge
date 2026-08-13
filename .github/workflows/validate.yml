@@ -19,7 +19,53 @@ jobs:
           python -m json.tool .codex-plugin/plugin.json >/dev/null
           python -m json.tool .agents/plugins/marketplace.json >/dev/null
       - name: Run tests
-        run: uv run --with pytest python -m pytest
+        run: |
+          uv sync --locked --no-default-groups --group test
+          uv run --locked --no-sync python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          recovery_module = "tests/install/test_transaction_recovery.py"
+          modules = [
+              str(path)
+              for path in sorted(Path("tests").rglob("test_*.py"))
+              if str(path) != recovery_module
+          ]
+          if not modules:
+              raise SystemExit("test module collection was empty")
+          for module in modules:
+              subprocess.run(
+                  [sys.executable, "-m", "pytest", module],
+                  check=True,
+              )
+
+          collected = subprocess.run(
+              [
+                  sys.executable,
+                  "-m",
+                  "pytest",
+                  "--collect-only",
+                  "-q",
+                  recovery_module,
+              ],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+          node_ids = [
+              line
+              for line in collected.stdout.splitlines()
+              if line.startswith(f"{recovery_module}::")
+          ]
+          if not node_ids:
+              raise SystemExit("transaction recovery collection was empty")
+          for offset in range(0, len(node_ids), 4):
+              subprocess.run(
+                  [sys.executable, "-m", "pytest", *node_ids[offset : offset + 4]],
+                  check=True,
+              )
+          PY
       - name: Run strict example gates
         run: |
           python scripts/zagrosi_skills.py lint-project-manifest --planning-dir examples/saas --strict
