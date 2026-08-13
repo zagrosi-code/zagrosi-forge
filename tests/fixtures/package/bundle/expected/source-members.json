@@ -61,8 +61,8 @@
   },
   {
     "path": "scripts/zagrosi_skills.py",
-    "sha256": "4e1c4bb883f1711227470397c0acb9e3664be0f0ce25be3ddf99b592a9b1484a",
-    "size": 266701
+    "sha256": "78a86156cab05677d8b876ace00941d260a3bda288e612d6643630e97d823127",
+    "size": 266775
   },
   {
     "path": "skills/zagrosi-implement/SKILL.md",
