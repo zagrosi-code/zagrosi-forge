@@ -792,6 +792,53 @@ def test_patch_scope_preserves_supply_chain_artifact_extensions(tmp_path: Path) 
     assert scope["out_of_scope"] == []
 
 
+def test_patch_scope_aggregates_multiple_owned_path_fences(tmp_path: Path) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Section\n\n"
+        "## Exact ownership\n\n"
+        "Production paths:\n\n"
+        "```text\n"
+        "src/toolchain.py\n"
+        "contracts/toolchain.json\n"
+        "```\n\n"
+        "Test paths:\n\n"
+        "```plaintext\n"
+        "tests/test_toolchain.py\n"
+        "tests/fixtures/toolchain.json\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text(
+        "diff --git a/src/toolchain.py b/src/toolchain.py\n"
+        "+++ b/src/toolchain.py\n"
+        "diff --git a/contracts/toolchain.json b/contracts/toolchain.json\n"
+        "+++ b/contracts/toolchain.json\n"
+        "diff --git a/tests/test_toolchain.py b/tests/test_toolchain.py\n"
+        "+++ b/tests/test_toolchain.py\n"
+        "diff --git a/tests/fixtures/toolchain.json b/tests/fixtures/toolchain.json\n"
+        "+++ b/tests/fixtures/toolchain.json\n"
+    )
+
+    scope = run_cmd(
+        "patch-scope",
+        "--section-file",
+        str(section_file),
+        "--diff-file",
+        str(diff_file),
+        "--strict",
+    )
+
+    assert scope["success"] is True
+    assert scope["declared_files"] == [
+        "contracts/toolchain.json",
+        "src/toolchain.py",
+        "tests/fixtures/toolchain.json",
+        "tests/test_toolchain.py",
+    ]
+    assert scope["out_of_scope"] == []
+
+
 def test_patch_scope_reads_name_only_supply_chain_diff(tmp_path: Path) -> None:
     section_file = tmp_path / "section-01-toolchain.md"
     section_file.write_text(
