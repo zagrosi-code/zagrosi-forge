@@ -366,8 +366,8 @@
   },
   {
     "path": "src/zagrosi_forge/install/paths.py",
-    "sha256": "a1576c238cd53152bb284eacad5cfc758c88297bfcdc603c8e09523a3edf3422",
-    "size": 190576
+    "sha256": "f96bd23b4ea520c5f8a8935cda6d0e80cf95ea3efdcf3a9d648e9926803c5ac5",
+    "size": 190494
   },
   {
     "path": "src/zagrosi_forge/install/policies.py",
