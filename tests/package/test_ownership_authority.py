@@ -758,14 +758,22 @@ def test_receipt_publication_rejects_in_place_mutation_during_directory_flush(
                     nonlocal mutation_identity
                     original_flush_directory(handle)
                     if receipt_path.exists() and mutation_identity is None:
-                        before = receipt_path.stat()
-                        receipt_path.write_bytes(mutated_raw)
-                        after = receipt_path.stat()
-                        assert (after.st_dev, after.st_ino) == (
-                            before.st_dev,
-                            before.st_ino,
+                        mutation = ownership._windows_open_raw_child(
+                            handle,
+                            receipt_path.name,
+                            directory=False,
+                            read_data=True,
+                            write_data=True,
                         )
-                        mutation_identity = (after.st_dev, after.st_ino)
+                        try:
+                            before = ownership._native_identity(mutation)
+                            ownership._windows_replace_bytes(mutation, mutated_raw)
+                            ownership._windows_flush(mutation)
+                            after = ownership._native_identity(mutation)
+                            assert after == before
+                            mutation_identity = after
+                        finally:
+                            ownership._paths._windows_close(mutation)
 
                 context.setattr(
                     ownership,
@@ -5975,6 +5983,7 @@ def test_receipt_proven_leaf_quarantines_then_walks_without_following(
     (generation / "payload").write_bytes(b"managed")
     _directory_link(generation / "external-link", external)
 
+    observed_path.close()
     ticket = quarantine_owned(proof, transaction_id="receipt-cleanup").unwrap()
     cleanup = remove_quarantine(ticket).unwrap()
     assert cleanup.removed
