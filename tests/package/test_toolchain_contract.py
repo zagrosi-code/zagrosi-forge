@@ -44,7 +44,7 @@ def test_installer_authority_hard_gate_matches_collected_tests() -> None:
     assert f"$Cases.Count -ne {len(cases)}" in workflow
     assert f"requires {len(cases)} cases" in workflow
     assert '"linux-x86_64" { 13 }' in workflow
-    assert '"windows-x86_64" { 34 }' in workflow
+    assert '"windows-x86_64" { 42 }' in workflow
     assert "default { 5 }" in workflow
 
 
