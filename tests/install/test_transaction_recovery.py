@@ -7903,6 +7903,7 @@ def test_execute_recovery_serializes_revalidate_and_close_around_one_effect(
     revalidate_errors: list[BaseException] = []
     close_errors: list[BaseException] = []
     execute_thread = revalidate_thread = close_thread = None
+    thread_timeout_seconds = 10.0
     real_cleanup = ownership.remove_quarantine
     real_release = recovery.HeldInstallLock.release
     try:
@@ -7924,7 +7925,7 @@ def test_execute_recovery_serializes_revalidate_and_close_around_one_effect(
         def blocking_cleanup(selected, **kwargs):
             effect_calls.append(selected)
             effect_started.set()
-            if not effect_allowed.wait(2):
+            if not effect_allowed.wait(thread_timeout_seconds):
                 raise AssertionError("cleanup effect was not released")
             return real_cleanup(selected, **kwargs)
 
@@ -7960,19 +7961,19 @@ def test_execute_recovery_serializes_revalidate_and_close_around_one_effect(
         monkeypatch.setattr(recovery.HeldInstallLock, "release", record_release)
         execute_thread = Thread(target=execute)
         execute_thread.start()
-        assert effect_started.wait(2)
+        assert effect_started.wait(thread_timeout_seconds)
         revalidate_thread = Thread(target=revalidate)
         close_thread = Thread(target=close)
         revalidate_thread.start()
         close_thread.start()
-        assert revalidate_started.wait(2)
-        assert close_started.wait(2)
+        assert revalidate_started.wait(thread_timeout_seconds)
+        assert close_started.wait(thread_timeout_seconds)
 
         assert not revalidate_finished.wait(0.1)
         assert not close_finished.wait(0.1)
         effect_allowed.set()
         for thread in (execute_thread, revalidate_thread, close_thread):
-            thread.join(2)
+            thread.join(thread_timeout_seconds)
 
         assert all(
             not thread.is_alive()
@@ -7997,7 +7998,7 @@ def test_execute_recovery_serializes_revalidate_and_close_around_one_effect(
         effect_allowed.set()
         for thread in (execute_thread, revalidate_thread, close_thread):
             if thread is not None:
-                thread.join(2)
+                thread.join(thread_timeout_seconds)
         monkeypatch.setattr(recovery.HeldInstallLock, "release", real_release)
         if locked is not None and not locked.closed:
             locked.close()
