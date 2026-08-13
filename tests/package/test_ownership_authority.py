@@ -88,6 +88,17 @@ def _private_test_directory(path: Path) -> Path:
     return path
 
 
+def _private_test_directory_tree(root: Path, relative: str) -> Path:
+    """Create missing fixture ancestors with the production-private Windows ACL."""
+
+    current = root
+    for component in Path(relative).parts:
+        current /= component
+        if not current.exists():
+            _private_test_directory(current)
+    return current
+
+
 def _owned(tmp_path: Path):
     from zagrosi_forge.install.paths import PlatformPathAuthority
 
@@ -277,11 +288,10 @@ def _receipt_proof(tmp_path: Path):
     authority, owned, root_path = _owned(tmp_path)
     identity = _install_identity()
     relative = _source_relative(identity)
-    generation = root_path / relative
-    generation.mkdir(parents=True, mode=0o700)
+    _private_test_directory_tree(root_path, relative)
     manifest_relative = _manifest_relative(identity, "source")
     manifest_path = root_path / manifest_relative
-    manifest_path.parent.mkdir(parents=True)
+    _private_test_directory_tree(root_path, str(Path(manifest_relative).parent))
     manifest_path.write_bytes(b"source-generation-manifest\n")
     observed_path = authority.prove_descendant(
         owned,
