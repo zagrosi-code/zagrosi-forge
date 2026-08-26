@@ -754,6 +754,24 @@ def contains_any(text: str, terms: list[str]) -> bool:
     return any(term.lower() in haystack for term in terms)
 
 
+def is_test_path(text: str) -> bool:
+    filename = text.rsplit("/", 1)[-1]
+    if filename.lower().endswith(
+        (".stories.js", ".stories.jsx", ".stories.mjs", ".stories.ts", ".stories.tsx")
+    ):
+        return True
+    test_tokens = {"test", "tests", "spec", "specs"}
+    if any(
+        test_tokens.intersection(re.split(r"[._-]+", component.lower()))
+        for component in text.split("/")
+    ):
+        return True
+    stem = filename.rsplit(".", 1)[0]
+    return stem.lower() == "conftest" or bool(
+        re.search(r"^(?:Test|Spec)[A-Z0-9]|(?:Test|Tests|Spec|Specs)$", stem)
+    )
+
+
 def requirement_ids(text: str) -> list[str]:
     return sorted(set(REQ_ID_RE.findall(text)))
 
@@ -12641,6 +12659,16 @@ def implementation_drift(args: argparse.Namespace) -> int:
     if progress["state"] in {"invalid_index", "no_index"}:
         findings.append(finding("critical", "invalid-sections", "Drift detection requires valid sections.", planning_dir / "sections" / "index.md"))
         return emit_quality("implementation-drift", findings, args, {"section_progress": progress})
+    if progress["state"] != "complete":
+        findings.append(
+            finding(
+                "critical",
+                "invalid-sections",
+                "Drift detection requires every manifested section to exist and be non-empty.",
+                planning_dir / "sections" / "index.md",
+            )
+        )
+        return emit_quality("implementation-drift", findings, args, {"section_progress": progress})
     if args.diff_file:
         diff_path = resolve_path(args.diff_file)
         changed = set(changed_files_from_diff(read_text(diff_path)))
@@ -12650,14 +12678,28 @@ def implementation_drift(args: argparse.Namespace) -> int:
             return print_json({"success": False, "error": error}, 1)
         changed = set(changed_list)
 
-    section_files = sorted((planning_dir / "sections").glob("section-*.md"))
-    planned_files = set()
-    planned_tests = set()
-    for section_path in section_files:
-        files = extract_section_owned_paths(read_text(section_path))
+    planned_files: set[str] = set()
+    section_owned_files: dict[str, set[str]] = {}
+    latest_owner: dict[str, str] = {}
+    for section in progress["sections"]:
+        section_path = planning_dir / "sections" / f"{section}.md"
+        files = set(extract_section_owned_paths(read_text(section_path)))
+        section_owned_files[section] = files
         planned_files.update(files)
-        planned_tests.update(file for file in files if contains_any(file, ["test", "spec"]))
-    changed_tests = {file for file in changed if contains_any(file, ["test", "spec"])}
+        for file in files:
+            latest_owner[file] = section
+    active_sections = {
+        latest_owner[file]
+        for file in changed
+        if file in latest_owner
+    }
+    planned_tests = {
+        file
+        for section in active_sections
+        for file in section_owned_files[section]
+        if is_test_path(file)
+    }
+    changed_tests = changed.intersection(planned_tests)
     out_of_scope = sorted(file for file in changed if file not in planned_files)
     missing_planned_tests = sorted(file for file in planned_tests if file not in changed_tests)
     for file in out_of_scope:
@@ -12673,6 +12715,7 @@ def implementation_drift(args: argparse.Namespace) -> int:
             "planned_files": sorted(planned_files),
             "changed_files": sorted(changed),
             "out_of_scope": out_of_scope,
+            "active_sections": sorted(active_sections),
             "planned_tests": sorted(planned_tests),
             "changed_tests": sorted(changed_tests),
             "missing_planned_tests": missing_planned_tests,
