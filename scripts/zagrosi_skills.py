@@ -12693,19 +12693,40 @@ def implementation_drift(args: argparse.Namespace) -> int:
         for file in changed
         if file in latest_owner
     }
+    section_planned_tests = {
+        section: {
+            file
+            for file in section_owned_files[section]
+            if latest_owner.get(file) == section and is_test_path(file)
+        }
+        for section in active_sections
+    }
     planned_tests = {
         file
-        for section in active_sections
-        for file in section_owned_files[section]
-        if is_test_path(file)
+        for tests in section_planned_tests.values()
+        for file in tests
     }
     changed_tests = changed.intersection(planned_tests)
+    sections_missing_changed_tests = sorted(
+        section
+        for section, tests in section_planned_tests.items()
+        if tests and not changed.intersection(tests)
+    )
     out_of_scope = sorted(file for file in changed if file not in planned_files)
     missing_planned_tests = sorted(file for file in planned_tests if file not in changed_tests)
     for file in out_of_scope:
         findings.append(finding("high", "implementation-drift-file", f"Changed file was not planned: {file}", planning_dir))
-    if planned_tests and not changed_tests:
-        findings.append(finding("medium", "planned-tests-not-changed", "No changed test files match planned test ownership.", planning_dir))
+    if sections_missing_changed_tests:
+        findings.append(
+            finding(
+                "medium",
+                "planned-tests-not-changed",
+                "No changed test files match planned test ownership for active sections: "
+                + ", ".join(sections_missing_changed_tests)
+                + ".",
+                planning_dir,
+            )
+        )
     return emit_quality(
         "implementation-drift",
         findings,
@@ -12719,6 +12740,7 @@ def implementation_drift(args: argparse.Namespace) -> int:
             "planned_tests": sorted(planned_tests),
             "changed_tests": sorted(changed_tests),
             "missing_planned_tests": missing_planned_tests,
+            "sections_missing_changed_tests": sections_missing_changed_tests,
         },
     )
 
