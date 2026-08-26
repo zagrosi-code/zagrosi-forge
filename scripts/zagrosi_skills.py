@@ -9,22 +9,35 @@ Each command prints JSON so Codex can decide the next workflow step.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import ctypes
 import csv
+import errno
+import fcntl
+import hashlib
 import html
 import io
 import json
 import os
+import platform
 import re
+import selectors
+import shlex
+import signal
 import shutil
+import stat
 import subprocess
 import sys
-import tomllib
+import tempfile
 import time
+import tomllib
+import unicodedata
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
+from typing import Any, NoReturn
 
 SPLIT_RE = re.compile(r"^\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
 SECTION_RE = re.compile(r"^section-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -34,6 +47,18 @@ REQ_ID_RE = re.compile(r"\bREQ-[A-Z0-9][A-Z0-9-]*\b")
 FILE_PATH_RE = re.compile(
     r"`?[\w./-]+\.(?:avif|css|gif|go|htm|html|ico|java|jpeg|jpg|js|json|jsx|less|md|php|png|py|rb|rs|sass|scss|sh|sql|svg|toml|ts|tsx|webp|yaml|yml)(?:`|\b)"
 )
+OWNED_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*//)[\w.-]+(?:/[\w.-]+)*$")
+OWNERSHIP_TITLE_RE = re.compile(
+    r"\b(?:exact(?:\s+(?:file|path))?\s+ownership|(?:file|path)\s+ownership|owned\s+(?:files|paths))\b",
+    re.IGNORECASE,
+)
+OWNERSHIP_DECLARATION_RE = re.compile(
+    r"\b(?:(?:this|the)\s+section|it)\s+owns\s+exactly(?:\s+\w+){0,3}\s+(?:files?|paths?)\b"
+    r"|\bonly these(?:\s+\w+){0,3}\s+paths?\s+may change\b",
+    re.IGNORECASE,
+)
+SHELL_FENCE_LANGUAGES = frozenset({"bash", "sh", "shell", "zsh"})
+SHELL_HEREDOC_DELIMITER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 FORGE_META_START = "FORGE_META"
 LEGACY_META_START = "DEEP_META"
 REVIEW_BOARD_PASSES = [
@@ -261,6 +286,15 @@ COMMAND_CATALOG = [
         "summary": "Start or resume section implementation against a target repo.",
         "aliases": ["implement", "zagrosi-implement-setup", "deep-implement-setup"],
         "examples": ["python3 scripts/zagrosi_skills.py implement-setup --sections-dir planning/01-auth/sections --target-dir ."],
+    },
+    {
+        "name": "implement-evidence-handoff",
+        "phase": "implement",
+        "summary": "Verify and persist the fixed privileged Section 26 or Section 28 evidence handoff.",
+        "aliases": [],
+        "examples": [
+            "python3 scripts/zagrosi_skills.py implement-evidence-handoff --implementation-root /external/implementation --section S26"
+        ],
     },
     {
         "name": "implement-record-section",
@@ -1071,6 +1105,5925 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(read_text(path))
 
 
+DETACHED_CONFIG_SCHEMA = "zagrosi-detached-implementation-config-v2"
+DETACHED_STATE_SCHEMA = "zagrosi-detached-implementation-state-v2"
+DETACHED_PROGRESS_SCHEMA = "zagrosi-detached-implementation-progress-v1"
+DETACHED_SETUP_PREFIX_SCHEMA = "zagrosi-detached-implementation-setup-prefix-v2"
+SECTION_PINNER_SCHEMA = "zagrosi-implementation-section-pinner-v2"
+SECTION_RECORD_TRANSACTION_SCHEMA = "zagrosi-section-record-transaction-v1"
+SECTION_RECORD_LOCK_PATH = "pinners/.record-section.lock"
+SECTION_RECORD_TRANSACTION_DIR = "pinners/.record-section-transaction-v1"
+SECTION_RECORD_TRANSACTION_PATH = f"{SECTION_RECORD_TRANSACTION_DIR}/transaction.json"
+SECTION_RECORD_ROLLBACK_PATH = f"{SECTION_RECORD_TRANSACTION_DIR}/rollback.json"
+SECTION_RECORD_STAGED_PINNER_TMP_PATH = f"{SECTION_RECORD_TRANSACTION_DIR}/pinner.tmp"
+SECTION_RECORD_STAGED_PINNER_PATH = f"{SECTION_RECORD_TRANSACTION_DIR}/pinner.json"
+DETACHED_GLOBAL_LOCK_PATH = Path(os.sep)
+DETACHED_LOCK_TIMEOUT_SECONDS = 5.0
+FINAL_ADMISSION_PINNER_SCHEMA = "dec075-final-pinner-receipt-v1"
+ADMISSION_STATE_SCHEMA = "dec075-admission-state-v1"
+DETACHED_JSON_CAP = 4 * 1024 * 1024
+DETACHED_REVIEW_CAP = 8 * 1024 * 1024
+IMPLEMENTATION_SOURCE_CAP = 16 * 1024 * 1024
+FROZEN_PLANNING_FILE_CAP = 64 * 1024 * 1024
+FROZEN_PLANNING_TREE_CAP = 512 * 1024 * 1024
+FINAL_ADMISSION_PINNER_FIELDS = {"schema", "start", "end", "o_sha256", "verdict"}
+ADMISSION_STATE_FIELDS = {"schema", "r_sha256", "p_sha256", "d_sha256", "a_sha256"}
+DETACHED_TOP_LEVEL_DIRECTORIES = {"code_review", "evidence", "pinners"}
+DETACHED_TOP_LEVEL_FILES = {
+    "zagrosi_implement_config.json",
+    "zagrosi_implement_state.json",
+    "forge-progress.json",
+}
+DETACHED_TOP_LEVEL_ALLOWED = DETACHED_TOP_LEVEL_DIRECTORIES | DETACHED_TOP_LEVEL_FILES
+DETACHED_ROOT_RECOVERABLE_TEMPS = {
+    f".{name}.tmp" for name in DETACHED_TOP_LEVEL_FILES
+} | {
+    f".{name}.setup.tmp" for name in DETACHED_TOP_LEVEL_FILES
+}
+DETACHED_SETUP_PREFIX_FIELDS = {
+    "schema",
+    "slot",
+    "planning_dir",
+    "sections_dir",
+    "target_dir",
+    "target_root_identity_digest",
+    "implementation_root",
+    "planning_tree_sha256",
+    "planning_file_count",
+    "planning_total_bytes",
+    "admission_pinner_path",
+    "admission_pinner_sha256",
+    "admission_pinner_size",
+    "admission_state_sha256",
+    "implement_tool_sha256",
+    "implement_skill_sha256",
+    "implement_test_sha256",
+    "self_digest",
+}
+SECTION_RECORD_TRANSACTION_FIELDS = {
+    "schema",
+    "section",
+    "base_state_sha256",
+    "candidate_state_sha256",
+    "prior_state_record",
+    "state_record",
+    "pinner_path",
+    "pinner_file_sha256",
+}
+REQUIRED_PRIVILEGED_SECTION_EVIDENCE = {
+    "section-26-publication-wire-and-decision-store": (
+        "s26_privileged_darwin_apfs_gate",
+        "evidence/s26-privileged-darwin-apfs-gate-handoff-receipt-v1.json",
+    ),
+    "section-28-scoped-native-and-external-composition": (
+        "s28_privileged_darwin_apfs_gate",
+        "evidence/s28-privileged-darwin-apfs-gate-handoff-receipt-v1.json",
+    ),
+}
+HANDOFF_REQUEST_SCHEMA = "unit12-privileged-darwin-apfs-gate-handoff-request-v1"
+HANDOFF_RECEIPT_SCHEMA = "unit12-privileged-darwin-apfs-gate-handoff-receipt-v1"
+HANDOFF_VERIFICATION_SCHEMA = "unit12-privileged-darwin-apfs-gate-handoff-verification-v1"
+HANDOFF_RESULT_SCHEMA = "zagrosi-privileged-evidence-handoff-result-v1"
+HANDOFF_ERROR_SCHEMA = "zagrosi-privileged-evidence-handoff-error-v1"
+HANDOFF_PURPOSE = "unit12_privileged_darwin_apfs_gate_handoff"
+HANDOFF_VERIFICATION_PURPOSE = "unit12_privileged_darwin_apfs_gate_handoff_verification"
+HANDOFF_ERROR_PURPOSE = "zagrosi_privileged_evidence_handoff_error"
+HANDOFF_REQUEST_FIELDS = {
+    "schema",
+    "purpose",
+    "gate_id",
+    "admission_state_sha256",
+    "admission_pinner_sha256",
+    "planning_tree_sha256",
+    "detached_implementation_root_identity_digest",
+    "implement_tool_sha256",
+    "implement_skill_sha256",
+    "implement_test_sha256",
+    "self_digest",
+}
+HANDOFF_RECEIPT_FIELDS = {
+    "schema",
+    "purpose",
+    "gate_id",
+    "handoff_request_final_wire_digest",
+    "admission_state_sha256",
+    "admission_pinner_sha256",
+    "planning_tree_sha256",
+    "detached_implementation_root_identity_digest",
+    "privileged_evidence_root_identity_digest",
+    "implement_tool_sha256",
+    "implement_skill_sha256",
+    "implement_test_sha256",
+    "host_provisioning_receipt_final_wire_digest",
+    "host_input_final_wire_digest",
+    "result_final_wire_digest",
+    "result_sha256",
+    "result_bytes",
+    "result_mode",
+    "result_uid",
+    "result_gid",
+    "result_nlink",
+    "gate_command_sha256",
+    "handoff_command_sha256",
+    "protected_source_root_identity_digest",
+    "source_commit",
+    "source_tree_sha256",
+    "implementation_source_sha256",
+    "test_source_sha256",
+    "result_finished_at",
+    "verdict",
+    "attestation_key_id",
+    "self_digest",
+    "signature_b64u",
+}
+HANDOFF_VERIFICATION_FIELDS = {
+    "schema",
+    "purpose",
+    "gate_id",
+    "handoff_request_final_wire_digest",
+    "handoff_receipt_final_wire_digest",
+    "admission_state_sha256",
+    "admission_pinner_sha256",
+    "planning_tree_sha256",
+    "detached_implementation_root_identity_digest",
+    "verdict",
+}
+HANDOFF_RESULT_FIELDS = {"schema", "section", "evidence_name", "evidence_path", "sha256", "size", "status"}
+HANDOFF_ERROR_FIELDS = {"schema", "purpose", "section", "status", "closed_error_code"}
+HANDOFF_CLOSED_ERROR_CODES = {
+    "HANDOFF_PLATFORM_UNAVAILABLE": 3,
+    "HANDOFF_FIXED_DEPENDENCY_UNAVAILABLE": 3,
+    "HANDOFF_ROOT_UNAVAILABLE": 3,
+    "HANDOFF_VERIFIER_UNAVAILABLE": 3,
+    "HANDOFF_CALLER_REFUSED": 5,
+    "HANDOFF_SECTION_NOT_READY": 5,
+    "HANDOFF_AUTHORITY_INVALID": 5,
+    "HANDOFF_ROOT_OUTPUT_INVALID": 5,
+    "HANDOFF_VERIFIER_OUTPUT_INVALID": 5,
+    "HANDOFF_EVIDENCE_CONFLICT": 5,
+    "HANDOFF_INTERNAL_FAILURE": 5,
+}
+HANDOFF_REQUEST_CAP = 16 * 1024
+HANDOFF_RECEIPT_CAP = 64 * 1024
+HANDOFF_VERIFICATION_CAP = 4 * 1024
+HANDOFF_STDERR_CAP = 64 * 1024
+HANDOFF_ROOT = "/var/db/santander-unit12/dec075"
+HANDOFF_HOST_PROVISIONING_RECEIPT = (
+    "/usr/local/share/santander-unit12-prereqs/privileged-darwin-apfs-host-provisioning-receipt-v1.json"
+)
+HANDOFF_PREREQUISITE_RECEIPT = "/usr/local/share/santander-unit12-prereqs/prerequisite-receipt-v1.json"
+HANDOFF_PYTHON = "/usr/local/libexec/santander-unit12-prereqs/python-3.12.13/bin/python3.12"
+HANDOFF_SUDO = "/usr/bin/sudo"
+HANDOFF_STAT = "/usr/bin/stat"
+HANDOFF_ENV = {"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
+HANDOFF_GIT = "/usr/local/libexec/santander-unit12-prereqs/git-2.50.1-apple-155"
+HANDOFF_GIT_ENV = {
+    "LC_ALL": "C",
+    "LANG": "C",
+    "TZ": "UTC",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_OPTIONAL_LOCKS": "0",
+}
+HANDOFF_GIT_STATUS_ARGS = ("status", "--porcelain=v1", "-z", "--untracked-files=all")
+HANDOFF_SECTION_CONTRACTS = {
+    "S26": {
+        "section": "section-26-publication-wire-and-decision-store",
+        "gate_id": "s26_publication_store",
+        "evidence_name": "s26_privileged_darwin_apfs_gate",
+        "evidence_path": "evidence/s26-privileged-darwin-apfs-gate-handoff-receipt-v1.json",
+        "host_input": f"{HANDOFF_ROOT}/s26-privileged-darwin-apfs-host-input-v1.json",
+        "result": f"{HANDOFF_ROOT}/evidence/s26-privileged-darwin-apfs-gate-result-v1.json",
+        "runner": "/usr/local/libexec/santander-unit12-gates/s26-privileged-darwin-apfs-gate-runner-v1.py",
+        "runner_source": "scripts/cutover/_runtime_evidence_revocation_publication_store.py",
+        "implementation_sources": (
+            "scripts/cutover/_runtime_evidence_revocation_publication_store.py",
+            "scripts/cutover/_runtime_evidence_revocation_publication_wire.py",
+        ),
+        "implementation_source_domain": b"unit12-s26-privileged-gate-implementation-source-set-v1\0",
+        "test": "tests/cutover/test_runtime_evidence_revocation_publication_store.py",
+        "gate_command_sha256": "sha256:2adb5c10c313b7bb758d539ffaf6313439cf562f7f0dad99ac3ed8ff705adc1d",
+        "command_sha256": "sha256:3cc96ce9be563930630c151e0b854f140e3e2e2421c49b888d1751946f8d672b",
+        "verifier_command_sha256": "sha256:c415905a53f5ad02d97336b65d21a6a31a469c21f2ae5745ddef74ed9de1c862",
+    },
+    "S28": {
+        "section": "section-28-scoped-native-and-external-composition",
+        "gate_id": "s28_publication_transport",
+        "evidence_name": "s28_privileged_darwin_apfs_gate",
+        "evidence_path": "evidence/s28-privileged-darwin-apfs-gate-handoff-receipt-v1.json",
+        "host_input": f"{HANDOFF_ROOT}/s28-privileged-darwin-apfs-host-input-v1.json",
+        "result": f"{HANDOFF_ROOT}/evidence/s28-privileged-darwin-apfs-gate-result-v1.json",
+        "runner": "/usr/local/libexec/santander-unit12-gates/s28-privileged-darwin-apfs-gate-runner-v1.py",
+        "runner_source": "scripts/cutover/_runtime_evidence_revocation_publication_transport.py",
+        "implementation_sources": (
+            "scripts/cutover/_runtime_evidence_revocation_github_native.py",
+            "scripts/cutover/_runtime_evidence_revocation_publication_transport.py",
+            "scripts/cutover/runtime_evidence_revocation_toolchain.py",
+            "scripts/cutover/runtime_evidence_revocation_toolchain_native.py",
+        ),
+        "implementation_source_domain": b"unit12-s28-privileged-gate-implementation-source-set-v1\0",
+        "test": "tests/cutover/test_runtime_evidence_revocation_publication_transport.py",
+        "gate_command_sha256": "sha256:43db5942eeb65b2d69e306aa7086f04c346ce1fd453fa930c39d9e713de824c1",
+        "command_sha256": "sha256:783c80921f7c9bb431fec5c0f1d77a538aa5761149987804a841800ece2f2c3c",
+        "verifier_command_sha256": "sha256:3d4ac7e265610fca5106c8dedcf89564f7ee424376a60707db6590131d273e57",
+    },
+}
+HANDOFF_FROZEN_RUNNER_CONTRACTS = {
+    "s26_publication_store": {
+        "runner": "/usr/local/libexec/santander-unit12-gates/s26-privileged-darwin-apfs-gate-runner-v1.py",
+        "runner_source": "scripts/cutover/_runtime_evidence_revocation_publication_store.py",
+        "gate_command_sha256": "sha256:2adb5c10c313b7bb758d539ffaf6313439cf562f7f0dad99ac3ed8ff705adc1d",
+        "command_sha256": "sha256:3cc96ce9be563930630c151e0b854f140e3e2e2421c49b888d1751946f8d672b",
+        "verifier_command_sha256": "sha256:c415905a53f5ad02d97336b65d21a6a31a469c21f2ae5745ddef74ed9de1c862",
+    },
+    "s28_publication_transport": {
+        "runner": "/usr/local/libexec/santander-unit12-gates/s28-privileged-darwin-apfs-gate-runner-v1.py",
+        "runner_source": "scripts/cutover/_runtime_evidence_revocation_publication_transport.py",
+        "gate_command_sha256": "sha256:43db5942eeb65b2d69e306aa7086f04c346ce1fd453fa930c39d9e713de824c1",
+        "command_sha256": "sha256:783c80921f7c9bb431fec5c0f1d77a538aa5761149987804a841800ece2f2c3c",
+        "verifier_command_sha256": "sha256:3d4ac7e265610fca5106c8dedcf89564f7ee424376a60707db6590131d273e57",
+    },
+}
+HANDOFF_CONTRACT_BY_SECTION = {
+    contract["section"]: contract for contract in HANDOFF_SECTION_CONTRACTS.values()
+}
+
+
+class DetachedImplementationError(ValueError):
+    def __init__(self, code: str, message: str, **details: Any) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
+
+def detached_error_payload(exc: DetachedImplementationError, **extras: Any) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error_code": exc.code,
+        "error": str(exc),
+        **extras,
+        **exc.details,
+    }
+
+
+def detached_io_error_payload(exc: OSError, **extras: Any) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error_code": "detached-io-failure",
+        "error": f"Detached implementation I/O failed closed: {exc.__class__.__name__}",
+        **extras,
+    }
+
+
+def absolute_path_no_follow(raw: str | os.PathLike[str]) -> Path:
+    expanded = Path(raw).expanduser()
+    if not expanded.is_absolute():
+        expanded = Path.cwd() / expanded
+    return Path(os.path.abspath(os.fspath(expanded)))
+
+
+def canonical_json_bytes(payload: Any) -> bytes:
+    return (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n"
+    ).encode("utf-8")
+
+
+def _nfc_json_value(value: Any) -> Any:
+    if type(value) is str:
+        return unicodedata.normalize("NFC", value)
+    if type(value) is list:
+        return [_nfc_json_value(item) for item in value]
+    if type(value) is dict:
+        normalized: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise DetachedImplementationError(
+                    "invalid-handoff-envelope",
+                    "Handoff canonical JSON object keys must be strings.",
+                )
+            normalized_key = unicodedata.normalize("NFC", key)
+            if normalized_key in normalized:
+                raise DetachedImplementationError(
+                    "invalid-handoff-envelope",
+                    "Handoff canonical JSON contains colliding NFC keys.",
+                )
+            normalized[normalized_key] = _nfc_json_value(item)
+        return normalized
+    return value
+
+
+def handoff_canonical_json_body(payload: Any) -> bytes:
+    return json.dumps(
+        _nfc_json_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def handoff_canonical_json_bytes(payload: Any) -> bytes:
+    return handoff_canonical_json_body(payload) + b"\n"
+
+
+def reject_json_constant(value: str) -> None:
+    raise ValueError(f"Non-finite JSON constant is forbidden: {value}")
+
+
+def sha256_digest(raw: bytes) -> str:
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def domain_sha256(domain: bytes, raw: bytes) -> str:
+    digest = hashlib.sha256(domain)
+    digest.update(raw)
+    return "sha256:" + digest.hexdigest()
+
+
+def parse_canonical_object_bytes(raw: bytes, *, cap: int, label: str) -> dict[str, Any]:
+    if len(raw) > cap:
+        raise DetachedImplementationError(
+            "invalid-handoff-envelope",
+            f"{label} exceeds its {cap}-byte cap.",
+            size=len(raw),
+        )
+    try:
+        payload = json.loads(raw.decode("utf-8"), parse_constant=reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise DetachedImplementationError(
+            "invalid-handoff-envelope",
+            f"{label} is not strict UTF-8 JSON.",
+        ) from exc
+    if type(payload) is not dict or handoff_canonical_json_bytes(payload) != raw:
+        raise DetachedImplementationError(
+            "invalid-handoff-envelope",
+            f"{label} must be one compact sorted-key canonical JSON object with one terminal LF.",
+        )
+    return payload
+
+
+def strict_b64u_decode(value: Any, *, expected_bytes: int | None = None) -> bytes:
+    if type(value) is not str or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise DetachedImplementationError("invalid-handoff-envelope", "Handoff base64url value is not canonical.")
+    try:
+        decoded = base64.urlsafe_b64decode(value + "=" * ((4 - len(value) % 4) % 4))
+    except (ValueError, binascii.Error) as exc:
+        raise DetachedImplementationError("invalid-handoff-envelope", "Handoff base64url value is invalid.") from exc
+    if base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii") != value:
+        raise DetachedImplementationError("invalid-handoff-envelope", "Handoff base64url value is not canonical.")
+    if expected_bytes is not None and len(decoded) != expected_bytes:
+        raise DetachedImplementationError(
+            "invalid-handoff-envelope",
+            f"Handoff base64url value must decode to exactly {expected_bytes} bytes.",
+        )
+    return decoded
+
+
+def framed_command_sha256(domain: bytes, argv: list[str]) -> str:
+    digest = hashlib.sha256(domain)
+    digest.update(len(argv).to_bytes(4, "big"))
+    for argument in argv:
+        raw = argument.encode("utf-8", errors="strict")
+        digest.update(len(raw).to_bytes(4, "big"))
+        digest.update(raw)
+    return "sha256:" + digest.hexdigest()
+
+
+def handoff_root_argv(contract: dict[str, Any]) -> list[str]:
+    return [
+        HANDOFF_SUDO,
+        "-n",
+        "--",
+        HANDOFF_PYTHON,
+        "-I",
+        "-B",
+        contract["runner"],
+        "--privileged-darwin-apfs-handoff-root",
+        "--host-provisioning-receipt",
+        HANDOFF_HOST_PROVISIONING_RECEIPT,
+        "--host-input",
+        contract["host_input"],
+        "--result",
+        contract["result"],
+        "--request-fd",
+        "0",
+        "--receipt-fd",
+        "1",
+    ]
+
+
+def handoff_verifier_argv(contract: dict[str, Any]) -> list[str]:
+    return [
+        HANDOFF_PYTHON,
+        "-I",
+        "-B",
+        contract["runner"],
+        "--verify-privileged-darwin-apfs-handoff",
+        "--host-provisioning-receipt",
+        HANDOFF_HOST_PROVISIONING_RECEIPT,
+        "--framed-input-fd",
+        "0",
+    ]
+
+
+def verify_handoff_command_identities(contract: dict[str, Any]) -> None:
+    frozen_runner = HANDOFF_FROZEN_RUNNER_CONTRACTS.get(contract.get("gate_id"))
+    if frozen_runner is None or any(contract.get(field) != value for field, value in frozen_runner.items()):
+        raise DetachedImplementationError(
+            "handoff-command-drift",
+            "Fixed privileged gate runner selection does not match its frozen contract.",
+        )
+    root_argv = handoff_root_argv(contract)
+    verifier_argv = handoff_verifier_argv(contract)
+    if len(root_argv) != 18 or framed_command_sha256(
+        b"unit12-privileged-gate-handoff-command-v1\0", root_argv
+    ) != contract["command_sha256"]:
+        raise DetachedImplementationError(
+            "handoff-command-drift",
+            "Fixed privileged handoff command identity does not match its frozen contract.",
+        )
+    if len(verifier_argv) != 9 or framed_command_sha256(
+        b"unit12-privileged-gate-handoff-verifier-command-v1\0", verifier_argv
+    ) != contract["verifier_command_sha256"]:
+        raise DetachedImplementationError(
+            "handoff-command-drift",
+            "Fixed unprivileged handoff verifier command identity does not match its frozen contract.",
+        )
+
+
+def build_handoff_request(config: dict[str, Any], contract: dict[str, Any]) -> tuple[dict[str, Any], bytes, str]:
+    request_without_self = {
+        "schema": HANDOFF_REQUEST_SCHEMA,
+        "purpose": HANDOFF_PURPOSE,
+        "gate_id": contract["gate_id"],
+        "admission_state_sha256": config["admission_state_sha256"],
+        "admission_pinner_sha256": config["admission_pinner_sha256"],
+        "planning_tree_sha256": config["planning_tree_sha256"],
+        "detached_implementation_root_identity_digest": config[
+            "detached_implementation_root_identity_digest"
+        ],
+        "implement_tool_sha256": config["implement_tool_sha256"],
+        "implement_skill_sha256": config["implement_skill_sha256"],
+        "implement_test_sha256": config["implement_test_sha256"],
+    }
+    request = {
+        **request_without_self,
+        "self_digest": domain_sha256(
+            b"unit12-privileged-darwin-apfs-gate-handoff-request-v1-self\0",
+            handoff_canonical_json_body(request_without_self),
+        ),
+    }
+    if set(request) != HANDOFF_REQUEST_FIELDS:
+        raise DetachedImplementationError("invalid-handoff-request", "Handoff request fields are not exact.")
+    raw = handoff_canonical_json_bytes(request)
+    if len(raw) > HANDOFF_REQUEST_CAP:
+        raise DetachedImplementationError("invalid-handoff-request", "Handoff request exceeds its fixed cap.")
+    final_wire_digest = domain_sha256(
+        b"unit12-privileged-darwin-apfs-gate-handoff-request-v1-final-wire\0",
+        handoff_canonical_json_body(request),
+    )
+    return request, raw, final_wire_digest
+
+
+def parse_handoff_receipt(
+    raw: bytes,
+    config: dict[str, Any],
+    contract: dict[str, Any],
+    request_final_wire_digest: str,
+) -> tuple[dict[str, Any], str]:
+    receipt = parse_canonical_object_bytes(raw, cap=HANDOFF_RECEIPT_CAP, label="Handoff receipt")
+    if set(receipt) != HANDOFF_RECEIPT_FIELDS:
+        raise DetachedImplementationError(
+            "invalid-handoff-receipt",
+            "Handoff receipt fields do not match the frozen schema.",
+            missing_fields=sorted(HANDOFF_RECEIPT_FIELDS - set(receipt)),
+            extra_fields=sorted(set(receipt) - HANDOFF_RECEIPT_FIELDS),
+        )
+    expected_echoes = {
+        "schema": HANDOFF_RECEIPT_SCHEMA,
+        "purpose": HANDOFF_PURPOSE,
+        "gate_id": contract["gate_id"],
+        "handoff_request_final_wire_digest": request_final_wire_digest,
+        "admission_state_sha256": config["admission_state_sha256"],
+        "admission_pinner_sha256": config["admission_pinner_sha256"],
+        "planning_tree_sha256": config["planning_tree_sha256"],
+        "detached_implementation_root_identity_digest": config[
+            "detached_implementation_root_identity_digest"
+        ],
+        "implement_tool_sha256": config["implement_tool_sha256"],
+        "implement_skill_sha256": config["implement_skill_sha256"],
+        "implement_test_sha256": config["implement_test_sha256"],
+        "gate_command_sha256": contract["gate_command_sha256"],
+        "handoff_command_sha256": contract["command_sha256"],
+        "verdict": "PASS",
+    }
+    mismatches = {
+        key: {"expected": value, "actual": receipt.get(key)}
+        for key, value in expected_echoes.items()
+        if type(receipt.get(key)) is not str or receipt.get(key) != value
+    }
+    if mismatches:
+        raise DetachedImplementationError(
+            "handoff-receipt-drift",
+            "Handoff receipt does not echo the current request and detached config exactly.",
+            field_mismatches=mismatches,
+        )
+    integer_expectations = {
+        "result_mode": 0o600,
+        "result_uid": 0,
+        "result_gid": 0,
+        "result_nlink": 1,
+    }
+    if any(type(receipt.get(key)) is not int or receipt[key] != value for key, value in integer_expectations.items()):
+        raise DetachedImplementationError(
+            "invalid-handoff-receipt",
+            "Handoff receipt raw-result ownership metadata is invalid.",
+        )
+    if (
+        type(receipt.get("result_bytes")) is not int
+        or receipt["result_bytes"] <= 0
+        or receipt["result_bytes"] > HANDOFF_RECEIPT_CAP
+    ):
+        raise DetachedImplementationError(
+            "invalid-handoff-receipt",
+            "Handoff receipt raw-result byte count is invalid.",
+        )
+    digest_fields = {
+        "handoff_request_final_wire_digest",
+        "admission_state_sha256",
+        "admission_pinner_sha256",
+        "planning_tree_sha256",
+        "detached_implementation_root_identity_digest",
+        "privileged_evidence_root_identity_digest",
+        "implement_tool_sha256",
+        "implement_skill_sha256",
+        "implement_test_sha256",
+        "host_provisioning_receipt_final_wire_digest",
+        "host_input_final_wire_digest",
+        "result_final_wire_digest",
+        "result_sha256",
+        "gate_command_sha256",
+        "handoff_command_sha256",
+        "protected_source_root_identity_digest",
+        "source_tree_sha256",
+        "implementation_source_sha256",
+        "test_source_sha256",
+        "self_digest",
+    }
+    if any(
+        type(receipt.get(field)) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", receipt[field])
+        for field in digest_fields
+    ):
+        raise DetachedImplementationError(
+            "invalid-handoff-receipt",
+            "Handoff receipt contains an invalid lowercase SHA-256 field.",
+        )
+    for field in ("source_commit", "result_finished_at", "attestation_key_id"):
+        if type(receipt.get(field)) is not str or not receipt[field] or len(receipt[field].encode("utf-8")) > 512:
+            raise DetachedImplementationError(
+                "invalid-handoff-receipt",
+                f"Handoff receipt field is invalid: {field}",
+            )
+    strict_b64u_decode(receipt["signature_b64u"], expected_bytes=64)
+    receipt_without_self_and_signature = {
+        key: value for key, value in receipt.items() if key not in {"self_digest", "signature_b64u"}
+    }
+    expected_self_digest = domain_sha256(
+        b"unit12-privileged-darwin-apfs-gate-handoff-receipt-v1-self\0",
+        handoff_canonical_json_body(receipt_without_self_and_signature),
+    )
+    if receipt["self_digest"] != expected_self_digest:
+        raise DetachedImplementationError(
+            "invalid-handoff-receipt",
+            "Handoff receipt self digest is invalid.",
+        )
+    final_wire_digest = domain_sha256(
+        b"unit12-privileged-darwin-apfs-gate-handoff-receipt-v1-final-wire\0",
+        handoff_canonical_json_body(receipt),
+    )
+    return receipt, final_wire_digest
+
+
+def parse_handoff_verification(
+    raw: bytes,
+    config: dict[str, Any],
+    contract: dict[str, Any],
+    request_final_wire_digest: str,
+    receipt_final_wire_digest: str,
+) -> dict[str, Any]:
+    verification = parse_canonical_object_bytes(
+        raw,
+        cap=HANDOFF_VERIFICATION_CAP,
+        label="Handoff verification",
+    )
+    if set(verification) != HANDOFF_VERIFICATION_FIELDS:
+        raise DetachedImplementationError(
+            "invalid-handoff-verification",
+            "Handoff verification fields do not match the frozen schema.",
+        )
+    expected = {
+        "schema": HANDOFF_VERIFICATION_SCHEMA,
+        "purpose": HANDOFF_VERIFICATION_PURPOSE,
+        "gate_id": contract["gate_id"],
+        "handoff_request_final_wire_digest": request_final_wire_digest,
+        "handoff_receipt_final_wire_digest": receipt_final_wire_digest,
+        "admission_state_sha256": config["admission_state_sha256"],
+        "admission_pinner_sha256": config["admission_pinner_sha256"],
+        "planning_tree_sha256": config["planning_tree_sha256"],
+        "detached_implementation_root_identity_digest": config[
+            "detached_implementation_root_identity_digest"
+        ],
+        "verdict": "PASS",
+    }
+    if any(type(verification.get(key)) is not str or verification.get(key) != value for key, value in expected.items()):
+        raise DetachedImplementationError(
+            "handoff-verification-drift",
+            "Handoff verifier did not return the exact current PASS projection.",
+        )
+    return verification
+
+
+def _directory_open_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _procfs_mount_hides_processes(raw_mounts: bytes) -> bool | None:
+    for raw_line in raw_mounts.splitlines():
+        fields = raw_line.split()
+        if len(fields) < 4 or fields[1:3] != [b"/proc", b"proc"]:
+            continue
+        for option in fields[3].split(b","):
+            if option == b"hidepid":
+                return True
+            if option.startswith(b"hidepid="):
+                return option.split(b"=", 1)[1] != b"0"
+        return False
+    return None
+
+
+def _linux_proc_stat_state_and_group(raw_stat: bytes) -> tuple[bytes, int] | None:
+    closing_parenthesis = raw_stat.rfind(b")")
+    fields = raw_stat[closing_parenthesis + 1 :].split() if closing_parenthesis >= 0 else []
+    if len(fields) < 3 or len(fields[0]) != 1:
+        return None
+    try:
+        return fields[0], int(fields[2])
+    except ValueError:
+        return None
+
+
+def _linux_process_tasks_have_live_members(
+    process_dir: Path,
+    process_group: int,
+) -> bool | None:
+    try:
+        task_entries = list(os.scandir(process_dir / "task"))
+    except OSError:
+        return None
+
+    uncertain = False
+    saw_matching_task = False
+    for entry in task_entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            parsed = _linux_proc_stat_state_and_group(
+                (Path(entry.path) / "stat").read_bytes()
+            )
+        except OSError:
+            uncertain = True
+            continue
+        if parsed is None or parsed[1] != process_group:
+            uncertain = True
+            continue
+        saw_matching_task = True
+        if parsed[0] not in {b"Z", b"X", b"x"}:
+            return True
+    return None if uncertain or not saw_matching_task else False
+
+
+def _linux_process_group_has_live_members(
+    process_group: int,
+    proc_root: Path = Path("/proc"),
+) -> bool | None:
+    if proc_root == Path("/proc"):
+        try:
+            procfs_hides_processes = _procfs_mount_hides_processes(
+                (proc_root / "mounts").read_bytes()
+            )
+        except OSError:
+            return None
+        if procfs_hides_processes is not False:
+            return None
+    try:
+        process_entries = list(os.scandir(proc_root))
+    except OSError:
+        return None
+
+    uncertain = False
+    saw_matching_group_member = False
+    for entry in process_entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            parsed = _linux_proc_stat_state_and_group(
+                (Path(entry.path) / "stat").read_bytes()
+            )
+        except FileNotFoundError:
+            continue
+        except OSError:
+            uncertain = True
+            continue
+        if parsed is None:
+            uncertain = True
+            continue
+        _, observed_group = parsed
+        if observed_group != process_group:
+            continue
+        saw_matching_group_member = True
+        tasks_have_live_members = _linux_process_tasks_have_live_members(
+            Path(entry.path),
+            process_group,
+        )
+        if tasks_have_live_members is True:
+            return True
+        if tasks_have_live_members is None:
+            uncertain = True
+    return None if uncertain or not saw_matching_group_member else False
+
+
+def run_bounded_child(
+    argv: list[str],
+    input_bytes: bytes,
+    *,
+    cwd_fd: int,
+    timeout_seconds: float,
+    stdout_cap: int,
+    stderr_cap: int,
+    child_env: dict[str, str] | None = None,
+) -> tuple[int, bytes, bytes]:
+    dirty_status_probe = argv == [HANDOFF_GIT, *HANDOFF_GIT_STATUS_ARGS] and stdout_cap == 1
+
+    def process_group_has_live_members(process_group: int) -> bool:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        linux_live_members = (
+            _linux_process_group_has_live_members(process_group)
+            if sys.platform.startswith("linux")
+            else None
+        )
+        return True if linux_live_members is None else linux_live_members
+
+    def reap_leader_if_group_absent(process: subprocess.Popen[bytes], process_group: int) -> bool:
+        process.poll()
+        if process_group_has_live_members(process_group):
+            return False
+        try:
+            process.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
+    def wait_for_group_exit(process: subprocess.Popen[bytes], process_group: int, seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if reap_leader_if_group_absent(process, process_group):
+                return True
+            time.sleep(0.01)
+        return reap_leader_if_group_absent(process, process_group)
+
+    def terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
+        process_group = process.pid
+        if reap_leader_if_group_absent(process, process_group):
+            return
+        try:
+            os.killpg(process_group, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError) as exc:
+            if wait_for_group_exit(process, process_group, 2.0):
+                return
+            raise DetachedImplementationError(
+                "handoff-child-termination-unproven",
+                "Privileged handoff child process group could not be signalled for bounded termination.",
+            ) from exc
+        if wait_for_group_exit(process, process_group, 2.0):
+            return
+        if reap_leader_if_group_absent(process, process_group):
+            return
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError) as exc:
+            if wait_for_group_exit(process, process_group, 2.0):
+                return
+            raise DetachedImplementationError(
+                "handoff-child-termination-unproven",
+                "Privileged handoff child process group could not be killed for bounded termination.",
+            ) from exc
+        if not wait_for_group_exit(process, process_group, 2.0):
+            raise DetachedImplementationError(
+                "handoff-child-termination-unproven",
+                "Privileged handoff child process group could not be boundedly terminated and reaped.",
+            )
+
+    process: subprocess.Popen[bytes] | None = None
+    process_group_closed = False
+    selector = selectors.DefaultSelector()
+    stdout = bytearray()
+    stderr = bytearray()
+
+    def enter_descriptor_cwd() -> None:
+        os.fchdir(cwd_fd)
+        os.close(cwd_fd)
+
+    with tempfile.TemporaryFile() as child_stdin:
+        child_stdin.write(input_bytes)
+        child_stdin.flush()
+        child_stdin.seek(0)
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdin=child_stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=None,
+                env=HANDOFF_ENV if child_env is None else child_env,
+                shell=False,
+                close_fds=True,
+                pass_fds=(cwd_fd,),
+                preexec_fn=enter_descriptor_cwd,
+                start_new_session=True,
+            )
+            assert process.stdout is not None and process.stderr is not None
+            for stream, label in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ, label)
+            deadline = time.monotonic() + timeout_seconds
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DetachedImplementationError(
+                        "handoff-child-timeout",
+                        "Privileged handoff child exceeded its fixed deadline.",
+                    )
+                events = selector.select(min(remaining, 0.25))
+                if not events and process.poll() is not None:
+                    events = [(key, selectors.EVENT_READ) for key in list(selector.get_map().values())]
+                for key, _ in events:
+                    stream = key.fileobj
+                    target = stdout if key.data == "stdout" else stderr
+                    cap = stdout_cap if key.data == "stdout" else stderr_cap
+                    read_size = 65536
+                    if key.data == "stdout" and dirty_status_probe:
+                        read_size = cap - len(target)
+                        if read_size <= 0:
+                            raise DetachedImplementationError(
+                                "handoff-child-output-cap",
+                                "Privileged handoff child exceeded its fixed stdout cap.",
+                            )
+                    try:
+                        chunk = os.read(stream.fileno(), read_size)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(stream)
+                        continue
+                    if key.data == "stdout" and dirty_status_probe:
+                        raise DetachedImplementationError(
+                            "handoff-source-dirty",
+                            "Protected source contains tracked or untracked worktree changes.",
+                        )
+                    target.extend(chunk)
+                    if len(target) > cap:
+                        raise DetachedImplementationError(
+                            "handoff-child-output-cap",
+                            f"Privileged handoff child exceeded its fixed {key.data} cap.",
+                        )
+            return_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            if process_group_has_live_members(process.pid):
+                raise DetachedImplementationError(
+                    "handoff-child-residual-process-group",
+                    "Privileged handoff child left a residual process-group member after apparent success.",
+                )
+            process_group_closed = True
+            return return_code, bytes(stdout), bytes(stderr)
+        except Exception:
+            if process is not None and not process_group_closed:
+                terminate_and_reap(process)
+            raise
+        finally:
+            selector.close()
+            if process is not None:
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
+
+
+def open_directory_chain_no_follow(path: Path, *, create: bool = False) -> int:
+    absolute = absolute_path_no_follow(path)
+    current_fd = os.open(os.sep, _directory_open_flags())
+    traversed = Path(os.sep)
+    try:
+        for component in absolute.parts[1:]:
+            traversed /= component
+            try:
+                next_fd = os.open(component, _directory_open_flags(), dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise DetachedImplementationError(
+                        "unsafe-detached-path",
+                        f"Required no-follow directory component is missing: {traversed}",
+                        path=str(traversed),
+                    )
+                os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                next_fd = os.open(component, _directory_open_flags(), dir_fd=current_fd)
+            except OSError as exc:
+                raise DetachedImplementationError(
+                    "unsafe-detached-path",
+                    f"Unsafe directory component (including any symbolic link) is refused: {traversed}",
+                    path=str(traversed),
+                ) from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _relative_parts(relative: str) -> tuple[str, ...]:
+    candidate = Path(relative)
+    if candidate.is_absolute() or not candidate.parts or any(part in {"", ".", ".."} for part in candidate.parts):
+        raise DetachedImplementationError(
+            "unsafe-detached-path",
+            f"Detached path must be a non-empty relative path without traversal: {relative}",
+            path=relative,
+        )
+    return candidate.parts
+
+
+def open_relative_directory(root_fd: int, relative: str, *, create: bool = False) -> int:
+    parts = _relative_parts(relative)
+    current_fd = os.dup(root_fd)
+    traversed: list[str] = []
+    try:
+        for component in parts:
+            traversed.append(component)
+            try:
+                next_fd = os.open(component, _directory_open_flags(), dir_fd=current_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise DetachedImplementationError(
+                        "unsafe-detached-path",
+                        f"Detached directory is missing: {'/'.join(traversed)}",
+                        path="/".join(traversed),
+                    )
+                os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                next_fd = os.open(component, _directory_open_flags(), dir_fd=current_fd)
+            except OSError as exc:
+                raise DetachedImplementationError(
+                    "unsafe-detached-path",
+                    f"Detached directory contains a symbolic link or non-directory component: {'/'.join(traversed)}",
+                    path="/".join(traversed),
+                ) from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def open_relative_parent(root_fd: int, relative: str, *, create: bool = False) -> tuple[int, str]:
+    parts = _relative_parts(relative)
+    if len(parts) == 1:
+        return os.dup(root_fd), parts[0]
+    parent_fd = open_relative_directory(root_fd, "/".join(parts[:-1]), create=create)
+    return parent_fd, parts[-1]
+
+
+def read_single_link_regular_at(
+    root_fd: int,
+    relative: str,
+    *,
+    cap: int,
+    require_mode: int | None = None,
+) -> bytes:
+    parent_fd, name = open_relative_parent(root_fd, relative)
+    file_fd: int | None = None
+    try:
+        try:
+            file_fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        except OSError as exc:
+            raise DetachedImplementationError(
+                "unsafe-detached-file",
+                f"Detached file is missing, replaced, or a symbolic link: {relative}",
+                path=relative,
+            ) from exc
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise DetachedImplementationError(
+                "unsafe-detached-file",
+                f"Detached file must be a regular single-link file: {relative}",
+                path=relative,
+                link_count=file_stat.st_nlink,
+            )
+        if require_mode is not None and stat.S_IMODE(file_stat.st_mode) != require_mode:
+            raise DetachedImplementationError(
+                "unsafe-detached-file",
+                f"Detached canonical JSON must have mode {require_mode:04o}: {relative}",
+                path=relative,
+                mode=stat.S_IMODE(file_stat.st_mode),
+            )
+        if file_stat.st_size > cap:
+            raise DetachedImplementationError(
+                "detached-file-too-large",
+                f"Detached file exceeds its {cap}-byte cap: {relative}",
+                path=relative,
+                size=file_stat.st_size,
+            )
+        chunks: list[bytes] = []
+        remaining = cap + 1
+        while remaining:
+            chunk = os.read(file_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > cap:
+            raise DetachedImplementationError(
+                "detached-file-too-large",
+                f"Detached file exceeds its {cap}-byte cap: {relative}",
+                path=relative,
+                size=len(raw),
+            )
+        after_read = os.fstat(file_fd)
+        stable_fields = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+        if stable_fields(file_stat) != stable_fields(after_read) or len(raw) != file_stat.st_size:
+            raise DetachedImplementationError(
+                "detached-file-changed",
+                f"Detached file changed while its bytes were read: {relative}",
+                path=relative,
+            )
+        return raw
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
+def load_canonical_json_at(root_fd: int, relative: str) -> tuple[dict[str, Any], bytes]:
+    raw = read_single_link_regular_at(root_fd, relative, cap=DETACHED_JSON_CAP, require_mode=0o600)
+    try:
+        payload = json.loads(raw.decode("utf-8"), parse_constant=reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise DetachedImplementationError(
+            "invalid-detached-json",
+            f"Detached JSON is not canonical UTF-8 JSON: {relative}",
+            path=relative,
+        ) from exc
+    if not isinstance(payload, dict) or canonical_json_bytes(payload) != raw:
+        raise DetachedImplementationError(
+            "invalid-detached-json",
+            f"Detached JSON must be a canonical object with one terminal LF: {relative}",
+            path=relative,
+        )
+    return payload, raw
+
+
+def load_canonical_json_bytes(raw: bytes, label: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw.decode("utf-8"), parse_constant=reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            f"{label} is not canonical UTF-8 JSON.",
+        ) from exc
+    if not isinstance(payload, dict) or canonical_json_bytes(payload) != raw:
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            f"{label} must be a canonical JSON object with one terminal LF.",
+        )
+    return payload
+
+
+def _write_all(file_fd: int, raw: bytes) -> None:
+    offset = 0
+    while offset < len(raw):
+        written = os.write(file_fd, raw[offset:])
+        if written <= 0:
+            raise OSError("short write")
+        offset += written
+
+
+def write_regular_bytes_at(root_fd: int, relative: str, raw: bytes, *, cap: int) -> tuple[str, int]:
+    if len(raw) > cap:
+        raise DetachedImplementationError(
+            "detached-file-too-large",
+            f"Detached output exceeds its {cap}-byte cap: {relative}",
+            path=relative,
+            size=len(raw),
+        )
+    parent_fd, name = open_relative_parent(root_fd, relative, create=True)
+    temporary = f".{name}.{os.getpid()}.{time.time_ns()}.tmp"
+    temporary_fd: int | None = None
+    try:
+        try:
+            read_single_link_regular_at(root_fd, relative, cap=cap, require_mode=0o600)
+        except DetachedImplementationError as exc:
+            if exc.code != "unsafe-detached-file":
+                raise
+            try:
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise
+        temporary_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        _write_all(temporary_fd, raw)
+        os.fsync(temporary_fd)
+        os.close(temporary_fd)
+        temporary_fd = None
+        os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        reopened = read_single_link_regular_at(root_fd, relative, cap=cap, require_mode=0o600)
+        if reopened != raw:
+            raise DetachedImplementationError(
+                "detached-write-mismatch",
+                f"Detached output changed after write: {relative}",
+                path=relative,
+            )
+        return sha256_digest(raw), len(raw)
+    finally:
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        try:
+            os.unlink(temporary, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        os.close(parent_fd)
+
+
+def write_canonical_json_at(
+    root_fd: int,
+    relative: str,
+    payload: dict[str, Any],
+    *,
+    immutable: bool = False,
+    report_created: bool = False,
+) -> tuple[str, int] | tuple[str, int, bool]:
+    raw = canonical_json_bytes(payload)
+    if len(raw) > DETACHED_JSON_CAP:
+        raise DetachedImplementationError(
+            "detached-file-too-large",
+            f"Detached canonical JSON exceeds its {DETACHED_JSON_CAP}-byte cap: {relative}",
+            path=relative,
+            size=len(raw),
+        )
+    parent_fd, name = open_relative_parent(root_fd, relative, create=True)
+    created = False
+    try:
+        if immutable:
+            try:
+                file_fd = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+            except FileExistsError:
+                existing = read_single_link_regular_at(root_fd, relative, cap=DETACHED_JSON_CAP, require_mode=0o600)
+                if existing != raw:
+                    raise DetachedImplementationError(
+                        "pinner-conflict",
+                        f"Immutable detached receipt already exists with different bytes: {relative}",
+                        path=relative,
+                    )
+                result: tuple[str, int] | tuple[str, int, bool] = (
+                    (sha256_digest(existing), len(existing), False)
+                    if report_created
+                    else (sha256_digest(existing), len(existing))
+                )
+                return result
+            created = True
+            try:
+                _write_all(file_fd, raw)
+                os.fsync(file_fd)
+            finally:
+                os.close(file_fd)
+            os.fsync(parent_fd)
+        else:
+            try:
+                read_single_link_regular_at(root_fd, relative, cap=DETACHED_JSON_CAP, require_mode=0o600)
+            except DetachedImplementationError as exc:
+                if exc.code != "unsafe-detached-file":
+                    raise
+                try:
+                    os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise
+            temporary = f".{name}.tmp"
+            temporary_fd: int | None = None
+            try:
+                temporary_fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                _write_all(temporary_fd, raw)
+                os.fsync(temporary_fd)
+                os.close(temporary_fd)
+                temporary_fd = None
+                os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            finally:
+                if temporary_fd is not None:
+                    os.close(temporary_fd)
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+        reopened = read_single_link_regular_at(root_fd, relative, cap=DETACHED_JSON_CAP, require_mode=0o600)
+        if reopened != raw:
+            raise DetachedImplementationError(
+                "detached-write-mismatch",
+                f"Detached canonical JSON changed after write: {relative}",
+                path=relative,
+            )
+        return (
+            (sha256_digest(raw), len(raw), created)
+            if report_created
+            else (sha256_digest(raw), len(raw))
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def detached_setup_prefix_payload(
+    slot: str,
+    *,
+    planning_dir: Path,
+    sections_dir: Path,
+    target_dir: Path,
+    target_root_identity_digest: str,
+    implementation_root: Path,
+    guard: FrozenPlanningTree,
+    admission_path: Path,
+    admission_sha256: str,
+    admission_size: int,
+    admission_state_sha256: str,
+    source_records: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    without_self = {
+        "schema": DETACHED_SETUP_PREFIX_SCHEMA,
+        "slot": slot,
+        "planning_dir": str(planning_dir),
+        "sections_dir": str(sections_dir),
+        "target_dir": str(target_dir),
+        "target_root_identity_digest": target_root_identity_digest,
+        "implementation_root": str(implementation_root),
+        "planning_tree_sha256": guard.digest,
+        "planning_file_count": guard.file_count,
+        "planning_total_bytes": guard.total_bytes,
+        "admission_pinner_path": str(admission_path),
+        "admission_pinner_sha256": admission_sha256,
+        "admission_pinner_size": admission_size,
+        "admission_state_sha256": admission_state_sha256,
+        "implement_tool_sha256": source_records["tool"]["sha256"],
+        "implement_skill_sha256": source_records["skill"]["sha256"],
+        "implement_test_sha256": source_records["test"]["sha256"],
+    }
+    payload = {
+        **without_self,
+        "self_digest": domain_sha256(
+            b"zagrosi-detached-implementation-setup-prefix-v2-self\0",
+            canonical_json_bytes(without_self),
+        ),
+    }
+    require_exact_fields(payload, DETACHED_SETUP_PREFIX_FIELDS, f"Detached setup prefix for {slot}")
+    return payload
+
+
+def ensure_detached_root_file_slot(
+    root_fd: int,
+    relative: str,
+    pending_payload: dict[str, Any],
+) -> tuple[bool, dict[str, Any], bytes]:
+    parent_fd, name = open_relative_parent(root_fd, relative)
+    file_fd: int | None = None
+    temporary = f".{name}.setup.tmp"
+    pending_raw = canonical_json_bytes(pending_payload)
+    try:
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            existing, existing_raw = load_canonical_json_at(root_fd, relative)
+            return False, existing, existing_raw
+        file_fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        _write_all(file_fd, pending_raw)
+        os.fsync(file_fd)
+        os.close(file_fd)
+        file_fd = None
+        try:
+            os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise DetachedImplementationError(
+                "detached-setup-prefix-conflict",
+                f"Detached setup slot appeared before atomic publication: {relative}",
+            )
+        os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        return True, pending_payload, pending_raw
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
+def unlink_immutable_json_if_exact_at(root_fd: int, relative: str, expected_raw: bytes) -> None:
+    parent_fd, name = open_relative_parent(root_fd, relative)
+    try:
+        actual = read_single_link_regular_at(root_fd, relative, cap=DETACHED_JSON_CAP, require_mode=0o600)
+        if actual != expected_raw:
+            raise DetachedImplementationError(
+                "pinner-cleanup-conflict",
+                f"Refusing to remove an immutable pinner whose bytes changed: {relative}",
+                path=relative,
+            )
+        os.unlink(name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def require_safe_detached_global_anchor(anchor_fd: int) -> tuple[int, int, int, int, int, int]:
+    observed = os.fstat(anchor_fd)
+    mode = stat.S_IMODE(observed.st_mode)
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or observed.st_uid != 0
+        or observed.st_nlink < 1
+        or mode & 0o022
+    ):
+        raise DetachedImplementationError(
+            "unsafe-detached-global-lock",
+            "The fixed global detached lock anchor must remain a root-owned, non-writable filesystem root directory.",
+        )
+    return (
+        observed.st_dev,
+        observed.st_ino,
+        observed.st_mode,
+        observed.st_uid,
+        observed.st_gid,
+        observed.st_nlink,
+    )
+
+
+@contextmanager
+def detached_global_lock(deadline: float):
+    anchor_fd: int | None = None
+    locked = False
+    try:
+        anchor_fd = os.open(DETACHED_GLOBAL_LOCK_PATH, _directory_open_flags())
+        os.set_inheritable(anchor_fd, False)
+        acquired_metadata = require_safe_detached_global_anchor(anchor_fd)
+        while True:
+            try:
+                fcntl.flock(anchor_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise DetachedImplementationError(
+                        "detached-lock-timeout",
+                        "Timed out waiting for the fixed global detached lifecycle lock.",
+                        path=str(DETACHED_GLOBAL_LOCK_PATH),
+                    )
+                time.sleep(0.01)
+            except OSError as exc:
+                if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EINVAL}:
+                    raise DetachedImplementationError(
+                        "detached-global-lock-unsupported",
+                        "The fixed filesystem-root anchor does not support the required directory flock semantics.",
+                    ) from exc
+                raise
+
+        def require_current_global_authority() -> None:
+            if anchor_fd is None or not locked:
+                raise DetachedImplementationError(
+                    "unsafe-detached-global-lock",
+                    "The fixed global detached lifecycle lock is not held.",
+                )
+            if require_safe_detached_global_anchor(anchor_fd) != acquired_metadata:
+                raise DetachedImplementationError(
+                    "unsafe-detached-global-lock",
+                    "The fixed global detached lock anchor metadata changed while held.",
+                )
+            reopened_fd = os.open(DETACHED_GLOBAL_LOCK_PATH, _directory_open_flags())
+            try:
+                os.set_inheritable(reopened_fd, False)
+                reopened_metadata = require_safe_detached_global_anchor(reopened_fd)
+                if reopened_metadata != acquired_metadata:
+                    raise DetachedImplementationError(
+                        "unsafe-detached-global-lock",
+                        "The lexical filesystem root no longer names the acquired global lock anchor.",
+                    )
+            finally:
+                os.close(reopened_fd)
+
+        require_current_global_authority()
+        yield require_current_global_authority
+    finally:
+        if anchor_fd is not None:
+            if locked:
+                try:
+                    fcntl.flock(anchor_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(anchor_fd)
+            except OSError:
+                pass
+
+
+@contextmanager
+def section_record_lock(
+    root_fd: int,
+    implementation_root: Path,
+    timeout_seconds: float = 5.0,
+    *,
+    create_marker_parent: bool = False,
+    defer_marker: bool = False,
+):
+    parent_fd: int | None = None
+    name = Path(SECTION_RECORD_LOCK_PATH).name
+    lock_fd: int | None = None
+    authority_fd = os.dup(root_fd)
+    os.set_inheritable(authority_fd, False)
+    locked = False
+    created = False
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            try:
+                fcntl.flock(authority_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise DetachedImplementationError(
+                        "detached-lock-timeout",
+                        "Timed out waiting for the OS-released section-record lock.",
+                        path=SECTION_RECORD_LOCK_PATH,
+                    )
+                time.sleep(0.01)
+            except OSError as exc:
+                if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+                    raise DetachedImplementationError(
+                        "section-record-lock-unsupported",
+                        "The detached implementation filesystem does not support directory flock authority.",
+                    ) from exc
+                raise
+        reopened_root_fd = open_directory_chain_no_follow(implementation_root)
+        try:
+            if _fd_identity(reopened_root_fd) != _fd_identity(root_fd):
+                raise DetachedImplementationError(
+                    "detached-root-replaced",
+                    "Detached implementation root path no longer names the flocked authority descriptor.",
+                )
+        finally:
+            os.close(reopened_root_fd)
+
+        def ensure_marker(*, create_parent: bool, allow_create: bool) -> None:
+            nonlocal parent_fd, lock_fd, created
+            if lock_fd is not None:
+                return
+            parent_fd, marker_name = open_relative_parent(
+                root_fd,
+                SECTION_RECORD_LOCK_PATH,
+                create=create_parent,
+            )
+            if allow_create:
+                try:
+                    lock_fd = os.open(
+                        marker_name,
+                        os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                        0o600,
+                        dir_fd=parent_fd,
+                    )
+                    created = True
+                except FileExistsError:
+                    lock_fd = os.open(
+                        marker_name,
+                        os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_fd,
+                    )
+            else:
+                try:
+                    lock_fd = os.open(
+                        marker_name,
+                        os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_fd,
+                    )
+                except FileNotFoundError as exc:
+                    raise DetachedImplementationError(
+                        "unsafe-section-record-lock",
+                        "The required diagnostic section-record marker is missing.",
+                    ) from exc
+            observed = os.fstat(lock_fd)
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or stat.S_IMODE(observed.st_mode) != 0o600
+                or observed.st_uid != os.getuid()
+                or observed.st_nlink != 1
+            ):
+                raise DetachedImplementationError(
+                    "unsafe-section-record-lock",
+                    "Section-record lock must be an owner-0600 regular single-link file.",
+                )
+            if created:
+                os.fsync(lock_fd)
+                os.fsync(parent_fd)
+
+        if not defer_marker:
+            ensure_marker(create_parent=create_marker_parent, allow_create=create_marker_parent)
+
+        def require_current_lock_authority(
+            *,
+            create_marker: bool = False,
+            require_marker: bool = False,
+        ) -> None:
+            reopened_root_fd = open_directory_chain_no_follow(implementation_root)
+            try:
+                if _fd_identity(reopened_root_fd) != _fd_identity(root_fd):
+                    raise DetachedImplementationError(
+                        "detached-root-replaced",
+                        "Detached implementation root path no longer names the flocked authority descriptor.",
+                    )
+            finally:
+                os.close(reopened_root_fd)
+            if create_marker:
+                ensure_marker(create_parent=True, allow_create=True)
+            elif require_marker:
+                ensure_marker(create_parent=False, allow_create=False)
+            if lock_fd is None or parent_fd is None:
+                return
+            current_parent_fd, current_name = open_relative_parent(root_fd, SECTION_RECORD_LOCK_PATH)
+            reopened_fd: int | None = None
+            try:
+                if _fd_identity(current_parent_fd) != _fd_identity(parent_fd):
+                    raise DetachedImplementationError(
+                        "unsafe-section-record-lock",
+                        "The lexical pinners directory no longer names the marker's acquired parent inode.",
+                    )
+                reopened_fd = os.open(
+                    current_name,
+                    os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=current_parent_fd,
+                )
+                reopened = os.fstat(reopened_fd)
+                held = os.fstat(lock_fd)
+                if (
+                    (reopened.st_dev, reopened.st_ino) != (held.st_dev, held.st_ino)
+                    or not stat.S_ISREG(reopened.st_mode)
+                    or stat.S_IMODE(reopened.st_mode) != 0o600
+                    or reopened.st_uid != os.getuid()
+                    or reopened.st_nlink != 1
+                ):
+                    raise DetachedImplementationError(
+                        "unsafe-section-record-lock",
+                        "Section-record lock path no longer names the acquired safe lock inode.",
+                    )
+            finally:
+                if reopened_fd is not None:
+                    os.close(reopened_fd)
+                os.close(current_parent_fd)
+
+        require_current_lock_authority()
+        yield require_current_lock_authority
+    finally:
+        if locked:
+            try:
+                fcntl.flock(authority_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            os.close(authority_fd)
+        except OSError:
+            pass
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+        if parent_fd is not None:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
+
+
+def section_record_transaction_dir(root_fd: int, *, create: bool = False) -> int | None:
+    pinners_fd = open_relative_directory(root_fd, "pinners")
+    name = Path(SECTION_RECORD_TRANSACTION_DIR).name
+    try:
+        try:
+            transaction_fd = os.open(name, _directory_open_flags(), dir_fd=pinners_fd)
+        except FileNotFoundError:
+            if not create:
+                return None
+            os.mkdir(name, 0o700, dir_fd=pinners_fd)
+            os.fsync(pinners_fd)
+            transaction_fd = os.open(name, _directory_open_flags(), dir_fd=pinners_fd)
+        observed = os.fstat(transaction_fd)
+        if (
+            not stat.S_ISDIR(observed.st_mode)
+            or stat.S_IMODE(observed.st_mode) != 0o700
+            or observed.st_uid != os.getuid()
+        ):
+            os.close(transaction_fd)
+            raise DetachedImplementationError(
+                "unsafe-section-record-transaction",
+                "Section-record transaction path must be an owner-0700 directory.",
+            )
+        reopened_fd = os.open(name, _directory_open_flags(), dir_fd=pinners_fd)
+        try:
+            if _fd_identity(reopened_fd) != _fd_identity(transaction_fd):
+                os.close(transaction_fd)
+                raise DetachedImplementationError(
+                    "unsafe-section-record-transaction",
+                    "Section-record transaction directory changed while it was opened.",
+                )
+        finally:
+            os.close(reopened_fd)
+        return transaction_fd
+    finally:
+        os.close(pinners_fd)
+
+
+def remove_section_record_transaction_dir(root_fd: int) -> None:
+    pinners_fd = open_relative_directory(root_fd, "pinners")
+    try:
+        os.rmdir(Path(SECTION_RECORD_TRANSACTION_DIR).name, dir_fd=pinners_fd)
+        os.fsync(pinners_fd)
+    finally:
+        os.close(pinners_fd)
+
+
+def write_new_fixed_file_at(root_fd: int, name: str, raw: bytes) -> None:
+    if "/" in name or name in {"", ".", ".."}:
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction file name is not fixed.",
+        )
+    if len(raw) > DETACHED_JSON_CAP:
+        raise DetachedImplementationError(
+            "detached-file-too-large",
+            f"Section-record transaction file exceeds its {DETACHED_JSON_CAP}-byte cap: {name}",
+        )
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=root_fd,
+        )
+        _write_all(file_fd, raw)
+        os.fsync(file_fd)
+        os.close(file_fd)
+        file_fd = None
+        os.fsync(root_fd)
+        reopened = read_single_link_regular_at(root_fd, name, cap=DETACHED_JSON_CAP, require_mode=0o600)
+        if reopened != raw:
+            raise DetachedImplementationError(
+                "detached-write-mismatch",
+                f"Section-record transaction file changed after durable write: {name}",
+            )
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+
+
+def rename_fixed_file_no_replace_at(root_fd: int, source: str, destination: str) -> None:
+    for name in (source, destination):
+        if "/" in name or name in {"", ".", ".."}:
+            raise DetachedImplementationError(
+                "invalid-section-record-transaction",
+                "Section-record publication file name is not fixed.",
+            )
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    ctypes.set_errno(0)
+    if sys.platform == "darwin":
+        rename_exclusive = getattr(libc, "renameatx_np", None)
+        if rename_exclusive is None:
+            raise DetachedImplementationError(
+                "unsupported-section-record-publication",
+                "Atomic no-replace section-record publication is unavailable on this host.",
+            )
+        rename_exclusive.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename_exclusive.restype = ctypes.c_int
+        result = rename_exclusive(
+            root_fd,
+            source_bytes,
+            root_fd,
+            destination_bytes,
+            0x00000004,  # Darwin RENAME_EXCL.
+        )
+    elif sys.platform.startswith("linux"):
+        rename_exclusive = getattr(libc, "renameat2", None)
+        if rename_exclusive is None:
+            raise DetachedImplementationError(
+                "unsupported-section-record-publication",
+                "Atomic no-replace section-record publication is unavailable on this host.",
+            )
+        rename_exclusive.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename_exclusive.restype = ctypes.c_int
+        result = rename_exclusive(
+            root_fd,
+            source_bytes,
+            root_fd,
+            destination_bytes,
+            0x00000001,  # Linux RENAME_NOREPLACE.
+        )
+    else:
+        raise DetachedImplementationError(
+            "unsupported-section-record-publication",
+            "Atomic no-replace section-record publication is unavailable on this host.",
+        )
+    if result != 0:
+        observed_errno = ctypes.get_errno()
+        if observed_errno == errno.EEXIST:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                f"Section-record publication target already exists: {destination}",
+                transaction_member=destination,
+            )
+        raise DetachedImplementationError(
+            "unsupported-section-record-publication"
+            if observed_errno in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+            else "unsafe-section-record-transaction",
+            f"Atomic no-replace section-record publication failed: {source} -> {destination}",
+            transaction_member=destination,
+            errno=observed_errno,
+        )
+
+
+def publish_section_record_staged_pinner(transaction_fd: int, pinner_raw: bytes) -> None:
+    load_canonical_json_bytes(pinner_raw, "Section-record staged pinner")
+    write_new_fixed_file_at(transaction_fd, "pinner.tmp", pinner_raw)
+    rename_fixed_file_no_replace_at(transaction_fd, "pinner.tmp", "pinner.json")
+    os.fsync(transaction_fd)
+    reopened = read_single_link_regular_at(
+        transaction_fd,
+        "pinner.json",
+        cap=DETACHED_JSON_CAP,
+        require_mode=0o600,
+    )
+    if reopened != pinner_raw:
+        raise DetachedImplementationError(
+            "detached-write-mismatch",
+            "Section-record staged pinner changed after atomic publication.",
+        )
+
+
+def unlink_fixed_file_at(root_fd: int, name: str, *, missing_ok: bool = False) -> None:
+    try:
+        os.unlink(name, dir_fd=root_fd)
+    except FileNotFoundError:
+        if not missing_ok:
+            raise
+        return
+    os.fsync(root_fd)
+
+
+def publish_section_record_transaction(
+    root_fd: int,
+    transaction_fd: int,
+    payload: dict[str, Any],
+    expected_base_raw: bytes,
+) -> bytes:
+    require_exact_fields(payload, SECTION_RECORD_TRANSACTION_FIELDS, "Section-record transaction")
+    raw = canonical_json_bytes(payload)
+    if payload.get("base_state_sha256") != sha256_digest(expected_base_raw):
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record journal base digest does not match its exact publication base.",
+        )
+    write_new_fixed_file_at(transaction_fd, "transaction.write.tmp", raw)
+    rename_fixed_file_no_replace_at(
+        transaction_fd,
+        "transaction.write.tmp",
+        "transaction.tmp",
+    )
+    os.fsync(transaction_fd)
+    transaction, reopened_tmp = load_canonical_json_at(transaction_fd, "transaction.tmp")
+    require_exact_fields(transaction, SECTION_RECORD_TRANSACTION_FIELDS, "Section-record transaction")
+    _, current_state_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if reopened_tmp != raw or current_state_raw != expected_base_raw:
+        raise DetachedImplementationError(
+            "section-record-state-conflict",
+            "Section-record journal or exact base state changed before publication.",
+        )
+    rename_fixed_file_no_replace_at(
+        transaction_fd,
+        "transaction.tmp",
+        "transaction.json",
+    )
+    os.fsync(transaction_fd)
+    _, reopened = load_canonical_json_at(transaction_fd, "transaction.json")
+    if reopened != raw:
+        raise DetachedImplementationError(
+            "detached-write-mismatch",
+            "Section-record transaction journal changed after publication.",
+        )
+    return raw
+
+
+def publish_section_record_rollback(
+    transaction_fd: int,
+    expected_transaction_raw: bytes,
+) -> None:
+    if section_record_entry_stat(transaction_fd, "rollback.json") is not None:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Section-record transaction already contains a rollback marker.",
+        )
+    _, observed_raw = load_canonical_json_at(transaction_fd, "transaction.json")
+    if observed_raw != expected_transaction_raw:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Section-record transaction changed before durable rollback publication.",
+        )
+    os.replace(
+        "transaction.json",
+        "rollback.json",
+        src_dir_fd=transaction_fd,
+        dst_dir_fd=transaction_fd,
+    )
+    os.fsync(transaction_fd)
+    _, reopened_raw = load_canonical_json_at(transaction_fd, "rollback.json")
+    if reopened_raw != expected_transaction_raw:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Section-record rollback marker changed after durable publication.",
+        )
+
+
+def read_regular_at_allow_links(
+    root_fd: int,
+    relative: str,
+    *,
+    allowed_link_counts: set[int],
+) -> tuple[bytes, os.stat_result]:
+    parent_fd, name = open_relative_parent(root_fd, relative)
+    file_fd: int | None = None
+    try:
+        file_fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        before = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_uid != os.getuid()
+            or before.st_nlink not in allowed_link_counts
+            or before.st_size > DETACHED_JSON_CAP
+        ):
+            raise DetachedImplementationError(
+                "unsafe-section-record-transaction",
+                f"Section-record staged file metadata is unsafe: {relative}",
+                path=relative,
+            )
+        chunks: list[bytes] = []
+        remaining = DETACHED_JSON_CAP + 1
+        while remaining:
+            chunk = os.read(file_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(file_fd)
+        stable = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+        if len(raw) > DETACHED_JSON_CAP or len(raw) != before.st_size or stable(before) != stable(after):
+            raise DetachedImplementationError(
+                "unsafe-section-record-transaction",
+                f"Section-record staged file changed while read: {relative}",
+                path=relative,
+            )
+        return raw, after
+    except OSError as exc:
+        raise DetachedImplementationError(
+            "unsafe-section-record-transaction",
+            f"Section-record staged file is missing or unsafe: {relative}",
+            path=relative,
+        ) from exc
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
+def replace_state_from_transaction(
+    root_fd: int,
+    transaction_fd: int,
+    expected_raw: bytes,
+    replacement: dict[str, Any],
+) -> bytes:
+    _, current_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if current_raw != expected_raw:
+        raise DetachedImplementationError(
+            "section-record-state-conflict",
+            "Section-record state no longer equals the transaction's exact compare-and-swap base.",
+        )
+    replacement_raw = canonical_json_bytes(replacement)
+    if section_record_entry_stat(transaction_fd, "state.json") is None:
+        write_new_fixed_file_at(transaction_fd, "state.json", replacement_raw)
+    else:
+        staged_replacement = read_single_link_regular_at(
+            transaction_fd,
+            "state.json",
+            cap=DETACHED_JSON_CAP,
+            require_mode=0o600,
+        )
+        if staged_replacement != replacement_raw:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Forward state temp is not the exact transaction candidate projection.",
+            )
+    _, current_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if current_raw != expected_raw:
+        raise DetachedImplementationError(
+            "section-record-state-conflict",
+            "Section-record state changed before atomic promotion.",
+        )
+    os.replace("state.json", "zagrosi_implement_state.json", src_dir_fd=transaction_fd, dst_dir_fd=root_fd)
+    os.fsync(root_fd)
+    _, reopened_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if reopened_raw != replacement_raw:
+        raise DetachedImplementationError(
+            "detached-write-mismatch",
+            "Section-record state changed after atomic promotion.",
+        )
+    return replacement_raw
+
+
+def replace_state_from_rollback(
+    root_fd: int,
+    transaction_fd: int,
+    expected_candidate_raw: bytes,
+    base_state: dict[str, Any],
+    base_raw: bytes,
+) -> None:
+    _, current_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if current_raw == base_raw:
+        if section_record_entry_stat(transaction_fd, "state.json") is not None:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Rollback state temp remained after the exact base state was already published.",
+            )
+        return
+    if current_raw != expected_candidate_raw:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Rollback root state is neither the exact transaction candidate nor exact base.",
+        )
+    state_entry = section_record_entry_stat(transaction_fd, "state.json")
+    if state_entry is None:
+        write_new_fixed_file_at(transaction_fd, "state.json", base_raw)
+    else:
+        staged_base = read_single_link_regular_at(
+            transaction_fd,
+            "state.json",
+            cap=DETACHED_JSON_CAP,
+            require_mode=0o600,
+        )
+        if staged_base != base_raw:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Rollback state temp is not the exact transaction base projection.",
+            )
+    _, current_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if current_raw != expected_candidate_raw:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Rollback root state changed before exact base replacement.",
+        )
+    os.replace(
+        "state.json",
+        "zagrosi_implement_state.json",
+        src_dir_fd=transaction_fd,
+        dst_dir_fd=root_fd,
+    )
+    os.fsync(root_fd)
+    _, reopened_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if reopened_raw != base_raw:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Rollback base state changed after atomic replacement.",
+        )
+
+
+def install_staged_section_pinner(
+    root_fd: int,
+    transaction_fd: int,
+    pinner_path: str,
+    pinner_raw: bytes,
+) -> bool:
+    parts = _relative_parts(pinner_path)
+    if len(parts) != 2 or parts[0] != "pinners":
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record pinner path must be an immediate child of pinners/.",
+        )
+    staged = read_single_link_regular_at(transaction_fd, "pinner.json", cap=DETACHED_JSON_CAP, require_mode=0o600)
+    if staged != pinner_raw:
+        raise DetachedImplementationError(
+            "section-record-pinner-drift",
+            "Staged section pinner bytes do not match the transaction.",
+        )
+    pinners_fd = open_relative_directory(root_fd, "pinners")
+    created = False
+    try:
+        try:
+            os.link(
+                "pinner.json",
+                parts[1],
+                src_dir_fd=transaction_fd,
+                dst_dir_fd=pinners_fd,
+                follow_symlinks=False,
+            )
+            created = True
+            os.fsync(pinners_fd)
+        except FileExistsError:
+            existing = read_single_link_regular_at(root_fd, pinner_path, cap=DETACHED_JSON_CAP, require_mode=0o600)
+            if existing != pinner_raw:
+                raise DetachedImplementationError(
+                    "pinner-conflict",
+                    f"Immutable detached receipt already exists with different bytes: {pinner_path}",
+                    path=pinner_path,
+                )
+        reopened, _ = read_regular_at_allow_links(
+            root_fd,
+            pinner_path,
+            allowed_link_counts={1, 2},
+        )
+        if reopened != pinner_raw:
+            raise DetachedImplementationError(
+                "detached-write-mismatch",
+                "Section pinner changed after atomic link installation.",
+            )
+        return created
+    finally:
+        os.close(pinners_fd)
+
+
+def section_record_entry_stat(root_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def require_safe_section_record_file(
+    root_fd: int,
+    name: str,
+    *,
+    allowed_link_counts: set[int],
+) -> os.stat_result:
+    observed = section_record_entry_stat(root_fd, name)
+    if observed is None or (
+        not stat.S_ISREG(observed.st_mode)
+        or stat.S_IMODE(observed.st_mode) != 0o600
+        or observed.st_uid != os.getuid()
+        or observed.st_nlink not in allowed_link_counts
+        or observed.st_size > DETACHED_JSON_CAP
+    ):
+        raise DetachedImplementationError(
+            "unsafe-section-record-transaction",
+            f"Section-record transaction member metadata is unsafe: {name}",
+            transaction_member=name,
+        )
+    return observed
+
+
+def section_record_pinner_relation(
+    root_fd: int,
+    transaction_fd: int,
+    pinner_path: str,
+    expected_raw: bytes,
+) -> tuple[bool, os.stat_result, os.stat_result]:
+    staged_raw, staged_stat = read_regular_at_allow_links(
+        transaction_fd,
+        "pinner.json",
+        allowed_link_counts={1, 2},
+    )
+    final_raw, final_stat = read_regular_at_allow_links(
+        root_fd,
+        pinner_path,
+        allowed_link_counts={1, 2},
+    )
+    if staged_raw != expected_raw or final_raw != expected_raw:
+        raise DetachedImplementationError(
+            "section-record-pinner-drift",
+            "Staged and final section pinner bytes are not the exact transaction pinner.",
+        )
+    same_inode = _fd_identity_from_stat(staged_stat) == _fd_identity_from_stat(final_stat)
+    if same_inode:
+        if staged_stat.st_nlink != 2 or final_stat.st_nlink != 2:
+            raise DetachedImplementationError(
+                "invalid-section-record-transaction",
+                "Invocation-created staged and final pinners must be the same exact two-link inode.",
+            )
+        return True, staged_stat, final_stat
+    if staged_stat.st_nlink != 1 or final_stat.st_nlink != 1:
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Adopted staged and final pinners must be distinct exact single-link files.",
+        )
+    return False, staged_stat, final_stat
+
+
+def verify_section_record_commit_closure(
+    root_fd: int,
+    transaction_fd: int,
+    expected_transaction_raw: bytes,
+    pinner_path: str,
+    expected_pinner_raw: bytes,
+    expected_candidate_raw: bytes,
+) -> None:
+    _, transaction_raw = load_canonical_json_at(transaction_fd, "transaction.json")
+    if transaction_raw != expected_transaction_raw:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Section-record journal changed before its commit point.",
+        )
+    _, current_state_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if current_state_raw != expected_candidate_raw:
+        raise DetachedImplementationError(
+            "section-record-state-conflict",
+            "Section-record state changed before its commit point.",
+        )
+    staged_raw, _ = read_regular_at_allow_links(
+        transaction_fd,
+        "pinner.json",
+        allowed_link_counts={1, 2},
+    )
+    if staged_raw != expected_pinner_raw:
+        raise DetachedImplementationError(
+            "section-record-pinner-drift",
+            "Published staged pinner changed before its commit point.",
+        )
+    section_record_pinner_relation(
+        root_fd,
+        transaction_fd,
+        pinner_path,
+        expected_pinner_raw,
+    )
+
+
+def unlink_invocation_created_section_pinner(
+    root_fd: int,
+    transaction_fd: int,
+    pinner_path: str,
+    pinner_raw: bytes,
+) -> None:
+    created, _, _ = section_record_pinner_relation(
+        root_fd,
+        transaction_fd,
+        pinner_path,
+        pinner_raw,
+    )
+    if not created:
+        return
+    parts = _relative_parts(pinner_path)
+    pinners_fd = open_relative_directory(root_fd, "pinners")
+    try:
+        os.unlink(parts[1], dir_fd=pinners_fd)
+        os.fsync(pinners_fd)
+    finally:
+        os.close(pinners_fd)
+    staged_raw, staged_stat = read_regular_at_allow_links(
+        transaction_fd,
+        "pinner.json",
+        allowed_link_counts={1},
+    )
+    if staged_raw != pinner_raw or staged_stat.st_nlink != 1:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Invocation-created final pinner unlink did not leave its exact single-link stage.",
+        )
+
+
+def execute_section_record_rollback(
+    root_fd: int,
+    transaction_fd: int,
+    transaction_raw: bytes,
+    pinner_path: str,
+    pinner_raw: bytes,
+    candidate_raw: bytes,
+    base_state: dict[str, Any],
+    base_raw: bytes,
+    validate_base_closure,
+) -> bool:
+    transaction_present = section_record_entry_stat(transaction_fd, "transaction.json") is not None
+    rollback_present = section_record_entry_stat(transaction_fd, "rollback.json") is not None
+    if transaction_present == rollback_present:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Section-record rollback requires exactly one forward or rollback journal name.",
+        )
+    _, current_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if current_raw not in {candidate_raw, base_raw}:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Section-record rollback root state is neither its exact candidate nor exact base.",
+        )
+    pinner_parts = _relative_parts(pinner_path)
+    pinners_fd = open_relative_directory(root_fd, "pinners")
+    try:
+        final_present = section_record_entry_stat(pinners_fd, pinner_parts[1]) is not None
+    finally:
+        os.close(pinners_fd)
+    if transaction_present:
+        if final_present:
+            section_record_pinner_relation(root_fd, transaction_fd, pinner_path, pinner_raw)
+        else:
+            staged_raw, staged_stat = read_regular_at_allow_links(
+                transaction_fd,
+                "pinner.json",
+                allowed_link_counts={1},
+            )
+            if staged_raw != pinner_raw or staged_stat.st_nlink != 1:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Rollback without a final pinner requires its exact single-link stage.",
+                )
+        publish_section_record_rollback(transaction_fd, transaction_raw)
+        if section_record_entry_stat(transaction_fd, "state.json") is not None:
+            staged_candidate = read_single_link_regular_at(
+                transaction_fd,
+                "state.json",
+                cap=DETACHED_JSON_CAP,
+                require_mode=0o600,
+            )
+            if current_raw != base_raw or staged_candidate != candidate_raw:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Forward state temp is not the exact candidate staged against the exact rollback base.",
+                )
+            unlink_fixed_file_at(transaction_fd, "state.json")
+    else:
+        _, reopened_rollback_raw = load_canonical_json_at(transaction_fd, "rollback.json")
+        if reopened_rollback_raw != transaction_raw:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Section-record rollback marker bytes changed during recovery.",
+            )
+
+    pinners_fd = open_relative_directory(root_fd, "pinners")
+    try:
+        final_present = section_record_entry_stat(pinners_fd, pinner_parts[1]) is not None
+    finally:
+        os.close(pinners_fd)
+    if final_present:
+        created_by_invocation, _, _ = section_record_pinner_relation(
+            root_fd,
+            transaction_fd,
+            pinner_path,
+            pinner_raw,
+        )
+        if created_by_invocation:
+            unlink_invocation_created_section_pinner(
+                root_fd,
+                transaction_fd,
+                pinner_path,
+                pinner_raw,
+            )
+    else:
+        staged_raw, staged_stat = read_regular_at_allow_links(
+            transaction_fd,
+            "pinner.json",
+            allowed_link_counts={1},
+        )
+        if staged_raw != pinner_raw or staged_stat.st_nlink != 1:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Rollback without a final pinner requires its exact retained single-link stage.",
+            )
+
+    replace_state_from_rollback(
+        root_fd,
+        transaction_fd,
+        candidate_raw,
+        base_state,
+        base_raw,
+    )
+    _, rolled_back_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if rolled_back_raw != base_raw:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Section-record rollback did not close on its exact base state.",
+        )
+    validate_base_closure()
+    _, reopened_rollback_raw = load_canonical_json_at(transaction_fd, "rollback.json")
+    if reopened_rollback_raw != transaction_raw:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Section-record rollback marker changed before closure cleanup.",
+        )
+    staged_raw, staged_stat = read_regular_at_allow_links(
+        transaction_fd,
+        "pinner.json",
+        allowed_link_counts={1},
+    )
+    if staged_raw != pinner_raw or staged_stat.st_nlink != 1:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Rollback staged pinner changed before closure cleanup.",
+        )
+    pinners_fd = open_relative_directory(root_fd, "pinners")
+    try:
+        final_present = section_record_entry_stat(pinners_fd, pinner_parts[1]) is not None
+    finally:
+        os.close(pinners_fd)
+    if final_present:
+        created_by_invocation, _, _ = section_record_pinner_relation(
+            root_fd,
+            transaction_fd,
+            pinner_path,
+            pinner_raw,
+        )
+        if created_by_invocation:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Invocation-created final pinner remained after rollback closure.",
+            )
+    os.unlink("rollback.json", dir_fd=transaction_fd)
+    os.fsync(transaction_fd)
+    return cleanup_section_record_transaction_after_commit(root_fd, transaction_fd)
+
+
+def abort_section_record_transaction(
+    root_fd: int,
+    transaction_fd: int,
+) -> bool:
+    journal_removed = section_record_entry_stat(transaction_fd, "transaction.json") is None
+    try:
+        if not journal_removed:
+            os.unlink("transaction.json", dir_fd=transaction_fd)
+            journal_removed = True
+            os.fsync(transaction_fd)
+        return cleanup_section_record_transaction_after_commit(root_fd, transaction_fd)
+    except (DetachedImplementationError, OSError):
+        try:
+            os.close(transaction_fd)
+        except OSError:
+            pass
+        return False
+
+
+def _fd_identity_from_stat(observed: os.stat_result) -> tuple[int, int]:
+    return observed.st_dev, observed.st_ino
+
+
+def mutate_canonical_json_at(root_fd: int, relative: str, default_factory, mutator, timeout_seconds: float = 5.0) -> dict[str, Any]:
+    parent_fd, name = open_relative_parent(root_fd, relative, create=True)
+    lock_name = f".{name}.lock"
+    start = time.monotonic()
+    try:
+        while True:
+            try:
+                lock_fd = os.open(
+                    lock_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    _write_all(lock_fd, f"{os.getpid()} {now_iso()}\n".encode())
+                    os.fsync(lock_fd)
+                finally:
+                    os.close(lock_fd)
+                break
+            except FileExistsError:
+                if time.monotonic() - start >= timeout_seconds:
+                    raise DetachedImplementationError(
+                        "detached-lock-timeout",
+                        f"Timed out waiting for detached state lock: {relative}",
+                        path=relative,
+                    )
+                time.sleep(0.01)
+        try:
+            try:
+                state, _ = load_canonical_json_at(root_fd, relative)
+            except DetachedImplementationError as exc:
+                if exc.code != "unsafe-detached-file":
+                    raise
+                state = default_factory()
+            mutator(state)
+            write_canonical_json_at(root_fd, relative, state)
+            return state
+        finally:
+            os.unlink(lock_name, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _read_planning_file(file_fd: int, relative: str, size: int) -> bytes:
+    if size > FROZEN_PLANNING_FILE_CAP:
+        raise DetachedImplementationError(
+            "planning-file-too-large",
+            f"Frozen planning file exceeds its {FROZEN_PLANNING_FILE_CAP}-byte cap: {relative}",
+            path=relative,
+            size=size,
+        )
+    chunks: list[bytes] = []
+    remaining = FROZEN_PLANNING_FILE_CAP + 1
+    while remaining:
+        chunk = os.read(file_fd, min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    if len(raw) > FROZEN_PLANNING_FILE_CAP:
+        raise DetachedImplementationError(
+            "planning-file-too-large",
+            f"Frozen planning file exceeds its {FROZEN_PLANNING_FILE_CAP}-byte cap: {relative}",
+            path=relative,
+            size=len(raw),
+        )
+    return raw
+
+
+def planning_tree_fingerprint(root_fd: int) -> tuple[str, int, int]:
+    digest = hashlib.sha256()
+    digest.update(b"zagrosi-frozen-planning-tree-v1\0")
+    file_count = 0
+    total_bytes = 0
+
+    def add_entry(relative: str, kind: bytes, observed: os.stat_result, raw: bytes = b"") -> None:
+        try:
+            path_bytes = relative.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise DetachedImplementationError(
+                "unsafe-planning-tree",
+                f"Frozen planning path is not strict UTF-8: {relative!r}",
+                path=relative,
+            ) from exc
+        if len(path_bytes) > 0xFFFFFFFF:
+            raise DetachedImplementationError(
+                "unsafe-planning-tree",
+                f"Frozen planning path is too long to frame: {relative!r}",
+                path=relative,
+            )
+        digest.update(len(path_bytes).to_bytes(4, "big"))
+        digest.update(path_bytes)
+        digest.update(kind)
+        digest.update(stat.S_IMODE(observed.st_mode).to_bytes(4, "big"))
+        digest.update(observed.st_nlink.to_bytes(8, "big"))
+        digest.update(len(raw).to_bytes(8, "big"))
+        digest.update(raw)
+
+    def walk(directory_fd: int, prefix: str) -> None:
+        nonlocal file_count, total_bytes
+        try:
+            names = sorted(os.listdir(directory_fd), key=lambda value: value.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError as exc:
+            raise DetachedImplementationError(
+                "unsafe-planning-tree",
+                "Frozen planning directory contains a name that is not strict UTF-8.",
+            ) from exc
+        for name in names:
+            relative = f"{prefix}/{name}" if prefix else name
+            observed = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(observed.st_mode):
+                raise DetachedImplementationError(
+                    "unsafe-planning-tree",
+                    f"Frozen planning trees may not contain symbolic links: {relative}",
+                    path=relative,
+                )
+            if stat.S_ISDIR(observed.st_mode):
+                add_entry(relative, b"D", observed)
+                child_fd = os.open(name, _directory_open_flags(), dir_fd=directory_fd)
+                try:
+                    reopened = os.fstat(child_fd)
+                    if (reopened.st_dev, reopened.st_ino) != (observed.st_dev, observed.st_ino):
+                        raise DetachedImplementationError(
+                            "planning-tree-changed",
+                            f"Frozen planning directory changed while being opened: {relative}",
+                            path=relative,
+                        )
+                    walk(child_fd, relative)
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(observed.st_mode):
+                raise DetachedImplementationError(
+                    "unsafe-planning-tree",
+                    f"Frozen planning trees may contain only directories and regular files: {relative}",
+                    path=relative,
+                )
+            file_fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory_fd)
+            try:
+                reopened = os.fstat(file_fd)
+                if (reopened.st_dev, reopened.st_ino) != (observed.st_dev, observed.st_ino):
+                    raise DetachedImplementationError(
+                        "planning-tree-changed",
+                        f"Frozen planning file changed while being opened: {relative}",
+                        path=relative,
+                    )
+                raw = _read_planning_file(file_fd, relative, reopened.st_size)
+                after_read = os.fstat(file_fd)
+                stable_fields = lambda value: (
+                    value.st_dev,
+                    value.st_ino,
+                    value.st_mode,
+                    value.st_nlink,
+                    value.st_size,
+                    value.st_mtime_ns,
+                    value.st_ctime_ns,
+                )
+                if stable_fields(reopened) != stable_fields(after_read) or len(raw) != reopened.st_size:
+                    raise DetachedImplementationError(
+                        "planning-tree-changed",
+                        f"Frozen planning file changed while its bytes were read: {relative}",
+                        path=relative,
+                    )
+            finally:
+                os.close(file_fd)
+            add_entry(relative, b"F", reopened, raw)
+            file_count += 1
+            total_bytes += len(raw)
+            if total_bytes > FROZEN_PLANNING_TREE_CAP:
+                raise DetachedImplementationError(
+                    "planning-tree-too-large",
+                    f"Frozen planning tree exceeds its {FROZEN_PLANNING_TREE_CAP}-byte cap.",
+                    total_bytes=total_bytes,
+                )
+    root_stat = os.fstat(root_fd)
+    add_entry(".", b"D", root_stat)
+    walk(root_fd, "")
+    return "sha256:" + digest.hexdigest(), file_count, total_bytes
+
+
+@dataclass
+class FrozenPlanningTree:
+    path: Path
+    root_fd: int
+    device: int
+    inode: int
+    digest: str
+    file_count: int
+    total_bytes: int
+
+    @classmethod
+    def open(cls, path: Path, *, expected_digest: str | None = None) -> FrozenPlanningTree:
+        absolute = absolute_path_no_follow(path)
+        root_fd = open_directory_chain_no_follow(absolute)
+        try:
+            root_stat = os.fstat(root_fd)
+            digest, file_count, total_bytes = planning_tree_fingerprint(root_fd)
+            if expected_digest is not None and digest != expected_digest:
+                raise DetachedImplementationError(
+                    "planning-tree-drift",
+                    "Frozen planning tree does not match the digest recorded by implement-setup.",
+                    expected_planning_tree_sha256=expected_digest,
+                    actual_planning_tree_sha256=digest,
+                )
+            return cls(absolute, root_fd, root_stat.st_dev, root_stat.st_ino, digest, file_count, total_bytes)
+        except Exception:
+            os.close(root_fd)
+            raise
+
+    def verify_unchanged(self) -> None:
+        current_digest, file_count, total_bytes = planning_tree_fingerprint(self.root_fd)
+        path_fd = open_directory_chain_no_follow(self.path)
+        try:
+            path_stat = os.fstat(path_fd)
+        finally:
+            os.close(path_fd)
+        if (path_stat.st_dev, path_stat.st_ino) != (self.device, self.inode):
+            raise DetachedImplementationError(
+                "planning-root-replaced",
+                "Frozen planning root was replaced while the command was running.",
+                planning_dir=str(self.path),
+            )
+        if (current_digest, file_count, total_bytes) != (self.digest, self.file_count, self.total_bytes):
+            raise DetachedImplementationError(
+                "planning-tree-changed",
+                "Frozen planning tree changed while the command was running.",
+                expected_planning_tree_sha256=self.digest,
+                actual_planning_tree_sha256=current_digest,
+            )
+
+    def close(self) -> None:
+        os.close(self.root_fd)
+
+
+def _fd_identity(file_fd: int) -> tuple[int, int]:
+    observed = os.fstat(file_fd)
+    return observed.st_dev, observed.st_ino
+
+
+def require_detached_top_level_inventory(
+    root_fd: int,
+    *,
+    complete: bool,
+    allow_recoverable_temps: bool = False,
+) -> None:
+    first = set(os.listdir(root_fd))
+    allowed = DETACHED_TOP_LEVEL_ALLOWED | (
+        DETACHED_ROOT_RECOVERABLE_TEMPS if allow_recoverable_temps else set()
+    )
+    unknown = sorted(first - allowed)
+    missing = sorted(DETACHED_TOP_LEVEL_ALLOWED - first) if complete else []
+    if unknown or missing:
+        raise DetachedImplementationError(
+            "unsafe-detached-root-inventory",
+            "Detached implementation root must contain exactly its six fixed top-level members.",
+            unknown_top_level_members=unknown,
+            missing_top_level_members=missing,
+        )
+    for name in sorted(first):
+        observed = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if name in DETACHED_TOP_LEVEL_DIRECTORIES:
+            valid = (
+                stat.S_ISDIR(observed.st_mode)
+                and stat.S_IMODE(observed.st_mode) == 0o700
+                and observed.st_uid == os.getuid()
+            )
+        else:
+            valid = (
+                stat.S_ISREG(observed.st_mode)
+                and stat.S_IMODE(observed.st_mode) == 0o600
+                and observed.st_uid == os.getuid()
+                and observed.st_nlink == 1
+                and (
+                    name not in DETACHED_ROOT_RECOVERABLE_TEMPS
+                    or observed.st_size <= DETACHED_JSON_CAP
+                )
+            )
+        if not valid:
+            raise DetachedImplementationError(
+                "unsafe-detached-root-inventory",
+                "Detached implementation root top-level member metadata is unsafe.",
+                top_level_member=name,
+            )
+    if set(os.listdir(root_fd)) != first:
+        raise DetachedImplementationError(
+            "unsafe-detached-root-inventory",
+            "Detached implementation root inventory changed while it was verified.",
+        )
+
+
+def recover_detached_root_temps_locked(root_fd: int) -> None:
+    inventory = set(os.listdir(root_fd))
+    unknown = sorted(inventory - DETACHED_TOP_LEVEL_ALLOWED - DETACHED_ROOT_RECOVERABLE_TEMPS)
+    if unknown:
+        raise DetachedImplementationError(
+            "unsafe-detached-root-inventory",
+            "Detached implementation root contains unknown members; no recovery mutation was attempted.",
+            unknown_top_level_members=unknown,
+        )
+    present = sorted(inventory & DETACHED_ROOT_RECOVERABLE_TEMPS)
+    for name in present:
+        observed = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or stat.S_IMODE(observed.st_mode) != 0o600
+            or observed.st_uid != os.getuid()
+            or observed.st_nlink != 1
+            or observed.st_size > DETACHED_JSON_CAP
+        ):
+            raise DetachedImplementationError(
+                "unsafe-detached-root-temp",
+                "Recoverable detached root temp has unsafe metadata and was retained.",
+                temp_name=name,
+            )
+    if set(os.listdir(root_fd)) != inventory:
+        raise DetachedImplementationError(
+            "unsafe-detached-root-inventory",
+            "Detached root inventory changed during locked temp recovery.",
+        )
+    for name in present:
+        os.unlink(name, dir_fd=root_fd)
+        os.fsync(root_fd)
+
+
+def detached_implementation_root_identity_digest(
+    root_fd: int,
+    *,
+    require_fixed_children: bool = True,
+    allow_recoverable_temps: bool = False,
+) -> str:
+    observed = os.fstat(root_fd)
+    mode = stat.S_IMODE(observed.st_mode)
+    if not stat.S_ISDIR(observed.st_mode) or mode != 0o700 or observed.st_uid != os.getuid():
+        raise DetachedImplementationError(
+            "unsafe-detached-root-identity",
+            "Detached implementation root must be a user-owned 0700 directory.",
+            expected_uid=os.getuid(),
+            actual_uid=observed.st_uid,
+            expected_mode=0o700,
+            actual_mode=mode,
+        )
+    require_detached_top_level_inventory(
+        root_fd,
+        complete=require_fixed_children,
+        allow_recoverable_temps=allow_recoverable_temps,
+    )
+    if require_fixed_children:
+        for relative in ("code_review", "evidence", "pinners"):
+            child_fd = open_relative_directory(root_fd, relative)
+            try:
+                child = os.fstat(child_fd)
+                if (
+                    not stat.S_ISDIR(child.st_mode)
+                    or stat.S_IMODE(child.st_mode) != 0o700
+                    or child.st_uid != os.getuid()
+                ):
+                    raise DetachedImplementationError(
+                        "unsafe-detached-root-identity",
+                        "Detached implementation fixed child directories must be user-owned 0700 directories.",
+                        child=relative,
+                    )
+            finally:
+                os.close(child_fd)
+    identity = {
+        "device": observed.st_dev,
+        "gid": observed.st_gid,
+        "inode": observed.st_ino,
+        "link_count": observed.st_nlink,
+        "mode": mode,
+        "uid": observed.st_uid,
+    }
+    digest = hashlib.sha256(b"zagrosi-detached-implementation-root-identity-v1\0")
+    digest.update(handoff_canonical_json_body(identity))
+    return "sha256:" + digest.hexdigest()
+
+
+def require_detached_root_identity_through_recoverable_temps(
+    root_fd: int,
+    expected_digest: Any,
+) -> None:
+    if not isinstance(expected_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest):
+        raise DetachedImplementationError(
+            "invalid-detached-config",
+            "Detached config implementation-root identity digest is invalid.",
+        )
+    actual_digest = detached_implementation_root_identity_digest(
+        root_fd,
+        allow_recoverable_temps=True,
+    )
+    if actual_digest == expected_digest:
+        return
+    inventory = set(os.listdir(root_fd))
+    temp_count = len(inventory & DETACHED_ROOT_RECOVERABLE_TEMPS)
+    observed = os.fstat(root_fd)
+    if temp_count and observed.st_nlink >= temp_count:
+        identity = {
+            "device": observed.st_dev,
+            "gid": observed.st_gid,
+            "inode": observed.st_ino,
+            "link_count": observed.st_nlink - temp_count,
+            "mode": stat.S_IMODE(observed.st_mode),
+            "uid": observed.st_uid,
+        }
+        digest = hashlib.sha256(b"zagrosi-detached-implementation-root-identity-v1\0")
+        digest.update(handoff_canonical_json_body(identity))
+        if "sha256:" + digest.hexdigest() == expected_digest:
+            return
+    raise DetachedImplementationError(
+        "detached-root-identity-drift",
+        "Detached implementation root identity no longer matches implement-setup.",
+        expected_detached_implementation_root_identity_digest=expected_digest,
+        actual_detached_implementation_root_identity_digest=actual_digest,
+    )
+
+
+def target_root_identity_digest(target_fd: int) -> str:
+    observed = os.fstat(target_fd)
+    if not stat.S_ISDIR(observed.st_mode):
+        raise DetachedImplementationError(
+            "unsafe-target-root-identity",
+            "Protected target root descriptor must name a directory.",
+        )
+    identity = {
+        "device": observed.st_dev,
+        "gid": observed.st_gid,
+        "inode": observed.st_ino,
+        "link_count": observed.st_nlink,
+        "mode": stat.S_IMODE(observed.st_mode),
+        "uid": observed.st_uid,
+    }
+    digest = hashlib.sha256(b"zagrosi-detached-target-root-identity-v1\0")
+    digest.update(handoff_canonical_json_body(identity))
+    return "sha256:" + digest.hexdigest()
+
+
+def _fd_ancestry_contains(file_fd: int, expected_identity: tuple[int, int]) -> bool:
+    current_fd = os.dup(file_fd)
+    try:
+        for _ in range(4096):
+            current_identity = _fd_identity(current_fd)
+            if current_identity == expected_identity:
+                return True
+            parent_fd = os.open("..", _directory_open_flags(), dir_fd=current_fd)
+            parent_identity = _fd_identity(parent_fd)
+            os.close(current_fd)
+            current_fd = parent_fd
+            if parent_identity == current_identity:
+                return False
+        raise DetachedImplementationError(
+            "unsafe-detached-path",
+            "Detached directory ancestry exceeded its bounded traversal limit.",
+        )
+    finally:
+        os.close(current_fd)
+
+
+def _nearest_existing_directory_no_follow(path: Path) -> tuple[int, bool]:
+    candidate = absolute_path_no_follow(path)
+    while True:
+        try:
+            return open_directory_chain_no_follow(candidate), candidate == path
+        except DetachedImplementationError as exc:
+            if exc.code != "unsafe-detached-path" or candidate.parent == candidate:
+                raise
+            candidate = candidate.parent
+
+
+def ensure_detached_root(
+    planning_dir: Path,
+    raw_root: str,
+    *,
+    create: bool,
+    planning_root_fd: int | None = None,
+) -> tuple[Path, int]:
+    root = absolute_path_no_follow(raw_root)
+    planning = absolute_path_no_follow(planning_dir)
+    overlaps = False
+    try:
+        root.relative_to(planning)
+        overlaps = True
+    except ValueError:
+        pass
+    try:
+        planning.relative_to(root)
+        overlaps = True
+    except ValueError:
+        pass
+    if overlaps:
+        raise DetachedImplementationError(
+            "detached-root-overlap",
+            "Detached implementation root must be disjoint from the frozen planning root.",
+            planning_dir=str(planning),
+            implementation_root=str(root),
+        )
+    owned_planning_fd: int | None = None
+    nearest_fd: int | None = None
+    root_fd: int | None = None
+    try:
+        if planning_root_fd is None:
+            owned_planning_fd = open_directory_chain_no_follow(planning)
+            planning_root_fd = owned_planning_fd
+        planning_identity = _fd_identity(planning_root_fd)
+        nearest_fd, root_exists = _nearest_existing_directory_no_follow(root)
+        nearest_identity = _fd_identity(nearest_fd)
+        if _fd_ancestry_contains(nearest_fd, planning_identity) or (
+            root_exists and _fd_ancestry_contains(planning_root_fd, nearest_identity)
+        ):
+            raise DetachedImplementationError(
+                "detached-root-overlap",
+                "Detached implementation root resolves within, aliases, or contains the frozen planning root.",
+                planning_dir=str(planning),
+                implementation_root=str(root),
+            )
+        root_fd = open_directory_chain_no_follow(root, create=create)
+        root_identity = _fd_identity(root_fd)
+        if _fd_ancestry_contains(root_fd, planning_identity) or _fd_ancestry_contains(
+            planning_root_fd, root_identity
+        ):
+            raise DetachedImplementationError(
+                "detached-root-overlap",
+                "Detached implementation root resolves within, aliases, or contains the frozen planning root.",
+                planning_dir=str(planning),
+                implementation_root=str(root),
+            )
+        result_fd = root_fd
+        root_fd = None
+        return root, result_fd
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+        if nearest_fd is not None:
+            os.close(nearest_fd)
+        if owned_planning_fd is not None:
+            os.close(owned_planning_fd)
+
+
+def require_candidate_root_disjoint_from_directory(
+    candidate_root: Path,
+    protected_path: Path,
+    protected_fd: int,
+) -> None:
+    nearest_fd: int | None = None
+    try:
+        nearest_fd, candidate_exists = _nearest_existing_directory_no_follow(candidate_root)
+        nearest_identity = _fd_identity(nearest_fd)
+        protected_identity = _fd_identity(protected_fd)
+        if _fd_ancestry_contains(nearest_fd, protected_identity) or (
+            candidate_exists and _fd_ancestry_contains(protected_fd, nearest_identity)
+        ):
+            raise DetachedImplementationError(
+                "detached-root-target-overlap",
+                "Detached implementation root must be descriptor-disjoint from the protected target root.",
+                implementation_root=str(candidate_root),
+                target_dir=str(protected_path),
+            )
+    finally:
+        if nearest_fd is not None:
+            os.close(nearest_fd)
+
+
+def require_open_roots_disjoint(
+    implementation_root: Path,
+    root_fd: int,
+    target_dir: Path,
+    target_fd: int,
+) -> None:
+    if _fd_ancestry_contains(root_fd, _fd_identity(target_fd)) or _fd_ancestry_contains(target_fd, _fd_identity(root_fd)):
+        raise DetachedImplementationError(
+            "detached-root-target-overlap",
+            "Detached implementation root aliases, contains, or is contained by the protected target root.",
+            implementation_root=str(implementation_root),
+            target_dir=str(target_dir),
+        )
+
+
+def require_planning_target_disjoint(
+    planning_dir: Path,
+    planning_fd: int,
+    target_dir: Path,
+    target_fd: int,
+) -> None:
+    if _fd_ancestry_contains(planning_fd, _fd_identity(target_fd)) or _fd_ancestry_contains(
+        target_fd,
+        _fd_identity(planning_fd),
+    ):
+        raise DetachedImplementationError(
+            "planning-target-overlap",
+            "Frozen planning root aliases, contains, or is contained by the protected target root.",
+            planning_dir=str(planning_dir),
+            target_dir=str(target_dir),
+        )
+
+
+def require_planning_implementation_disjoint(
+    planning_dir: Path,
+    planning_fd: int,
+    implementation_root: Path,
+    root_fd: int,
+) -> None:
+    if _fd_ancestry_contains(planning_fd, _fd_identity(root_fd)) or _fd_ancestry_contains(
+        root_fd,
+        _fd_identity(planning_fd),
+    ):
+        raise DetachedImplementationError(
+            "detached-root-overlap",
+            "Detached implementation root aliases, contains, or is contained by the frozen planning root.",
+            planning_dir=str(planning_dir),
+            implementation_root=str(implementation_root),
+        )
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def reopen_admission_pinner(
+    planning_dir: Path,
+    implementation_root: Path,
+    raw_path: str,
+    *,
+    expected_sha256: str,
+    planning_root_fd: int,
+    implementation_root_fd: int | None = None,
+) -> tuple[Path, str, int, str]:
+    path = absolute_path_no_follow(raw_path)
+    planning = absolute_path_no_follow(planning_dir)
+    root = absolute_path_no_follow(implementation_root)
+    if _path_is_within(path, planning) or _path_is_within(path, root):
+        raise DetachedImplementationError(
+            "admission-pinner-overlap",
+            "Admission pinner must be a distinct external file outside both planning and implementation roots.",
+            admission_pinner_path=str(path),
+        )
+    parent_fd = open_directory_chain_no_follow(path.parent)
+    try:
+        if _fd_ancestry_contains(parent_fd, _fd_identity(planning_root_fd)) or (
+            implementation_root_fd is not None
+            and _fd_ancestry_contains(parent_fd, _fd_identity(implementation_root_fd))
+        ):
+            raise DetachedImplementationError(
+                "admission-pinner-overlap",
+                "Admission pinner resolves inside or aliases the planning or implementation root.",
+                admission_pinner_path=str(path),
+            )
+        payload, raw = load_canonical_json_at(parent_fd, path.name)
+    finally:
+        os.close(parent_fd)
+    actual_sha256 = sha256_digest(raw)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_sha256) or actual_sha256 != expected_sha256:
+        raise DetachedImplementationError(
+            "admission-pinner-drift",
+            "Admission pinner bytes no longer match implement-setup.",
+            admission_pinner_path=str(path),
+            expected_admission_pinner_sha256=expected_sha256,
+            actual_admission_pinner_sha256=actual_sha256,
+        )
+    if set(payload) != FINAL_ADMISSION_PINNER_FIELDS:
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Admission pinner fields do not match dec075-final-pinner-receipt-v1 exactly.",
+            admission_pinner_path=str(path),
+            missing_fields=sorted(FINAL_ADMISSION_PINNER_FIELDS - set(payload)),
+            extra_fields=sorted(set(payload) - FINAL_ADMISSION_PINNER_FIELDS),
+        )
+    if (
+        type(payload.get("schema")) is not str
+        or payload["schema"] != FINAL_ADMISSION_PINNER_SCHEMA
+        or type(payload.get("verdict")) is not str
+        or payload["verdict"] != "PASS"
+        or type(payload.get("o_sha256")) is not str
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", payload["o_sha256"])
+    ):
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Admission pinner schema, verdict, or O digest is invalid.",
+            admission_pinner_path=str(path),
+        )
+    start = payload.get("start")
+    end = payload.get("end")
+    if type(start) is not dict or type(end) is not dict or start != end:
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Admission pinner START and END must be identical admission-state objects.",
+            admission_pinner_path=str(path),
+        )
+    if set(start) != ADMISSION_STATE_FIELDS:
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Admission pinner state fields do not match dec075-admission-state-v1 exactly.",
+            admission_pinner_path=str(path),
+            missing_fields=sorted(ADMISSION_STATE_FIELDS - set(start)),
+            extra_fields=sorted(set(start) - ADMISSION_STATE_FIELDS),
+        )
+    if type(start.get("schema")) is not str or start["schema"] != ADMISSION_STATE_SCHEMA:
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Admission pinner state schema is invalid.",
+            admission_pinner_path=str(path),
+        )
+    digest_fields = ("r_sha256", "p_sha256", "d_sha256", "a_sha256")
+    if any(type(start.get(field)) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", start[field]) for field in digest_fields):
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Admission pinner state digests must be exact lowercase sha256 values.",
+            admission_pinner_path=str(path),
+        )
+    a_digest = hashlib.sha256(b"dec075-a-v1\0")
+    for field in ("r_sha256", "p_sha256", "d_sha256"):
+        a_digest.update(bytes.fromhex(start[field].removeprefix("sha256:")))
+    expected_a_sha256 = "sha256:" + a_digest.hexdigest()
+    if start["a_sha256"] != expected_a_sha256:
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Admission pinner A digest does not bind its R, P, and D digests.",
+            admission_pinner_path=str(path),
+            expected_a_sha256=expected_a_sha256,
+            actual_a_sha256=start["a_sha256"],
+        )
+    try:
+        index_raw = read_single_link_regular_at(
+            planning_root_fd,
+            "sections/index.md",
+            cap=FROZEN_PLANNING_FILE_CAP,
+        )
+        index_text = index_raw.decode("utf-8", errors="strict")
+    except (UnicodeDecodeError, DetachedImplementationError) as exc:
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Current planning SECTION_MANIFEST cannot be reopened for admission binding.",
+            admission_pinner_path=str(path),
+        ) from exc
+    sections, manifest_errors = parse_numbered_manifest(index_text, "SECTION_MANIFEST", SECTION_RE, prefix="section-")
+    if manifest_errors or not sections:
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Current planning SECTION_MANIFEST is invalid for admission binding.",
+            admission_pinner_path=str(path),
+            manifest_errors=manifest_errors,
+        )
+    d_digest = hashlib.sha256()
+    for section in sections:
+        relative = f"sections/{section}.md"
+        body = read_single_link_regular_at(planning_root_fd, relative, cap=FROZEN_PLANNING_FILE_CAP)
+        path_bytes = relative.encode("utf-8", errors="strict")
+        d_digest.update(len(path_bytes).to_bytes(4, "big"))
+        d_digest.update(path_bytes)
+        d_digest.update(len(body).to_bytes(8, "big"))
+        d_digest.update(body)
+    current_d_sha256 = "sha256:" + d_digest.hexdigest()
+    if start["d_sha256"] != current_d_sha256:
+        raise DetachedImplementationError(
+            "invalid-admission-pinner",
+            "Admission pinner D digest does not bind the current section corpus.",
+            admission_pinner_path=str(path),
+            expected_d_sha256=current_d_sha256,
+            actual_d_sha256=start["d_sha256"],
+        )
+    return path, actual_sha256, len(raw), start["a_sha256"]
+
+
+IMPLEMENTATION_SOURCE_NAMES = ("tool", "skill", "test")
+
+
+def implementation_source_paths() -> dict[str, Path]:
+    running_tool = absolute_path_no_follow(__file__)
+    plugin_root = running_tool.parent.parent
+    paths = {
+        "tool": plugin_root / "scripts" / "zagrosi_skills.py",
+        "skill": plugin_root / "skills" / "zagrosi-implement" / "SKILL.md",
+        "test": plugin_root / "tests" / "test_zagrosi_skills.py",
+    }
+    if running_tool != paths["tool"]:
+        raise DetachedImplementationError(
+            "unsafe-implement-source",
+            "Detached mode must run from the fixed scripts/zagrosi_skills.py plugin path.",
+            implement_source="tool",
+            expected_implement_source_path=str(paths["tool"]),
+            actual_implement_source_path=str(running_tool),
+        )
+    return paths
+
+
+def reopen_implementation_source(source: str, path: Path) -> dict[str, Any]:
+    parent_fd: int | None = None
+    reopened_parent_fd: int | None = None
+    try:
+        parent_fd = open_directory_chain_no_follow(path.parent)
+        parent_stat = os.fstat(parent_fd)
+        raw = read_single_link_regular_at(parent_fd, path.name, cap=IMPLEMENTATION_SOURCE_CAP)
+        reopened_parent_fd = open_directory_chain_no_follow(path.parent)
+        reopened_parent_stat = os.fstat(reopened_parent_fd)
+        reopened_raw = read_single_link_regular_at(reopened_parent_fd, path.name, cap=IMPLEMENTATION_SOURCE_CAP)
+        if (
+            (parent_stat.st_dev, parent_stat.st_ino) != (reopened_parent_stat.st_dev, reopened_parent_stat.st_ino)
+            or raw != reopened_raw
+        ):
+            raise DetachedImplementationError(
+                "implement-source-changed",
+                f"Implementation {source} source changed while its complete bytes were reopened.",
+                implement_source=source,
+                implement_source_path=str(path),
+            )
+        return {"path": str(path), "sha256": sha256_digest(raw), "size": len(raw)}
+    except DetachedImplementationError as exc:
+        if exc.code == "implement-source-changed":
+            raise
+        raise DetachedImplementationError(
+            "unsafe-implement-source",
+            f"Implementation {source} source must be a component-wise no-follow regular single-link file.",
+            implement_source=source,
+            implement_source_path=str(path),
+            source_error_code=exc.code,
+        ) from exc
+    except OSError as exc:
+        raise DetachedImplementationError(
+            "unsafe-implement-source",
+            f"Implementation {source} source could not be reopened safely.",
+            implement_source=source,
+            implement_source_path=str(path),
+        ) from exc
+    finally:
+        if reopened_parent_fd is not None:
+            os.close(reopened_parent_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def expected_implementation_source_hashes(args: argparse.Namespace) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for source in IMPLEMENTATION_SOURCE_NAMES:
+        argument = f"--expected-implement-{source}-sha256"
+        value = getattr(args, f"expected_implement_{source}_sha256", None)
+        if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+            raise DetachedImplementationError(
+                "missing-implement-source-hash",
+                f"Detached frozen-planning mode requires {argument} with an exact sha256 digest.",
+                implement_source=source,
+                required_argument=argument,
+            )
+        expected[source] = value
+    return expected
+
+
+def reopen_implementation_sources(*, expected_hashes: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for source, path in implementation_source_paths().items():
+        record = reopen_implementation_source(source, path)
+        expected_sha256 = expected_hashes.get(source) if expected_hashes is not None else None
+        if expected_sha256 is not None and record["sha256"] != expected_sha256:
+            raise DetachedImplementationError(
+                "implement-source-drift",
+                f"Implementation {source} source bytes do not match the required complete-file sha256.",
+                implement_source=source,
+                implement_source_path=record["path"],
+                expected_implement_source_sha256=expected_sha256,
+                actual_implement_source_sha256=record["sha256"],
+            )
+        records[source] = record
+    return records
+
+
+def implementation_source_config_fields(records: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for source in IMPLEMENTATION_SOURCE_NAMES:
+        record = records[source]
+        fields[f"implement_{source}_path"] = record["path"]
+        fields[f"implement_{source}_sha256"] = record["sha256"]
+        fields[f"implement_{source}_size"] = record["size"]
+    return fields
+
+
+def verify_implementation_sources(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    paths = implementation_source_paths()
+    expected_hashes: dict[str, str] = {}
+    for source in IMPLEMENTATION_SOURCE_NAMES:
+        path_field = f"implement_{source}_path"
+        hash_field = f"implement_{source}_sha256"
+        size_field = f"implement_{source}_size"
+        expected_path = str(paths[source])
+        expected_sha256 = config.get(hash_field)
+        expected_size = config.get(size_field)
+        if config.get(path_field) != expected_path:
+            raise DetachedImplementationError(
+                "invalid-detached-config",
+                f"Detached config does not bind the exact current implementation {source} source path.",
+                implement_source=source,
+                expected_implement_source_path=expected_path,
+                actual_implement_source_path=config.get(path_field),
+            )
+        if not isinstance(expected_sha256, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_sha256):
+            raise DetachedImplementationError(
+                "invalid-detached-config",
+                f"Detached config implementation {source} source sha256 is invalid.",
+                implement_source=source,
+            )
+        if not isinstance(expected_size, int) or isinstance(expected_size, bool) or expected_size < 0:
+            raise DetachedImplementationError(
+                "invalid-detached-config",
+                f"Detached config implementation {source} source size is invalid.",
+                implement_source=source,
+            )
+        expected_hashes[source] = expected_sha256
+    records = reopen_implementation_sources(expected_hashes=expected_hashes)
+    for source, record in records.items():
+        expected_size = config[f"implement_{source}_size"]
+        if record["size"] != expected_size:
+            raise DetachedImplementationError(
+                "implement-source-drift",
+                f"Implementation {source} source size no longer matches implement-setup.",
+                implement_source=source,
+                implement_source_path=record["path"],
+                expected_implement_source_size=expected_size,
+                actual_implement_source_size=record["size"],
+            )
+    return records
+
+
+DETACHED_CONFIG_FIELDS = {
+    "schema",
+    "mode",
+    "planning_dir",
+    "sections_dir",
+    "target_dir",
+    "target_root_identity_digest",
+    "implementation_root",
+    "state_path",
+    "progress_path",
+    "reviews_dir",
+    "evidence_dir",
+    "pinners_dir",
+    "planning_tree_sha256",
+    "planning_file_count",
+    "planning_total_bytes",
+    "admission_pinner_path",
+    "admission_pinner_sha256",
+    "admission_pinner_size",
+    "admission_state_sha256",
+    "detached_implementation_root_identity_digest",
+    "implement_tool_path",
+    "implement_tool_sha256",
+    "implement_tool_size",
+    "implement_skill_path",
+    "implement_skill_sha256",
+    "implement_skill_size",
+    "implement_test_path",
+    "implement_test_sha256",
+    "implement_test_size",
+    "runtime",
+    "test_command",
+}
+DETACHED_STATE_FIELDS = {
+    "schema",
+    "mode",
+    "planning_tree_sha256",
+    "admission_pinner_sha256",
+    "admission_state_sha256",
+    "detached_implementation_root_identity_digest",
+    "target_root_identity_digest",
+    "created_at",
+    "completed_sections",
+}
+DETACHED_PROGRESS_FIELDS = {
+    "schema",
+    "mode",
+    "planning_tree_sha256",
+    "admission_pinner_sha256",
+    "created_at",
+    "events",
+}
+SECTION_PINNER_FIELDS = {
+    "schema",
+    "section",
+    "planning_tree_sha256",
+    "admission_pinner_sha256",
+    "admission_state_sha256",
+    "detached_implementation_root_identity_digest",
+    "target_root_identity_digest",
+    "implement_tool_sha256",
+    "implement_skill_sha256",
+    "implement_test_sha256",
+    "completed_at",
+    "commit",
+    "commit_status",
+    "notes",
+    "files_changed",
+    "test_files",
+    "review_artifacts",
+    "evidence_rows",
+    "verification",
+    "predecessor_pinners",
+}
+PINNER_STATE_RECORD_FIELDS = {
+    "completed_at",
+    "commit",
+    "commit_status",
+    "notes",
+    "files_changed",
+    "test_files",
+    "review_artifacts",
+    "evidence_rows",
+    "verification",
+    "pinner_path",
+    "pinner_file_sha256",
+}
+
+
+def require_exact_fields(payload: dict[str, Any], expected: set[str], label: str) -> None:
+    actual = set(payload)
+    if actual != expected:
+        raise DetachedImplementationError(
+            "invalid-detached-schema",
+            f"{label} fields do not match the frozen schema.",
+            missing_fields=sorted(expected - actual),
+            extra_fields=sorted(actual - expected),
+        )
+
+
+def load_detached_config(root_fd: int, planning_dir: Path, implementation_root: Path) -> dict[str, Any]:
+    config, _ = load_canonical_json_at(root_fd, "zagrosi_implement_config.json")
+    require_exact_fields(config, DETACHED_CONFIG_FIELDS, "Detached implementation config")
+    if config.get("schema") != DETACHED_CONFIG_SCHEMA or config.get("mode") != "detached-frozen":
+        raise DetachedImplementationError(
+            "invalid-detached-config",
+            "Detached implementation config schema or mode is invalid.",
+        )
+    if not isinstance(config.get("target_root_identity_digest"), str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        config["target_root_identity_digest"],
+    ):
+        raise DetachedImplementationError(
+            "invalid-detached-config",
+            "Detached implementation config target root identity digest is invalid.",
+        )
+    expected_paths = {
+        "planning_dir": str(absolute_path_no_follow(planning_dir)),
+        "implementation_root": str(absolute_path_no_follow(implementation_root)),
+        "state_path": str(absolute_path_no_follow(implementation_root) / "zagrosi_implement_state.json"),
+        "progress_path": str(absolute_path_no_follow(implementation_root) / "forge-progress.json"),
+        "reviews_dir": str(absolute_path_no_follow(implementation_root) / "code_review"),
+        "evidence_dir": str(absolute_path_no_follow(implementation_root) / "evidence"),
+        "pinners_dir": str(absolute_path_no_follow(implementation_root) / "pinners"),
+        **{f"implement_{source}_path": str(path) for source, path in implementation_source_paths().items()},
+    }
+    mismatches = {key: {"expected": value, "actual": config.get(key)} for key, value in expected_paths.items() if config.get(key) != value}
+    if mismatches:
+        raise DetachedImplementationError(
+            "invalid-detached-config",
+            "Detached implementation config path binding is invalid.",
+            path_mismatches=mismatches,
+        )
+    return config
+
+
+def reopen_detached_config_exact(root_fd: int, expected_config: dict[str, Any]) -> None:
+    reopened, reopened_raw = load_canonical_json_at(root_fd, "zagrosi_implement_config.json")
+    require_exact_fields(reopened, DETACHED_CONFIG_FIELDS, "Detached implementation config")
+    expected_raw = canonical_json_bytes(expected_config)
+    if reopened != expected_config or reopened_raw != expected_raw:
+        raise DetachedImplementationError(
+            "detached-config-drift",
+            "Detached implementation config bytes changed after the command opened its authority context.",
+        )
+
+
+def verify_target_root_authority(
+    planning_dir: Path,
+    planning_fd: int,
+    implementation_root: Path,
+    root_fd: int,
+    config: dict[str, Any],
+) -> None:
+    target_dir = absolute_path_no_follow(config["target_dir"])
+    if str(target_dir) != config["target_dir"]:
+        raise DetachedImplementationError(
+            "invalid-detached-config",
+            "Detached config target root is not an exact absolute no-follow path.",
+        )
+    target_fd = open_directory_chain_no_follow(target_dir)
+    try:
+        target_identity = _fd_identity(target_fd)
+        actual_digest = target_root_identity_digest(target_fd)
+        if actual_digest != config.get("target_root_identity_digest"):
+            raise DetachedImplementationError(
+                "target-root-identity-drift",
+                "Protected target root identity no longer matches implement-setup.",
+                expected_target_root_identity_digest=config.get("target_root_identity_digest"),
+                actual_target_root_identity_digest=actual_digest,
+            )
+        require_planning_target_disjoint(planning_dir, planning_fd, target_dir, target_fd)
+        require_open_roots_disjoint(implementation_root, root_fd, target_dir, target_fd)
+        reopened_fd = open_directory_chain_no_follow(target_dir)
+        try:
+            if _fd_identity(reopened_fd) != target_identity or target_root_identity_digest(reopened_fd) != actual_digest:
+                raise DetachedImplementationError(
+                    "target-root-replaced",
+                    "Protected target root changed while its cross-invocation identity was verified.",
+                )
+        finally:
+            os.close(reopened_fd)
+    finally:
+        os.close(target_fd)
+
+
+def open_detached_context(
+    planning_dir: Path | None,
+    raw_implementation_root: str,
+    *,
+    sections_dir: Path | None = None,
+) -> tuple[Path, int, dict[str, Any], FrozenPlanningTree, Any, Any]:
+    root_fd: int | None = None
+    guard: FrozenPlanningTree | None = None
+    lock_context: ExitStack | None = None
+    try:
+        lock_deadline = time.monotonic() + DETACHED_LOCK_TIMEOUT_SECONDS
+        lock_context = ExitStack()
+        require_global_authority = lock_context.enter_context(detached_global_lock(lock_deadline))
+        require_global_authority()
+        if planning_dir is None:
+            planning_dir = recover_planning_dir_from_detached_root(raw_implementation_root)
+        guard = FrozenPlanningTree.open(planning_dir)
+        root, root_fd = ensure_detached_root(
+            planning_dir,
+            raw_implementation_root,
+            create=False,
+            planning_root_fd=guard.root_fd,
+        )
+        require_root_authority = lock_context.enter_context(
+            section_record_lock(
+                root_fd,
+                root,
+                timeout_seconds=max(0.0, lock_deadline - time.monotonic()),
+            )
+        )
+
+        def require_lock_authority(
+            *,
+            create_marker: bool = False,
+            require_marker: bool = False,
+        ) -> None:
+            require_global_authority()
+            require_root_authority(
+                create_marker=create_marker,
+                require_marker=require_marker,
+            )
+            require_global_authority()
+
+        require_lock_authority()
+        require_detached_top_level_inventory(
+            root_fd,
+            complete=True,
+            allow_recoverable_temps=True,
+        )
+        require_planning_implementation_disjoint(planning_dir, guard.root_fd, root, root_fd)
+        config = load_detached_config(root_fd, planning_dir, root)
+        require_detached_root_identity_through_recoverable_temps(
+            root_fd,
+            config.get("detached_implementation_root_identity_digest"),
+        )
+        load_detached_state(root_fd, config)
+        load_detached_progress(root_fd, config)
+        verify_target_root_authority(planning_dir, guard.root_fd, root, root_fd, config)
+        if config.get("planning_tree_sha256") != guard.digest:
+            raise DetachedImplementationError(
+                "planning-tree-drift",
+                "Frozen planning tree does not match the digest recorded by implement-setup.",
+                expected_planning_tree_sha256=config.get("planning_tree_sha256"),
+                actual_planning_tree_sha256=guard.digest,
+            )
+        if sections_dir is not None and config.get("sections_dir") != str(absolute_path_no_follow(sections_dir)):
+            raise DetachedImplementationError(
+                "invalid-detached-config",
+                "Command sections directory does not match detached implement-setup.",
+                expected_sections_dir=config.get("sections_dir"),
+                actual_sections_dir=str(absolute_path_no_follow(sections_dir)),
+            )
+        _, _, _, admission_state_sha256 = reopen_admission_pinner(
+            planning_dir,
+            root,
+            str(config["admission_pinner_path"]),
+            expected_sha256=str(config["admission_pinner_sha256"]),
+            planning_root_fd=guard.root_fd,
+            implementation_root_fd=root_fd,
+        )
+        if config.get("admission_state_sha256") != admission_state_sha256:
+            raise DetachedImplementationError(
+                "invalid-detached-config",
+                "Detached config admission state does not equal the reopened final pinner START/END A digest.",
+                expected_admission_state_sha256=admission_state_sha256,
+                actual_admission_state_sha256=config.get("admission_state_sha256"),
+            )
+        verify_implementation_sources(config)
+        reopen_detached_config_exact(root_fd, config)
+        guard.verify_unchanged()
+        verify_target_root_authority(planning_dir, guard.root_fd, root, root_fd, config)
+        _, _, _, admission_state_sha256 = reopen_admission_pinner(
+            planning_dir,
+            root,
+            str(config["admission_pinner_path"]),
+            expected_sha256=str(config["admission_pinner_sha256"]),
+            planning_root_fd=guard.root_fd,
+            implementation_root_fd=root_fd,
+        )
+        if config.get("admission_state_sha256") != admission_state_sha256:
+            raise DetachedImplementationError(
+                "invalid-detached-config",
+                "Detached config admission state changed before authenticated temp recovery.",
+            )
+        require_lock_authority()
+        recover_detached_root_temps_locked(root_fd)
+        if detached_implementation_root_identity_digest(root_fd) != config.get(
+            "detached_implementation_root_identity_digest"
+        ):
+            raise DetachedImplementationError(
+                "detached-root-identity-drift",
+                "Detached implementation root identity changed during authenticated temp recovery.",
+            )
+        verify_detached_authorities(planning_dir, root, root_fd, config, guard)
+        recover_section_record_transaction_locked(
+            planning_dir,
+            root,
+            root_fd,
+            config,
+            guard,
+            check_section_progress(planning_dir),
+            require_lock_authority,
+        )
+        verify_detached_authorities(planning_dir, root, root_fd, config, guard)
+        require_lock_authority()
+        returned_lock_context = lock_context
+        lock_context = None
+        return root, root_fd, config, guard, returned_lock_context, require_lock_authority
+    except Exception:
+        if lock_context is not None:
+            lock_context.__exit__(*sys.exc_info())
+        if guard is not None:
+            guard.close()
+        if root_fd is not None:
+            os.close(root_fd)
+        raise
+
+
+def verify_detached_authorities(
+    planning_dir: Path,
+    implementation_root: Path,
+    root_fd: int,
+    config: dict[str, Any],
+    guard: FrozenPlanningTree,
+) -> None:
+    reopen_detached_config_exact(root_fd, config)
+    guard.verify_unchanged()
+    require_planning_implementation_disjoint(
+        planning_dir,
+        guard.root_fd,
+        implementation_root,
+        root_fd,
+    )
+    reopened_root_fd = open_directory_chain_no_follow(implementation_root)
+    try:
+        if _fd_identity(reopened_root_fd) != _fd_identity(root_fd):
+            raise DetachedImplementationError(
+                "detached-root-replaced",
+                "Detached implementation root path no longer names the held authority descriptor.",
+            )
+        require_planning_implementation_disjoint(
+            planning_dir,
+            guard.root_fd,
+            implementation_root,
+            reopened_root_fd,
+        )
+    finally:
+        os.close(reopened_root_fd)
+    verify_target_root_authority(planning_dir, guard.root_fd, implementation_root, root_fd, config)
+    actual_root_identity_digest = detached_implementation_root_identity_digest(root_fd)
+    if config.get("detached_implementation_root_identity_digest") != actual_root_identity_digest:
+        raise DetachedImplementationError(
+            "detached-root-identity-drift",
+            "Detached implementation root identity changed after implement-setup.",
+            expected_detached_implementation_root_identity_digest=config.get(
+                "detached_implementation_root_identity_digest"
+            ),
+            actual_detached_implementation_root_identity_digest=actual_root_identity_digest,
+        )
+    verify_implementation_sources(config)
+    _, _, _, admission_state_sha256 = reopen_admission_pinner(
+        planning_dir,
+        implementation_root,
+        str(config["admission_pinner_path"]),
+        expected_sha256=str(config["admission_pinner_sha256"]),
+        planning_root_fd=guard.root_fd,
+        implementation_root_fd=root_fd,
+    )
+    if config.get("admission_state_sha256") != admission_state_sha256:
+        raise DetachedImplementationError(
+            "admission-state-drift",
+            "Detached config admission state no longer equals the reopened final pinner START/END A digest.",
+            expected_admission_state_sha256=config.get("admission_state_sha256"),
+            actual_admission_state_sha256=admission_state_sha256,
+        )
+    reopen_detached_config_exact(root_fd, config)
+    verify_target_root_authority(planning_dir, guard.root_fd, implementation_root, root_fd, config)
+    guard.verify_unchanged()
+
+
+def recover_planning_dir_from_detached_root(raw_implementation_root: str) -> Path:
+    implementation_root = absolute_path_no_follow(raw_implementation_root)
+    root_fd = open_directory_chain_no_follow(implementation_root)
+    try:
+        detached_implementation_root_identity_digest(
+            root_fd,
+            allow_recoverable_temps=True,
+        )
+        config, _ = load_canonical_json_at(root_fd, "zagrosi_implement_config.json")
+        require_exact_fields(config, DETACHED_CONFIG_FIELDS, "Detached implementation config")
+        planning_dir = config.get("planning_dir")
+        if (
+            config.get("schema") != DETACHED_CONFIG_SCHEMA
+            or config.get("mode") != "detached-frozen"
+            or config.get("implementation_root") != str(implementation_root)
+            or type(planning_dir) is not str
+            or str(absolute_path_no_follow(planning_dir)) != planning_dir
+        ):
+            raise DetachedImplementationError(
+                "invalid-detached-config",
+                "Detached config cannot authoritatively recover its planning root.",
+            )
+        return Path(planning_dir)
+    finally:
+        os.close(root_fd)
+
+
+def require_handoff_platform(root_fd: int) -> None:
+    if os.geteuid() == 0:
+        raise DetachedImplementationError(
+            "unsafe-handoff-caller",
+            "Privileged evidence handoff must be initiated by the owning non-root user.",
+        )
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise DetachedImplementationError(
+            "unsupported-handoff-platform",
+            "Privileged evidence handoff requires a Darwin arm64 host.",
+        )
+    if HANDOFF_STAT != "/usr/bin/stat":
+        raise DetachedImplementationError(
+            "handoff-command-drift",
+            "The fixed APFS probe path does not match its frozen literal.",
+        )
+    require_fixed_handoff_executable(HANDOFF_STAT, allow_multiple_links=True)
+    return_code, stdout, stderr = run_bounded_child(
+        [HANDOFF_STAT, "-f", "%T", "."],
+        b"",
+        cwd_fd=root_fd,
+        timeout_seconds=5.0,
+        stdout_cap=64,
+        stderr_cap=64,
+    )
+    if return_code != 0 or stderr or stdout != b"apfs\n":
+        raise DetachedImplementationError(
+            "unsupported-handoff-platform",
+            "Privileged evidence handoff requires an APFS detached root.",
+        )
+
+
+def open_root_owned_nonwritable_directory_chain(path: Path) -> int:
+    absolute = absolute_path_no_follow(path)
+    current_fd = os.open(os.sep, _directory_open_flags())
+    try:
+        root_observed = os.fstat(current_fd)
+        if (
+            not stat.S_ISDIR(root_observed.st_mode)
+            or root_observed.st_uid != 0
+            or root_observed.st_gid != 0
+            or stat.S_IMODE(root_observed.st_mode) & 0o022
+        ):
+            raise DetachedImplementationError(
+                "unsafe-handoff-dependency",
+                "The fixed privileged handoff filesystem root is not root-owned and non-writable.",
+            )
+        for component in absolute.parts[1:]:
+            next_fd = os.open(component, _directory_open_flags(), dir_fd=current_fd)
+            observed = os.fstat(next_fd)
+            if (
+                not stat.S_ISDIR(observed.st_mode)
+                or observed.st_uid != 0
+                or observed.st_gid != 0
+                or stat.S_IMODE(observed.st_mode) & 0o022
+            ):
+                raise DetachedImplementationError(
+                    "unsafe-handoff-dependency",
+                    "A fixed privileged handoff dependency ancestor is not root-owned and non-writable.",
+                )
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def require_fixed_handoff_executable(raw_path: str, *, allow_multiple_links: bool = False) -> None:
+    path = Path(raw_path)
+    parent_fd: int | None = None
+    executable_fd: int | None = None
+    try:
+        parent_fd = open_root_owned_nonwritable_directory_chain(path.parent)
+        executable_fd = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        observed = os.fstat(executable_fd)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or type(observed.st_nlink) is not int
+            or observed.st_nlink < 1
+            or (not allow_multiple_links and observed.st_nlink != 1)
+            or observed.st_uid != 0
+            or observed.st_gid != 0
+            or stat.S_IMODE(observed.st_mode) & 0o022
+            or not (observed.st_mode & 0o111)
+        ):
+            raise DetachedImplementationError(
+                "unsafe-handoff-dependency",
+                "A fixed privileged handoff executable is outside its frozen metadata contract.",
+            )
+    except FileNotFoundError as exc:
+        raise DetachedImplementationError(
+            "missing-handoff-dependency",
+            "A fixed privileged handoff executable is missing.",
+        ) from exc
+    except OSError as exc:
+        raise DetachedImplementationError(
+            "unsafe-handoff-dependency",
+            "A fixed privileged handoff executable path is unsafe.",
+        ) from exc
+    finally:
+        if executable_fd is not None:
+            os.close(executable_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def read_stable_fd(file_fd: int, *, cap: int, label: str) -> bytes:
+    before = os.fstat(file_fd)
+    if before.st_size < 0 or before.st_size > cap:
+        raise DetachedImplementationError(
+            "unsafe-handoff-dependency",
+            f"{label} exceeds its frozen byte cap.",
+        )
+    chunks: list[bytes] = []
+    remaining = cap + 1
+    while remaining:
+        chunk = os.read(file_fd, min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    after = os.fstat(file_fd)
+    stable = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_uid,
+        value.st_gid,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+    if len(raw) > cap or len(raw) != before.st_size or stable(before) != stable(after):
+        raise DetachedImplementationError(
+            "unsafe-handoff-dependency",
+            f"{label} changed while its complete bytes were read.",
+        )
+    return raw
+
+
+def read_fixed_gate_runner(contract: dict[str, Any]) -> bytes:
+    runner = Path(contract["runner"])
+    parent_fd: int | None = None
+    runner_fd: int | None = None
+    try:
+        parent_fd = open_root_owned_nonwritable_directory_chain(runner.parent)
+        runner_fd = os.open(
+            runner.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        observed = os.fstat(runner_fd)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or stat.S_IMODE(observed.st_mode) != 0o555
+            or observed.st_nlink != 1
+            or observed.st_uid != 0
+            or observed.st_gid != 0
+        ):
+            raise DetachedImplementationError(
+                "unsafe-handoff-dependency",
+                "The fixed privileged gate runner metadata is outside the frozen contract.",
+            )
+        return read_stable_fd(
+            runner_fd,
+            cap=IMPLEMENTATION_SOURCE_CAP,
+            label="Fixed privileged gate runner",
+        )
+    except FileNotFoundError as exc:
+        raise DetachedImplementationError(
+            "missing-handoff-dependency",
+            "The fixed privileged gate runner is missing.",
+        ) from exc
+    except OSError as exc:
+        raise DetachedImplementationError(
+            "unsafe-handoff-dependency",
+            "The fixed privileged gate runner path is unsafe.",
+        ) from exc
+    finally:
+        if runner_fd is not None:
+            os.close(runner_fd)
+        if parent_fd is not None:
+            os.close(parent_fd)
+
+
+def require_fixed_handoff_dependencies(contract: dict[str, Any], *, target_fd: int | None = None) -> None:
+    verify_handoff_command_identities(contract)
+    if (
+        HANDOFF_SUDO != "/usr/bin/sudo"
+        or HANDOFF_STAT != "/usr/bin/stat"
+        or HANDOFF_PYTHON != "/usr/local/libexec/santander-unit12-prereqs/python-3.12.13/bin/python3.12"
+        or HANDOFF_GIT != "/usr/local/libexec/santander-unit12-prereqs/git-2.50.1-apple-155"
+    ):
+        raise DetachedImplementationError(
+            "handoff-command-drift",
+            "A fixed privileged handoff executable path does not match its frozen literal.",
+        )
+    for raw_path in (HANDOFF_SUDO, HANDOFF_PYTHON, HANDOFF_GIT):
+        require_fixed_handoff_executable(raw_path)
+    require_fixed_handoff_executable(HANDOFF_STAT, allow_multiple_links=True)
+    for raw_path in (HANDOFF_PREREQUISITE_RECEIPT, HANDOFF_HOST_PROVISIONING_RECEIPT):
+        path = Path(raw_path)
+        try:
+            parent_fd = open_root_owned_nonwritable_directory_chain(path.parent)
+        except DetachedImplementationError as exc:
+            if not path.parent.exists():
+                raise DetachedImplementationError(
+                    "missing-handoff-dependency",
+                    "A fixed privileged handoff trust-receipt parent is missing.",
+                ) from exc
+            raise
+        try:
+            try:
+                read_single_link_regular_at(parent_fd, path.name, cap=HANDOFF_RECEIPT_CAP, require_mode=0o644)
+            except DetachedImplementationError as exc:
+                try:
+                    os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    raise DetachedImplementationError(
+                        "missing-handoff-dependency",
+                        "A fixed privileged handoff trust receipt is missing.",
+                    ) from exc
+                raise
+            observed = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if observed.st_uid != 0 or observed.st_gid != 0:
+                raise DetachedImplementationError(
+                    "missing-handoff-dependency",
+                    "A fixed privileged handoff trust receipt has unsafe ownership.",
+                )
+        finally:
+            os.close(parent_fd)
+    runner_raw = read_fixed_gate_runner(contract)
+    if target_fd is not None:
+        require_gate_runner_matches_source(contract, target_fd, runner_raw)
+
+
+def require_gate_runner_matches_source(
+    contract: dict[str, Any],
+    target_fd: int,
+    runner_raw: bytes,
+) -> None:
+    runner_source_raw = read_single_link_regular_at(
+        target_fd,
+        contract["runner_source"],
+        cap=IMPLEMENTATION_SOURCE_CAP,
+    )
+    if (
+        runner_raw != runner_source_raw
+        or hashlib.sha256(runner_raw).digest() != hashlib.sha256(runner_source_raw).digest()
+    ):
+        raise DetachedImplementationError(
+            "handoff-runner-source-drift",
+            "The fixed root-owned gate runner is not byte-identical to its current admitted source.",
+        )
+
+
+@dataclass(frozen=True)
+class ProtectedSourceObservation:
+    protected_source_root_identity_digest: str
+    source_commit: str
+    source_tree_sha256: str
+    implementation_source_sha256: str
+    test_source_sha256: str
+
+
+def run_protected_source_probe(
+    target_fd: int,
+    argv: list[str],
+    *,
+    timeout_seconds: float,
+    stdout_cap: int,
+) -> bytes:
+    try:
+        return_code, stdout, stderr = run_bounded_child(
+            argv,
+            b"",
+            cwd_fd=target_fd,
+            timeout_seconds=timeout_seconds,
+            stdout_cap=stdout_cap,
+            stderr_cap=HANDOFF_STDERR_CAP,
+            child_env=HANDOFF_GIT_ENV,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DetachedImplementationError(
+            "handoff-source-probe-unavailable",
+            "The fixed protected-source probe could not be spawned or completed.",
+        ) from exc
+    except DetachedImplementationError as exc:
+        if exc.code == "handoff-source-dirty":
+            raise
+        if exc.code in {
+            "handoff-child-timeout",
+            "handoff-child-output-cap",
+            "handoff-child-termination-unproven",
+            "handoff-child-residual-process-group",
+        }:
+            raise DetachedImplementationError(
+                "handoff-source-probe-unavailable",
+                "The fixed protected-source probe could not be boundedly completed.",
+            ) from exc
+        raise DetachedImplementationError(
+            "handoff-source-probe-invalid",
+            "The fixed protected-source probe exceeded its frozen output contract.",
+        ) from exc
+    if return_code < 0:
+        raise DetachedImplementationError(
+            "handoff-source-probe-unavailable",
+            "The fixed protected-source probe was terminated.",
+        )
+    if return_code != 0 or stderr:
+        raise DetachedImplementationError(
+            "handoff-source-probe-invalid",
+            "The fixed protected-source probe did not close with empty-stderr exit zero.",
+        )
+    return stdout
+
+
+def derive_protected_source_observation(
+    target_fd: int,
+    contract: dict[str, Any],
+) -> ProtectedSourceObservation:
+    before = os.fstat(target_fd)
+    root_identity = {
+        "device": before.st_dev,
+        "gid": before.st_gid,
+        "inode": before.st_ino,
+        "link_count": before.st_nlink,
+        "mode": stat.S_IMODE(before.st_mode),
+        "uid": before.st_uid,
+    }
+    root_identity_digest = domain_sha256(
+        b"unit12-protected-source-root-identity-v1\0",
+        handoff_canonical_json_body(root_identity),
+    )
+    status = run_protected_source_probe(
+        target_fd,
+        [HANDOFF_GIT, *HANDOFF_GIT_STATUS_ARGS],
+        timeout_seconds=10.0,
+        stdout_cap=1,
+    )
+    if status != b"":
+        raise DetachedImplementationError(
+            "handoff-source-dirty",
+            "Protected source contains tracked or untracked worktree changes.",
+        )
+    revision = run_protected_source_probe(
+        target_fd,
+        [HANDOFF_GIT, "rev-parse", "--verify", "HEAD^{commit}"],
+        timeout_seconds=10.0,
+        stdout_cap=41,
+    )
+    if not re.fullmatch(rb"[0-9a-f]{40}\n", revision):
+        raise DetachedImplementationError(
+            "handoff-source-revision-invalid",
+            "Protected source HEAD is not the exact committed 40-lowerhex revision frame.",
+        )
+    tree = run_protected_source_probe(
+        target_fd,
+        [HANDOFF_GIT, "ls-tree", "-r", "-z", "--full-tree", "HEAD"],
+        timeout_seconds=30.0,
+        stdout_cap=16_777_216,
+    )
+    tree_digest = hashlib.sha256(b"unit12-protected-source-tree-v1\0")
+    tree_digest.update(len(tree).to_bytes(8, "big"))
+    tree_digest.update(tree)
+
+    implementation_digest = hashlib.sha256(contract["implementation_source_domain"])
+    implementation_paths = tuple(contract["implementation_sources"])
+    if implementation_paths != tuple(sorted(implementation_paths, key=lambda value: value.encode("ascii"))):
+        raise DetachedImplementationError(
+            "handoff-source-contract-invalid",
+            "Protected implementation source paths are not in exact ASCII order.",
+        )
+    for relative in implementation_paths:
+        path_bytes = relative.encode("ascii", errors="strict")
+        raw = read_single_link_regular_at(target_fd, relative, cap=IMPLEMENTATION_SOURCE_CAP)
+        implementation_digest.update(len(path_bytes).to_bytes(4, "big"))
+        implementation_digest.update(path_bytes)
+        implementation_digest.update(hashlib.sha256(raw).digest())
+    test_raw = read_single_link_regular_at(target_fd, contract["test"], cap=IMPLEMENTATION_SOURCE_CAP)
+    after = os.fstat(target_fd)
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_uid,
+        before.st_gid,
+        before.st_mode,
+        before.st_nlink,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_uid,
+        after.st_gid,
+        after.st_mode,
+        after.st_nlink,
+    ):
+        raise DetachedImplementationError(
+            "handoff-source-root-drift",
+            "Protected source root metadata changed during source derivation.",
+        )
+    return ProtectedSourceObservation(
+        protected_source_root_identity_digest=root_identity_digest,
+        source_commit=revision[:-1].decode("ascii"),
+        source_tree_sha256="sha256:" + tree_digest.hexdigest(),
+        implementation_source_sha256="sha256:" + implementation_digest.hexdigest(),
+        test_source_sha256=sha256_digest(test_raw),
+    )
+
+
+def require_receipt_source_observation(
+    receipt: dict[str, Any],
+    expected: ProtectedSourceObservation,
+) -> None:
+    mismatches = {
+        field
+        for field in (
+            "protected_source_root_identity_digest",
+            "source_commit",
+            "source_tree_sha256",
+            "implementation_source_sha256",
+            "test_source_sha256",
+        )
+        if receipt.get(field) != getattr(expected, field)
+    }
+    if mismatches:
+        raise DetachedImplementationError(
+            "handoff-source-observation-drift",
+            "Handoff receipt protected-source fields do not equal the current independent derivation.",
+        )
+
+
+def open_handoff_target(
+    config: dict[str, Any],
+    contract: dict[str, Any],
+) -> tuple[Path, int, ProtectedSourceObservation]:
+    target_dir = absolute_path_no_follow(config["target_dir"])
+    if str(target_dir) != config["target_dir"]:
+        raise DetachedImplementationError(
+            "invalid-detached-config",
+            "Detached config target root is not an exact absolute no-follow path.",
+        )
+    target_fd = open_directory_chain_no_follow(target_dir)
+    try:
+        actual_target_digest = target_root_identity_digest(target_fd)
+        if actual_target_digest != config.get("target_root_identity_digest"):
+            raise DetachedImplementationError(
+                "target-root-identity-drift",
+                "Protected target root identity no longer matches implement-setup.",
+                expected_target_root_identity_digest=config.get("target_root_identity_digest"),
+                actual_target_root_identity_digest=actual_target_digest,
+            )
+        observation = derive_protected_source_observation(target_fd, contract)
+        reopened_fd = open_directory_chain_no_follow(target_dir)
+        try:
+            if (
+                _fd_identity(reopened_fd) != _fd_identity(target_fd)
+                or target_root_identity_digest(reopened_fd) != actual_target_digest
+            ):
+                raise DetachedImplementationError(
+                    "handoff-source-root-drift",
+                    "Protected source root changed before privileged evidence handoff.",
+                )
+        finally:
+            os.close(reopened_fd)
+        return target_dir, target_fd, observation
+    except Exception:
+        os.close(target_fd)
+        raise
+
+
+def verify_handoff_with_unprivileged_test(
+    config: dict[str, Any],
+    contract: dict[str, Any],
+    request_raw: bytes,
+    receipt_raw: bytes,
+    request_final_wire_digest: str,
+    receipt_final_wire_digest: str,
+    *,
+    target_fd: int,
+) -> dict[str, Any]:
+    verifier_argv = handoff_verifier_argv(contract)
+    framed_input = (
+        len(request_raw).to_bytes(4, "big")
+        + request_raw
+        + len(receipt_raw).to_bytes(4, "big")
+        + receipt_raw
+    )
+    return_code, stdout, stderr = run_bounded_child(
+        verifier_argv,
+        framed_input,
+        cwd_fd=target_fd,
+        timeout_seconds=10.0,
+        stdout_cap=HANDOFF_VERIFICATION_CAP,
+        stderr_cap=HANDOFF_STDERR_CAP,
+    )
+    if return_code < 0:
+        raise DetachedImplementationError(
+            "handoff-verifier-terminated",
+            "Unprivileged handoff verifier was terminated.",
+        )
+    if return_code != 0 or stderr or not stdout or not stdout.endswith(b"\n"):
+        raise DetachedImplementationError(
+            "handoff-verifier-output-invalid",
+            "Unprivileged handoff verifier did not return one exact empty-stderr PASS frame.",
+        )
+    return parse_handoff_verification(
+        stdout,
+        config,
+        contract,
+        request_final_wire_digest,
+        receipt_final_wire_digest,
+    )
+
+
+def verify_stored_privileged_handoff(
+    planning_dir: Path,
+    implementation_root: Path,
+    root_fd: int,
+    config: dict[str, Any],
+    guard: FrozenPlanningTree,
+    section: str,
+) -> tuple[dict[str, Any], bytes]:
+    contract = HANDOFF_CONTRACT_BY_SECTION[section]
+    verify_handoff_command_identities(contract)
+    require_handoff_platform(root_fd)
+    require_fixed_handoff_dependencies(contract)
+    _, request_raw, request_final_wire_digest = build_handoff_request(config, contract)
+    receipt, receipt_raw = load_canonical_json_at(root_fd, contract["evidence_path"])
+    parsed_receipt, receipt_final_wire_digest = parse_handoff_receipt(
+        receipt_raw,
+        config,
+        contract,
+        request_final_wire_digest,
+    )
+    if receipt != parsed_receipt:
+        raise DetachedImplementationError(
+            "invalid-handoff-receipt",
+            "Stored handoff receipt parse changed its canonical object.",
+        )
+    _, target_fd, source_observation = open_handoff_target(config, contract)
+    target_identity = _fd_identity(target_fd)
+    try:
+        require_receipt_source_observation(parsed_receipt, source_observation)
+        if derive_protected_source_observation(target_fd, contract) != source_observation:
+            raise DetachedImplementationError(
+                "handoff-source-observation-drift",
+                "Protected source changed immediately before stored-receipt verification.",
+            )
+        require_fixed_handoff_dependencies(contract, target_fd=target_fd)
+        verify_handoff_with_unprivileged_test(
+            config,
+            contract,
+            request_raw,
+            receipt_raw,
+            request_final_wire_digest,
+            receipt_final_wire_digest,
+            target_fd=target_fd,
+        )
+        if derive_protected_source_observation(target_fd, contract) != source_observation:
+            raise DetachedImplementationError(
+                "handoff-source-observation-drift",
+                "Protected source changed during stored-receipt verification.",
+            )
+    finally:
+        os.close(target_fd)
+    recheck_handoff_target(config, contract, target_identity, source_observation)
+    verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+    return receipt, receipt_raw
+
+
+def verify_handoff_readiness(
+    planning_dir: Path,
+    root_fd: int,
+    config: dict[str, Any],
+    section: str,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    progress = check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"} or section not in progress.get("sections", []):
+        raise DetachedImplementationError(
+            "invalid-handoff-section",
+            "Privileged evidence handoff section is absent from the admitted manifest.",
+            section=section,
+        )
+    dependencies = dependency_graph(planning_dir, progress)
+    known = set(progress["sections"])
+    unknown_predecessors = sorted(
+        {
+            predecessor
+            for candidate in progress["sections"]
+            for predecessor in dependencies.get(candidate, [])
+            if predecessor not in known
+        }
+    )
+    if unknown_predecessors:
+        raise DetachedImplementationError(
+            "unknown-predecessors",
+            "Privileged handoff refuses a dependency graph with predecessors absent from the manifest.",
+            unknown_predecessors=unknown_predecessors,
+        )
+    completed_records = detached_completed_records(root_fd, config, progress)
+    if section in completed_records:
+        raise DetachedImplementationError(
+            "completed-handoff-section",
+            "Privileged handoff is only valid for an incomplete dependency-ready section.",
+            section=section,
+        )
+    incomplete_predecessors = [
+        predecessor for predecessor in dependencies.get(section, []) if predecessor not in completed_records
+    ]
+    if incomplete_predecessors:
+        raise DetachedImplementationError(
+            "incomplete-handoff-predecessors",
+            "Privileged handoff cannot run before every requested-section predecessor pinner closes.",
+            section=section,
+            incomplete_predecessors=incomplete_predecessors,
+        )
+    ready = ready_sections(progress, dependencies, set(completed_records))
+    if section not in ready:
+        raise DetachedImplementationError(
+            "handoff-section-not-ready",
+            "Privileged handoff requires the requested section to be dependency-ready and incomplete.",
+            section=section,
+            ready_sections=ready,
+        )
+    return progress, completed_records
+
+
+def recheck_handoff_target(
+    config: dict[str, Any],
+    contract: dict[str, Any],
+    expected_identity: tuple[int, int],
+    expected_observation: ProtectedSourceObservation,
+) -> None:
+    _, target_fd, observation = open_handoff_target(config, contract)
+    try:
+        if _fd_identity(target_fd) != expected_identity or observation != expected_observation:
+            raise DetachedImplementationError(
+                "handoff-source-root-drift",
+                "Protected source root, commit, tree, implementation or test bytes changed during handoff.",
+            )
+        require_fixed_handoff_dependencies(contract, target_fd=target_fd)
+    finally:
+        os.close(target_fd)
+
+
+def emit_canonical_json(payload: dict[str, Any], exit_code: int = 0) -> int:
+    sys.stdout.buffer.write(canonical_json_bytes(payload))
+    sys.stdout.buffer.flush()
+    return exit_code
+
+
+def handoff_error_result(section_token: Any, closed_error_code: str) -> tuple[dict[str, Any], int]:
+    if section_token not in HANDOFF_SECTION_CONTRACTS:
+        raise AssertionError("Privileged evidence handoff error requires an admitted public section token.")
+    exit_code = HANDOFF_CLOSED_ERROR_CODES.get(closed_error_code)
+    if exit_code is None:
+        raise AssertionError("Privileged evidence handoff error code is outside the frozen closed set.")
+    result = {
+        "schema": HANDOFF_ERROR_SCHEMA,
+        "purpose": HANDOFF_ERROR_PURPOSE,
+        "section": section_token,
+        "status": "failed",
+        "closed_error_code": closed_error_code,
+    }
+    if set(result) != HANDOFF_ERROR_FIELDS or len(handoff_canonical_json_bytes(result)) > 4096:
+        raise AssertionError("Privileged evidence handoff error fields are not exact.")
+    return result, exit_code
+
+
+def classify_handoff_error(exc: BaseException, stage: str) -> str:
+    code = exc.code if isinstance(exc, DetachedImplementationError) else None
+    if code == "unsafe-handoff-caller":
+        return "HANDOFF_CALLER_REFUSED"
+    if code in {
+        "invalid-handoff-section",
+        "unknown-predecessors",
+        "completed-handoff-section",
+        "incomplete-handoff-predecessors",
+        "handoff-section-not-ready",
+    }:
+        return "HANDOFF_SECTION_NOT_READY"
+    if code == "unsupported-handoff-platform" or stage == "platform":
+        return "HANDOFF_PLATFORM_UNAVAILABLE"
+    if code in {"missing-handoff-dependency", "handoff-source-probe-unavailable"} or stage == "fixed_dependency":
+        return "HANDOFF_FIXED_DEPENDENCY_UNAVAILABLE"
+    if stage == "root":
+        if code in {
+            "handoff-child-timeout",
+            "handoff-child-termination-unproven",
+            "handoff-child-residual-process-group",
+            "handoff-root-terminated",
+        } or not isinstance(
+            exc, DetachedImplementationError
+        ):
+            return "HANDOFF_ROOT_UNAVAILABLE"
+        return "HANDOFF_ROOT_OUTPUT_INVALID"
+    if stage == "verifier":
+        if code in {
+            "handoff-child-timeout",
+            "handoff-child-termination-unproven",
+            "handoff-child-residual-process-group",
+            "handoff-verifier-terminated",
+        } or not isinstance(
+            exc, DetachedImplementationError
+        ):
+            return "HANDOFF_VERIFIER_UNAVAILABLE"
+        return "HANDOFF_VERIFIER_OUTPUT_INVALID"
+    if stage == "evidence":
+        return "HANDOFF_EVIDENCE_CONFLICT"
+    if stage == "authority":
+        return "HANDOFF_AUTHORITY_INVALID"
+    return "HANDOFF_INTERNAL_FAILURE"
+
+
+def detached_implement_evidence_handoff(args: argparse.Namespace) -> int:
+    implementation_root: Path | None = None
+    planning_dir: Path | None = None
+    root_fd: int | None = None
+    guard: FrozenPlanningTree | None = None
+    record_lock_context: Any = None
+    require_lock_authority = None
+    section_token = getattr(args, "section", None)
+    failure_stage = "internal"
+    try:
+        contract = HANDOFF_SECTION_CONTRACTS.get(section_token)
+        if contract is None:
+            raise DetachedImplementationError(
+                "invalid-handoff-section",
+                "Privileged evidence handoff supports only the exact Section 26 or Section 28 owner.",
+                section=section_token,
+            )
+        section = contract["section"]
+        failure_stage = "authority"
+        implementation_root, root_fd, config, guard, record_lock_context, require_lock_authority = open_detached_context(
+            None,
+            args.implementation_root,
+        )
+        planning_dir = Path(config["planning_dir"])
+        verify_handoff_readiness(planning_dir, root_fd, config, section)
+        verify_handoff_command_identities(contract)
+        failure_stage = "platform"
+        require_handoff_platform(root_fd)
+        failure_stage = "fixed_dependency"
+        require_fixed_handoff_dependencies(contract)
+        failure_stage = "authority"
+        _, target_fd, source_observation = open_handoff_target(config, contract)
+        target_identity = _fd_identity(target_fd)
+        try:
+            _, request_raw, request_final_wire_digest = build_handoff_request(config, contract)
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            verify_handoff_readiness(planning_dir, root_fd, config, section)
+            recheck_handoff_target(config, contract, target_identity, source_observation)
+            failure_stage = "root"
+            return_code, receipt_raw, stderr = run_bounded_child(
+                handoff_root_argv(contract),
+                request_raw,
+                cwd_fd=target_fd,
+                timeout_seconds=30.0,
+                stdout_cap=HANDOFF_RECEIPT_CAP,
+                stderr_cap=HANDOFF_STDERR_CAP,
+            )
+            if return_code < 0:
+                raise DetachedImplementationError(
+                    "handoff-root-terminated",
+                    "Privileged handoff root arm was terminated.",
+                )
+            if return_code != 0 or stderr or not receipt_raw or not receipt_raw.endswith(b"\n"):
+                raise DetachedImplementationError(
+                    "handoff-root-output-invalid",
+                    "Privileged handoff root arm did not return one exact empty-stderr receipt frame.",
+                )
+            receipt, receipt_final_wire_digest = parse_handoff_receipt(
+                receipt_raw,
+                config,
+                contract,
+                request_final_wire_digest,
+            )
+            require_receipt_source_observation(receipt, source_observation)
+            failure_stage = "authority"
+            if derive_protected_source_observation(target_fd, contract) != source_observation:
+                raise DetachedImplementationError(
+                    "handoff-source-observation-drift",
+                    "Protected source changed between root handoff and unprivileged verification.",
+                )
+            recheck_handoff_target(config, contract, target_identity, source_observation)
+            failure_stage = "fixed_dependency"
+            require_fixed_handoff_dependencies(contract, target_fd=target_fd)
+            failure_stage = "verifier"
+            verify_handoff_with_unprivileged_test(
+                config,
+                contract,
+                request_raw,
+                receipt_raw,
+                request_final_wire_digest,
+                receipt_final_wire_digest,
+                target_fd=target_fd,
+            )
+            failure_stage = "authority"
+            if derive_protected_source_observation(target_fd, contract) != source_observation:
+                raise DetachedImplementationError(
+                    "handoff-source-observation-drift",
+                    "Protected source changed during unprivileged handoff verification.",
+                )
+            recheck_handoff_target(config, contract, target_identity, source_observation)
+        finally:
+            os.close(target_fd)
+        failure_stage = "authority"
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        verify_handoff_readiness(planning_dir, root_fd, config, section)
+        recheck_handoff_target(config, contract, target_identity, source_observation)
+        evidence_path = contract["evidence_path"]
+        failure_stage = "evidence"
+        evidence_preexisted = True
+        try:
+            read_single_link_regular_at(root_fd, evidence_path, cap=HANDOFF_RECEIPT_CAP, require_mode=0o600)
+        except DetachedImplementationError as exc:
+            if exc.code != "unsafe-detached-file":
+                raise
+            evidence_preexisted = False
+        try:
+            written_sha256, written_size, created = write_canonical_json_at(
+                root_fd,
+                evidence_path,
+                receipt,
+                immutable=True,
+                report_created=True,
+            )
+            reopened, reopened_raw = load_canonical_json_at(root_fd, evidence_path)
+            if reopened != receipt or reopened_raw != receipt_raw:
+                raise DetachedImplementationError(
+                    "handoff-receipt-drift",
+                    "User-owned handoff receipt changed after create-once persistence.",
+                )
+            failure_stage = "authority"
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            verify_handoff_readiness(planning_dir, root_fd, config, section)
+            recheck_handoff_target(config, contract, target_identity, source_observation)
+        except Exception:
+            if not evidence_preexisted:
+                try:
+                    unlink_immutable_json_if_exact_at(root_fd, evidence_path, receipt_raw)
+                except DetachedImplementationError as cleanup_exc:
+                    if cleanup_exc.code != "unsafe-detached-file":
+                        raise
+            raise
+        result = {
+            "schema": HANDOFF_RESULT_SCHEMA,
+            "section": section_token,
+            "evidence_name": contract["evidence_name"],
+            "evidence_path": contract["evidence_path"],
+            "sha256": written_sha256,
+            "size": written_size,
+            "status": "created" if created else "reopened",
+        }
+        if set(result) != HANDOFF_RESULT_FIELDS:
+            raise DetachedImplementationError("invalid-handoff-result", "Handoff result fields are not exact.")
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        require_lock_authority()
+        return emit_canonical_json(result)
+    except DetachedImplementationError as exc:
+        closed_error_code = classify_handoff_error(exc, failure_stage)
+        error_result, exit_code = handoff_error_result(section_token, closed_error_code)
+        return emit_canonical_json(error_result, exit_code)
+    except (OSError, subprocess.SubprocessError) as exc:
+        closed_error_code = classify_handoff_error(exc, failure_stage)
+        error_result, exit_code = handoff_error_result(section_token, closed_error_code)
+        return emit_canonical_json(error_result, exit_code)
+    except Exception:
+        error_result, exit_code = handoff_error_result(section_token, "HANDOFF_INTERNAL_FAILURE")
+        return emit_canonical_json(error_result, exit_code)
+    finally:
+        if record_lock_context is not None:
+            record_lock_context.__exit__(*sys.exc_info())
+        if guard is not None:
+            guard.close()
+        if root_fd is not None:
+            os.close(root_fd)
+
+
+def detached_state_default(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": DETACHED_STATE_SCHEMA,
+        "mode": "detached-frozen",
+        "planning_tree_sha256": config["planning_tree_sha256"],
+        "admission_pinner_sha256": config["admission_pinner_sha256"],
+        "admission_state_sha256": config["admission_state_sha256"],
+        "detached_implementation_root_identity_digest": config[
+            "detached_implementation_root_identity_digest"
+        ],
+        "target_root_identity_digest": config["target_root_identity_digest"],
+        "created_at": now_iso(),
+        "completed_sections": {},
+    }
+
+
+def detached_progress_default(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": DETACHED_PROGRESS_SCHEMA,
+        "mode": "detached-frozen",
+        "planning_tree_sha256": config["planning_tree_sha256"],
+        "admission_pinner_sha256": config["admission_pinner_sha256"],
+        "created_at": now_iso(),
+        "events": [],
+    }
+
+
+def load_detached_progress(root_fd: int, config: dict[str, Any]) -> dict[str, Any]:
+    progress, _ = load_canonical_json_at(root_fd, "forge-progress.json")
+    require_exact_fields(progress, DETACHED_PROGRESS_FIELDS, "Detached implementation progress")
+    if (
+        progress.get("schema") != DETACHED_PROGRESS_SCHEMA
+        or progress.get("mode") != "detached-frozen"
+        or progress.get("planning_tree_sha256") != config.get("planning_tree_sha256")
+        or progress.get("admission_pinner_sha256") != config.get("admission_pinner_sha256")
+        or not isinstance(progress.get("created_at"), str)
+        or not isinstance(progress.get("events"), list)
+    ):
+        raise DetachedImplementationError(
+            "invalid-detached-progress",
+            "Detached progress is not bound to the current planning tree and admission pinner.",
+        )
+    return progress
+
+
+def load_detached_state(root_fd: int, config: dict[str, Any]) -> dict[str, Any]:
+    state, _ = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    require_exact_fields(state, DETACHED_STATE_FIELDS, "Detached implementation state")
+    if (
+        state.get("schema") != DETACHED_STATE_SCHEMA
+        or state.get("mode") != "detached-frozen"
+        or state.get("planning_tree_sha256") != config.get("planning_tree_sha256")
+        or state.get("admission_pinner_sha256") != config.get("admission_pinner_sha256")
+        or state.get("admission_state_sha256") != config.get("admission_state_sha256")
+        or state.get("detached_implementation_root_identity_digest")
+        != config.get("detached_implementation_root_identity_digest")
+        or state.get("target_root_identity_digest") != config.get("target_root_identity_digest")
+        or not isinstance(state.get("completed_sections"), dict)
+    ):
+        raise DetachedImplementationError(
+            "invalid-detached-state",
+            "Detached implementation state is not bound to the current config, planning tree, admission pinner, and target root.",
+        )
+    return state
+
+
+def detached_artifact_relative(implementation_root: Path, raw_path: str) -> str:
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        absolute = absolute_path_no_follow(candidate)
+        try:
+            candidate = absolute.relative_to(implementation_root)
+        except ValueError as exc:
+            raise DetachedImplementationError(
+                "external-artifact-outside-root",
+                "Detached review and evidence artifacts must be inside the implementation root.",
+                path=str(absolute),
+            ) from exc
+    parts = _relative_parts(candidate.as_posix())
+    return Path(*parts).as_posix()
+
+
+def detached_review_rows(root_fd: int, implementation_root: Path, section: str, values: list[str]) -> list[dict[str, Any]]:
+    relative_paths = sorted({detached_artifact_relative(implementation_root, value) for value in normalize_repeated(values)})
+    required = {
+        f"code_review/{section}-review.md",
+        f"code_review/{section}-decisions.md",
+    }
+    missing = sorted(required - set(relative_paths))
+    if missing:
+        raise DetachedImplementationError(
+            "missing-detached-review",
+            "Detached record requires the section review and decisions artifacts.",
+            missing_review_artifacts=missing,
+        )
+    rows: list[dict[str, Any]] = []
+    for relative in relative_paths:
+        raw = read_single_link_regular_at(root_fd, relative, cap=DETACHED_REVIEW_CAP)
+        rows.append({"path": relative, "sha256": sha256_digest(raw), "size": len(raw)})
+    return rows
+
+
+def detached_evidence_rows(root_fd: int, implementation_root: Path, values: list[str]) -> list[dict[str, Any]]:
+    parsed: dict[str, str] = {}
+    for value in normalize_repeated(values):
+        name, separator, raw_path = value.partition("=")
+        if not separator or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", name):
+            raise DetachedImplementationError(
+                "invalid-evidence-row",
+                "Evidence rows use NAME=PATH with a unique lower-snake-case name.",
+                evidence_row=value,
+            )
+        if name in parsed:
+            raise DetachedImplementationError(
+                "invalid-evidence-row",
+                f"Duplicate detached evidence row name: {name}",
+                evidence_row=name,
+            )
+        parsed[name] = detached_artifact_relative(implementation_root, raw_path)
+    rows: list[dict[str, Any]] = []
+    for name in sorted(parsed):
+        relative = parsed[name]
+        payload, raw = load_canonical_json_at(root_fd, relative)
+        if not payload.get("schema"):
+            raise DetachedImplementationError(
+                "invalid-evidence-row",
+                f"Detached evidence row must name a canonical JSON object with a schema: {name}",
+                evidence_row=name,
+            )
+        if payload.get("schema") == "unit12-privileged-darwin-apfs-gate-result-v1":
+            raise DetachedImplementationError(
+                "raw-privileged-evidence-forbidden",
+                "Root-owned privileged gate results are never accepted as user-owned detached evidence rows.",
+                evidence_row=name,
+            )
+        rows.append({"name": name, "path": relative, "sha256": sha256_digest(raw), "size": len(raw)})
+    return rows
+
+
+def detached_section_evidence_values(section: str, values: list[str]) -> list[str]:
+    normalized = normalize_repeated(values)
+    reserved_names = {name for name, _ in REQUIRED_PRIVILEGED_SECTION_EVIDENCE.values()}
+    reserved_paths = {path for _, path in REQUIRED_PRIVILEGED_SECTION_EVIDENCE.values()}
+    for value in normalized:
+        name, separator, raw_path = value.partition("=")
+        if not separator:
+            continue
+        relative = Path(raw_path).as_posix() if not Path(raw_path).is_absolute() else raw_path
+        if name in reserved_names or relative in reserved_paths:
+            raise DetachedImplementationError(
+                "reserved-evidence-row",
+                "Section 26 and Section 28 privileged handoff evidence rows are derived by Forge and cannot be caller supplied.",
+                evidence_row=value,
+            )
+    required = REQUIRED_PRIVILEGED_SECTION_EVIDENCE.get(section)
+    if required is not None:
+        normalized.append(f"{required[0]}={required[1]}")
+    return normalized
+
+
+def require_privileged_section_evidence(section: str, rows: list[dict[str, Any]]) -> None:
+    required = REQUIRED_PRIVILEGED_SECTION_EVIDENCE.get(section)
+    if required is None:
+        return
+    required_name, required_path = required
+    row_by_name = {row["name"]: row for row in rows}
+    if required_name not in row_by_name:
+        raise DetachedImplementationError(
+            "missing-required-section-evidence",
+            f"Section requires its exact privileged Darwin/APFS evidence row: {section}",
+            section=section,
+            required_evidence_name=required_name,
+            required_evidence_path=required_path,
+        )
+    actual_path = row_by_name[required_name]["path"]
+    if actual_path != required_path:
+        raise DetachedImplementationError(
+            "invalid-required-section-evidence",
+            f"Privileged Darwin/APFS evidence row has the wrong fixed path: {section}",
+            section=section,
+            required_evidence_name=required_name,
+            required_evidence_path=required_path,
+            actual_evidence_path=actual_path,
+        )
+
+
+def require_verified_privileged_evidence_bytes(
+    section: str,
+    rows: list[dict[str, Any]],
+    receipt_raw: bytes | None,
+) -> None:
+    required = REQUIRED_PRIVILEGED_SECTION_EVIDENCE.get(section)
+    if required is None:
+        if receipt_raw is not None:
+            raise DetachedImplementationError(
+                "invalid-required-section-evidence",
+                "A privileged handoff receipt was returned for a section without that gate.",
+                section=section,
+            )
+        return
+    require_privileged_section_evidence(section, rows)
+    assert receipt_raw is not None
+    required_name, required_path = required
+    row = next(item for item in rows if item["name"] == required_name)
+    expected = {
+        "name": required_name,
+        "path": required_path,
+        "sha256": sha256_digest(receipt_raw),
+        "size": len(receipt_raw),
+    }
+    if row != expected:
+        raise DetachedImplementationError(
+            "detached-evidence-drift",
+            "Privileged handoff receipt bytes changed between verification and section pinner construction.",
+            section=section,
+            expected_evidence_row=expected,
+            actual_evidence_row=row,
+        )
+
+
+def verify_section_pinner_bytes(
+    root_fd: int,
+    config: dict[str, Any],
+    section: str,
+    state_record: dict[str, Any],
+    pinner: dict[str, Any],
+    raw: bytes,
+    *,
+    verify_predecessors: bool = True,
+) -> tuple[dict[str, Any], str]:
+    if not isinstance(state_record, dict):
+        raise DetachedImplementationError("invalid-detached-state", f"State record is not an object: {section}", section=section)
+    require_exact_fields(state_record, PINNER_STATE_RECORD_FIELDS, f"State record for {section}")
+    pinner_path = state_record.get("pinner_path")
+    if not isinstance(pinner_path, str):
+        raise DetachedImplementationError("invalid-detached-state", f"State pinner path is invalid: {section}", section=section)
+    file_sha256 = sha256_digest(raw)
+    if file_sha256 != state_record.get("pinner_file_sha256"):
+        raise DetachedImplementationError(
+            "pinner-drift",
+            f"Section pinner hash no longer matches state: {section}",
+            section=section,
+            expected_pinner_file_sha256=state_record.get("pinner_file_sha256"),
+            actual_pinner_file_sha256=file_sha256,
+        )
+    expected_pinner_path = f"pinners/{section}-{file_sha256.removeprefix('sha256:')}.json"
+    if pinner_path != expected_pinner_path:
+        raise DetachedImplementationError(
+            "invalid-section-pinner",
+            f"Section pinner path is not content-addressed by its canonical file hash: {section}",
+            section=section,
+            expected_pinner_path=expected_pinner_path,
+            actual_pinner_path=pinner_path,
+        )
+    require_exact_fields(pinner, SECTION_PINNER_FIELDS, f"Section pinner for {section}")
+    state_projection = {
+        field: pinner.get(field)
+        for field in PINNER_STATE_RECORD_FIELDS
+        if field not in {"pinner_path", "pinner_file_sha256"}
+    }
+    expected_state_projection = {
+        field: state_record.get(field)
+        for field in PINNER_STATE_RECORD_FIELDS
+        if field not in {"pinner_path", "pinner_file_sha256"}
+    }
+    if (
+        pinner.get("schema") != SECTION_PINNER_SCHEMA
+        or pinner.get("section") != section
+        or pinner.get("planning_tree_sha256") != config.get("planning_tree_sha256")
+        or pinner.get("admission_pinner_sha256") != config.get("admission_pinner_sha256")
+        or pinner.get("admission_state_sha256") != config.get("admission_state_sha256")
+        or pinner.get("detached_implementation_root_identity_digest")
+        != config.get("detached_implementation_root_identity_digest")
+        or pinner.get("target_root_identity_digest") != config.get("target_root_identity_digest")
+        or pinner.get("implement_tool_sha256") != config.get("implement_tool_sha256")
+        or pinner.get("implement_skill_sha256") != config.get("implement_skill_sha256")
+        or pinner.get("implement_test_sha256") != config.get("implement_test_sha256")
+        or state_projection != expected_state_projection
+    ):
+        raise DetachedImplementationError(
+            "invalid-section-pinner",
+            f"Section pinner is not bound to its section, planning tree, admission pinner, and implementation sources: {section}",
+            section=section,
+        )
+    predecessor_rows = pinner.get("predecessor_pinners")
+    if not isinstance(predecessor_rows, list):
+        raise DetachedImplementationError("invalid-section-pinner", f"Predecessor pinners are invalid: {section}", section=section)
+    if verify_predecessors:
+        for row in predecessor_rows:
+            if not isinstance(row, dict) or set(row) != {"section", "pinner_path", "pinner_file_sha256"}:
+                raise DetachedImplementationError("invalid-section-pinner", f"Predecessor pinner row is invalid: {section}", section=section)
+            if not all(isinstance(row.get(field), str) for field in ("section", "pinner_path", "pinner_file_sha256")):
+                raise DetachedImplementationError("invalid-section-pinner", f"Predecessor pinner row types are invalid: {section}", section=section)
+            predecessor, predecessor_raw = load_canonical_json_at(root_fd, row["pinner_path"])
+            predecessor_sha256 = sha256_digest(predecessor_raw)
+            expected_predecessor_path = (
+                f"pinners/{row['section']}-{predecessor_sha256.removeprefix('sha256:')}.json"
+            )
+            require_exact_fields(predecessor, SECTION_PINNER_FIELDS, f"Predecessor pinner for {row['section']}")
+            if (
+                predecessor_sha256 != row["pinner_file_sha256"]
+                or row["pinner_path"] != expected_predecessor_path
+                or predecessor.get("schema") != SECTION_PINNER_SCHEMA
+                or predecessor.get("section") != row["section"]
+                or predecessor.get("planning_tree_sha256") != config.get("planning_tree_sha256")
+                or predecessor.get("admission_pinner_sha256") != config.get("admission_pinner_sha256")
+                or predecessor.get("admission_state_sha256") != config.get("admission_state_sha256")
+                or predecessor.get("detached_implementation_root_identity_digest")
+                != config.get("detached_implementation_root_identity_digest")
+                or predecessor.get("target_root_identity_digest") != config.get("target_root_identity_digest")
+                or predecessor.get("implement_tool_sha256") != config.get("implement_tool_sha256")
+                or predecessor.get("implement_skill_sha256") != config.get("implement_skill_sha256")
+                or predecessor.get("implement_test_sha256") != config.get("implement_test_sha256")
+            ):
+                raise DetachedImplementationError(
+                    "predecessor-pinner-drift",
+                    f"Predecessor pinner did not reopen with its recorded canonical file hash: {row.get('section')}",
+                    section=section,
+                    predecessor_section=row.get("section"),
+                )
+    return pinner, file_sha256
+
+
+def verify_section_pinner(
+    root_fd: int,
+    config: dict[str, Any],
+    section: str,
+    state_record: dict[str, Any],
+    *,
+    verify_predecessors: bool = True,
+) -> tuple[dict[str, Any], str]:
+    if not isinstance(state_record, dict):
+        raise DetachedImplementationError(
+            "invalid-detached-state",
+            f"State record is not an object: {section}",
+            section=section,
+        )
+    pinner_path = state_record.get("pinner_path")
+    if not isinstance(pinner_path, str):
+        raise DetachedImplementationError(
+            "invalid-detached-state",
+            f"State pinner path is invalid: {section}",
+            section=section,
+        )
+    pinner, raw = load_canonical_json_at(root_fd, pinner_path)
+    return verify_section_pinner_bytes(
+        root_fd,
+        config,
+        section,
+        state_record,
+        pinner,
+        raw,
+        verify_predecessors=verify_predecessors,
+    )
+
+
+def detached_completed_records(
+    root_fd: int,
+    config: dict[str, Any],
+    progress: dict[str, Any],
+    *,
+    pending_pinner: tuple[str, dict[str, Any], bytes] | None = None,
+) -> dict[str, dict[str, Any]]:
+    state = load_detached_state(root_fd, config)
+    completed = state["completed_sections"]
+    known = set(progress.get("sections", []))
+    unknown = sorted(set(completed) - known)
+    if unknown:
+        raise DetachedImplementationError(
+            "unknown-recorded-sections",
+            "Detached state contains sections absent from the manifest.",
+            unknown_recorded_sections=unknown,
+        )
+    reopened_pinners: dict[str, dict[str, Any]] = {}
+    for section, record in completed.items():
+        if pending_pinner is not None and pending_pinner[0] == section:
+            pinner, _ = verify_section_pinner_bytes(
+                root_fd,
+                config,
+                section,
+                record,
+                pending_pinner[1],
+                pending_pinner[2],
+            )
+        else:
+            pinner, _ = verify_section_pinner(root_fd, config, section, record)
+        reopened_pinners[section] = pinner
+    dependencies = dependency_graph(absolute_path_no_follow(config["planning_dir"]), progress)
+    for section, pinner in reopened_pinners.items():
+        expected_rows: list[dict[str, str]] = []
+        for predecessor in dependencies.get(section, []):
+            predecessor_record = completed.get(predecessor)
+            if predecessor_record is None:
+                raise DetachedImplementationError(
+                    "predecessor-pinner-current-state-mismatch",
+                    f"Completed section no longer has a completed current predecessor: {section}",
+                    section=section,
+                    predecessor_section=predecessor,
+                )
+            expected_rows.append(
+                {
+                    "section": predecessor,
+                    "pinner_path": predecessor_record["pinner_path"],
+                    "pinner_file_sha256": predecessor_record["pinner_file_sha256"],
+                }
+            )
+        if pinner["predecessor_pinners"] != expected_rows:
+            actual_by_section = {
+                row.get("section"): row
+                for row in pinner["predecessor_pinners"]
+                if isinstance(row, dict) and isinstance(row.get("section"), str)
+            }
+            mismatched = next(
+                (
+                    row["section"]
+                    for row in expected_rows
+                    if actual_by_section.get(row["section"]) != row
+                ),
+                None,
+            )
+            raise DetachedImplementationError(
+                "predecessor-pinner-current-state-mismatch",
+                f"Completed section predecessor rows do not equal the current state pointers: {section}",
+                section=section,
+                predecessor_section=mismatched,
+                expected_predecessor_pinners=expected_rows,
+                actual_predecessor_pinners=pinner["predecessor_pinners"],
+            )
+    return completed
+
+
+def require_sha256_field(value: Any, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            f"Section-record transaction {label} is not an exact lowercase sha256 digest.",
+        )
+    return value
+
+
+def section_record_transaction_inventory(transaction_fd: int) -> set[str]:
+    first = set(os.listdir(transaction_fd))
+    if set(os.listdir(transaction_fd)) != first:
+        raise DetachedImplementationError(
+            "unsafe-section-record-transaction",
+            "Section-record transaction inventory changed while it was observed.",
+        )
+    return first
+
+
+def section_record_transaction_states(
+    current_state: dict[str, Any],
+    transaction: dict[str, Any],
+) -> tuple[dict[str, Any], bytes, dict[str, Any], bytes]:
+    section = transaction.get("section")
+    prior_record = transaction.get("prior_state_record")
+    state_record = transaction.get("state_record")
+    if not isinstance(section, str) or not section:
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction section is invalid.",
+        )
+    if prior_record is not None:
+        if not isinstance(prior_record, dict):
+            raise DetachedImplementationError(
+                "invalid-section-record-transaction",
+                "Section-record transaction prior state record is invalid.",
+            )
+        require_exact_fields(prior_record, PINNER_STATE_RECORD_FIELDS, "Transaction prior state record")
+    if not isinstance(state_record, dict):
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction candidate state record is invalid.",
+        )
+    require_exact_fields(state_record, PINNER_STATE_RECORD_FIELDS, "Transaction candidate state record")
+    base_state = json.loads(canonical_json_bytes(current_state).decode("utf-8"))
+    candidate_state = json.loads(canonical_json_bytes(current_state).decode("utf-8"))
+    base_completed = base_state["completed_sections"]
+    candidate_completed = candidate_state["completed_sections"]
+    if prior_record is None:
+        base_completed.pop(section, None)
+    else:
+        base_completed[section] = prior_record
+    candidate_completed[section] = state_record
+    base_raw = canonical_json_bytes(base_state)
+    candidate_raw = canonical_json_bytes(candidate_state)
+    if sha256_digest(base_raw) != require_sha256_field(transaction.get("base_state_sha256"), "base_state_sha256"):
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction base-state projection does not match its digest.",
+        )
+    if sha256_digest(candidate_raw) != require_sha256_field(
+        transaction.get("candidate_state_sha256"),
+        "candidate_state_sha256",
+    ):
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction candidate-state projection does not match its digest.",
+        )
+    return base_state, base_raw, candidate_state, candidate_raw
+
+
+def validate_section_record_transaction(
+    transaction: dict[str, Any],
+    current_state: dict[str, Any],
+) -> tuple[dict[str, Any], bytes, dict[str, Any], bytes]:
+    require_exact_fields(transaction, SECTION_RECORD_TRANSACTION_FIELDS, "Section-record transaction")
+    if transaction.get("schema") != SECTION_RECORD_TRANSACTION_SCHEMA:
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction schema is invalid.",
+        )
+    pinner_path = transaction.get("pinner_path")
+    pinner_file_sha256 = require_sha256_field(transaction.get("pinner_file_sha256"), "pinner_file_sha256")
+    state_record = transaction.get("state_record")
+    if (
+        not isinstance(pinner_path, str)
+        or not isinstance(state_record, dict)
+        or state_record.get("pinner_path") != pinner_path
+        or state_record.get("pinner_file_sha256") != pinner_file_sha256
+    ):
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction pinner pointer is not the exact candidate state pointer.",
+        )
+    return section_record_transaction_states(current_state, transaction)
+
+
+def verify_section_record_artifact_closure(
+    planning_dir: Path,
+    implementation_root: Path,
+    root_fd: int,
+    config: dict[str, Any],
+    guard: FrozenPlanningTree,
+    progress: dict[str, Any],
+    section: str,
+    pinner: dict[str, Any],
+    pinner_raw: bytes,
+    expected_state_raw: bytes,
+    require_lock_authority,
+) -> None:
+    require_lock_authority()
+    verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+    _, observed_state_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if observed_state_raw != expected_state_raw:
+        raise DetachedImplementationError(
+            "section-record-state-conflict",
+            "Section-record state changed during transaction closure validation.",
+        )
+    state_record = pinner_state_record(pinner, pinner_raw)
+    state, _ = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    pending = None
+    if state.get("completed_sections", {}).get(section) == state_record:
+        pending = (section, pinner, pinner_raw)
+    detached_completed_records(root_fd, config, progress, pending_pinner=pending)
+    review_rows = pinner.get("review_artifacts")
+    if not isinstance(review_rows, list) or any(
+        not isinstance(row, dict) or set(row) != {"path", "sha256", "size"} for row in review_rows
+    ):
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction review projection is invalid.",
+        )
+    observed_reviews = detached_review_rows(
+        root_fd,
+        implementation_root,
+        section,
+        [row["path"] for row in review_rows],
+    )
+    if observed_reviews != review_rows:
+        raise DetachedImplementationError(
+            "detached-review-drift",
+            f"Detached review artifacts changed during transaction recovery: {section}",
+            section=section,
+        )
+    evidence_rows = pinner.get("evidence_rows")
+    if not isinstance(evidence_rows, list) or any(
+        not isinstance(row, dict) or set(row) != {"name", "path", "sha256", "size"} for row in evidence_rows
+    ):
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Section-record transaction evidence projection is invalid.",
+        )
+    observed_evidence = detached_evidence_rows(
+        root_fd,
+        implementation_root,
+        [f"{row['name']}={row['path']}" for row in evidence_rows],
+    )
+    if observed_evidence != evidence_rows:
+        raise DetachedImplementationError(
+            "detached-evidence-drift",
+            f"Detached evidence changed during transaction recovery: {section}",
+            section=section,
+        )
+    privileged_raw: bytes | None = None
+    if section in HANDOFF_CONTRACT_BY_SECTION:
+        _, privileged_raw = verify_stored_privileged_handoff(
+            planning_dir,
+            implementation_root,
+            root_fd,
+            config,
+            guard,
+            section,
+        )
+    require_verified_privileged_evidence_bytes(section, observed_evidence, privileged_raw)
+    verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+    require_lock_authority()
+
+
+def pinner_state_record(pinner: dict[str, Any], pinner_raw: bytes) -> dict[str, Any]:
+    pinner_file_sha256 = sha256_digest(pinner_raw)
+    section = pinner.get("section")
+    if not isinstance(section, str):
+        raise DetachedImplementationError(
+            "invalid-section-record-transaction",
+            "Staged pinner section is invalid.",
+        )
+    record = {
+        field: pinner.get(field)
+        for field in PINNER_STATE_RECORD_FIELDS
+        if field not in {"pinner_path", "pinner_file_sha256"}
+    }
+    record["pinner_path"] = f"pinners/{section}-{pinner_file_sha256.removeprefix('sha256:')}.json"
+    record["pinner_file_sha256"] = pinner_file_sha256
+    require_exact_fields(record, PINNER_STATE_RECORD_FIELDS, "Staged pinner state record")
+    return record
+
+
+def verify_no_journal_base_stage(
+    root_fd: int,
+    transaction_fd: int,
+    config: dict[str, Any],
+    state: dict[str, Any],
+    progress: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+    staged_raw, staged_stat = read_regular_at_allow_links(
+        transaction_fd,
+        "pinner.json",
+        allowed_link_counts={1},
+    )
+    staged_pinner = load_canonical_json_bytes(
+        staged_raw,
+        "Pre-publication staged section pinner",
+    )
+    state_record = pinner_state_record(staged_pinner, staged_raw)
+    section = staged_pinner["section"]
+    if SECTION_RE.fullmatch(section) is None or section not in progress.get("sections", []):
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Pre-publication staged pinner section is absent from the frozen manifest.",
+            section=section,
+        )
+    pinner_path = state_record["pinner_path"]
+    pinner_parts = _relative_parts(pinner_path)
+    if len(pinner_parts) != 2 or pinner_parts[0] != "pinners":
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Pre-publication staged pinner path is not an immediate content-addressed pinners child.",
+        )
+    verify_section_pinner_bytes(
+        root_fd,
+        config,
+        section,
+        state_record,
+        staged_pinner,
+        staged_raw,
+    )
+    completed = state.get("completed_sections", {})
+    dependencies = dependency_graph(absolute_path_no_follow(config["planning_dir"]), progress)
+    expected_predecessors: list[dict[str, str]] = []
+    for predecessor in dependencies.get(section, []):
+        predecessor_record = completed.get(predecessor)
+        if not isinstance(predecessor_record, dict):
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Pre-publication staged pinner is missing a current completed predecessor.",
+                section=section,
+                predecessor_section=predecessor,
+            )
+        expected_predecessors.append(
+            {
+                "section": predecessor,
+                "pinner_path": predecessor_record["pinner_path"],
+                "pinner_file_sha256": predecessor_record["pinner_file_sha256"],
+            }
+        )
+    if staged_pinner.get("predecessor_pinners") != expected_predecessors:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Pre-publication staged pinner predecessor rows do not equal current state pointers.",
+            section=section,
+        )
+    if state.get("completed_sections", {}).get(section) == state_record:
+        raise DetachedImplementationError(
+            "section-record-recovery-required",
+            "Pre-publication transaction residue cannot be cleaned from its candidate state.",
+        )
+    pinners_fd = open_relative_directory(root_fd, "pinners")
+    try:
+        final_present = section_record_entry_stat(pinners_fd, pinner_parts[1]) is not None
+    finally:
+        os.close(pinners_fd)
+    if final_present:
+        final_raw, final_stat = read_regular_at_allow_links(
+            root_fd,
+            pinner_path,
+            allowed_link_counts={1},
+        )
+        if (
+            final_raw != staged_raw
+            or _fd_identity_from_stat(final_stat) == _fd_identity_from_stat(staged_stat)
+        ):
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Pre-publication staged pinner does not reopen against an exact distinct orphan final.",
+            )
+    return staged_pinner, state_record, staged_raw
+
+
+def cleanup_section_record_transaction_after_commit(root_fd: int, transaction_fd: int) -> bool:
+    try:
+        for name in (
+            "state.json",
+            "transaction.write.tmp",
+            "transaction.tmp",
+            "pinner.tmp",
+            "pinner.json",
+        ):
+            unlink_fixed_file_at(transaction_fd, name, missing_ok=True)
+        os.close(transaction_fd)
+        transaction_fd = -1
+        remove_section_record_transaction_dir(root_fd)
+        return True
+    except (DetachedImplementationError, OSError):
+        return False
+    finally:
+        if transaction_fd >= 0:
+            os.close(transaction_fd)
+
+
+def commit_section_record_transaction(root_fd: int, transaction_fd: int) -> bool:
+    journal_removed = False
+    try:
+        os.unlink("transaction.json", dir_fd=transaction_fd)
+        journal_removed = True
+        os.fsync(transaction_fd)
+    except OSError:
+        if not journal_removed:
+            raise
+        os.close(transaction_fd)
+        return False
+    return cleanup_section_record_transaction_after_commit(root_fd, transaction_fd)
+
+
+def recover_section_record_transaction_locked(
+    planning_dir: Path,
+    implementation_root: Path,
+    root_fd: int,
+    config: dict[str, Any],
+    guard: FrozenPlanningTree,
+    progress: dict[str, Any],
+    require_lock_authority,
+) -> None:
+    transaction_fd = section_record_transaction_dir(root_fd)
+    if transaction_fd is None:
+        return
+    close_transaction_fd = True
+    try:
+        inventory = section_record_transaction_inventory(transaction_fd)
+        if "transaction.json" in inventory and "rollback.json" in inventory:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Section-record transaction contains both forward and rollback journals.",
+            )
+        if "rollback.json" in inventory:
+            if not inventory.issubset({"rollback.json", "pinner.json", "state.json"}):
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Published section-record rollback contains unrecognised retained members.",
+                )
+            if "pinner.json" not in inventory:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Published section-record rollback is missing its ownership-proving staged pinner.",
+                )
+            transaction, transaction_raw = load_canonical_json_at(transaction_fd, "rollback.json")
+            state, current_state_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+            require_exact_fields(state, DETACHED_STATE_FIELDS, "Detached implementation state")
+            base_state, base_raw, _, candidate_raw = validate_section_record_transaction(
+                transaction,
+                state,
+            )
+            if current_state_raw not in {base_raw, candidate_raw}:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Rollback root state is neither the exact transaction base nor exact candidate.",
+                )
+            if "state.json" in inventory:
+                staged_base = read_single_link_regular_at(
+                    transaction_fd,
+                    "state.json",
+                    cap=DETACHED_JSON_CAP,
+                    require_mode=0o600,
+                )
+                if current_state_raw != candidate_raw or staged_base != base_raw:
+                    raise DetachedImplementationError(
+                        "section-record-recovery-required",
+                        "Rollback state temp is not the exact base staged against the exact candidate.",
+                    )
+            section = transaction["section"]
+            pinner_path = transaction["pinner_path"]
+            staged_raw, _ = read_regular_at_allow_links(
+                transaction_fd,
+                "pinner.json",
+                allowed_link_counts={1, 2},
+            )
+            if sha256_digest(staged_raw) != transaction["pinner_file_sha256"]:
+                raise DetachedImplementationError(
+                    "section-record-pinner-drift",
+                    "Rollback staged pinner does not match its transaction digest.",
+                )
+            staged_pinner = load_canonical_json_bytes(staged_raw, "Rollback staged section pinner")
+            verify_section_pinner_bytes(
+                root_fd,
+                config,
+                section,
+                transaction["state_record"],
+                staged_pinner,
+                staged_raw,
+                verify_predecessors=False,
+            )
+
+            def validate_recovered_rollback_base() -> None:
+                require_lock_authority()
+                verify_detached_authorities(
+                    planning_dir,
+                    implementation_root,
+                    root_fd,
+                    config,
+                    guard,
+                )
+                detached_completed_records(root_fd, config, progress)
+                require_lock_authority()
+
+            if not execute_section_record_rollback(
+                root_fd,
+                transaction_fd,
+                transaction_raw,
+                pinner_path,
+                staged_raw,
+                candidate_raw,
+                base_state,
+                base_raw,
+                validate_recovered_rollback_base,
+            ):
+                close_transaction_fd = False
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Section-record rollback closed its state but left idempotent cleanup pending.",
+                )
+            close_transaction_fd = False
+            return
+        if "transaction.json" not in inventory:
+            if "state.json" in inventory:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "No-journal section-record state temp is unreachable and was retained for explicit recovery.",
+                )
+            if not inventory.issubset(
+                {"pinner.tmp", "pinner.json", "transaction.write.tmp", "transaction.tmp"}
+            ):
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "No-journal section-record transaction contains unrecognised retained members.",
+                )
+            for name in inventory:
+                require_safe_section_record_file(
+                    transaction_fd,
+                    name,
+                    allowed_link_counts={1, 2} if name == "pinner.json" else {1},
+                )
+            pending: tuple[str, dict[str, Any], bytes] | None = None
+            state, current_state_raw = load_canonical_json_at(
+                root_fd,
+                "zagrosi_implement_state.json",
+            )
+            require_exact_fields(state, DETACHED_STATE_FIELDS, "Detached implementation state")
+            if "pinner.tmp" in inventory:
+                if inventory != {"pinner.tmp"}:
+                    raise DetachedImplementationError(
+                        "section-record-recovery-required",
+                        "A pre-publication pinner temp cannot coexist with another transaction member.",
+                    )
+                detached_completed_records(root_fd, config, progress)
+            elif "transaction.write.tmp" in inventory:
+                if inventory != {"pinner.json", "transaction.write.tmp"}:
+                    raise DetachedImplementationError(
+                        "section-record-recovery-required",
+                        "A journal write temp requires exactly its published staged pinner.",
+                    )
+                _, derived_state_record, staged_raw = verify_no_journal_base_stage(
+                    root_fd,
+                    transaction_fd,
+                    config,
+                    state,
+                    progress,
+                )
+                write_temp_raw = read_single_link_regular_at(
+                    transaction_fd,
+                    "transaction.write.tmp",
+                    cap=DETACHED_JSON_CAP,
+                    require_mode=0o600,
+                )
+                try:
+                    write_transaction = load_canonical_json_bytes(
+                        write_temp_raw,
+                        "Pre-publication journal write temp",
+                    )
+                except DetachedImplementationError:
+                    write_transaction = None
+                if write_transaction is not None:
+                    require_exact_fields(
+                        write_transaction,
+                        SECTION_RECORD_TRANSACTION_FIELDS,
+                        "Section-record transaction",
+                    )
+                    _, write_base_raw, _, write_candidate_raw = validate_section_record_transaction(
+                        write_transaction,
+                        state,
+                    )
+                    if (
+                        current_state_raw != write_base_raw
+                        or current_state_raw == write_candidate_raw
+                        or write_transaction["state_record"] != derived_state_record
+                        or write_transaction["pinner_file_sha256"] != sha256_digest(staged_raw)
+                    ):
+                        raise DetachedImplementationError(
+                            "section-record-recovery-required",
+                            "Canonical journal write temp does not join its exact staged pinner and distinct base.",
+                        )
+                detached_completed_records(root_fd, config, progress)
+            elif "transaction.tmp" in inventory:
+                if inventory != {"pinner.json", "transaction.tmp"}:
+                    raise DetachedImplementationError(
+                        "section-record-recovery-required",
+                        "A pre-publication transaction temp requires exactly its published staged pinner.",
+                    )
+                transaction, _ = load_canonical_json_at(transaction_fd, "transaction.tmp")
+                _, base_raw, _, candidate_raw = validate_section_record_transaction(
+                    transaction,
+                    state,
+                )
+                if current_state_raw != base_raw or current_state_raw == candidate_raw:
+                    raise DetachedImplementationError(
+                        "section-record-recovery-required",
+                        "A pre-publication transaction temp requires the exact distinct transaction base state.",
+                    )
+                staged_pinner, derived_state_record, staged_raw = verify_no_journal_base_stage(
+                    root_fd,
+                    transaction_fd,
+                    config,
+                    state,
+                    progress,
+                )
+                if sha256_digest(staged_raw) != transaction["pinner_file_sha256"]:
+                    raise DetachedImplementationError(
+                        "section-record-pinner-drift",
+                        "Pre-publication staged pinner does not match its transaction temp digest.",
+                    )
+                section = transaction["section"]
+                verify_section_pinner_bytes(
+                    root_fd,
+                    config,
+                    section,
+                    transaction["state_record"],
+                    staged_pinner,
+                    staged_raw,
+                )
+                if transaction["state_record"] != derived_state_record:
+                    raise DetachedImplementationError(
+                        "invalid-section-record-transaction",
+                        "Pre-publication transaction temp does not project its exact staged pinner record.",
+                    )
+                detached_completed_records(root_fd, config, progress)
+            elif "pinner.json" in inventory:
+                staged_raw, staged_stat = read_regular_at_allow_links(
+                    transaction_fd,
+                    "pinner.json",
+                    allowed_link_counts={1, 2},
+                )
+                staged_pinner = load_canonical_json_bytes(
+                    staged_raw,
+                    "Published no-journal staged section pinner",
+                )
+                state_record = pinner_state_record(staged_pinner, staged_raw)
+                section = staged_pinner["section"]
+                verify_section_pinner_bytes(
+                    root_fd,
+                    config,
+                    section,
+                    state_record,
+                    staged_pinner,
+                    staged_raw,
+                )
+                pinner_path = state_record["pinner_path"]
+                pinner_parts = _relative_parts(pinner_path)
+                pinners_fd = open_relative_directory(root_fd, "pinners")
+                try:
+                    final_present = section_record_entry_stat(pinners_fd, pinner_parts[1]) is not None
+                finally:
+                    os.close(pinners_fd)
+                state_has_candidate = state.get("completed_sections", {}).get(section) == state_record
+                if state_has_candidate:
+                    if not final_present:
+                        raise DetachedImplementationError(
+                            "section-record-recovery-required",
+                            "No-journal candidate state is missing its exact final pinner.",
+                        )
+                    section_record_pinner_relation(
+                        root_fd,
+                        transaction_fd,
+                        pinner_path,
+                        staged_raw,
+                    )
+                    pending = (section, staged_pinner, staged_raw)
+                else:
+                    verified_pinner, verified_record, verified_raw = verify_no_journal_base_stage(
+                        root_fd,
+                        transaction_fd,
+                        config,
+                        state,
+                        progress,
+                    )
+                    if (
+                        verified_pinner != staged_pinner
+                        or verified_record != state_record
+                        or verified_raw != staged_raw
+                        or staged_stat.st_nlink != 1
+                    ):
+                        raise DetachedImplementationError(
+                            "section-record-recovery-required",
+                            "No-journal base-stage provenance changed during validation.",
+                        )
+                detached_completed_records(
+                    root_fd,
+                    config,
+                    progress,
+                    pending_pinner=pending,
+                )
+            else:
+                detached_completed_records(root_fd, config, progress)
+            require_lock_authority()
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            if not cleanup_section_record_transaction_after_commit(root_fd, transaction_fd):
+                close_transaction_fd = False
+                raise DetachedImplementationError(
+                    "section-record-committed-cleanup-pending",
+                    "Committed or pre-journal section-record residue could not be cleaned safely.",
+                )
+            close_transaction_fd = False
+            return
+        if not inventory.issubset({"transaction.json", "pinner.json", "state.json"}):
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Published section-record transaction contains unrecognised retained members.",
+            )
+        transaction, transaction_raw = load_canonical_json_at(transaction_fd, "transaction.json")
+        state, current_state_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+        require_exact_fields(state, DETACHED_STATE_FIELDS, "Detached implementation state")
+        base_state, base_raw, candidate_state, candidate_raw = validate_section_record_transaction(
+            transaction,
+            state,
+        )
+        if current_state_raw not in {base_raw, candidate_raw}:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Detached state is neither the exact transaction base nor exact candidate.",
+            )
+        if "state.json" in inventory:
+            staged_candidate = read_single_link_regular_at(
+                transaction_fd,
+                "state.json",
+                cap=DETACHED_JSON_CAP,
+                require_mode=0o600,
+            )
+            if current_state_raw != base_raw or staged_candidate != candidate_raw:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Forward state temp is not the exact candidate staged against the exact base.",
+                )
+        section = transaction["section"]
+        pinner_path = transaction["pinner_path"]
+        pinner_file_sha256 = transaction["pinner_file_sha256"]
+        staged_present = "pinner.json" in inventory
+        pinner_parts = _relative_parts(pinner_path)
+        if len(pinner_parts) != 2 or pinner_parts[0] != "pinners":
+            raise DetachedImplementationError(
+                "invalid-section-record-transaction",
+                "Published section-record pinner path is not an immediate pinners child.",
+            )
+        pinners_fd = open_relative_directory(root_fd, "pinners")
+        try:
+            final_present = section_record_entry_stat(pinners_fd, pinner_parts[1]) is not None
+        finally:
+            os.close(pinners_fd)
+        if not staged_present:
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Published section-record transaction is missing its ownership-proving staged pinner.",
+            )
+        staged_raw, _ = read_regular_at_allow_links(
+            transaction_fd,
+            "pinner.json",
+            allowed_link_counts={1, 2},
+        )
+        if sha256_digest(staged_raw) != pinner_file_sha256:
+            raise DetachedImplementationError(
+                "section-record-pinner-drift",
+                "Published staged pinner does not match its transaction digest.",
+            )
+        staged_pinner = load_canonical_json_bytes(staged_raw, "Published staged section pinner")
+        verify_section_pinner_bytes(
+            root_fd,
+            config,
+            section,
+            transaction["state_record"],
+            staged_pinner,
+            staged_raw,
+            verify_predecessors=False,
+        )
+        def rollback_candidate_after_recovery_failure(cause: Exception) -> None:
+            nonlocal close_transaction_fd
+            _, observed_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+            if observed_raw not in {base_raw, candidate_raw}:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Section-record recovery failed after state changed outside its exact base/candidate projections.",
+                ) from cause
+            try:
+                def validate_failed_candidate_rollback_base() -> None:
+                    require_lock_authority()
+                    verify_detached_authorities(
+                        planning_dir,
+                        implementation_root,
+                        root_fd,
+                        config,
+                        guard,
+                    )
+                    detached_completed_records(root_fd, config, progress)
+                    require_lock_authority()
+
+                cleanup_complete = execute_section_record_rollback(
+                    root_fd,
+                    transaction_fd,
+                    transaction_raw,
+                    pinner_path,
+                    staged_raw,
+                    candidate_raw,
+                    base_state,
+                    base_raw,
+                    validate_failed_candidate_rollback_base,
+                )
+                close_transaction_fd = False
+                if not cleanup_complete:
+                    raise DetachedImplementationError(
+                        "section-record-recovery-required",
+                        "Rollback closed its state but left idempotent cleanup pending.",
+                    )
+            except Exception as rollback_exc:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Candidate recovery failed and exact state/pinner rollback could not be proven.",
+                ) from rollback_exc
+            raise DetachedImplementationError(
+                "section-record-recovery-required",
+                "Candidate recovery validation failed; state was rolled back and transaction artefacts were retained.",
+            ) from cause
+
+        if not final_present:
+            if current_state_raw == candidate_raw:
+                rollback_candidate_after_recovery_failure(
+                    DetachedImplementationError(
+                        "section-record-recovery-required",
+                        "Candidate state retained a staged pinner without its final pinner.",
+                    )
+                )
+            install_staged_section_pinner(root_fd, transaction_fd, pinner_path, staged_raw)
+        section_record_pinner_relation(root_fd, transaction_fd, pinner_path, staged_raw)
+
+        if current_state_raw == base_raw:
+            try:
+                verify_section_record_artifact_closure(
+                    planning_dir,
+                    implementation_root,
+                    root_fd,
+                    config,
+                    guard,
+                    progress,
+                    section,
+                    staged_pinner,
+                    staged_raw,
+                    base_raw,
+                    require_lock_authority,
+                )
+                replace_state_from_transaction(root_fd, transaction_fd, base_raw, candidate_state)
+                current_state_raw = candidate_raw
+            except Exception as exc:
+                rollback_candidate_after_recovery_failure(exc)
+        try:
+            verify_section_record_artifact_closure(
+                planning_dir,
+                implementation_root,
+                root_fd,
+                config,
+                guard,
+                progress,
+                section,
+                staged_pinner,
+                staged_raw,
+                candidate_raw,
+                require_lock_authority,
+            )
+            require_lock_authority()
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            verify_section_record_commit_closure(
+                root_fd,
+                transaction_fd,
+                transaction_raw,
+                pinner_path,
+                staged_raw,
+                candidate_raw,
+            )
+            require_lock_authority()
+        except Exception as exc:
+            rollback_candidate_after_recovery_failure(exc)
+        if not commit_section_record_transaction(root_fd, transaction_fd):
+            close_transaction_fd = False
+            raise DetachedImplementationError(
+                "section-record-committed-cleanup-pending",
+                "Section record committed, but idempotent transaction cleanup remains pending.",
+            )
+        close_transaction_fd = False
+    finally:
+        if close_transaction_fd:
+            os.close(transaction_fd)
+
+
+def completed_transitive_dependants(
+    section: str,
+    dependencies: dict[str, list[str]],
+    completed: set[str],
+) -> list[str]:
+    discovered: set[str] = set()
+    frontier = [section]
+    while frontier:
+        predecessor = frontier.pop()
+        for candidate, candidate_dependencies in dependencies.items():
+            if candidate in completed and candidate not in discovered and predecessor in candidate_dependencies:
+                discovered.add(candidate)
+                frontier.append(candidate)
+    discovered.discard(section)
+    return sorted(discovered)
+
+
 def normalize_repeated(values: list[str] | None) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1539,6 +7492,9 @@ def implement_preflight_report(sections_dir: Path, target_dir: Path, args: argpa
     depth = getattr(args, "depth", "standard") or "standard"
     profile = getattr(args, "profile", "solo")
     repo = git_info(target_dir) if target_dir.exists() else {"available": False, "root": None}
+    next_section_command = ["next-section", "--planning-dir", str(planning_dir)]
+    if getattr(args, "implementation_root", None):
+        next_section_command.extend(["--implementation-root", str(absolute_path_no_follow(args.implementation_root))])
     gates = [
         direct_gate("sections-directory", sections_dir.exists() and sections_dir.is_dir(), {"sections_dir": str(sections_dir)}),
         direct_gate("target-directory", target_dir.exists() and target_dir.is_dir(), {"target_dir": str(target_dir)}),
@@ -1547,7 +7503,7 @@ def implement_preflight_report(sections_dir: Path, target_dir: Path, args: argpa
         run_internal_gate("lint-sections", append_strict(["lint-sections", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
         run_internal_gate("traceability", append_strict(["traceability", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
         run_internal_gate("lint-implementation-readiness", append_strict(["lint-implementation-readiness", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
-        run_internal_gate("next-section", ["next-section", "--planning-dir", str(planning_dir)], required=False),
+        run_internal_gate("next-section", next_section_command, required=False),
         run_internal_gate("suggest-section-splits", ["suggest-section-splits", "--planning-dir", str(planning_dir)], required=False),
     ]
     warnings: list[str] = []
@@ -1984,6 +7940,145 @@ def extract_file_paths(text: str) -> list[str]:
     return sorted(paths)
 
 
+def normalize_owned_path(value: str) -> str | None:
+    candidate = value.strip()
+    if len(candidate) >= 2 and candidate.startswith("`") and candidate.endswith("`"):
+        candidate = candidate[1:-1].strip()
+    candidate = candidate.removeprefix("./")
+    return candidate if OWNED_PATH_RE.fullmatch(candidate) else None
+
+
+def safe_legacy_file_paths(text: str) -> list[str]:
+    paths = {path for value in extract_file_paths(text) if (path := normalize_owned_path(value))}
+    return sorted(paths)
+
+
+def markdown_fence_opening(line: str) -> tuple[str, int, str] | None:
+    match = re.fullmatch(r" {0,3}(`{3,}|~{3,})([^\r\n]*)", line.rstrip("\r\n"))
+    if not match:
+        return None
+    marker = match.group(1)
+    info = match.group(2).strip()
+    language = info.split(maxsplit=1)[0].casefold() if info else ""
+    return marker[0], len(marker), language
+
+
+def markdown_fence_closes(line: str, marker: str, minimum: int) -> bool:
+    return bool(re.fullmatch(rf" {{0,3}}{re.escape(marker)}{{{minimum},}}[ \t]*", line.rstrip("\r\n")))
+
+
+def markdown_h2_sections(text: str) -> list[tuple[str, str]]:
+    lines = text.splitlines(keepends=True)
+    headings: list[tuple[int, str]] = []
+    active_fence: tuple[str, int] | None = None
+    for index, line in enumerate(lines):
+        if active_fence:
+            if markdown_fence_closes(line, *active_fence):
+                active_fence = None
+            continue
+        opening = markdown_fence_opening(line)
+        if opening:
+            active_fence = opening[:2]
+            continue
+        heading = re.fullmatch(r"##[ \t]+(.+?)[ \t]*", line.rstrip("\r\n"))
+        if heading:
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", heading.group(1)).strip()
+            headings.append((index, title))
+
+    sections: list[tuple[str, str]] = []
+    for index, (line_number, title) in enumerate(headings):
+        end = headings[index + 1][0] if index + 1 < len(headings) else len(lines)
+        sections.append((title, "".join(lines[line_number + 1 : end])))
+    return sections
+
+
+def split_markdown_fences_with_closure(
+    text: str,
+) -> tuple[list[tuple[str, list[str], bool]], list[str]]:
+    blocks: list[tuple[str, list[str], bool]] = []
+    plain_lines: list[str] = []
+    active_fence: tuple[str, int, str] | None = None
+    block_lines: list[str] = []
+    for line in text.splitlines():
+        if active_fence:
+            marker, minimum, language = active_fence
+            if markdown_fence_closes(line, marker, minimum):
+                blocks.append((language, block_lines, True))
+                active_fence = None
+                block_lines = []
+            else:
+                block_lines.append(line)
+            continue
+        opening = markdown_fence_opening(line)
+        if opening:
+            active_fence = opening
+        else:
+            plain_lines.append(line)
+    if active_fence:
+        blocks.append((active_fence[2], block_lines, False))
+    return blocks, plain_lines
+
+
+def split_markdown_fences(text: str) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    blocks, plain_lines = split_markdown_fences_with_closure(text)
+    return [(language, lines) for language, lines, _ in blocks], plain_lines
+
+
+def ownership_declaration_end(text: str) -> int | None:
+    active_fence: tuple[str, int] | None = None
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        if active_fence:
+            if markdown_fence_closes(line, *active_fence):
+                active_fence = None
+        elif opening := markdown_fence_opening(line):
+            active_fence = opening[:2]
+        elif match := OWNERSHIP_DECLARATION_RE.search(line):
+            return offset + match.end()
+        offset += len(line)
+    return None
+
+
+def standalone_owned_path(line: str) -> str | None:
+    candidate = line.strip()
+    list_item = re.fullmatch(r"(?:[-*+]|\d+[.)])\s+(.+)", candidate)
+    if list_item:
+        candidate = list_item.group(1).strip()
+    return normalize_owned_path(candidate)
+
+
+def owned_paths_from_body(body: str) -> list[str]:
+    fenced_blocks, plain_lines = split_markdown_fences(body)
+    for language, lines in fenced_blocks:
+        if language not in {"", "text", "plaintext"}:
+            continue
+        paths = {path for line in lines if (path := standalone_owned_path(line))}
+        if paths:
+            return sorted(paths)
+
+    structured: set[str] = set()
+    for line in plain_lines:
+        is_indented = line.startswith(("    ", "\t"))
+        is_list_item = bool(re.match(r"\s*(?:[-*+]|\d+[.)])\s+", line))
+        if (is_indented or is_list_item) and (path := standalone_owned_path(line)):
+            structured.add(path)
+    return sorted(structured) if structured else safe_legacy_file_paths("\n".join(plain_lines))
+
+
+def extract_section_owned_paths(text: str) -> list[str]:
+    found_ownership_section = False
+    for title, body in markdown_h2_sections(text):
+        title_declares_ownership = bool(OWNERSHIP_TITLE_RE.search(title))
+        declaration_end = ownership_declaration_end(body)
+        if not (title_declares_ownership or declaration_end is not None):
+            continue
+        found_ownership_section = True
+        ownership_body = body[declaration_end:] if declaration_end is not None else body
+        if paths := owned_paths_from_body(ownership_body):
+            return paths
+    return [] if found_ownership_section else safe_legacy_file_paths(text)
+
+
 def parse_section_dependencies(index_text: str, sections: list[str]) -> dict[str, list[str]]:
     known = set(sections)
     dependencies = {section: [] for section in sections}
@@ -2014,6 +8109,170 @@ def parse_section_dependencies(index_text: str, sections: list[str]) -> dict[str
             continue
         add_dependencies(dependent_candidates[0], SECTION_TOKEN_RE.findall(after))
     return dependencies
+
+
+def transitive_section_predecessors(
+    section: str,
+    dependencies: dict[str, list[str]],
+) -> set[str]:
+    predecessors: set[str] = set()
+    pending = list(dependencies.get(section, []))
+    while pending:
+        predecessor = pending.pop()
+        if predecessor in predecessors:
+            continue
+        predecessors.add(predecessor)
+        pending.extend(dependencies.get(predecessor, []))
+    return predecessors
+
+
+def add_shell_token_owned_path_reference(
+    references: set[str],
+    token: str,
+    owned_paths: set[str],
+) -> None:
+    candidates = [token]
+    if "=" in token:
+        candidates.append(token.rsplit("=", 1)[1])
+    for candidate in candidates:
+        path = candidate.removeprefix("./").split("::", 1)[0]
+        if path in owned_paths:
+            references.add(path)
+
+
+def shell_line_literal_heredocs(line: str) -> tuple[list[tuple[str, bool]], bool]:
+    heredocs: list[tuple[str, bool]] = []
+    arithmetic_depth = 0
+    index = 0
+    while index < len(line):
+        if line.startswith("\\\n", index):
+            index += 2
+            continue
+        char = line[index]
+        if char == "#" and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";|&()"):
+            break
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            while index < len(line) and line[index] != quote:
+                if quote == '"' and line[index] == "\\" and index + 1 < len(line):
+                    index += 2
+                else:
+                    index += 1
+            if index >= len(line):
+                return [], True
+            index += 1
+            continue
+        if char == "\\":
+            if index + 1 >= len(line):
+                return [], True
+            index += 2
+            continue
+        if line.startswith("((", index):
+            arithmetic_depth += 1
+            index += 2
+            continue
+        if line.startswith("))", index) and arithmetic_depth:
+            arithmetic_depth -= 1
+            index += 2
+            continue
+        if arithmetic_depth or not line.startswith("<<", index):
+            index += 1
+            continue
+        if line.startswith("<<<", index):
+            index += 3
+            continue
+
+        index += 2
+        strip_tabs = index < len(line) and line[index] == "-"
+        if strip_tabs:
+            index += 1
+        while index < len(line):
+            if line.startswith("\\\n", index):
+                index += 2
+            elif line[index].isspace():
+                index += 1
+            else:
+                break
+
+        delimiter_parts: list[str] = []
+        while index < len(line) and not line[index].isspace() and line[index] not in ";|&()<>#":
+            char = line[index]
+            if char in {"'", '"'}:
+                quote = char
+                end = line.find(quote, index + 1)
+                if end == -1:
+                    return [], True
+                part = line[index + 1 : end]
+                if part and not re.fullmatch(r"[A-Za-z0-9_.-]+", part):
+                    return [], True
+                delimiter_parts.append(part)
+                index = end + 1
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9_.-]", char):
+                return [], True
+            delimiter_parts.append(char)
+            index += 1
+        delimiter = "".join(delimiter_parts)
+        if not SHELL_HEREDOC_DELIMITER_RE.fullmatch(delimiter):
+            return [], True
+        heredocs.append((delimiter, strip_tabs))
+    return heredocs, False
+
+
+def shell_lines_without_literal_heredoc_bodies(lines: list[str]) -> tuple[list[str], bool]:
+    lexical_lines: list[str] = []
+    line_index = 0
+    while line_index < len(lines):
+        command_lines = [lines[line_index]]
+        line_index += 1
+        while (
+            (len(command_lines[-1]) - len(command_lines[-1].rstrip("\\"))) % 2 == 1
+            and line_index < len(lines)
+        ):
+            command_lines.append(lines[line_index])
+            line_index += 1
+        heredocs, malformed = shell_line_literal_heredocs("\n".join(command_lines))
+        lexical_lines.extend(command_lines)
+        if malformed:
+            return lexical_lines, True
+        for delimiter, strip_tabs in heredocs:
+            closed = False
+            while line_index < len(lines):
+                candidate = lines[line_index].lstrip("\t") if strip_tabs else lines[line_index]
+                line_index += 1
+                if candidate == delimiter:
+                    closed = True
+                    break
+            if not closed:
+                return lexical_lines, True
+    return lexical_lines, False
+
+
+def shell_gate_owned_path_references(text: str, owned_paths: set[str]) -> tuple[set[str], bool]:
+    references: set[str] = set()
+    malformed = False
+    for language, lines, closed in split_markdown_fences_with_closure(text)[0]:
+        if language not in SHELL_FENCE_LANGUAGES:
+            continue
+        malformed = malformed or not closed
+        lexical_lines, heredoc_malformed = shell_lines_without_literal_heredoc_bodies(lines)
+        malformed = malformed or heredoc_malformed
+        lexer = shlex.shlex("\n".join(lexical_lines), posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        while True:
+            try:
+                token = lexer.get_token()
+            except ValueError:
+                malformed = True
+                if lexer.token:
+                    add_shell_token_owned_path_reference(references, lexer.token, owned_paths)
+                break
+            if token == lexer.eof:
+                break
+            add_shell_token_owned_path_reference(references, token, owned_paths)
+    return references, malformed
 
 
 def dependency_graph(planning_dir: Path, progress: dict[str, Any] | None = None) -> dict[str, list[str]]:
@@ -2059,7 +8318,7 @@ def implementation_recording_status(planning_dir: Path) -> dict[str, Any]:
 
 def section_metrics(section: str, path: Path, dependencies: dict[str, list[str]]) -> dict[str, Any]:
     text = read_text(path) if path.exists() else ""
-    files = extract_file_paths(text)
+    files = extract_section_owned_paths(text)
     words = word_count(text)
     dep_count = len(dependencies.get(section, []))
     risk_terms = ["security", "privacy", "auth", "permission", "migration", "data", "payment", "token", "secret"]
@@ -2253,7 +8512,483 @@ def deep_plan_generate_section_prompts(args: argparse.Namespace) -> int:
     )
 
 
+def detached_implement_setup(args: argparse.Namespace) -> int:
+    sections_dir = absolute_path_no_follow(args.sections_dir)
+    planning_dir = sections_dir.parent
+    target_dir = absolute_path_no_follow(args.target_dir or os.getcwd())
+    guard: FrozenPlanningTree | None = None
+    root_fd: int | None = None
+    target_fd: int | None = None
+    implementation_root: Path | None = None
+    lock_context: ExitStack | None = None
+    require_lock_authority = None
+    try:
+        if not sections_dir.exists() or not sections_dir.is_dir():
+            return print_json({"success": False, "error": f"Sections directory not found: {sections_dir}"}, 1)
+        if not target_dir.exists() or not target_dir.is_dir():
+            return print_json({"success": False, "error": f"Target directory not found: {target_dir}"}, 1)
+        target_fd = open_directory_chain_no_follow(target_dir)
+        if not getattr(args, "admission_pinner", None):
+            raise DetachedImplementationError(
+                "missing-admission-pinner",
+                "Detached frozen-planning mode requires --admission-pinner.",
+            )
+        expected_admission_sha256 = getattr(args, "expected_admission_pinner_sha256", None)
+        if not isinstance(expected_admission_sha256, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_admission_sha256):
+            raise DetachedImplementationError(
+                "missing-admission-pinner-hash",
+                "Detached frozen-planning mode requires --expected-admission-pinner-sha256 with an exact sha256 digest.",
+            )
+        guard = FrozenPlanningTree.open(planning_dir)
+        require_planning_target_disjoint(planning_dir, guard.root_fd, target_dir, target_fd)
+        setup_target_identity = _fd_identity(target_fd)
+        setup_target_identity_digest = target_root_identity_digest(target_fd)
+        progress = check_section_progress(planning_dir)
+        if progress["state"] in {"invalid_index", "no_index"}:
+            return print_json({"success": False, "section_progress": progress}, 1)
+        artifact_payload = plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
+        if not artifact_payload["success"]:
+            artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before implementation."
+            return print_json(artifact_payload, 1)
+
+        lock_deadline = time.monotonic() + DETACHED_LOCK_TIMEOUT_SECONDS
+        lock_context = ExitStack()
+        require_global_authority = lock_context.enter_context(detached_global_lock(lock_deadline))
+        require_global_authority()
+        requested_root = absolute_path_no_follow(args.implementation_root)
+        admission_path, admission_sha256, admission_size, admission_state_sha256 = reopen_admission_pinner(
+            planning_dir,
+            requested_root,
+            args.admission_pinner,
+            expected_sha256=expected_admission_sha256,
+            planning_root_fd=guard.root_fd,
+        )
+        expected_source_hashes = expected_implementation_source_hashes(args)
+        source_records = reopen_implementation_sources(expected_hashes=expected_source_hashes)
+        guard.verify_unchanged()
+        require_candidate_root_disjoint_from_directory(requested_root, target_dir, target_fd)
+        implementation_root, root_fd = ensure_detached_root(
+            planning_dir,
+            args.implementation_root,
+            create=True,
+            planning_root_fd=guard.root_fd,
+        )
+        require_root_authority = lock_context.enter_context(
+            section_record_lock(
+                root_fd,
+                implementation_root,
+                timeout_seconds=max(0.0, lock_deadline - time.monotonic()),
+                create_marker_parent=True,
+                defer_marker=True,
+            )
+        )
+
+        def require_lock_authority(
+            *,
+            create_marker: bool = False,
+            require_marker: bool = False,
+        ) -> None:
+            require_global_authority()
+            require_root_authority(
+                create_marker=create_marker,
+                require_marker=require_marker,
+            )
+            require_global_authority()
+
+        require_lock_authority()
+        require_detached_top_level_inventory(
+            root_fd,
+            complete=False,
+            allow_recoverable_temps=True,
+        )
+        require_planning_implementation_disjoint(planning_dir, guard.root_fd, implementation_root, root_fd)
+        require_planning_target_disjoint(planning_dir, guard.root_fd, target_dir, target_fd)
+        require_open_roots_disjoint(implementation_root, root_fd, target_dir, target_fd)
+        reopened_target_fd = open_directory_chain_no_follow(target_dir)
+        try:
+            if (
+                _fd_identity(reopened_target_fd) != setup_target_identity
+                or target_root_identity_digest(reopened_target_fd) != setup_target_identity_digest
+            ):
+                raise DetachedImplementationError(
+                    "target-root-replaced",
+                    "Protected target root changed during detached implement-setup.",
+                )
+        finally:
+            os.close(reopened_target_fd)
+        admission_path, admission_sha256, admission_size, admission_state_sha256 = reopen_admission_pinner(
+            planning_dir,
+            implementation_root,
+            args.admission_pinner,
+            expected_sha256=expected_admission_sha256,
+            planning_root_fd=guard.root_fd,
+            implementation_root_fd=root_fd,
+        )
+        guard.verify_unchanged()
+        verify_implementation_sources(
+            {
+                **implementation_source_config_fields(source_records),
+            }
+        )
+        detached_implementation_root_identity_digest(
+            root_fd,
+            require_fixed_children=False,
+            allow_recoverable_temps=True,
+        )
+        pending_by_path: dict[str, dict[str, Any]] = {}
+        for relative, slot in (
+            ("zagrosi_implement_config.json", "config"),
+            ("zagrosi_implement_state.json", "state"),
+            ("forge-progress.json", "progress"),
+        ):
+            pending = detached_setup_prefix_payload(
+                slot,
+                planning_dir=planning_dir,
+                sections_dir=sections_dir,
+                target_dir=target_dir,
+                target_root_identity_digest=setup_target_identity_digest,
+                implementation_root=implementation_root,
+                guard=guard,
+                admission_path=admission_path,
+                admission_sha256=admission_sha256,
+                admission_size=admission_size,
+                admission_state_sha256=admission_state_sha256,
+                source_records=source_records,
+            )
+            pending_by_path[relative] = pending
+
+        def setup_config_payload(root_identity_digest: str) -> dict[str, Any]:
+            payload = {
+                "schema": DETACHED_CONFIG_SCHEMA,
+                "mode": "detached-frozen",
+                "planning_dir": str(planning_dir),
+                "sections_dir": str(sections_dir),
+                "target_dir": str(target_dir),
+                "target_root_identity_digest": setup_target_identity_digest,
+                "implementation_root": str(implementation_root),
+                "state_path": str(implementation_root / "zagrosi_implement_state.json"),
+                "progress_path": str(implementation_root / "forge-progress.json"),
+                "reviews_dir": str(implementation_root / "code_review"),
+                "evidence_dir": str(implementation_root / "evidence"),
+                "pinners_dir": str(implementation_root / "pinners"),
+                "planning_tree_sha256": guard.digest,
+                "planning_file_count": guard.file_count,
+                "planning_total_bytes": guard.total_bytes,
+                "admission_pinner_path": str(admission_path),
+                "admission_pinner_sha256": admission_sha256,
+                "admission_pinner_size": admission_size,
+                "admission_state_sha256": admission_state_sha256,
+                "detached_implementation_root_identity_digest": root_identity_digest,
+                **implementation_source_config_fields(source_records),
+                "test_command": progress.get("project_config", {}).get("test_command"),
+                "runtime": progress.get("project_config", {}).get("runtime"),
+            }
+            require_exact_fields(payload, DETACHED_CONFIG_FIELDS, "Detached implementation config")
+            return payload
+
+        existing_top_level = set(os.listdir(root_fd)) - DETACHED_ROOT_RECOVERABLE_TEMPS
+        existing_files = existing_top_level & DETACHED_TOP_LEVEL_FILES
+        config_name = "zagrosi_implement_config.json"
+        if config_name not in existing_files and existing_files:
+            raise DetachedImplementationError(
+                "detached-setup-prefix-conflict",
+                "Detached setup cannot adopt state/progress slots without its exact authenticated config prefix.",
+            )
+        if config_name in existing_files:
+            existing_config, _ = load_canonical_json_at(root_fd, config_name)
+            if existing_config.get("schema") == DETACHED_SETUP_PREFIX_SCHEMA:
+                if existing_config != pending_by_path[config_name]:
+                    raise DetachedImplementationError(
+                        "detached-setup-prefix-conflict",
+                        "Existing detached setup prefix does not match the current authenticated setup inputs.",
+                    )
+                if not DETACHED_TOP_LEVEL_DIRECTORIES.issubset(existing_top_level):
+                    raise DetachedImplementationError(
+                        "detached-setup-prefix-conflict",
+                        "An authenticated config prefix requires all fixed root directories to pre-exist.",
+                    )
+                allowed_pending_slot_sets = (
+                    {config_name},
+                    {config_name, "zagrosi_implement_state.json"},
+                    set(DETACHED_TOP_LEVEL_FILES),
+                )
+                if existing_files not in allowed_pending_slot_sets:
+                    raise DetachedImplementationError(
+                        "detached-setup-prefix-conflict",
+                        "Existing detached setup prefix slots violate config-to-state-to-progress publication order.",
+                    )
+                for relative in existing_files - {config_name}:
+                    existing, _ = load_canonical_json_at(root_fd, relative)
+                    if existing != pending_by_path[relative]:
+                        raise DetachedImplementationError(
+                            "detached-setup-prefix-conflict",
+                            "Existing detached setup prefix slots are not exact authenticated pending objects.",
+                        )
+                require_lock_authority(require_marker=True)
+            elif existing_config.get("schema") == DETACHED_CONFIG_SCHEMA:
+                if existing_top_level != DETACHED_TOP_LEVEL_ALLOWED:
+                    raise DetachedImplementationError(
+                        "detached-config-conflict",
+                        "A final detached config requires the complete exact six-member root before replay.",
+                    )
+                require_detached_root_identity_through_recoverable_temps(
+                    root_fd,
+                    existing_config.get("detached_implementation_root_identity_digest"),
+                )
+                expected_existing_config = setup_config_payload(
+                    existing_config["detached_implementation_root_identity_digest"]
+                )
+                if existing_config != expected_existing_config:
+                    raise DetachedImplementationError(
+                        "detached-config-conflict",
+                        "Existing final detached config does not equal the complete current authenticated setup config.",
+                    )
+                existing_state, _ = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+                existing_progress, _ = load_canonical_json_at(root_fd, "forge-progress.json")
+                state_pending_before_cleanup = (
+                    existing_state == pending_by_path["zagrosi_implement_state.json"]
+                )
+                progress_pending_before_cleanup = (
+                    existing_progress == pending_by_path["forge-progress.json"]
+                )
+                if not state_pending_before_cleanup:
+                    load_detached_state(root_fd, existing_config)
+                if not progress_pending_before_cleanup:
+                    load_detached_progress(root_fd, existing_config)
+                if (state_pending_before_cleanup, progress_pending_before_cleanup) not in {
+                    (True, True),
+                    (False, True),
+                    (False, False),
+                }:
+                    raise DetachedImplementationError(
+                        "detached-setup-prefix-conflict",
+                        "Final detached setup slots violate config-to-state-to-progress promotion order.",
+                    )
+                require_lock_authority(require_marker=True)
+            else:
+                raise DetachedImplementationError(
+                    "detached-setup-prefix-conflict",
+                    "Detached setup refuses an arbitrary caller-planted config prefix.",
+                )
+        if config_name not in existing_files or existing_config.get("schema") == DETACHED_SETUP_PREFIX_SCHEMA:
+            for directory in ("code_review", "evidence"):
+                if directory not in existing_top_level:
+                    continue
+                existing_directory_fd = open_relative_directory(root_fd, directory)
+                try:
+                    first_members = set(os.listdir(existing_directory_fd))
+                    if first_members or set(os.listdir(existing_directory_fd)) != first_members:
+                        raise DetachedImplementationError(
+                            "detached-setup-prefix-conflict",
+                            "Fresh or pending detached setup requires empty review and evidence directories.",
+                            directory=directory,
+                        )
+                finally:
+                    os.close(existing_directory_fd)
+            if "pinners" in existing_top_level:
+                existing_pinners_fd = open_relative_directory(root_fd, "pinners")
+                try:
+                    first_pinner_members = set(os.listdir(existing_pinners_fd))
+                    unexpected_pinner_members = sorted(
+                        first_pinner_members - {Path(SECTION_RECORD_LOCK_PATH).name}
+                    )
+                    if unexpected_pinner_members:
+                        raise DetachedImplementationError(
+                            "detached-setup-prefix-conflict",
+                            "Fresh or pending detached setup refuses pre-planted pinner members.",
+                            unexpected_pinner_members=unexpected_pinner_members,
+                        )
+                    if set(os.listdir(existing_pinners_fd)) != first_pinner_members:
+                        raise DetachedImplementationError(
+                            "detached-setup-prefix-conflict",
+                            "Fresh or pending detached pinners inventory changed during authentication.",
+                        )
+                finally:
+                    os.close(existing_pinners_fd)
+        recover_detached_root_temps_locked(root_fd)
+        require_detached_top_level_inventory(
+            root_fd,
+            complete=existing_config.get("schema") == DETACHED_CONFIG_SCHEMA
+            if config_name in existing_files
+            else False,
+        )
+        require_lock_authority(create_marker=True)
+        for relative in ("code_review", "evidence", "pinners"):
+            directory_fd = open_relative_directory(root_fd, relative, create=True)
+            os.close(directory_fd)
+        observed_by_path: dict[str, dict[str, Any]] = {}
+        for relative in (
+            "zagrosi_implement_config.json",
+            "zagrosi_implement_state.json",
+            "forge-progress.json",
+        ):
+            _, observed, _ = ensure_detached_root_file_slot(
+                root_fd,
+                relative,
+                pending_by_path[relative],
+            )
+            observed_by_path[relative] = observed
+        root_identity_digest = detached_implementation_root_identity_digest(root_fd)
+
+        config = setup_config_payload(root_identity_digest)
+        observed_config = observed_by_path["zagrosi_implement_config.json"]
+        observed_state = observed_by_path["zagrosi_implement_state.json"]
+        observed_progress = observed_by_path["forge-progress.json"]
+        config_pending = observed_config == pending_by_path["zagrosi_implement_config.json"]
+        state_pending = observed_state == pending_by_path["zagrosi_implement_state.json"]
+        progress_pending = observed_progress == pending_by_path["forge-progress.json"]
+        config_final = observed_config == config
+        state_final = False
+        progress_final = False
+        if not config_pending and not config_final:
+            raise DetachedImplementationError(
+                "detached-config-conflict",
+                "Existing detached config is neither the exact authenticated pending prefix nor this setup's final config.",
+            )
+        if config_pending and (not state_pending or not progress_pending):
+            raise DetachedImplementationError(
+                "detached-setup-prefix-conflict",
+                "Detached setup prefix slots are not in an exact recoverable creation order.",
+            )
+        if config_pending:
+            write_canonical_json_at(root_fd, "zagrosi_implement_config.json", config)
+        if state_pending:
+            state = detached_state_default(config)
+            write_canonical_json_at(root_fd, "zagrosi_implement_state.json", state)
+        else:
+            state = load_detached_state(root_fd, config)
+            state_final = True
+        if state_pending is False and config_pending:
+            raise DetachedImplementationError(
+                "detached-setup-prefix-conflict",
+                "A pending config cannot authorise an already-final state.",
+            )
+        if state_pending and not progress_pending:
+            raise DetachedImplementationError(
+                "detached-setup-prefix-conflict",
+                "A pending state requires the exact pending progress prefix.",
+            )
+        if progress_pending:
+            progress_state = detached_progress_default(config)
+            write_canonical_json_at(root_fd, "forge-progress.json", progress_state)
+        else:
+            progress_state = load_detached_progress(root_fd, config)
+            progress_final = True
+        if config_final and state_final and progress_final:
+            pass
+
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        recover_section_record_transaction_locked(
+            planning_dir,
+            implementation_root,
+            root_fd,
+            config,
+            guard,
+            progress,
+            require_lock_authority,
+        )
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        require_lock_authority()
+
+        dependencies = dependency_graph(planning_dir, progress)
+        known = set(progress["sections"])
+        unknown_dependencies = {
+            section: [dependency for dependency in dependencies.get(section, []) if dependency not in known]
+            for section in progress["sections"]
+            if any(dependency not in known for dependency in dependencies.get(section, []))
+        }
+        if unknown_dependencies:
+            raise DetachedImplementationError(
+                "unknown-predecessors",
+                "Section dependency graph contains predecessors absent from the manifest.",
+                unknown_predecessors=unknown_dependencies,
+            )
+        completed_records = detached_completed_records(root_fd, config, progress)
+        completed = set(completed_records)
+        ready = ready_sections(progress, dependencies, completed)
+        remaining = [section for section in progress["sections"] if section not in completed]
+        blocked = {
+            section: [dependency for dependency in dependencies.get(section, []) if dependency not in completed]
+            for section in remaining
+            if section not in ready
+        }
+        guard.verify_unchanged()
+
+        repo = git_info(target_dir)
+        warnings: list[str] = []
+        if repo.get("is_protected_branch"):
+            warnings.append(f"Current git branch is protected-looking: {repo.get('branch')}")
+        if repo.get("available") and not repo.get("working_tree_clean"):
+            warnings.append(f"Working tree has {len(repo.get('dirty_files', []))} uncommitted change(s)")
+        payload = {
+            "success": bool(ready) or not remaining,
+            "mode": "detached-frozen",
+            "sections_dir": str(sections_dir),
+            "target_dir": str(target_dir),
+            "implementation_root": str(implementation_root),
+            "state_dir": str(implementation_root),
+            "config_path": str(implementation_root / "zagrosi_implement_config.json"),
+            "state_path": str(implementation_root / "zagrosi_implement_state.json"),
+            "reviews_dir": str(implementation_root / "code_review"),
+            "evidence_dir": str(implementation_root / "evidence"),
+            "pinners_dir": str(implementation_root / "pinners"),
+            "planning_tree_sha256": guard.digest,
+            "planning_file_count": guard.file_count,
+            "planning_total_bytes": guard.total_bytes,
+            "admission_pinner_path": str(admission_path),
+            "admission_pinner_sha256": admission_sha256,
+            "admission_state_sha256": admission_state_sha256,
+            "detached_implementation_root_identity_digest": root_identity_digest,
+            "target_root_identity_digest": setup_target_identity_digest,
+            "implementation_sources": source_records,
+            "section_progress": progress,
+            "completed_sections": sorted(completed),
+            "next_section": ready[0] if ready else None,
+            "ready_sections": ready,
+            "remaining_sections": remaining,
+            "blocked_sections": blocked,
+            "git": repo,
+            "warnings": warnings,
+        }
+        if effective_flight_mode(args) != "off":
+            payload["preflight"] = implement_preflight_report(sections_dir, target_dir, args)
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        require_lock_authority()
+        return print_json(payload, 0 if payload["success"] else 1)
+    except DetachedImplementationError as exc:
+        return print_json(
+            detached_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    except OSError as exc:
+        return print_json(
+            detached_io_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    finally:
+        if lock_context is not None:
+            lock_context.__exit__(*sys.exc_info())
+        if guard is not None:
+            guard.close()
+        if root_fd is not None:
+            os.close(root_fd)
+        if target_fd is not None:
+            os.close(target_fd)
+
+
 def deep_implement_setup(args: argparse.Namespace) -> int:
+    if getattr(args, "implementation_root", None):
+        return detached_implement_setup(args)
     sections_dir = resolve_path(args.sections_dir)
     target_dir = resolve_path(args.target_dir or os.getcwd())
     if not sections_dir.exists() or not sections_dir.is_dir():
@@ -2298,7 +9033,9 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
     write_json(config_path, config)
 
     completed = sorted(state.get("completed_sections", {}).keys())
-    next_section = next((section for section in progress["sections"] if section not in completed), None)
+    dependencies = dependency_graph(planning_dir, progress)
+    ready = ready_sections(progress, dependencies, set(completed))
+    next_section = ready[0] if ready else None
     repo = git_info(target_dir)
     warnings: list[str] = []
     if repo.get("is_protected_branch"):
@@ -2316,6 +9053,7 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
         "section_progress": progress,
         "completed_sections": completed,
         "next_section": next_section,
+        "ready_sections": ready,
         "git": repo,
         "warnings": warnings,
     }
@@ -2364,15 +9102,548 @@ def compact_section_evidence(record: dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "-"
 
 
+def detached_implement_record_section(args: argparse.Namespace) -> int:
+    sections_dir = absolute_path_no_follow(args.sections_dir)
+    planning_dir = sections_dir.parent
+    implementation_root: Path | None = None
+    root_fd: int | None = None
+    guard: FrozenPlanningTree | None = None
+    record_lock_context: Any = None
+    require_lock_authority = None
+    try:
+        implementation_root, root_fd, config, guard, record_lock_context, require_lock_authority = open_detached_context(
+            planning_dir,
+            args.implementation_root,
+            sections_dir=sections_dir,
+        )
+        progress = check_section_progress(planning_dir)
+        if progress["state"] in {"invalid_index", "no_index"}:
+            raise DetachedImplementationError(
+                "invalid-sections-index",
+                "Cannot record detached implementation against an invalid sections index.",
+                section_progress=progress,
+            )
+        artifact_payload = plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
+        if not artifact_payload["success"]:
+            raise DetachedImplementationError(
+                "incomplete-plan-artifacts",
+                "Forge planning process is incomplete; finish zagrosi-plan before recording implementation.",
+                findings=artifact_payload.get("findings", []),
+            )
+        section = args.section
+        known = set(progress["sections"])
+        if section not in known:
+            raise DetachedImplementationError(
+                "unknown-section",
+                f"Section is absent from SECTION_MANIFEST: {section}",
+                section=section,
+            )
+        dependencies = dependency_graph(planning_dir, progress)
+        unknown_predecessors = sorted(dependency for dependency in dependencies.get(section, []) if dependency not in known)
+        if unknown_predecessors:
+            raise DetachedImplementationError(
+                "unknown-predecessors",
+                f"Section names predecessors absent from SECTION_MANIFEST: {section}",
+                section=section,
+                unknown_predecessors=unknown_predecessors,
+            )
+        completed_records = detached_completed_records(root_fd, config, progress)
+        initial_state, initial_state_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+        if initial_state.get("completed_sections") != completed_records:
+            raise DetachedImplementationError(
+                "detached-state-drift",
+                "Detached implementation state changed during initial predecessor validation.",
+                section=section,
+            )
+        completed_dependants = completed_transitive_dependants(
+            section,
+            dependencies,
+            set(completed_records),
+        )
+        if section in completed_records and completed_dependants:
+            raise DetachedImplementationError(
+                "completed-dependent-pinner-conflict",
+                f"Section cannot be re-recorded while completed transitive dependants pin its current receipt: {section}",
+                section=section,
+                completed_dependants=completed_dependants,
+            )
+        incomplete_predecessors = [dependency for dependency in dependencies.get(section, []) if dependency not in completed_records]
+        if incomplete_predecessors:
+            raise DetachedImplementationError(
+                "incomplete-predecessors",
+                f"Section cannot be recorded before every predecessor pinner closes: {section}",
+                section=section,
+                incomplete_predecessors=incomplete_predecessors,
+            )
+
+        evidence_values = detached_section_evidence_values(section, args.evidence_rows)
+        review_rows = detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
+        if section in HANDOFF_CONTRACT_BY_SECTION:
+            verify_stored_privileged_handoff(
+                planning_dir,
+                implementation_root,
+                root_fd,
+                config,
+                guard,
+                section,
+            )
+        evidence_rows = detached_evidence_rows(root_fd, implementation_root, evidence_values)
+        require_privileged_section_evidence(section, evidence_rows)
+        verification = normalize_repeated(args.verification)
+        if evidence_rows and not verification:
+            raise DetachedImplementationError(
+                "missing-evidence-verification",
+                "Detached evidence rows require at least one section verification command that semantically validates them.",
+                section=section,
+            )
+
+        final_review_rows = detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
+        if final_review_rows != review_rows:
+            raise DetachedImplementationError(
+                "detached-review-drift",
+                f"Detached review artifacts changed before section pinner creation: {section}",
+                section=section,
+            )
+        if section in HANDOFF_CONTRACT_BY_SECTION:
+            verify_stored_privileged_handoff(
+                planning_dir,
+                implementation_root,
+                root_fd,
+                config,
+                guard,
+                section,
+            )
+        final_evidence_rows = detached_evidence_rows(root_fd, implementation_root, evidence_values)
+        require_privileged_section_evidence(section, final_evidence_rows)
+        if final_evidence_rows != evidence_rows:
+            raise DetachedImplementationError(
+                "detached-evidence-drift",
+                f"Detached evidence changed before section pinner creation: {section}",
+                section=section,
+                expected_evidence_rows=evidence_rows,
+                actual_evidence_rows=final_evidence_rows,
+            )
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        final_completed_records = detached_completed_records(root_fd, config, progress)
+        if final_completed_records != completed_records:
+            raise DetachedImplementationError(
+                "detached-state-drift",
+                f"Detached predecessor state changed before section pinner creation: {section}",
+                section=section,
+            )
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+
+        predecessor_pinners: list[dict[str, Any]] = []
+        for predecessor in dependencies.get(section, []):
+            predecessor_record = final_completed_records[predecessor]
+            _, file_sha256 = verify_section_pinner(root_fd, config, predecessor, predecessor_record)
+            predecessor_pinners.append(
+                {
+                    "section": predecessor,
+                    "pinner_path": predecessor_record["pinner_path"],
+                    "pinner_file_sha256": file_sha256,
+                }
+            )
+
+        last_completed_records = detached_completed_records(root_fd, config, progress)
+        if last_completed_records != final_completed_records:
+            raise DetachedImplementationError(
+                "detached-state-drift",
+                f"Detached predecessor state changed during final section validation: {section}",
+                section=section,
+            )
+        last_review_rows = detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
+        if last_review_rows != final_review_rows:
+            raise DetachedImplementationError(
+                "detached-review-drift",
+                f"Detached review artifacts changed during final section validation: {section}",
+                section=section,
+            )
+        last_evidence_rows = detached_evidence_rows(root_fd, implementation_root, evidence_values)
+        require_privileged_section_evidence(section, last_evidence_rows)
+        if last_evidence_rows != final_evidence_rows:
+            raise DetachedImplementationError(
+                "detached-evidence-drift",
+                f"Detached evidence changed during final section validation: {section}",
+                section=section,
+                expected_evidence_rows=final_evidence_rows,
+                actual_evidence_rows=last_evidence_rows,
+            )
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        privileged_receipt_raw: bytes | None = None
+        if section in HANDOFF_CONTRACT_BY_SECTION:
+            _, privileged_receipt_raw = verify_stored_privileged_handoff(
+                planning_dir,
+                implementation_root,
+                root_fd,
+                config,
+                guard,
+                section,
+            )
+        require_verified_privileged_evidence_bytes(section, last_evidence_rows, privileged_receipt_raw)
+
+        completed_at = now_iso()
+        files_changed = normalize_repeated(args.files_changed)
+        test_files = normalize_repeated(args.test_files)
+        commit_status = args.commit_status or ("recorded" if args.commit else "not_recorded")
+        pinner = {
+            "schema": SECTION_PINNER_SCHEMA,
+            "section": section,
+            "planning_tree_sha256": config["planning_tree_sha256"],
+            "admission_pinner_sha256": config["admission_pinner_sha256"],
+            "admission_state_sha256": config["admission_state_sha256"],
+            "detached_implementation_root_identity_digest": config[
+                "detached_implementation_root_identity_digest"
+            ],
+            "target_root_identity_digest": config["target_root_identity_digest"],
+            "implement_tool_sha256": config["implement_tool_sha256"],
+            "implement_skill_sha256": config["implement_skill_sha256"],
+            "implement_test_sha256": config["implement_test_sha256"],
+            "completed_at": completed_at,
+            "commit": args.commit,
+            "commit_status": commit_status,
+            "notes": args.notes,
+            "files_changed": files_changed,
+            "test_files": test_files,
+            "review_artifacts": final_review_rows,
+            "evidence_rows": final_evidence_rows,
+            "verification": verification,
+            "predecessor_pinners": predecessor_pinners,
+        }
+        require_exact_fields(pinner, SECTION_PINNER_FIELDS, f"Section pinner for {section}")
+        pinner_raw = canonical_json_bytes(pinner)
+        pinner_file_sha256 = sha256_digest(pinner_raw)
+        pinner_path = f"pinners/{section}-{pinner_file_sha256.removeprefix('sha256:')}.json"
+        state_record = {
+            "completed_at": completed_at,
+            "commit": args.commit,
+            "commit_status": commit_status,
+            "notes": args.notes,
+            "files_changed": files_changed,
+            "test_files": test_files,
+            "review_artifacts": final_review_rows,
+            "evidence_rows": final_evidence_rows,
+            "verification": verification,
+            "pinner_path": pinner_path,
+            "pinner_file_sha256": pinner_file_sha256,
+        }
+        require_exact_fields(state_record, PINNER_STATE_RECORD_FIELDS, f"State record for {section}")
+
+        require_lock_authority()
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        locked_completed_records = detached_completed_records(root_fd, config, progress)
+        if locked_completed_records != final_completed_records:
+            raise DetachedImplementationError(
+                "detached-state-drift",
+                f"Detached predecessor/current state changed before transaction preparation: {section}",
+                section=section,
+            )
+        base_state = load_detached_state(root_fd, config)
+        _, base_state_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+        if base_state.get("completed_sections") != locked_completed_records:
+            raise DetachedImplementationError(
+                "detached-state-drift",
+                "Detached state projection changed before section transaction preparation.",
+                section=section,
+            )
+        candidate_state = json.loads(base_state_raw.decode("utf-8"))
+        prior_state_record = candidate_state["completed_sections"].get(section)
+        candidate_state["completed_sections"][section] = state_record
+        candidate_state_raw = canonical_json_bytes(candidate_state)
+        if candidate_state_raw == base_state_raw:
+            raise DetachedImplementationError(
+                "section-record-state-conflict",
+                "Section record is an exact no-op against the current canonical state.",
+                section=section,
+            )
+        completed_after = set(candidate_state["completed_sections"])
+        ready_after = ready_sections(progress, dependencies, completed_after)
+        remaining_after = [candidate for candidate in progress["sections"] if candidate not in completed_after]
+        payload = {
+            "success": True,
+            "mode": "detached-frozen",
+            "planning_dir": str(planning_dir),
+            "implementation_root": str(implementation_root),
+            "planning_tree_sha256": guard.digest,
+            "admission_pinner_sha256": config["admission_pinner_sha256"],
+            "admission_state_sha256": config["admission_state_sha256"],
+            "detached_implementation_root_identity_digest": config[
+                "detached_implementation_root_identity_digest"
+            ],
+            "state_path": str(implementation_root / "zagrosi_implement_state.json"),
+            "section": section,
+            "record": state_record,
+            "pinner_path": str(implementation_root / pinner_path),
+            "pinner_file_sha256": pinner_file_sha256,
+            "traceability_matrix": None,
+            "completed_sections": sorted(completed_after),
+            "next_section": ready_after[0] if ready_after else None,
+            "ready_sections": ready_after,
+            "remaining_sections": remaining_after,
+            "transaction_status": "pending",
+            "transaction_cleanup_pending": False,
+        }
+        if effective_flight_mode(args) != "off":
+            payload["postflight"] = flight_payload(
+                phase="implement",
+                stage="postflight",
+                mode=effective_flight_mode(args),
+                gates=[
+                    direct_gate(
+                        "detached-section-pinner",
+                        True,
+                        {"path": payload["pinner_path"], "sha256": pinner_file_sha256},
+                    ),
+                    direct_gate("frozen-planning-tree", True, {"sha256": guard.digest}),
+                ],
+                extras={"planning_dir": str(planning_dir), "implementation_root": str(implementation_root)},
+            )
+        transaction = {
+            "schema": SECTION_RECORD_TRANSACTION_SCHEMA,
+            "section": section,
+            "base_state_sha256": sha256_digest(base_state_raw),
+            "candidate_state_sha256": sha256_digest(candidate_state_raw),
+            "prior_state_record": prior_state_record,
+            "state_record": state_record,
+            "pinner_path": pinner_path,
+            "pinner_file_sha256": pinner_file_sha256,
+        }
+        require_exact_fields(transaction, SECTION_RECORD_TRANSACTION_FIELDS, "Section-record transaction")
+        transaction_raw = canonical_json_bytes(transaction)
+        verify_section_pinner_bytes(root_fd, config, section, state_record, pinner, pinner_raw)
+        verify_section_record_artifact_closure(
+            planning_dir,
+            implementation_root,
+            root_fd,
+            config,
+            guard,
+            progress,
+            section,
+            pinner,
+            pinner_raw,
+            base_state_raw,
+            require_lock_authority,
+        )
+
+        transaction_fd: int | None = None
+        committed = False
+        cleanup_pending = False
+        try:
+            transaction_fd = section_record_transaction_dir(root_fd, create=True)
+            assert transaction_fd is not None
+            if section_record_transaction_inventory(transaction_fd):
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Section-record transaction directory was not empty after locked recovery.",
+                )
+            publish_section_record_staged_pinner(transaction_fd, pinner_raw)
+            if publish_section_record_transaction(
+                root_fd,
+                transaction_fd,
+                transaction,
+                base_state_raw,
+            ) != transaction_raw:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Published section-record transaction bytes changed before use.",
+                )
+            install_staged_section_pinner(root_fd, transaction_fd, pinner_path, pinner_raw)
+            section_record_pinner_relation(root_fd, transaction_fd, pinner_path, pinner_raw)
+            verify_section_record_artifact_closure(
+                planning_dir,
+                implementation_root,
+                root_fd,
+                config,
+                guard,
+                progress,
+                section,
+                pinner,
+                pinner_raw,
+                base_state_raw,
+                require_lock_authority,
+            )
+            replace_state_from_transaction(root_fd, transaction_fd, base_state_raw, candidate_state)
+            verify_section_record_artifact_closure(
+                planning_dir,
+                implementation_root,
+                root_fd,
+                config,
+                guard,
+                progress,
+                section,
+                pinner,
+                pinner_raw,
+                candidate_state_raw,
+                require_lock_authority,
+            )
+            require_lock_authority()
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            verify_section_record_commit_closure(
+                root_fd,
+                transaction_fd,
+                transaction_raw,
+                pinner_path,
+                pinner_raw,
+                candidate_state_raw,
+            )
+            require_lock_authority()
+            cleanup_pending = not commit_section_record_transaction(root_fd, transaction_fd)
+            transaction_fd = None
+            committed = True
+            state = candidate_state
+        except Exception as record_exc:
+            if committed:
+                raise
+            cleanup_safe = True
+            if transaction_fd is not None:
+                try:
+                    _, observed_state_raw = load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+                    if observed_state_raw not in {base_state_raw, candidate_state_raw}:
+                        cleanup_safe = False
+                    if cleanup_safe:
+                        require_lock_authority()
+                    if cleanup_safe:
+                        journal_present = section_record_entry_stat(transaction_fd, "transaction.json") is not None
+                        rollback_present = section_record_entry_stat(transaction_fd, "rollback.json") is not None
+                        if journal_present or rollback_present:
+                            if section_record_entry_stat(transaction_fd, "state.json") is not None:
+                                staged_state = read_single_link_regular_at(
+                                    transaction_fd,
+                                    "state.json",
+                                    cap=DETACHED_JSON_CAP,
+                                    require_mode=0o600,
+                                )
+                                expected_staged = (
+                                    candidate_state_raw
+                                    if journal_present and observed_state_raw == base_state_raw
+                                    else base_state_raw
+                                )
+                                if staged_state != expected_staged:
+                                    raise DetachedImplementationError(
+                                        "section-record-recovery-required",
+                                        "Section-record state temp was not reachable from the failed transaction state.",
+                                    )
+
+                            def validate_failed_record_rollback_base() -> None:
+                                require_lock_authority()
+                                verify_detached_authorities(
+                                    planning_dir,
+                                    implementation_root,
+                                    root_fd,
+                                    config,
+                                    guard,
+                                )
+                                detached_completed_records(root_fd, config, progress)
+                                require_lock_authority()
+
+                            cleanup_safe = execute_section_record_rollback(
+                                root_fd,
+                                transaction_fd,
+                                transaction_raw,
+                                pinner_path,
+                                pinner_raw,
+                                candidate_state_raw,
+                                base_state,
+                                base_state_raw,
+                                validate_failed_record_rollback_base,
+                            )
+                        else:
+                            cleanup_safe = abort_section_record_transaction(root_fd, transaction_fd)
+                        transaction_fd = None
+                except Exception:
+                    cleanup_safe = False
+            if transaction_fd is not None:
+                os.close(transaction_fd)
+            if not cleanup_safe:
+                raise DetachedImplementationError(
+                    "section-record-recovery-required",
+                    "Section recording failed and exact rollback/transaction cleanup could not be proven; artefacts were retained.",
+                ) from record_exc
+            raise
+        payload["transaction_cleanup_pending"] = cleanup_pending
+        payload["transaction_status"] = (
+            "committed-cleanup-pending" if cleanup_pending else "committed-clean"
+        )
+        return print_json(payload)
+    except DetachedImplementationError as exc:
+        return print_json(
+            detached_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    except OSError as exc:
+        return print_json(
+            detached_io_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    finally:
+        if record_lock_context is not None:
+            record_lock_context.__exit__(*sys.exc_info())
+        if guard is not None:
+            guard.close()
+        if root_fd is not None:
+            os.close(root_fd)
+
+
 def deep_implement_record_section(args: argparse.Namespace) -> int:
+    if getattr(args, "implementation_root", None):
+        return detached_implement_record_section(args)
     sections_dir = resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
     artifact_payload = plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
     if not artifact_payload["success"]:
         artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before recording implementation."
         return print_json(artifact_payload, 1)
+    progress = check_section_progress(planning_dir)
+    known = set(progress.get("sections", []))
+    if args.section not in known:
+        return print_json(
+            {
+                "success": False,
+                "error_code": "unknown-section",
+                "error": f"Section is absent from SECTION_MANIFEST: {args.section}",
+                "section": args.section,
+            },
+            1,
+        )
     state_path = implementation_state_path(planning_dir)
     state = load_implementation_state(planning_dir)
+    dependencies = dependency_graph(planning_dir, progress)
+    unknown_predecessors = sorted(dependency for dependency in dependencies.get(args.section, []) if dependency not in known)
+    if unknown_predecessors:
+        return print_json(
+            {
+                "success": False,
+                "error_code": "unknown-predecessors",
+                "error": f"Section names predecessors absent from SECTION_MANIFEST: {args.section}",
+                "section": args.section,
+                "unknown_predecessors": unknown_predecessors,
+            },
+            1,
+        )
+    completed = state.get("completed_sections", {})
+    completed_names = set(completed) if isinstance(completed, dict) else set()
+    incomplete_predecessors = [dependency for dependency in dependencies.get(args.section, []) if dependency not in completed_names]
+    if incomplete_predecessors:
+        return print_json(
+            {
+                "success": False,
+                "error_code": "incomplete-predecessors",
+                "error": f"Section cannot be recorded before every predecessor closes: {args.section}",
+                "section": args.section,
+                "incomplete_predecessors": incomplete_predecessors,
+            },
+            1,
+        )
     section_record = {
         "completed_at": now_iso(),
         "commit": args.commit,
@@ -2380,6 +9651,7 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
         "files_changed": normalize_repeated(args.files_changed),
         "test_files": normalize_repeated(args.test_files),
         "review_artifacts": normalize_repeated(args.review_artifacts),
+        "evidence_rows": normalize_repeated(getattr(args, "evidence_rows", [])),
         "verification": normalize_repeated(args.verification),
         "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
     }
@@ -2681,6 +9953,21 @@ def lint_sections(args: argparse.Namespace) -> int:
     spec_ids = requirement_ids(read_text(spec_path)) if spec_path else []
     all_section_text = ""
     estimates: list[dict[str, Any]] = []
+    section_texts: dict[str, str] = {}
+    owned_path_owners: dict[str, set[str]] = {}
+
+    for section in progress["sections"]:
+        section_path = planning_dir / "sections" / f"{section}.md"
+        if not section_path.exists():
+            continue
+        section_texts[section] = read_text(section_path)
+        for owned_path in extract_section_owned_paths(section_texts[section]):
+            owned_path_owners.setdefault(owned_path, set()).add(section)
+
+    predecessor_closure = {
+        section: transitive_section_predecessors(section, dependencies)
+        for section in progress["sections"]
+    }
 
     for section, deps in dependencies.items():
         unknown = [dep for dep in deps if dep not in progress["sections"]]
@@ -2711,7 +9998,7 @@ def lint_sections(args: argparse.Namespace) -> int:
         if not section_path.exists():
             findings.append(finding("critical", "missing-section-file", f"Section file missing: {section}.md", section_path))
             continue
-        text = read_text(section_path)
+        text = section_texts[section]
         metrics = section_metrics(section, section_path, dependencies)
         estimates.append(metrics)
         all_section_text += "\n" + text
@@ -2766,6 +10053,32 @@ def lint_sections(args: argparse.Namespace) -> int:
         require_terms(findings, text, SECTION_DETAIL_TERMS, section_path, "medium")
         if not FILE_PATH_RE.search(text):
             findings.append(finding("medium", "section-no-file-paths", f"{section} does not name concrete files.", section_path))
+        allowed_owners = predecessor_closure[section] | {section}
+        referenced_paths, malformed_shell_gate = shell_gate_owned_path_references(text, set(owned_path_owners))
+        if malformed_shell_gate:
+            findings.append(
+                finding(
+                    "high",
+                    "malformed-shell-gate",
+                    f"{section} contains shell gate syntax that cannot be lexically closed.",
+                    section_path,
+                    "Close every shell quote and escape before relying on the gate.",
+                )
+            )
+        for referenced_path in sorted(referenced_paths):
+            owners = owned_path_owners[referenced_path]
+            if not owners.isdisjoint(allowed_owners):
+                continue
+            owner_text = ", ".join(sorted(owners))
+            findings.append(
+                finding(
+                    "high",
+                    "section-gate-non-predecessor-owned-path",
+                    f"{section} shell gate names {referenced_path}, owned by non-predecessor section(s): {owner_text}.",
+                    section_path,
+                    "Defer the gate to an owning section, or add a dependency only when the implementation boundary genuinely requires it.",
+                )
+            )
 
     missing_requirements = [req_id for req_id in spec_ids if req_id not in all_section_text]
     if missing_requirements:
@@ -3504,7 +10817,19 @@ def review_board_prompts(args: argparse.Namespace) -> int:
         path.write_text(
             (
                 f"# {review_pass.replace('-', ' ').title()} Review\n\n"
-                f"Review `{planning_dir}/codex-plan.md` from the perspective of {review_pass.replace('-', ' ')}.\n\n"
+                f"Review the complete current-authority corpus under `{planning_dir}` from the "
+                f"perspective of {review_pass.replace('-', ' ')}. Read `spec.md`, `codex-spec.md`, "
+                "`codex-plan.md`, `codex-plan-tdd.md`, `sections/index.md`, `quality-gates.md`, "
+                "`risk-register.md`, `traceability.md`, the relevant section files and the matching "
+                "plan-local review. Historical notices and prior receipts are non-authorising.\n\n"
+                "When the current specification defines a governed freeze `A=(R,P,D)`, first use "
+                "its pinned read-only verifier to recompute exact `R`, `P`, `D` and `A` at START. "
+                "Stop on any mismatch. Make zero planning-root writes. Review only those frozen "
+                "bytes, then recompute the same values at END and require byte equality. Emit the "
+                "versioned canonical council receipt outside the planning root, in the fixed council "
+                "order, using only the exact receipt members, START/END pins, findings array and "
+                "verdict permitted by the specification. Do not invent a receipt member, schema, "
+                "framing rule or hash equation.\n\n"
                 "Return severity-ranked findings with evidence, file references, contract gaps, "
                 "test gaps, migration/rollback concerns, and specific plan edits. Target 1,000+ "
                 "words when the review surface is non-trivial. Do not rewrite the plan; identify "
@@ -3676,7 +11001,99 @@ def section_estimates(args: argparse.Namespace) -> int:
     )
 
 
+def detached_next_section(args: argparse.Namespace) -> int:
+    planning_dir = absolute_path_no_follow(args.planning_dir)
+    implementation_root: Path | None = None
+    root_fd: int | None = None
+    guard: FrozenPlanningTree | None = None
+    record_lock_context: Any = None
+    require_lock_authority = None
+    try:
+        implementation_root, root_fd, config, guard, record_lock_context, require_lock_authority = open_detached_context(
+            planning_dir,
+            args.implementation_root,
+        )
+        progress = check_section_progress(planning_dir)
+        if progress["state"] in {"invalid_index", "no_index"}:
+            raise DetachedImplementationError(
+                "invalid-sections-index",
+                "Cannot select a detached next section from an invalid sections index.",
+                section_progress=progress,
+            )
+        dependencies = dependency_graph(planning_dir, progress)
+        known = set(progress["sections"])
+        unknown_dependencies = {
+            section: [dependency for dependency in dependencies.get(section, []) if dependency not in known]
+            for section in progress["sections"]
+            if any(dependency not in known for dependency in dependencies.get(section, []))
+        }
+        if unknown_dependencies:
+            raise DetachedImplementationError(
+                "unknown-predecessors",
+                "Section dependency graph contains predecessors absent from the manifest.",
+                unknown_predecessors=unknown_dependencies,
+            )
+        completed_records = detached_completed_records(root_fd, config, progress)
+        completed = set(completed_records)
+        ready = ready_sections(progress, dependencies, completed)
+        remaining = [section for section in progress["sections"] if section not in completed]
+        blocked = {
+            section: [dependency for dependency in dependencies.get(section, []) if dependency not in completed]
+            for section in remaining
+            if section not in ready
+        }
+        guard.verify_unchanged()
+        verify_implementation_sources(config)
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        require_lock_authority()
+        return print_json(
+            {
+                "success": bool(ready) or not remaining,
+                "mode": "detached-frozen",
+                "planning_dir": str(planning_dir),
+                "implementation_root": str(implementation_root),
+                "planning_tree_sha256": guard.digest,
+                "admission_pinner_sha256": config["admission_pinner_sha256"],
+                "next_section": ready[0] if ready else None,
+                "ready_sections": ready,
+                "remaining_sections": remaining,
+                "blocked_sections": blocked,
+                "completed_sections": sorted(completed),
+            },
+            0 if ready or not remaining else 1,
+        )
+    except DetachedImplementationError as exc:
+        return print_json(
+            detached_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    except OSError as exc:
+        return print_json(
+            detached_io_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    finally:
+        if record_lock_context is not None:
+            record_lock_context.__exit__(*sys.exc_info())
+        if guard is not None:
+            guard.close()
+        if root_fd is not None:
+            os.close(root_fd)
+
+
 def next_section(args: argparse.Namespace) -> int:
+    if getattr(args, "implementation_root", None):
+        return detached_next_section(args)
     planning_dir = resolve_path(args.planning_dir)
     progress = check_section_progress(planning_dir)
     if progress["state"] in {"invalid_index", "no_index"}:
@@ -3749,18 +11166,26 @@ def parallel_plan(args: argparse.Namespace) -> int:
 
 
 def changed_files_from_diff(text: str) -> list[str]:
+    lines = text.splitlines()
+    is_unified_diff = any(
+        line.startswith(("diff --git ", "--- ", "+++ ", "@@ "))
+        for line in lines
+    )
+    if not is_unified_diff:
+        return sorted({
+            path
+            for line in lines
+            if (path := line.strip().removeprefix("./")) and path != "/dev/null"
+        })
+
     files: set[str] = set()
-    for line in text.splitlines():
+    for line in lines:
         if line.startswith("diff --git "):
             parts = line.split()
             if len(parts) >= 4:
                 files.add(parts[3].removeprefix("b/"))
         elif line.startswith("+++ b/"):
             files.add(line[6:].strip())
-        else:
-            stripped = line.strip().removeprefix("./")
-            if FILE_PATH_RE.fullmatch(stripped):
-                files.add(stripped.strip("`"))
     return sorted(file for file in files if file != "/dev/null")
 
 
@@ -3785,7 +11210,7 @@ def patch_scope(args: argparse.Namespace) -> int:
     section_file = resolve_path(args.section_file)
     if not section_file.exists():
         return print_json({"success": False, "error": f"Section file not found: {section_file}"}, 1)
-    declared = set(extract_file_paths(read_text(section_file)))
+    declared = set(extract_section_owned_paths(read_text(section_file)))
     if args.diff_file:
         diff_path = resolve_path(args.diff_file)
         if not diff_path.exists():
@@ -3838,7 +11263,7 @@ def commit_message(args: argparse.Namespace) -> int:
         subject = f"Implement {label}"
     text = read_text(section_file)
     req_ids = requirement_ids(text)
-    files = extract_file_paths(text)
+    files = extract_section_owned_paths(text)
     body_lines = []
     if req_ids:
         body_lines.append(f"Requirements: {', '.join(req_ids)}")
@@ -4184,6 +11609,18 @@ def test_names(text: str) -> list[str]:
     return sorted(found)
 
 
+def section_owned_test_names(text: str) -> list[str]:
+    """Return concrete test cases, excluding identifiers inferred from paths."""
+    found: set[str] = set(re.findall(r"\btest_[A-Za-z0-9_]+\b(?!\.)", text))
+    for pattern in (r"\bit\([\"']([^\"']+)[\"']\)", r"\bdescribe\([\"']([^\"']+)[\"']\)"):
+        found.update(re.findall(pattern, text))
+    referenced_test_modules = {
+        Path(path).stem
+        for path in re.findall(r"\b(?:tests|terraform)/[A-Za-z0-9_./-]+\.py\b", text)
+    }
+    return sorted(found - referenced_test_modules)
+
+
 def add_term_findings(findings: list[Finding], text: str, groups: dict[str, list[str]], path: Path, severity: str) -> None:
     for label, terms in groups.items():
         if not contains_any(text, terms):
@@ -4436,6 +11873,17 @@ def readiness_findings_for_score(planning_dir: Path, max_files: int) -> list[Fin
     return findings
 
 
+def assumption_ledger_line_token(line_no: int) -> str:
+    if isinstance(line_no, bool) or not isinstance(line_no, int) or line_no < 1:
+        raise ValueError("assumption-ledger-line-number-invalid")
+    letters: list[str] = []
+    remaining = line_no
+    while remaining:
+        remaining, offset = divmod(remaining - 1, 26)
+        letters.append(chr(ord("a") + offset))
+    return "L" + "".join(reversed(letters))
+
+
 def assumption_ledger(args: argparse.Namespace) -> int:
     planning_dir = resolve_path(args.planning_dir)
     texts = existing_artifact_texts(planning_dir)
@@ -4452,7 +11900,8 @@ def assumption_ledger(args: argparse.Namespace) -> int:
                 continue
             for label, terms in labels.items():
                 if contains_any(stripped, terms):
-                    rows.append({"type": label, "artifact": name, "line": str(line_no), "text": stripped})
+                    line_token = assumption_ledger_line_token(line_no)
+                    rows.append({"type": label, "artifact": name, "line": line_token, "text": stripped})
                     break
     content = "# Assumption Ledger\n\n| Type | Artifact | Line | Text |\n|------|----------|------|------|\n"
     for row in rows:
@@ -4466,32 +11915,95 @@ def assumption_ledger(args: argparse.Namespace) -> int:
 
 
 def implementation_packet(args: argparse.Namespace) -> int:
-    planning_dir = resolve_path(args.planning_dir)
-    section = args.section
-    section_path = planning_dir / "sections" / f"{section}.md"
-    if not section_path.exists():
-        return print_json({"success": False, "error": f"Section file not found: {section_path}"}, 1)
-    artifacts = planning_artifacts(planning_dir)
-    tdd_text = read_text(artifacts["tdd"]) if artifacts["tdd"] and artifacts["tdd"].exists() else ""
-    trace_findings, trace = traceability_analysis(planning_dir)
-    section_text = read_text(section_path)
-    reqs = requirement_ids(section_text)
-    tests = test_names(section_text + "\n" + tdd_text)
-    files = extract_file_paths(section_text)
-    content = (
-        f"# Implementation Packet: {section}\n\n"
-        f"Planning directory: `{planning_dir}`\n\n"
-        f"## Requirements\n\n{', '.join(reqs) if reqs else 'No requirement IDs found.'}\n\n"
-        f"## Owned Files\n\n" + "\n".join(f"- `{file}`" for file in files) + "\n\n"
-        f"## Tests\n\n" + "\n".join(f"- `{name}`" for name in tests) + "\n\n"
-        f"## Traceability\n\n```json\n{json.dumps(trace.get('coverage', {}), indent=2, sort_keys=True)}\n```\n\n"
-        f"## Section\n\n{section_text}\n"
-    )
-    output_dir = resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "packets"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / f"{section}-packet.md"
-    output.write_text(content, encoding="utf-8")
-    return print_json({"success": not trace_findings, "planning_dir": str(planning_dir), "section": section, "output": str(output), "requirements": reqs, "files": files, "tests": tests})
+    detached = bool(getattr(args, "implementation_root", None))
+    planning_dir = absolute_path_no_follow(args.planning_dir) if detached else resolve_path(args.planning_dir)
+    implementation_root: Path | None = None
+    root_fd: int | None = None
+    guard: FrozenPlanningTree | None = None
+    record_lock_context: Any = None
+    require_lock_authority = None
+    try:
+        if detached:
+            if not args.output_dir:
+                raise DetachedImplementationError(
+                    "missing-detached-output-dir",
+                    "Detached implementation packets require an explicit external --output-dir.",
+                )
+            implementation_root, root_fd, config, guard, record_lock_context, require_lock_authority = open_detached_context(
+                planning_dir,
+                args.implementation_root,
+            )
+        section = args.section
+        section_path = planning_dir / "sections" / f"{section}.md"
+        if not section_path.exists():
+            return print_json({"success": False, "error": f"Section file not found: {section_path}"}, 1)
+        trace_findings, trace = traceability_analysis(planning_dir)
+        section_text = read_text(section_path)
+        reqs = requirement_ids(section_text)
+        tests = section_owned_test_names(section_text)
+        files = extract_section_owned_paths(section_text)
+        content = (
+            f"# Implementation Packet: {section}\n\n"
+            f"Planning directory: `{planning_dir}`\n\n"
+            f"## Requirements\n\n{', '.join(reqs) if reqs else 'No requirement IDs found.'}\n\n"
+            f"## Owned Files\n\n" + "\n".join(f"- `{file}`" for file in files) + "\n\n"
+            f"## Tests\n\n" + "\n".join(f"- `{name}`" for name in tests) + "\n\n"
+            f"## Traceability\n\n```json\n{json.dumps(trace.get('coverage', {}), indent=2, sort_keys=True)}\n```\n\n"
+            f"## Section\n\n{section_text}\n"
+        )
+        filename = f"{section}-packet.md"
+        if detached:
+            assert implementation_root is not None and root_fd is not None and guard is not None
+            output = absolute_path_no_follow(args.output_dir) / filename
+            relative = detached_artifact_relative(implementation_root, str(output))
+            if Path(relative).parts[0] != "code_review":
+                raise DetachedImplementationError(
+                    "invalid-detached-output-dir",
+                    "Detached generated packets must stay beneath the fixed code_review directory.",
+                    path=str(output),
+                )
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            write_regular_bytes_at(root_fd, relative, content.encode("utf-8"), cap=DETACHED_REVIEW_CAP)
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            require_lock_authority()
+            output = implementation_root / relative
+        else:
+            output_dir = resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "packets"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output = output_dir / filename
+            output.write_text(content, encoding="utf-8")
+        return print_json({"success": not trace_findings, "planning_dir": str(planning_dir), "section": section, "output": str(output), "requirements": reqs, "files": files, "tests": tests})
+    except DetachedImplementationError as exc:
+        if not detached:
+            raise
+        return print_json(
+            detached_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    except OSError as exc:
+        if not detached:
+            raise
+        return print_json(
+            detached_io_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    finally:
+        if record_lock_context is not None:
+            record_lock_context.__exit__(*sys.exc_info())
+        if guard is not None:
+            guard.close()
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def context_brief(args: argparse.Namespace) -> int:
@@ -4519,26 +12031,92 @@ def context_brief(args: argparse.Namespace) -> int:
 
 
 def tdd_skeletons(args: argparse.Namespace) -> int:
-    planning_dir = resolve_path(args.planning_dir)
-    artifacts = planning_artifacts(planning_dir)
-    if not artifacts["tdd"] or not artifacts["tdd"].exists():
-        return print_json({"success": False, "error": "codex-plan-tdd.md is missing"}, 1)
-    text = read_text(artifacts["tdd"])
-    tests = test_names(text)
-    output_dir = resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "tdd-skeletons"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    ext = {"pytest": "py", "vitest": "ts", "go": "go", "rust": "rs"}[args.framework]
-    output = output_dir / f"test_skeleton.{ext}"
-    if args.framework == "pytest":
-        body = "\n\n".join(f"def {name}():\n    \"\"\"Generated from Forge TDD plan. Replace with real red test.\"\"\"\n    raise AssertionError(\"red test not implemented\")" for name in tests if name.startswith("test_"))
-    elif args.framework == "vitest":
-        body = "import { describe, it, expect } from 'vitest';\n\n" + "\n\n".join(f"it('{name}', () => {{\n  expect.fail('red test not implemented');\n}});" for name in tests)
-    elif args.framework == "go":
-        body = "package tests\n\nimport \"testing\"\n\n" + "\n\n".join(f"func Test{re.sub(r'[^A-Za-z0-9]', '', name.title())}(t *testing.T) {{\n\tt.Fatal(\"red test not implemented\")\n}}" for name in tests)
-    else:
-        body = "\n\n".join(f"#[test]\nfn {re.sub(r'[^a-zA-Z0-9_]', '_', name.lower())}() {{\n    panic!(\"red test not implemented\");\n}}" for name in tests)
-    output.write_text(body + "\n", encoding="utf-8")
-    return print_json({"success": True, "planning_dir": str(planning_dir), "framework": args.framework, "tests": tests, "output": str(output)})
+    detached = bool(getattr(args, "implementation_root", None))
+    planning_dir = absolute_path_no_follow(args.planning_dir) if detached else resolve_path(args.planning_dir)
+    implementation_root: Path | None = None
+    root_fd: int | None = None
+    guard: FrozenPlanningTree | None = None
+    record_lock_context: Any = None
+    require_lock_authority = None
+    try:
+        if detached:
+            if not args.output_dir:
+                raise DetachedImplementationError(
+                    "missing-detached-output-dir",
+                    "Detached TDD skeletons require an explicit external --output-dir.",
+                )
+            implementation_root, root_fd, config, guard, record_lock_context, require_lock_authority = open_detached_context(
+                planning_dir,
+                args.implementation_root,
+            )
+        artifacts = planning_artifacts(planning_dir)
+        if not artifacts["tdd"] or not artifacts["tdd"].exists():
+            return print_json({"success": False, "error": "codex-plan-tdd.md is missing"}, 1)
+        text = read_text(artifacts["tdd"])
+        tests = test_names(text)
+        ext = {"pytest": "py", "vitest": "ts", "go": "go", "rust": "rs"}[args.framework]
+        filename = f"test_skeleton.{ext}"
+        if args.framework == "pytest":
+            body = "\n\n".join(f"def {name}():\n    \"\"\"Generated from Forge TDD plan. Replace with real red test.\"\"\"\n    raise AssertionError(\"red test not implemented\")" for name in tests if name.startswith("test_"))
+        elif args.framework == "vitest":
+            body = "import { describe, it, expect } from 'vitest';\n\n" + "\n\n".join(f"it('{name}', () => {{\n  expect.fail('red test not implemented');\n}});" for name in tests)
+        elif args.framework == "go":
+            body = "package tests\n\nimport \"testing\"\n\n" + "\n\n".join(f"func Test{re.sub(r'[^A-Za-z0-9]', '', name.title())}(t *testing.T) {{\n\tt.Fatal(\"red test not implemented\")\n}}" for name in tests)
+        else:
+            body = "\n\n".join(f"#[test]\nfn {re.sub(r'[^a-zA-Z0-9_]', '_', name.lower())}() {{\n    panic!(\"red test not implemented\");\n}}" for name in tests)
+        raw = (body + "\n").encode("utf-8")
+        if detached:
+            assert implementation_root is not None and root_fd is not None and guard is not None
+            output = absolute_path_no_follow(args.output_dir) / filename
+            relative = detached_artifact_relative(implementation_root, str(output))
+            if Path(relative).parts[0] != "code_review":
+                raise DetachedImplementationError(
+                    "invalid-detached-output-dir",
+                    "Detached generated TDD skeletons must stay beneath the fixed code_review directory.",
+                    path=str(output),
+                )
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            write_regular_bytes_at(root_fd, relative, raw, cap=DETACHED_REVIEW_CAP)
+            verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+            require_lock_authority()
+            output = implementation_root / relative
+        else:
+            output_dir = resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "tdd-skeletons"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output = output_dir / filename
+            output.write_bytes(raw)
+        return print_json({"success": True, "planning_dir": str(planning_dir), "framework": args.framework, "tests": tests, "output": str(output)})
+    except DetachedImplementationError as exc:
+        if not detached:
+            raise
+        return print_json(
+            detached_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    except OSError as exc:
+        if not detached:
+            raise
+        return print_json(
+            detached_io_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    finally:
+        if record_lock_context is not None:
+            record_lock_context.__exit__(*sys.exc_info())
+        if guard is not None:
+            guard.close()
+        if root_fd is not None:
+            os.close(root_fd)
 
 
 def plan_diff(args: argparse.Namespace) -> int:
@@ -4603,7 +12181,120 @@ def lint_review_integration(args: argparse.Namespace) -> int:
     )
 
 
+def detached_implement_progress(args: argparse.Namespace) -> int:
+    planning_dir = absolute_path_no_follow(args.planning_dir)
+    implementation_root: Path | None = None
+    root_fd: int | None = None
+    guard: FrozenPlanningTree | None = None
+    record_lock_context: Any = None
+    require_lock_authority = None
+    try:
+        implementation_root, root_fd, config, guard, record_lock_context, require_lock_authority = open_detached_context(
+            planning_dir,
+            args.implementation_root,
+        )
+        progress = check_section_progress(planning_dir)
+        if progress["state"] in {"invalid_index", "no_index"}:
+            raise DetachedImplementationError(
+                "invalid-sections-index",
+                "Cannot record detached progress against an invalid sections index.",
+                section_progress=progress,
+            )
+        section = args.section
+        if section not in set(progress["sections"]):
+            raise DetachedImplementationError(
+                "unknown-section",
+                f"Section is absent from SECTION_MANIFEST: {section}",
+                section=section,
+            )
+        dependencies = dependency_graph(planning_dir, progress)
+        completed_records = detached_completed_records(root_fd, config, progress)
+        incomplete_predecessors = [dependency for dependency in dependencies.get(section, []) if dependency not in completed_records]
+        if section not in completed_records and incomplete_predecessors:
+            raise DetachedImplementationError(
+                "incomplete-predecessors",
+                f"Progress cannot start before every predecessor pinner closes: {section}",
+                section=section,
+                incomplete_predecessors=incomplete_predecessors,
+            )
+        event = {
+            "timestamp": now_iso(),
+            "section": section,
+            "stage": args.stage,
+            "command": args.command,
+            "result": args.result,
+            "notes": args.notes,
+        }
+
+        def append_event(state: dict[str, Any]) -> None:
+            require_exact_fields(state, DETACHED_PROGRESS_FIELDS, "Detached implementation progress")
+            if (
+                state.get("schema") != DETACHED_PROGRESS_SCHEMA
+                or state.get("mode") != "detached-frozen"
+                or state.get("planning_tree_sha256") != config.get("planning_tree_sha256")
+                or state.get("admission_pinner_sha256") != config.get("admission_pinner_sha256")
+                or not isinstance(state.get("events"), list)
+            ):
+                raise DetachedImplementationError(
+                    "invalid-detached-progress",
+                    "Detached progress is not bound to the current planning tree and admission pinner.",
+                )
+            state["events"].append(event)
+
+        guard.verify_unchanged()
+        verify_implementation_sources(config)
+        state = load_detached_progress(root_fd, config)
+        append_event(state)
+        write_canonical_json_at(root_fd, "forge-progress.json", state)
+        guard.verify_unchanged()
+        verify_implementation_sources(config)
+        verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+        require_lock_authority()
+        return print_json(
+            {
+                "success": True,
+                "mode": "detached-frozen",
+                "planning_dir": str(planning_dir),
+                "implementation_root": str(implementation_root),
+                "planning_tree_sha256": guard.digest,
+                "admission_pinner_sha256": config["admission_pinner_sha256"],
+                "state_path": str(implementation_root / "forge-progress.json"),
+                "event": event,
+                "event_count": len(state["events"]),
+            }
+        )
+    except DetachedImplementationError as exc:
+        return print_json(
+            detached_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    except OSError as exc:
+        return print_json(
+            detached_io_error_payload(
+                exc,
+                mode="detached-frozen",
+                planning_dir=str(planning_dir),
+                implementation_root=str(implementation_root or absolute_path_no_follow(args.implementation_root)),
+            ),
+            1,
+        )
+    finally:
+        if record_lock_context is not None:
+            record_lock_context.__exit__(*sys.exc_info())
+        if guard is not None:
+            guard.close()
+        if root_fd is not None:
+            os.close(root_fd)
+
+
 def implement_progress(args: argparse.Namespace) -> int:
+    if getattr(args, "implementation_root", None):
+        return detached_implement_progress(args)
     planning_dir = resolve_path(args.planning_dir)
     state_dir = planning_dir / "implementation"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -4963,7 +12654,7 @@ def implementation_drift(args: argparse.Namespace) -> int:
     planned_files = set()
     planned_tests = set()
     for section_path in section_files:
-        files = extract_file_paths(read_text(section_path))
+        files = extract_section_owned_paths(read_text(section_path))
         planned_files.update(files)
         planned_tests.update(file for file in files if contains_any(file, ["test", "spec"]))
     changed_tests = {file for file in changed if contains_any(file, ["test", "spec"])}
@@ -5772,8 +13463,28 @@ def command_help(name: str) -> str | None:
     return COMMAND_SUMMARIES.get(name)
 
 
+class ZagrosiArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        if self.prog.endswith(" implement-evidence-handoff"):
+            raise SystemExit(2)
+        super().error(message)
+
+
+class SingleHandoffSectionAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str,
+        option_string: str | None = None,
+    ) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            parser.error("privileged evidence handoff accepts exactly one section selector")
+        setattr(namespace, self.dest, values)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Helpers for Zagrosi Forge Codex skills")
+    parser = ZagrosiArgumentParser(description="Helpers for Zagrosi Forge Codex skills")
     parser.add_argument("--pretty", action="store_true", help="Print a human-readable report instead of JSON.")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -5819,10 +13530,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sections-dir", required=True)
     p.add_argument("--target-dir")
     p.add_argument("--plugin-root")
+    p.add_argument("--implementation-root", help="External state/review/evidence/pinner root; activates detached frozen-planning mode.")
+    p.add_argument("--admission-pinner", help="External canonical admission pinner required with --implementation-root.")
+    p.add_argument("--expected-admission-pinner-sha256", help="Exact complete-file sha256 identity required for --admission-pinner.")
+    p.add_argument("--expected-implement-tool-sha256", help="Exact complete-file sha256 of the running scripts/zagrosi_skills.py required in detached mode.")
+    p.add_argument("--expected-implement-skill-sha256", help="Exact complete-file sha256 of skills/zagrosi-implement/SKILL.md required in detached mode.")
+    p.add_argument("--expected-implement-test-sha256", help="Exact complete-file sha256 of tests/test_zagrosi_skills.py required in detached mode.")
     p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
     p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
     add_flight_args(p)
     p.set_defaults(func=deep_implement_setup)
+
+    p = sub.add_parser("implement-evidence-handoff", help=command_help("implement-evidence-handoff"))
+    p.add_argument("--implementation-root", required=True)
+    p.add_argument(
+        "--section",
+        required=True,
+        choices=tuple(HANDOFF_SECTION_CONTRACTS),
+        action=SingleHandoffSectionAction,
+    )
+    p.set_defaults(func=detached_implement_evidence_handoff)
 
     p = sub.add_parser(
         "implement-record-section",
@@ -5836,12 +13563,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--file", action="append", dest="files_changed", default=[])
     p.add_argument("--test-file", action="append", dest="test_files", default=[])
     p.add_argument("--review-artifact", action="append", dest="review_artifacts", default=[])
+    p.add_argument("--evidence-row", action="append", dest="evidence_rows", default=[], help="Detached canonical evidence binding as lower_snake_name=path.")
     p.add_argument("--verification", action="append", default=[])
     p.add_argument("--commit-status")
     p.add_argument("--target-dir")
     p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
     p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
     p.add_argument("--write-report", action="store_true")
+    p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
     add_flight_args(p)
     p.set_defaults(func=deep_implement_record_section)
 
@@ -5984,6 +13713,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("next-section")
     p.add_argument("--planning-dir", required=True)
+    p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
     p.set_defaults(func=next_section)
 
     p = sub.add_parser("parallel-plan")
@@ -6091,6 +13821,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("implementation-packet")
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--section", required=True)
+    p.add_argument("--implementation-root", help="Existing external detached implementation root.")
     p.add_argument("--output-dir")
     p.set_defaults(func=implementation_packet)
 
@@ -6104,6 +13835,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("tdd-skeletons")
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--framework", choices=["pytest", "vitest", "go", "rust"], default="pytest")
+    p.add_argument("--implementation-root", help="Existing external detached implementation root.")
     p.add_argument("--output-dir")
     p.set_defaults(func=tdd_skeletons)
 
@@ -6114,6 +13846,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("implement-progress")
     p.add_argument("--planning-dir", required=True)
+    p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
     p.add_argument("--section", required=True)
     p.add_argument("--stage", choices=["started", "red", "green", "refactor", "review", "verified", "recorded"], required=True)
     p.add_argument("--command")
@@ -6173,9 +13906,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def exact_handoff_cli_shape(raw_args: list[str]) -> bool:
+    if len(raw_args) != 5 or raw_args[0] != "implement-evidence-handoff":
+        return False
+    pairs: dict[str, str] = {}
+    for offset in (1, 3):
+        option = raw_args[offset]
+        value = raw_args[offset + 1]
+        if option not in {"--implementation-root", "--section"} or option in pairs or not value:
+            return False
+        pairs[option] = value
+    return set(pairs) == {"--implementation-root", "--section"} and pairs["--section"] in HANDOFF_SECTION_CONTRACTS
+
+
 def main(argv: list[str] | None = None) -> int:
     global PRETTY_OUTPUT
     raw_args = list(sys.argv[1:] if argv is None else argv)
+    if "implement-evidence-handoff" in raw_args and not exact_handoff_cli_shape(raw_args):
+        return 2
     if "--pretty" in raw_args:
         PRETTY_OUTPUT = True
         raw_args = [item for item in raw_args if item != "--pretty"]
