@@ -493,6 +493,115 @@ def test_target_root_identity_digest_vector_uses_exact_domain_and_cj0_without_lf
     assert json.dumps(identity, sort_keys=True, separators=(",", ":")).encode() == body
 
 
+def test_linux_process_group_probe_treats_zombie_only_group_as_inactive(
+    tmp_path: Path,
+) -> None:
+    module = load_zagrosi_module()
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+
+    def write_stat(pid: int, state: str, process_group: int) -> None:
+        process_dir = proc_root / str(pid)
+        process_dir.mkdir(exist_ok=True)
+        (process_dir / "stat").write_text(
+            f"{pid} (child {pid}) {state} 1 {process_group} {process_group} 0\n"
+        )
+        task_dir = process_dir / "task" / str(pid)
+        task_dir.mkdir(parents=True)
+        (task_dir / "stat").write_text(
+            f"{pid} (child {pid}) {state} 1 {process_group} {process_group} 0\n"
+        )
+
+    assert module._linux_process_group_has_live_members(4321, proc_root) is None
+
+    write_stat(100, "S", 9999)
+
+    assert module._linux_process_group_has_live_members(4321, proc_root) is None
+
+    write_stat(101, "Z", 4321)
+    write_stat(102, "Z", 4321)
+
+    assert module._linux_process_group_has_live_members(4321, proc_root) is False
+
+    malformed_dir = proc_root / "104"
+    malformed_dir.mkdir()
+    (malformed_dir / "stat").write_bytes(b"malformed\n")
+
+    assert module._linux_process_group_has_live_members(4321, proc_root) is None
+
+    write_stat(103, "S", 4321)
+
+    assert module._linux_process_group_has_live_members(4321, proc_root) is True
+
+
+def test_linux_process_group_probe_detects_live_worker_behind_zombie_leader(
+    tmp_path: Path,
+) -> None:
+    module = load_zagrosi_module()
+    proc_root = tmp_path / "proc"
+    process_dir = proc_root / "101"
+    task_dir = process_dir / "task"
+    (task_dir / "101").mkdir(parents=True)
+    (task_dir / "201").mkdir()
+    (process_dir / "stat").write_text("101 (leader) Z 1 4321 4321 0\n")
+    (task_dir / "101" / "stat").write_text("101 (leader) Z 1 4321 4321 0\n")
+    (task_dir / "201" / "stat").write_text("201 (worker) S 1 4321 4321 0\n")
+
+    assert module._linux_process_group_has_live_members(4321, proc_root) is True
+
+
+def test_procfs_mount_visibility_gate_rejects_hidden_or_unknown_process_views() -> None:
+    module = load_zagrosi_module()
+
+    assert module._procfs_mount_hides_processes(
+        b"proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+    ) is False
+    assert module._procfs_mount_hides_processes(
+        b"proc /proc proc rw,nosuid,hidepid=2 0 0\n"
+    ) is True
+    assert module._procfs_mount_hides_processes(b"tmpfs /tmp tmpfs rw 0 0\n") is None
+
+
+def test_run_bounded_child_accepts_zombie_only_process_group_after_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = load_zagrosi_module()
+    real_killpg = module.os.killpg
+    zero_probes: list[int] = []
+
+    def zombie_only_group(process_group: int, sig: int) -> None:
+        if sig == 0:
+            zero_probes.append(process_group)
+            return
+        real_killpg(process_group, sig)
+
+    monkeypatch.setattr(module.os, "killpg", zombie_only_group)
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        module,
+        "_linux_process_group_has_live_members",
+        lambda process_group: False,
+    )
+    cwd_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        return_code, stdout, stderr = module.run_bounded_child(
+            [sys.executable, "-I", "-B", "-c", "pass"],
+            b"",
+            cwd_fd=cwd_fd,
+            timeout_seconds=2.0,
+            stdout_cap=4096,
+            stderr_cap=4096,
+        )
+    finally:
+        os.close(cwd_fd)
+
+    assert return_code == 0
+    assert stdout == b""
+    assert stderr == b""
+    assert zero_probes
+
+
 @pytest.mark.parametrize(
     ("child_shape", "expected_code"),
     (
@@ -544,8 +653,20 @@ def test_run_bounded_child_terminates_and_reaps_the_complete_process_group(
     assert caught.value.code == expected_code
     assert time.monotonic() - started < 5.0
     pid = int(pid_path.read_text())
-    with pytest.raises(ProcessLookupError):
+    try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        assert sys.platform.startswith("linux")
+        try:
+            raw_stat = (Path("/proc") / str(pid) / "stat").read_bytes()
+        except FileNotFoundError:
+            pass
+        else:
+            closing_parenthesis = raw_stat.rfind(b")")
+            fields = raw_stat[closing_parenthesis + 1 :].split()
+            assert fields and fields[0] in {b"Z", b"X", b"x"}
 
 
 @pytest.mark.parametrize("stream_fd", (1, 2))

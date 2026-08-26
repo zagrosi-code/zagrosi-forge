@@ -1748,6 +1748,111 @@ def _directory_open_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
+def _procfs_mount_hides_processes(raw_mounts: bytes) -> bool | None:
+    for raw_line in raw_mounts.splitlines():
+        fields = raw_line.split()
+        if len(fields) < 4 or fields[1:3] != [b"/proc", b"proc"]:
+            continue
+        for option in fields[3].split(b","):
+            if option == b"hidepid":
+                return True
+            if option.startswith(b"hidepid="):
+                return option.split(b"=", 1)[1] != b"0"
+        return False
+    return None
+
+
+def _linux_proc_stat_state_and_group(raw_stat: bytes) -> tuple[bytes, int] | None:
+    closing_parenthesis = raw_stat.rfind(b")")
+    fields = raw_stat[closing_parenthesis + 1 :].split() if closing_parenthesis >= 0 else []
+    if len(fields) < 3 or len(fields[0]) != 1:
+        return None
+    try:
+        return fields[0], int(fields[2])
+    except ValueError:
+        return None
+
+
+def _linux_process_tasks_have_live_members(
+    process_dir: Path,
+    process_group: int,
+) -> bool | None:
+    try:
+        task_entries = list(os.scandir(process_dir / "task"))
+    except OSError:
+        return None
+
+    uncertain = False
+    saw_matching_task = False
+    for entry in task_entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            parsed = _linux_proc_stat_state_and_group(
+                (Path(entry.path) / "stat").read_bytes()
+            )
+        except OSError:
+            uncertain = True
+            continue
+        if parsed is None or parsed[1] != process_group:
+            uncertain = True
+            continue
+        saw_matching_task = True
+        if parsed[0] not in {b"Z", b"X", b"x"}:
+            return True
+    return None if uncertain or not saw_matching_task else False
+
+
+def _linux_process_group_has_live_members(
+    process_group: int,
+    proc_root: Path = Path("/proc"),
+) -> bool | None:
+    if proc_root == Path("/proc"):
+        try:
+            procfs_hides_processes = _procfs_mount_hides_processes(
+                (proc_root / "mounts").read_bytes()
+            )
+        except OSError:
+            return None
+        if procfs_hides_processes is not False:
+            return None
+    try:
+        process_entries = list(os.scandir(proc_root))
+    except OSError:
+        return None
+
+    uncertain = False
+    saw_matching_group_member = False
+    for entry in process_entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            parsed = _linux_proc_stat_state_and_group(
+                (Path(entry.path) / "stat").read_bytes()
+            )
+        except FileNotFoundError:
+            continue
+        except OSError:
+            uncertain = True
+            continue
+        if parsed is None:
+            uncertain = True
+            continue
+        _, observed_group = parsed
+        if observed_group != process_group:
+            continue
+        saw_matching_group_member = True
+        tasks_have_live_members = _linux_process_tasks_have_live_members(
+            Path(entry.path),
+            process_group,
+        )
+        if tasks_have_live_members is True:
+            return True
+        if tasks_have_live_members is None:
+            uncertain = True
+    return None if uncertain or not saw_matching_group_member else False
+
+
 def run_bounded_child(
     argv: list[str],
     input_bytes: bytes,
@@ -1760,18 +1865,23 @@ def run_bounded_child(
 ) -> tuple[int, bytes, bytes]:
     dirty_status_probe = argv == [HANDOFF_GIT, *HANDOFF_GIT_STATUS_ARGS] and stdout_cap == 1
 
-    def process_group_exists(process_group: int) -> bool:
+    def process_group_has_live_members(process_group: int) -> bool:
         try:
             os.killpg(process_group, 0)
-            return True
         except ProcessLookupError:
             return False
         except PermissionError:
             return True
+        linux_live_members = (
+            _linux_process_group_has_live_members(process_group)
+            if sys.platform.startswith("linux")
+            else None
+        )
+        return True if linux_live_members is None else linux_live_members
 
     def reap_leader_if_group_absent(process: subprocess.Popen[bytes], process_group: int) -> bool:
         process.poll()
-        if process_group_exists(process_group):
+        if process_group_has_live_members(process_group):
             return False
         try:
             process.wait(timeout=0)
@@ -1893,7 +2003,7 @@ def run_bounded_child(
                             f"Privileged handoff child exceeded its fixed {key.data} cap.",
                         )
             return_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
-            if process_group_exists(process.pid):
+            if process_group_has_live_members(process.pid):
                 raise DetachedImplementationError(
                     "handoff-child-residual-process-group",
                     "Privileged handoff child left a residual process-group member after apparent success.",
