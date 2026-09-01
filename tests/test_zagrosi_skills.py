@@ -6227,6 +6227,20 @@ def test_owned_paths_ignore_unclosed_trailing_plaintext_fence(
     assert declared == ["src/toolchain.py"]
 
 
+def test_owned_paths_do_not_fall_back_to_prose_after_rejected_fence() -> None:
+    module = load_zagrosi_module()
+
+    declared = module.extract_section_owned_paths(
+        "# Toolchain\n\n"
+        "## Exact path ownership\n\n"
+        "The rollout mentions `docs/incidental.md`, but it is not ownership.\n\n"
+        "```text\n"
+        "src/unclosed.py\n"
+    )
+
+    assert declared == []
+
+
 def test_patch_scope_aggregates_owned_fences_and_excludes_other_mentions(
     tmp_path: Path,
 ) -> None:

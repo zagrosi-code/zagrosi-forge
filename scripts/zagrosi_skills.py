@@ -8068,14 +8068,20 @@ def standalone_owned_path(line: str) -> str | None:
 def owned_paths_from_body(body: str) -> list[str]:
     fenced_blocks, plain_lines = split_markdown_fences_with_closure(body)
     fenced_paths: set[str] = set()
+    rejected_ownership_fence = False
     for language, lines, closed in fenced_blocks:
-        if not closed or language not in {"", "text", "plaintext"}:
+        if language not in {"", "text", "plaintext"}:
+            continue
+        if not closed:
+            rejected_ownership_fence = True
             continue
         fenced_paths.update(
             path for line in lines if (path := standalone_owned_path(line))
         )
     if fenced_paths:
         return sorted(fenced_paths)
+    if rejected_ownership_fence:
+        return []
 
     structured: set[str] = set()
     for line in plain_lines:
