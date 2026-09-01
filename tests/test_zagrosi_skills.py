@@ -20,6 +20,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "zagrosi_skills.py"
+PLUGIN_VERSION = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text())["version"]
 IMPLEMENTATION_SOURCE_RELATIVE_PATHS = {
     "tool": Path("scripts/zagrosi_skills.py"),
     "skill": Path("skills/zagrosi-implement/SKILL.md"),
@@ -8382,7 +8383,7 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
     assert "enabled = true" in updated
     assert Path(installed["backup_path"]).exists()
     cache_path = Path(installed["cache"]["path"])
-    assert cache_path == tmp_path / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / "0.2.0"
+    assert cache_path == tmp_path / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / PLUGIN_VERSION
     assert (cache_path / ".codex-plugin" / "plugin.json").exists()
     assert (cache_path / "skills" / "zagrosi-project" / "SKILL.md").exists()
 
@@ -8412,7 +8413,7 @@ def test_update_check_reports_cache_and_config_status(tmp_path: Path) -> None:
     assert status["cache"]["current"] is False
     assert status["cache"]["exists"] is False
     assert status["cache"]["changed"] is True
-    assert Path(status["cache"]["path"]) == tmp_path / "codex" / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / "0.2.0"
+    assert Path(status["cache"]["path"]) == tmp_path / "codex" / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / PLUGIN_VERSION
     assert status["config"]["current"] is False
     assert status["restart_required"] is True
     assert any("self-update" in item for item in status["next_steps"])
@@ -8428,7 +8429,7 @@ def test_self_update_materializes_cache_and_update_check_passes(tmp_path: Path) 
     assert updated["operation"] == "self-update"
     assert updated["changed"] is True
     cache_path = Path(updated["cache"]["path"])
-    assert cache_path == tmp_path / "codex" / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / "0.2.0"
+    assert cache_path == tmp_path / "codex" / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / PLUGIN_VERSION
     assert not (cache_path / "planning").exists()
     assert config.exists()
 
