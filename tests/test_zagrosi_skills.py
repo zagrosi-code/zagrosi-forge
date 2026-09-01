@@ -6181,6 +6181,111 @@ def test_patch_scope_accepts_declared_frontend_assets(tmp_path: Path) -> None:
     assert scope["out_of_scope"] == []
 
 
+def test_owned_paths_aggregate_all_plaintext_fences() -> None:
+    module = load_zagrosi_module()
+
+    declared = module.extract_section_owned_paths(
+        "# Toolchain\n\n"
+        "## Exact path ownership\n\n"
+        "Production paths:\n\n"
+        "```text\n"
+        "src/toolchain.py\n"
+        "contracts/toolchain.json\n"
+        "```\n\n"
+        "Test paths:\n\n"
+        "```plaintext\n"
+        "tests/test_toolchain.py\n"
+        "tests/fixtures/toolchain.json\n"
+        "```\n"
+    )
+
+    assert declared == [
+        "contracts/toolchain.json",
+        "src/toolchain.py",
+        "tests/fixtures/toolchain.json",
+        "tests/test_toolchain.py",
+    ]
+
+
+@pytest.mark.parametrize("trailing_closer", ("", "~~~\n"))
+def test_owned_paths_ignore_unclosed_trailing_plaintext_fence(
+    trailing_closer: str,
+) -> None:
+    module = load_zagrosi_module()
+
+    declared = module.extract_section_owned_paths(
+        "# Toolchain\n\n"
+        "## Exact path ownership\n\n"
+        "```text\n"
+        "src/toolchain.py\n"
+        "```\n\n"
+        "```text\n"
+        "src/unplanned.py\n"
+        f"{trailing_closer}"
+    )
+
+    assert declared == ["src/toolchain.py"]
+
+
+def test_owned_paths_do_not_fall_back_to_prose_after_rejected_fence() -> None:
+    module = load_zagrosi_module()
+
+    declared = module.extract_section_owned_paths(
+        "# Toolchain\n\n"
+        "## Exact path ownership\n\n"
+        "The rollout mentions `docs/incidental.md`, but it is not ownership.\n\n"
+        "```text\n"
+        "src/unclosed.py\n"
+    )
+
+    assert declared == []
+
+
+def test_patch_scope_aggregates_owned_fences_and_excludes_other_mentions(
+    tmp_path: Path,
+) -> None:
+    section_file = tmp_path / "section-01-toolchain.md"
+    section_file.write_text(
+        "# Toolchain\n\n"
+        "## Exact path ownership\n\n"
+        "The rollout notes mention `docs/toolchain.md`, but that prose is not ownership.\n\n"
+        "```text\n"
+        "src/toolchain.py\n"
+        "```\n\n"
+        "```python\n"
+        "scripts/toolchain_example.py\n"
+        "```\n\n"
+        "```plaintext\n"
+        "tests/test_toolchain.py\n"
+        "```\n"
+    )
+    diff_file = tmp_path / "scope.diff"
+    diff_file.write_text(
+        "diff --git a/src/toolchain.py b/src/toolchain.py\n"
+        "+++ b/src/toolchain.py\n"
+        "diff --git a/tests/test_toolchain.py b/tests/test_toolchain.py\n"
+        "+++ b/tests/test_toolchain.py\n"
+        "diff --git a/docs/toolchain.md b/docs/toolchain.md\n"
+        "+++ b/docs/toolchain.md\n"
+        "diff --git a/scripts/toolchain_example.py b/scripts/toolchain_example.py\n"
+        "+++ b/scripts/toolchain_example.py\n"
+    )
+
+    result = run_raw(
+        "patch-scope",
+        "--section-file",
+        str(section_file),
+        "--diff-file",
+        str(diff_file),
+        "--strict",
+    )
+
+    assert result.returncode != 0
+    scope = json.loads(result.stdout)
+    assert scope["declared_files"] == ["src/toolchain.py", "tests/test_toolchain.py"]
+    assert scope["out_of_scope"] == ["docs/toolchain.md", "scripts/toolchain_example.py"]
+
+
 def test_patch_scope_reports_untracked_files_by_default(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
