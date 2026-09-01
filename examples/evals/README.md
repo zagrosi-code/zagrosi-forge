@@ -7,6 +7,11 @@ This directory documents the benchmark surface used by `eval-suite`.
 - `examples/saas/01-authentication`: Python-style SaaS OAuth foundation.
 - `examples/typescript-app/01-auth`: TypeScript OAuth plus preferences.
 
+Both tracks exercise the lean contract: source spec, compact plan, one Codex
+review, section index, and bounded section files. Optional research, interview,
+TDD, governance, evidence, integration, and traceability artifacts are absent
+because these fixtures do not need them.
+
 ## Deep Review Track
 
 - `examples/deep-review/zero-downtime-migration`: input scenario for deep-mode

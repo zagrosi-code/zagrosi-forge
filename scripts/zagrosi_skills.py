@@ -33,6 +33,7 @@ import tempfile
 import time
 import tomllib
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 SPLIT_RE = re.compile(r"^\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
+SPLIT_TOKEN_RE = re.compile(r"\b\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*\b")
 SECTION_RE = re.compile(r"^section-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*$")
 SECTION_TOKEN_RE = re.compile(r"\bsection-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*\b")
 CONFIG_RE = re.compile(r"^[a-z][a-z0-9_]*:\s*.+$")
@@ -70,83 +72,75 @@ REVIEW_BOARD_PASSES = [
     "implementation-feasibility",
 ]
 SENSITIVE_KEY_RE = re.compile(r"(token|secret|key|password|credential|authorization|bearer)", re.I)
-WORKFLOW_AMBIGUITY_TERMS = [
-    "maybe",
-    "option",
-    "or",
-    "recommend",
-    "whatever",
-    "vague",
-    "decide",
-    "should",
-    "could",
-    "autonomous",
-    "external",
-    "privacy",
-    "review",
-    "ci",
-    "pr",
-    "workflow",
-    "research",
-    "auto",
-]
+WORKFLOW_AMBIGUITY_TERMS = ["choose", "either", "tradeoff", "unknown", "tbd"]
 LOCAL_TOOL_NAMES = ["gh", "codex", "claude", "gemini"]
-DEPTH_REMEDIATION_RECOMMENDATION = (
-    "Identify missing decisions, codebase evidence, documentation support, or review substance; "
-    "ask relevant questions or perform targeted research before expanding prose to meet the depth target."
-)
-DEPTH_MODES = {"fast", "standard", "deep"}
-DEPTH_WORD_TARGETS = {
+DEFAULT_DEPTH = "lean"
+DEPTH_MODES = {"lean", "fast", "standard", "deep"}
+PROJECT_CONTRACT_VERSION = "compact-v1"
+WORD_BUDGETS = {
+    "lean": {
+        "spec": 500,
+        "research": 400,
+        "plan": 800,
+        "tdd": 400,
+        "review": 150,
+        "integration_notes": 150,
+        "section_index": 150,
+        "section": 300,
+    },
     "fast": {
-        "spec": 700,
-        "research": 700,
-        "plan": 900,
-        "tdd": 450,
-        "review": 500,
-        "integration_notes": 500,
-        "section_index": 350,
-        "section": 250,
+        "spec": 500,
+        "research": 400,
+        "plan": 800,
+        "tdd": 400,
+        "review": 150,
+        "integration_notes": 150,
+        "section_index": 150,
+        "section": 300,
     },
     "standard": {
         "spec": 1200,
-        "research": 1500,
+        "research": 1200,
         "plan": 2500,
         "tdd": 1200,
-        "review": 1000,
-        "integration_notes": 900,
-        "section_index": 700,
-        "section": 1000,
+        "review": 500,
+        "integration_notes": 500,
+        "section_index": 500,
+        "section": 700,
     },
     "deep": {
         "spec": 1800,
-        "research": 2500,
-        "plan": 5000,
-        "tdd": 2000,
-        "review": 1800,
-        "integration_notes": 1500,
-        "section_index": 900,
-        "section": 1500,
+        "research": 1800,
+        "plan": 4000,
+        "tdd": 1600,
+        "review": 800,
+        "integration_notes": 800,
+        "section_index": 700,
+        "section": 1000,
     },
 }
-PLAN_DETAIL_TERMS = {
-    "reader-orientation": ["reader note", "self-contained", "fresh implementer", "no prior context"],
-    "current-state-evidence": ["current state", "existing", "verified", "grep", "found in"],
-    "architecture-rationale": ["why", "rationale", "tradeoff", "decision", "alternative"],
-    "contracts": ["contract", "schema", "interface", "api", "payload", "shape"],
-    "file-tree": ["file tree", "directory layout", "file-by-file", "files"],
-    "phase-plan": ["phase", "batch", "execution order", "sequenced", "dependency"],
-    "test-matrix": ["test matrix", "unit", "integration", "e2e", "fixture"],
-    "review-integration": ["review-integrated", "review", "iteration", "integration notes"],
+PROJECT_WORD_BUDGETS = {
+    "lean": {"manifest": 300, "spec": 250},
+    "fast": {"manifest": 300, "spec": 250},
+    "standard": {"manifest": 700, "spec": 500},
+    "deep": {"manifest": 1000, "spec": 800},
 }
-SECTION_DETAIL_TERMS = {
+LEAN_PLAN_TERMS = {
+    "goal": ["goal", "non-goal", "out of scope"],
+    "evidence": ["current state", "current-state", "verified", "evidence"],
+    "design-contract": ["design", "contract", "interface", "schema", "approach"],
+    "testing": ["test", "expected failure", "verification"],
+    "risk": ["risk", "security", "failure"],
+    "rollback": ["rollback", "revert", "disable"],
+    "acceptance": ["acceptance", "done when", "complete when"],
+}
+LEAN_SECTION_TERMS = {
     "goal": ["goal", "purpose"],
     "dependencies": ["dependencies", "depends on"],
-    "background-context": ["background context", "why", "rationale", "architectural"],
-    "file-tree": ["file tree", "files", "paths"],
-    "tests-first": ["tests first", "expected failure", "test cases", "red"],
-    "implementation-details": ["implementation details", "public api", "signature", "contract", "schema"],
+    "tests-first": ["tests first", "expected failure", "red"],
+    "implementation": ["implementation", "modify", "create"],
+    "risks": ["risk", "failure", "rollback"],
     "acceptance": ["acceptance", "done when", "verification"],
-    "risks": ["risk", "edge case", "failure mode", "security"],
 }
 QUALITY_PROFILES = {
     "solo": {
@@ -219,7 +213,7 @@ PROMPT_TYPES = {
     "spec-reviewer": "Review the normalized spec for missing requirements, ambiguous acceptance criteria, scope drift, and unverified assumptions.",
     "security-reviewer": "Review the plan or implementation for auth, privacy, data exposure, injection, secrets, and abuse cases. Return severity-ranked findings.",
     "test-strategist": "Review test strategy. Identify missing tests, brittle fixtures, untestable design, and the smallest useful red/green path.",
-    "section-writer": "Write one self-contained, reference-grade implementation section from the plan and TDD plan. Target 1,000+ words in standard mode, copy essential context, include tests first, file paths, dependencies, APIs/contracts, risks, rollback, and acceptance criteria.",
+    "section-writer": "Write one bounded implementation section: IDs, dependencies, exact owned paths, tests first, contracts, risks, rollback, and acceptance. Reference the plan; do not copy it.",
     "release-reviewer": "Review final readiness for rollout, rollback, docs, observability, migration safety, and residual risks.",
     "implementation-reviewer": "Review changed code against the section file. Prioritize correctness, security, scope drift, and missing tests.",
 }
@@ -714,40 +708,32 @@ def word_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", text))
 
 
-def word_targets(depth: str) -> dict[str, int]:
-    return DEPTH_WORD_TARGETS.get(depth, DEPTH_WORD_TARGETS["standard"])
+def word_budgets(depth: str) -> dict[str, int]:
+    return WORD_BUDGETS.get(depth, WORD_BUDGETS["standard"])
 
 
-def add_depth_finding(
+def is_lean_depth(depth: str | None) -> bool:
+    return depth in {"lean", "fast"}
+
+
+def add_budget_finding(
     findings: list[Finding],
     actual_words: int,
-    target_words: int,
+    budget_words: int,
     artifact_label: str,
     code: str,
     path: Path,
-    hard_floor: int,
 ) -> None:
-    if actual_words < hard_floor:
-        findings.append(
-            finding(
-                "high",
-                code,
-                f"{artifact_label} has {actual_words} words; hard floor is {hard_floor}.",
-                path,
-                DEPTH_REMEDIATION_RECOMMENDATION,
-            )
-        )
-    elif actual_words < target_words:
+    if actual_words > budget_words:
         findings.append(
             finding(
                 "medium",
                 code,
-                f"{artifact_label} has {actual_words} words; target for this depth is {target_words}.",
+                f"{artifact_label} has {actual_words} words; budget is {budget_words}.",
                 path,
-                DEPTH_REMEDIATION_RECOMMENDATION,
+                "Delete repetition; keep only decisions, evidence, contracts, tests, risks, and acceptance criteria.",
             )
         )
-
 
 def contains_any(text: str, terms: list[str]) -> bool:
     haystack = text.lower()
@@ -823,7 +809,62 @@ def artifact(path: Path, names: list[str]) -> Path | None:
     return None
 
 
-def default_governance_files(planning_dir: Path, depth: str = "standard") -> dict[str, Path]:
+def planning_config(planning_dir: Path) -> dict[str, Any]:
+    for name in ("zagrosi_plan_config.json", "deep_plan_config.json"):
+        path = planning_dir / name
+        if not path.exists():
+            continue
+        try:
+            payload = load_json(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def configured_source_spec(planning_dir: Path) -> Path | None:
+    configured = planning_config(planning_dir).get("initial_file")
+    candidates: list[Path] = []
+    if isinstance(configured, str) and configured.strip():
+        candidate = Path(configured).expanduser()
+        candidates.append(candidate if candidate.is_absolute() else planning_dir / candidate)
+    candidates.extend([planning_dir / "spec.md", planning_dir / "requirements.md"])
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def requirement_source_spec(planning_dir: Path) -> Path | None:
+    return artifact(planning_dir, ["codex-spec.md", "claude-spec.md"]) or configured_source_spec(planning_dir)
+
+
+def planning_depth(planning_dir: Path, fallback: str = DEFAULT_DEPTH) -> str:
+    depth = planning_config(planning_dir).get("depth_mode")
+    if isinstance(depth, str) and depth in DEPTH_MODES:
+        return depth
+    plan_path = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
+    if plan_path:
+        meta, _ = parse_forge_meta(read_text(plan_path))
+        meta_depth = meta.get("depth_mode") if isinstance(meta, dict) else None
+        if isinstance(meta_depth, str) and meta_depth in DEPTH_MODES:
+            return meta_depth
+    return fallback
+
+
+def project_depth(planning_dir: Path, fallback: str = DEFAULT_DEPTH) -> str:
+    for path in (planning_dir / ".zagrosi-project" / "session.json", planning_dir / ".deep-project" / "session.json"):
+        if not path.exists():
+            continue
+        try:
+            depth = load_json(path).get("depth_mode")
+        except (OSError, ValueError, json.JSONDecodeError):
+            return fallback
+        return depth if isinstance(depth, str) and depth in DEPTH_MODES else fallback
+    return fallback
+
+
+def default_governance_files(planning_dir: Path, depth: str = DEFAULT_DEPTH) -> dict[str, Path]:
     return {
         "decisions": planning_dir / "decisions.md",
         "risks": planning_dir / "risk-register.md",
@@ -1106,7 +1147,7 @@ def print_json(payload: dict[str, Any], exit_code: int = 0) -> int:
     if PRETTY_OUTPUT:
         print(format_pretty(payload))
     else:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     return exit_code
 
 
@@ -4323,6 +4364,8 @@ def reopen_admission_pinner(
 
 
 IMPLEMENTATION_SOURCE_NAMES = ("tool", "skill", "test")
+DETACHED_CONTRACT_RELATIVE_PATH = Path("references/detached-frozen.md")
+DETACHED_CONTRACT_SHA256 = "sha256:63fab2d082629bce818e96ab43b7c2b60cd23c670c2e1f41979308786e87ecf8"
 
 
 def implementation_source_paths() -> dict[str, Path]:
@@ -4389,6 +4432,21 @@ def reopen_implementation_source(source: str, path: Path) -> dict[str, Any]:
             os.close(parent_fd)
 
 
+def verify_detached_contract_reference(skill_path: Path) -> dict[str, Any]:
+    contract_path = skill_path.parent / DETACHED_CONTRACT_RELATIVE_PATH
+    record = reopen_implementation_source("contract", contract_path)
+    if record["sha256"] != DETACHED_CONTRACT_SHA256:
+        raise DetachedImplementationError(
+            "implement-contract-drift",
+            "Detached implementation contract bytes do not match the tool-pinned complete-file sha256.",
+            implement_source="contract",
+            implement_source_path=record["path"],
+            expected_implement_source_sha256=DETACHED_CONTRACT_SHA256,
+            actual_implement_source_sha256=record["sha256"],
+        )
+    return record
+
+
 def expected_implementation_source_hashes(args: argparse.Namespace) -> dict[str, str]:
     expected: dict[str, str] = {}
     for source in IMPLEMENTATION_SOURCE_NAMES:
@@ -4407,7 +4465,9 @@ def expected_implementation_source_hashes(args: argparse.Namespace) -> dict[str,
 
 def reopen_implementation_sources(*, expected_hashes: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {}
-    for source, path in implementation_source_paths().items():
+    paths = implementation_source_paths()
+    verify_detached_contract_reference(paths["skill"])
+    for source, path in paths.items():
         record = reopen_implementation_source(source, path)
         expected_sha256 = expected_hashes.get(source) if expected_hashes is not None else None
         if expected_sha256 is not None and record["sha256"] != expected_sha256:
@@ -4435,6 +4495,7 @@ def implementation_source_config_fields(records: dict[str, dict[str, Any]]) -> d
 
 def verify_implementation_sources(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     paths = implementation_source_paths()
+    verify_detached_contract_reference(paths["skill"])
     expected_hashes: dict[str, str] = {}
     for source in IMPLEMENTATION_SOURCE_NAMES:
         path_field = f"implement_{source}_path"
@@ -7296,46 +7357,131 @@ def sanitize_gate_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+SUCCESS_GATE_PAYLOAD_KEYS = (
+    "gate",
+    "score",
+    "finding_count",
+    "forge_score",
+    "state",
+    "next_section",
+    "progress",
+    "deferred_gate",
+    "output",
+    "check_count",
+    "checks",
+    "duration_seconds",
+)
+
+
+def bounded_output_tail(value: Any, limit: int = 1000) -> str:
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    elif value is None:
+        text = ""
+    else:
+        text = str(value)
+    return text[-limit:]
+
+
+def compact_gate_record(gate: dict[str, Any]) -> dict[str, Any]:
+    compact = dict(gate)
+    if compact.get("success") is True:
+        if isinstance(compact.get("payload"), dict):
+            payload = compact["payload"]
+            compact["payload"] = {
+                key: payload[key]
+                for key in SUCCESS_GATE_PAYLOAD_KEYS
+                if key in payload
+            }
+        compact.pop("command", None)
+        compact.pop("returncode", None)
+        if not compact.get("stderr_tail"):
+            compact.pop("stderr_tail", None)
+        if not compact.get("payload"):
+            compact.pop("payload", None)
+    return compact
+
+
 def run_internal_gate(
     name: str,
     command: list[str],
     *,
     required: bool = True,
     cwd: Path | None = None,
+    timeout_seconds: int = 120,
 ) -> dict[str, Any]:
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), *command],
-        cwd=cwd or current_plugin_root(),
-        capture_output=True,
-        text=True,
-    )
-    payload: dict[str, Any]
     try:
-        payload = json.loads(result.stdout) if result.stdout.strip() else {}
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), *command],
+            cwd=cwd or current_plugin_root(),
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "name": name,
+            "required": required,
+            "success": False,
+            "returncode": 124,
+            "command": " ".join(command),
+            "payload": {
+                "error_code": "gate-timeout",
+                "timeout_seconds": timeout_seconds,
+                "stdout": bounded_output_tail(exc.stdout),
+            },
+            "stderr_tail": bounded_output_tail(exc.stderr),
+        }
+    payload: dict[str, Any]
+    valid_json_object = False
+    try:
+        decoded = json.loads(result.stdout) if result.stdout.strip() else None
     except json.JSONDecodeError:
-        payload = {"stdout": result.stdout[-1000:]}
-    command_success = result.returncode == 0 and payload.get("success", True) is not False
-    return {
-        "name": name,
-        "required": required,
-        "success": command_success,
-        "returncode": result.returncode,
-        "command": " ".join(command),
-        "payload": sanitize_gate_payload(payload),
-        "stderr_tail": result.stderr[-1000:],
-    }
+        decoded = None
+    if isinstance(decoded, dict):
+        payload = decoded
+        valid_json_object = True
+    else:
+        payload = {"error_code": "invalid-gate-json", "stdout": result.stdout[-1000:]}
+    command_success = result.returncode == 0 and valid_json_object and payload.get("success", True) is not False
+    cleaned_payload = sanitize_gate_payload(payload)
+    return compact_gate_record(
+        {
+            "name": name,
+            "required": required,
+            "success": command_success,
+            "returncode": result.returncode,
+            "command": " ".join(command),
+            "payload": cleaned_payload,
+            "stderr_tail": result.stderr[-1000:],
+        }
+    )
+
+
+def run_internal_gate_batch(jobs: list[tuple[str, list[str], bool]]) -> list[dict[str, Any]]:
+    if not jobs:
+        return []
+
+    def run(job: tuple[str, list[str], bool]) -> dict[str, Any]:
+        name, command, required = job
+        return run_internal_gate(name, command, required=required)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(jobs)), thread_name_prefix="forge-gate") as executor:
+        return list(executor.map(run, jobs))
 
 
 def direct_gate(name: str, success: bool, payload: dict[str, Any], *, required: bool = True) -> dict[str, Any]:
-    return {
-        "name": name,
-        "required": required,
-        "success": success,
-        "returncode": 0 if success else 1,
-        "command": "internal",
-        "payload": sanitize_gate_payload(payload),
-        "stderr_tail": "",
-    }
+    return compact_gate_record(
+        {
+            "name": name,
+            "required": required,
+            "success": success,
+            "returncode": 0 if success else 1,
+            "command": "internal",
+            "payload": sanitize_gate_payload(payload),
+            "stderr_tail": "",
+        }
+    )
 
 
 def effective_flight_mode(args: argparse.Namespace) -> str:
@@ -7359,6 +7505,7 @@ def flight_payload(
     gates: list[dict[str, Any]],
     extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    gates = [compact_gate_record(gate) for gate in gates]
     if mode == "off":
         return {
             "success": True,
@@ -7417,8 +7564,12 @@ def project_preflight_report(project_input: ProjectInput, args: argparse.Namespa
 
     gates = [
         input_gate,
-        run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
-        run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False),
+        *run_internal_gate_batch(
+            [
+                ("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode), True),
+                ("status", ["status", "--path", str(planning_dir)], False),
+            ]
+        ),
     ]
     return flight_payload(
         phase="project",
@@ -7438,11 +7589,16 @@ def project_postflight_report(planning_dir: Path, args: argparse.Namespace) -> d
     mode = effective_flight_mode(args)
     if mode == "off":
         return flight_payload(phase="project", stage="postflight", mode=mode, gates=[])
-    gates = [
-        run_internal_gate("lint-interview", append_strict(["lint-interview", "--phase", "project", "--planning-dir", str(planning_dir)], mode)),
-        run_internal_gate("lint-project-manifest", append_strict(["lint-project-manifest", "--planning-dir", str(planning_dir)], mode)),
-        run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False),
-    ]
+    jobs: list[tuple[str, list[str], bool]] = []
+    if interview_artifact(planning_dir, "project"):
+        jobs.append(("lint-interview", append_strict(["lint-interview", "--phase", "project", "--planning-dir", str(planning_dir)], mode), True))
+    jobs.extend(
+        [
+            ("lint-project-manifest", ["lint-project-manifest", "--planning-dir", str(planning_dir), "--strict"], True),
+            ("status", ["status", "--path", str(planning_dir)], False),
+        ]
+    )
+    gates = run_internal_gate_batch(jobs)
     return flight_payload(phase="project", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir)})
 
 
@@ -7457,11 +7613,16 @@ def plan_preflight_report(spec_file: Path, args: argparse.Namespace) -> dict[str
     evidence_command = ["codebase-evidence", "--target-dir", str(target_dir), "--planning-dir", str(planning_dir)]
     if getattr(args, "write_evidence", False):
         evidence_command.append("--write")
+    depth = planning_depth(planning_dir, getattr(args, "depth", DEFAULT_DEPTH) or DEFAULT_DEPTH)
+    jobs: list[tuple[str, list[str], bool]] = [
+        ("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode), True),
+        ("status", ["status", "--path", str(planning_dir)], False),
+    ]
+    if getattr(args, "write_evidence", False) or not is_lean_depth(depth):
+        jobs.insert(1, ("codebase-evidence", evidence_command, False))
     gates = [
         direct_gate("spec-file", ok, {"path": str(spec_file), "error": error if error else None}),
-        run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
-        run_internal_gate("codebase-evidence", evidence_command, required=False),
-        run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False),
+        *run_internal_gate_batch(jobs),
     ]
     return flight_payload(
         phase="plan",
@@ -7476,65 +7637,103 @@ def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict
     mode = effective_flight_mode(args)
     if mode == "off":
         return flight_payload(phase="plan", stage="postflight", mode=mode, gates=[])
-    depth = getattr(args, "depth", "standard") or "standard"
+    depth = planning_depth(planning_dir, getattr(args, "depth", DEFAULT_DEPTH) or DEFAULT_DEPTH)
     profile = getattr(args, "profile", "solo")
-    gates = [
-        run_internal_gate("lint-interview", append_strict(["lint-interview", "--phase", "plan", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
-        run_internal_gate("lint-plan", append_strict(["lint-plan", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
-        run_internal_gate("lint-evidence", append_strict(["lint-evidence", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
-        run_internal_gate("lint-artifact-schema", append_strict(["lint-artifact-schema", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
-    ]
-    if (planning_dir / "reviews").exists() or (planning_dir / "codex-integration-notes.md").exists() or (planning_dir / "claude-integration-notes.md").exists():
-        gates.append(run_internal_gate("lint-review-integration", append_strict(["lint-review-integration", "--planning-dir", str(planning_dir), "--profile", profile], mode)))
-    if (planning_dir / "sections" / "index.md").exists():
-        gates.extend(
+    compact = is_lean_depth(depth)
+    jobs: list[tuple[str, list[str], bool]] = []
+    if interview_artifact(planning_dir, "plan"):
+        jobs.append(("lint-interview", append_strict(["lint-interview", "--phase", "plan", "--planning-dir", str(planning_dir), "--profile", profile], mode), True))
+    jobs.append(("lint-plan", append_strict(["lint-plan", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode), True))
+    if compact:
+        jobs.append(("lint-plan-artifacts", append_strict(["lint-plan-artifacts", "--planning-dir", str(planning_dir), "--profile", profile], mode), True))
+    else:
+        jobs.extend(
             [
-                run_internal_gate("lint-sections", append_strict(["lint-sections", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
-                run_internal_gate("traceability", append_strict(["traceability", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
-                run_internal_gate("lint-implementation-readiness", append_strict(["lint-implementation-readiness", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
-                run_internal_gate("forge-score", append_strict(["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
+                ("lint-evidence", append_strict(["lint-evidence", "--planning-dir", str(planning_dir), "--profile", profile], mode), True),
+                ("lint-artifact-schema", append_strict(["lint-artifact-schema", "--planning-dir", str(planning_dir), "--profile", profile], mode), True),
             ]
         )
+    if (planning_dir / "sections" / "index.md").exists():
+        jobs.extend(
+            [
+                ("lint-sections", append_strict(["lint-sections", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode), True),
+                ("traceability", append_strict(["traceability", "--planning-dir", str(planning_dir), "--profile", profile], mode), True),
+                ("lint-implementation-readiness", append_strict(["lint-implementation-readiness", "--planning-dir", str(planning_dir), "--profile", profile], mode), True),
+            ]
+        )
+        if not compact:
+            jobs.append(("forge-score", append_strict(["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode), True))
         if getattr(args, "write_report", False):
-            gates.append(run_internal_gate("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], required=False))
-    gates.append(run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False))
+            jobs.append(("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], False))
+    jobs.append(("status", ["status", "--path", str(planning_dir)], False))
+    gates = run_internal_gate_batch(jobs)
     return flight_payload(phase="plan", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir)})
 
 
-def implement_preflight_report(sections_dir: Path, target_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+def implement_preflight_report(
+    sections_dir: Path,
+    target_dir: Path,
+    args: argparse.Namespace,
+    *,
+    progress: dict[str, Any] | None = None,
+    artifact_payload: dict[str, Any] | None = None,
+    repo: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     mode = effective_flight_mode(args)
     if mode == "off":
         return flight_payload(phase="implement", stage="preflight", mode=mode, gates=[])
-    plugin_root = resolve_path(getattr(args, "plugin_root", None)) if getattr(args, "plugin_root", None) else current_plugin_root()
     planning_dir = sections_dir.parent
-    depth = getattr(args, "depth", "standard") or "standard"
+    depth = planning_depth(planning_dir, getattr(args, "depth", DEFAULT_DEPTH) or DEFAULT_DEPTH)
     profile = getattr(args, "profile", "solo")
-    repo = git_info(target_dir) if target_dir.exists() else {"available": False, "root": None}
-    next_section_command = ["next-section", "--planning-dir", str(planning_dir)]
-    if getattr(args, "implementation_root", None):
-        next_section_command.extend(["--implementation-root", str(absolute_path_no_follow(args.implementation_root))])
+    strict = mode == "strict"
+    progress = progress or check_section_progress(planning_dir)
+    artifact_payload = artifact_payload or plan_artifacts_payload(
+        planning_dir,
+        argparse.Namespace(profile=profile, strict=True),
+    )
+    repo = repo or (git_info(target_dir) if target_dir.exists() else {"available": False, "root": None})
+
+    section_findings, section_extras = section_findings_for_score(planning_dir, depth)
+    section_payload = quality_payload("sections", section_findings, section_extras, profile, strict)
+    trace_findings, trace_extras = traceability_analysis(planning_dir)
+    trace_payload = quality_payload("traceability", trace_findings, trace_extras, profile, strict)
+    readiness_findings, readiness_extras = implementation_readiness_analysis(planning_dir, 8)
+    readiness_payload = quality_payload(
+        "implementation-readiness",
+        readiness_findings,
+        readiness_extras,
+        profile,
+        strict,
+    )
     gates = [
         direct_gate("sections-directory", sections_dir.exists() and sections_dir.is_dir(), {"sections_dir": str(sections_dir)}),
         direct_gate("target-directory", target_dir.exists() and target_dir.is_dir(), {"target_dir": str(target_dir)}),
-        run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
-        run_internal_gate("lint-plan-artifacts", ["lint-plan-artifacts", "--planning-dir", str(planning_dir), "--profile", profile, "--strict"]),
-        run_internal_gate("lint-sections", append_strict(["lint-sections", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode)),
-        run_internal_gate("traceability", append_strict(["traceability", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
-        run_internal_gate("lint-implementation-readiness", append_strict(["lint-implementation-readiness", "--planning-dir", str(planning_dir), "--profile", profile], mode)),
-        run_internal_gate("next-section", next_section_command, required=False),
-        run_internal_gate("suggest-section-splits", ["suggest-section-splits", "--planning-dir", str(planning_dir)], required=False),
+        direct_gate("lint-plan-artifacts", bool(artifact_payload.get("success")), artifact_payload),
+        direct_gate("lint-sections", bool(section_payload["success"]), section_payload),
+        direct_gate("traceability", bool(trace_payload["success"]), trace_payload),
+        direct_gate("lint-implementation-readiness", bool(readiness_payload["success"]), readiness_payload),
     ]
     warnings: list[str] = []
     if repo.get("is_protected_branch"):
         warnings.append(f"Current branch is protected-looking: {repo.get('branch')}")
     if repo.get("available") and not repo.get("working_tree_clean"):
         warnings.append(f"Working tree has {len(repo.get('dirty_files', []))} uncommitted change(s)")
+    dirty_files = list(repo.get("dirty_files", []))
+    git_payload = {
+        key: repo.get(key)
+        for key in ("available", "root", "branch", "is_protected_branch", "working_tree_clean")
+    }
+    git_payload["dirty_file_count"] = len(dirty_files)
+    if dirty_files:
+        git_payload["dirty_files"] = dirty_files[:12]
+    if len(dirty_files) > 12:
+        git_payload["dirty_files_truncated"] = True
     return flight_payload(
         phase="implement",
         stage="preflight",
         mode=mode,
         gates=gates,
-        extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir), "git": repo, "warnings": warnings},
+        extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir), "git": git_payload, "warnings": warnings},
     )
 
 
@@ -7542,63 +7741,65 @@ def implement_postflight_report(planning_dir: Path, args: argparse.Namespace) ->
     mode = effective_flight_mode(args)
     if mode == "off":
         return flight_payload(phase="implement", stage="postflight", mode=mode, gates=[])
-    depth = getattr(args, "depth", "standard") or "standard"
+    depth = planning_depth(planning_dir, getattr(args, "depth", DEFAULT_DEPTH) or DEFAULT_DEPTH)
+    compact = is_lean_depth(depth)
     profile = getattr(args, "profile", "solo")
     sections_dir = resolve_path(getattr(args, "sections_dir", None)) if getattr(args, "sections_dir", None) else planning_dir / "sections"
     target_dir = resolve_path(getattr(args, "target_dir", None)) if getattr(args, "target_dir", None) else Path.cwd()
     recording_status = implementation_recording_status(planning_dir)
     final_state_gates = recording_status["sections_recorded_complete"]
-    gates: list[dict[str, Any]] = []
+    jobs: list[tuple[str, list[str], bool]] = []
     if getattr(args, "diff_file", None) or getattr(args, "staged", False):
         command = ["implementation-drift", "--planning-dir", str(planning_dir), "--repo", str(target_dir), "--profile", profile]
         if getattr(args, "diff_file", None):
             command.extend(["--diff-file", str(resolve_path(args.diff_file))])
         if getattr(args, "staged", False):
             command.append("--staged")
-        gates.append(run_internal_gate("implementation-drift", append_strict(command, mode)))
+        jobs.append(("implementation-drift", append_strict(command, mode), True))
     if getattr(args, "section_file", None):
         command = ["patch-scope", "--section-file", str(resolve_path(args.section_file)), "--repo", str(target_dir), "--profile", profile]
         if getattr(args, "diff_file", None):
             command.extend(["--diff-file", str(resolve_path(args.diff_file))])
         if getattr(args, "staged", False):
             command.append("--staged")
-        gates.append(run_internal_gate("patch-scope", append_strict(command, mode)))
+        jobs.append(("patch-scope", append_strict(command, mode), True))
     progress_state = recording_status["section_progress"].get("state")
+    progress_gate: dict[str, Any] | None = None
     if progress_state in {"invalid_index", "no_index"}:
-        gates.append(
-            direct_gate(
-                "sections-index",
-                False,
-                {
-                    "section_progress": recording_status["section_progress"],
-                    "message": "Implementation postflight requires a valid sections/index.md.",
-                },
-            )
+        progress_gate = direct_gate(
+            "sections-index",
+            False,
+            {
+                "section_progress": recording_status["section_progress"],
+                "message": "Implementation postflight requires a valid sections/index.md.",
+            },
         )
     elif final_state_gates:
-        gates.append(run_internal_gate("lint-implementation-state", append_strict(["lint-implementation-state", "--sections-dir", str(sections_dir), "--profile", profile], mode)))
+        jobs.append(("lint-implementation-state", append_strict(["lint-implementation-state", "--sections-dir", str(sections_dir), "--profile", profile], mode), True))
     else:
-        gates.append(
-            direct_gate(
-                "implementation-progress",
-                True,
-                {
-                    "recording_state": recording_status["recording_state"],
-                    "recorded_sections": recording_status["recorded_sections"],
-                    "remaining_sections": recording_status["remaining_sections"],
-                    "deferred_gate": "lint-implementation-state",
-                    "message": "Implementation state lint is deferred until all sections are recorded complete.",
-                },
-                required=False,
-            )
+        progress_gate = direct_gate(
+            "implementation-progress",
+            True,
+            {
+                "recording_state": recording_status["recording_state"],
+                "recorded_sections": recording_status["recorded_sections"],
+                "remaining_sections": recording_status["remaining_sections"],
+                "deferred_gate": "lint-implementation-state",
+                "message": "Implementation state lint is deferred until all sections are recorded complete.",
+            },
+            required=False,
         )
-    score_command = ["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile, "--write-history"]
-    if final_state_gates:
-        score_command = append_strict(score_command, mode)
-    gates.append(run_internal_gate("forge-score", score_command, required=final_state_gates))
+    if not compact:
+        score_command = ["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile, "--write-history"]
+        if final_state_gates:
+            score_command = append_strict(score_command, mode)
+        jobs.append(("forge-score", score_command, final_state_gates))
     if getattr(args, "write_report", False):
-        gates.append(run_internal_gate("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], required=False))
-    gates.append(run_internal_gate("status", ["status", "--path", str(planning_dir)], required=False))
+        jobs.append(("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], False))
+    jobs.append(("status", ["status", "--path", str(planning_dir)], False))
+    gates = run_internal_gate_batch(jobs)
+    if progress_gate is not None:
+        gates.append(progress_gate)
     return flight_payload(
         phase="implement",
         stage="postflight",
@@ -7612,10 +7813,12 @@ def release_preflight_report(plugin_root: Path, args: argparse.Namespace) -> dic
     mode = effective_flight_mode(args)
     if mode == "off":
         return flight_payload(phase="release", stage="preflight", mode=mode, gates=[])
-    gates = [
-        run_internal_gate("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode)),
-        run_internal_gate("eval-suite", ["eval-suite", "--examples-dir", str(plugin_root / "examples")], required=False),
-    ]
+    gates = run_internal_gate_batch(
+        [
+            ("doctor", append_strict(["doctor", "--plugin-root", str(plugin_root)], mode), True),
+            ("eval-suite", ["eval-suite", "--examples-dir", str(plugin_root / "examples")], False),
+        ]
+    )
     return flight_payload(phase="release", stage="preflight", mode=mode, gates=gates, extras={"plugin_root": str(plugin_root)})
 
 
@@ -7626,7 +7829,7 @@ def release_postflight_report(plugin_root: Path, args: argparse.Namespace) -> di
     command = ["release-check", "--plugin-root", str(plugin_root)]
     if getattr(args, "run_tests", False):
         command.append("--run-tests")
-    gates = [run_internal_gate("release-check", command)]
+    gates = [run_internal_gate("release-check", command, timeout_seconds=600)]
     return flight_payload(phase="release", stage="postflight", mode=mode, gates=gates, extras={"plugin_root": str(plugin_root)})
 
 
@@ -7691,6 +7894,7 @@ def deep_project_setup(args: argparse.Namespace) -> int:
             "initial_source": project_input.input_mode,
             "created_at": now_iso(),
             "depth_mode": args.depth,
+            "contract_version": PROJECT_CONTRACT_VERSION,
             "workflow": "zagrosi-project",
         }
         write_json(state_path, state)
@@ -7714,14 +7918,11 @@ def deep_project_setup(args: argparse.Namespace) -> int:
     elif manifest_path.exists():
         resume_step = 4
         resume_label = "confirmation_or_directory_creation"
-    elif (planning_dir / "zagrosi_project_interview.md").exists() or (planning_dir / "deep_project_interview.md").exists():
+    else:
         resume_step = 2
         resume_label = "split_analysis"
-    else:
-        resume_step = 1
-        resume_label = "interview"
 
-    if resume_step > 1 or interview_artifact(planning_dir, "project"):
+    if interview_artifact(planning_dir, "project"):
         warnings.extend(interview_warning_messages(planning_dir, "project"))
 
     payload = {
@@ -8402,8 +8603,6 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
             "created_at": now_iso(),
         }
         write_json(config_path, config)
-        for name, path in default_governance_files(planning_dir, args.depth).items():
-            write_if_missing(path, governance_templates(args.depth)[name])
 
     files = {
         "research": first_existing(planning_dir, ["codex-research.md", "claude-research.md"]),
@@ -8423,33 +8622,18 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
     elif section_progress["state"] in {"has_index", "partial"}:
         resume_step = 19
         resume_label = "write_sections"
-    elif files["plan_tdd"]:
+    elif files["plan"] and (reviews or config.get("review_mode") == "skip"):
         resume_step = 18
         resume_label = "create_section_index"
-    elif files["integration_notes"]:
-        resume_step = 16
-        resume_label = "write_tdd_plan"
-    elif reviews:
-        resume_step = 14
-        resume_label = "integrate_review"
     elif files["plan"]:
         resume_step = 13
         resume_label = "review_plan"
-    elif files["spec"]:
+    else:
         resume_step = 11
         resume_label = "write_plan"
-    elif files["interview"]:
-        resume_step = 10
-        resume_label = "write_spec"
-    elif files["research"]:
-        resume_step = 8
-        resume_label = "interview"
-    else:
-        resume_step = 6
-        resume_label = "research_decision"
 
     warnings: list[str] = []
-    if (resume_step is None or resume_step > 10) or files["interview"]:
+    if files["interview"]:
         warnings.extend(interview_warning_messages(planning_dir, "plan"))
 
     payload = {
@@ -8479,32 +8663,15 @@ def deep_plan_check_sections(args: argparse.Namespace) -> int:
     return print_json(result, 0 if result["success"] else 1)
 
 
-SECTION_PROMPT = """Generate the implementation section `{section}`.
+SECTION_PROMPT = """Write ONLY `{section}.md` as raw Markdown.
 
-Read these planning files from `{planning_dir}`:
-- `codex-plan.md` (or `claude-plan.md` if this is a migrated plan)
-- `codex-plan-tdd.md` (or `claude-plan-tdd.md` if this is a migrated plan)
-- `sections/index.md`
+Read `{plan_path}` and `{index_path}`.
+Clarify only from `{source_path}` when required.
 
-Write ONLY raw markdown for `{section}.md`.
-
-Requirements:
-- Make the section self-contained for a fresh implementer with no prior context.
-- Target 1,000-3,500 words in standard mode, 1,500-4,500 words in deep mode.
-- Start with the goal, explicit dependencies, and non-goals for this section.
-- Include a Background Context section that copies the relevant architecture,
-  contracts, data shapes, and rationale from the plan.
-- Put Tests FIRST with concrete test files, test names or descriptions,
-  fixtures, expected failures, and verification commands.
-- Include exact file paths to create or modify, preferably as a file tree.
-- Include implementation details, public APIs, function/class signatures,
-  schema/migration snippets, and error shapes where those remove ambiguity.
-- Include risks, edge cases, rollback notes, acceptance criteria, and final
-  verification commands.
-- Include dependencies on earlier sections, but do not duplicate their content.
-- Do not include full production implementations unless absolutely necessary.
-- Do not reference other planning files for essential context; copy the needed
-  facts into this section.
+{max_words} words max. Do not copy plan context. Reference REQ/DEC/RISK IDs.
+Include only: goal/non-goals; dependencies; exact owned paths; tests first with
+expected failure and command; implementation contracts; risks/rollback; acceptance.
+No production implementation. Every sentence must change an implementation decision.
 """
 
 
@@ -8522,9 +8689,23 @@ def deep_plan_generate_section_prompts(args: argparse.Namespace) -> int:
     prompts_dir.mkdir(parents=True, exist_ok=True)
 
     prompts: list[str] = []
+    depth = planning_depth(planning_dir, args.depth)
+    max_words = word_budgets(depth)["section"]
+    plan_path = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"]) or planning_dir / "codex-plan.md"
+    source_path = requirement_source_spec(planning_dir) or planning_dir / "spec.md"
+    index_path = planning_dir / "sections" / "index.md"
     for section in batch:
         prompt_path = prompts_dir / f"{section}-prompt.md"
-        prompt_path.write_text(SECTION_PROMPT.format(section=section, planning_dir=planning_dir), encoding="utf-8")
+        prompt_path.write_text(
+            SECTION_PROMPT.format(
+                section=section,
+                plan_path=plan_path,
+                index_path=index_path,
+                source_path=source_path,
+                max_words=max_words,
+            ),
+            encoding="utf-8",
+        )
         prompts.append(str(prompt_path))
 
     return print_json(
@@ -8978,7 +9159,9 @@ def detached_implement_setup(args: argparse.Namespace) -> int:
             "warnings": warnings,
         }
         if effective_flight_mode(args) != "off":
-            payload["preflight"] = implement_preflight_report(sections_dir, target_dir, args)
+            preflight = implement_preflight_report(sections_dir, target_dir, args)
+            payload["preflight"] = preflight
+            payload["success"] = bool(payload["success"] and preflight.get("success"))
         verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
         require_lock_authority()
         return print_json(payload, 0 if payload["success"] else 1)
@@ -9059,10 +9242,9 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
     }
     write_json(config_path, config)
 
-    completed = sorted(state.get("completed_sections", {}).keys())
+    completed = set(state.get("completed_sections", {}).keys())
     dependencies = dependency_graph(planning_dir, progress)
-    ready = ready_sections(progress, dependencies, set(completed))
-    next_section = ready[0] if ready else None
+    readiness = mutable_readiness_snapshot(progress, dependencies, completed)
     repo = git_info(target_dir)
     warnings: list[str] = []
     if repo.get("is_protected_branch"):
@@ -9078,15 +9260,23 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
         "config_path": str(config_path),
         "state_path": str(state_path),
         "section_progress": progress,
-        "completed_sections": completed,
-        "next_section": next_section,
-        "ready_sections": ready,
-        "git": repo,
+        **readiness,
         "warnings": warnings,
     }
-    if effective_flight_mode(args) != "off":
-        payload["preflight"] = implement_preflight_report(sections_dir, target_dir, args)
-    return print_json(payload)
+    if effective_flight_mode(args) == "off":
+        payload["git"] = repo
+    else:
+        preflight = implement_preflight_report(
+            sections_dir,
+            target_dir,
+            args,
+            progress=progress,
+            artifact_payload=artifact_payload,
+            repo=repo,
+        )
+        payload["preflight"] = preflight
+        payload["success"] = bool(payload["success"] and preflight.get("success"))
+    return print_json(payload, 0 if payload["success"] else 1)
 
 
 def implementation_state_path(planning_dir: Path) -> Path:
@@ -9100,6 +9290,27 @@ def implementation_state_path(planning_dir: Path) -> Path:
 def load_implementation_state(planning_dir: Path) -> dict[str, Any]:
     state_path = implementation_state_path(planning_dir)
     return load_json(state_path) if state_path.exists() else {"completed_sections": {}, "created_at": now_iso()}
+
+
+def mutable_readiness_snapshot(
+    progress: dict[str, Any],
+    dependencies: dict[str, list[str]],
+    completed: set[str],
+) -> dict[str, Any]:
+    ready = ready_sections(progress, dependencies, completed)
+    remaining = [section for section in progress["sections"] if section not in completed]
+    blocked = {
+        section: [dependency for dependency in dependencies.get(section, []) if dependency not in completed]
+        for section in remaining
+        if section not in ready
+    }
+    return {
+        "next_section": ready[0] if ready else None,
+        "ready_sections": ready,
+        "remaining_sections": remaining,
+        "blocked_sections": blocked,
+        "completed_sections": sorted(completed),
+    }
 
 
 def implementation_evidence_by_section(planning_dir: Path) -> dict[str, dict[str, Any]]:
@@ -9671,6 +9882,19 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
             },
             1,
         )
+    compact = is_lean_depth(planning_depth(planning_dir))
+    verification = normalize_repeated(args.verification)
+    review_status = getattr(args, "review_status", None)
+    if compact and (review_status not in {"pass", "fixed"} or not verification):
+        return print_json(
+            {
+                "success": False,
+                "error_code": "incomplete-lean-record",
+                "error": "Lean completion requires --review-status pass|fixed and at least one --verification command.",
+                "section": args.section,
+            },
+            1,
+        )
     section_record = {
         "completed_at": now_iso(),
         "commit": args.commit,
@@ -9678,21 +9902,28 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
         "files_changed": normalize_repeated(args.files_changed),
         "test_files": normalize_repeated(args.test_files),
         "review_artifacts": normalize_repeated(args.review_artifacts),
+        "review_status": review_status,
         "evidence_rows": normalize_repeated(getattr(args, "evidence_rows", [])),
-        "verification": normalize_repeated(args.verification),
+        "verification": verification,
         "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
     }
     state.setdefault("completed_sections", {})[args.section] = section_record
     write_json(state_path, state)
-    traceability_path = refresh_traceability_matrix(planning_dir)
+    traceability_path = None if compact else refresh_traceability_matrix(planning_dir)
+    readiness = mutable_readiness_snapshot(
+        progress,
+        dependencies,
+        completed_names | {args.section},
+    )
     payload = {
         "success": True,
         "state_path": str(state_path),
         "section": args.section,
         "record": section_record,
         "traceability_matrix": str(traceability_path) if traceability_path else None,
+        **readiness,
     }
-    if effective_flight_mode(args) != "off":
+    if effective_flight_mode(args) != "off" and not compact:
         payload["postflight"] = implement_postflight_report(sections_dir.parent, args)
     return print_json(payload)
 
@@ -9701,6 +9932,105 @@ def lint_interview(args: argparse.Namespace) -> int:
     planning_dir = resolve_path(args.planning_dir)
     findings, extras = interview_findings(planning_dir, args.phase)
     return emit_quality("interview", findings, args, extras)
+
+
+def project_manifest_rows(text: str) -> list[dict[str, str]] | None:
+    aliases = {
+        "split": {"split", "unit"},
+        "requirements": {"req", "reqs", "requirement", "requirements"},
+        "dependencies": {"depends on", "dependencies", "dependency"},
+        "boundary": {"owns boundary", "owns", "boundary", "owned boundary"},
+        "command": {"next command", "command"},
+    }
+    for table in markdown_tables(text):
+        if not table:
+            continue
+        normalized = [re.sub(r"[^a-z]+", " ", cell.lower()).strip() for cell in table[0]]
+        indexes: dict[str, int] = {}
+        for name, choices in aliases.items():
+            match = next((index for index, value in enumerate(normalized) if value in choices), None)
+            if match is None:
+                break
+            indexes[name] = match
+        if len(indexes) != len(aliases):
+            continue
+        return [
+            {name: row[index].strip() if index < len(row) else "" for name, index in indexes.items()}
+            for row in table[1:]
+        ]
+    return None
+
+
+def graph_cycle(graph: dict[str, list[str]]) -> list[str]:
+    visited: set[str] = set()
+    active: list[str] = []
+
+    def visit(node: str) -> list[str]:
+        if node in active:
+            start = active.index(node)
+            return [*active[start:], node]
+        if node in visited:
+            return []
+        active.append(node)
+        for dependency in graph.get(node, []):
+            if cycle := visit(dependency):
+                return cycle
+        active.pop()
+        visited.add(node)
+        return []
+
+    for node in graph:
+        if cycle := visit(node):
+            return cycle
+    return []
+
+
+def project_requirement_source(planning_dir: Path, meta: dict[str, Any] | None) -> Path | None:
+    candidates: list[Path] = []
+    for state_path in (planning_dir / ".zagrosi-project" / "session.json", planning_dir / ".deep-project" / "session.json"):
+        if not state_path.exists():
+            continue
+        try:
+            initial = load_json(state_path).get("initial_file")
+        except (OSError, ValueError, json.JSONDecodeError):
+            initial = None
+        if isinstance(initial, str) and initial.strip():
+            candidate = Path(initial).expanduser()
+            candidates.append(candidate if candidate.is_absolute() else planning_dir / candidate)
+    if isinstance(meta, dict) and isinstance(meta.get("source"), str):
+        candidates.append(planning_dir / meta["source"])
+    candidates.append(planning_dir / "requirements.md")
+    return next((path.resolve() for path in candidates if path.exists() and path.is_file()), None)
+
+
+def compact_project_session(planning_dir: Path) -> bool:
+    for path in (planning_dir / ".zagrosi-project" / "session.json", planning_dir / ".deep-project" / "session.json"):
+        if not path.exists():
+            continue
+        try:
+            state = load_json(path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
+        return isinstance(state, dict) and state.get("contract_version") == PROJECT_CONTRACT_VERSION
+    return False
+
+
+def project_artifact_depth(planning_dir: Path, meta: dict[str, Any] | None) -> str:
+    session_depth = project_depth(planning_dir, "")
+    if session_depth in DEPTH_MODES:
+        return session_depth
+    meta_depth = meta.get("depth_mode") if isinstance(meta, dict) else None
+    return meta_depth if isinstance(meta_depth, str) and meta_depth in DEPTH_MODES else DEFAULT_DEPTH
+
+
+def split_spec_declarations(text: str) -> tuple[list[str], list[str]]:
+    dependencies = re.findall(r"(?im)^\s*dependencies?\s*:\s*(.+?)\s*$", text)
+    boundaries = re.findall(r"(?im)^\s*boundary\s*:\s*(.+?)\s*$", text)
+    return ([item.strip() for item in dependencies], [item.strip() for item in boundaries])
+
+
+def normalized_boundary(text: str) -> str:
+    return re.sub(r"\s+", " ", text.replace("`", "").strip().lower()).removeprefix("owns ")
 
 
 def lint_project_manifest(args: argparse.Namespace) -> int:
@@ -9713,21 +10043,17 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
         findings.append(finding("critical", "missing-manifest", "project-manifest.md is missing.", manifest_path))
         return emit_quality("project-manifest", findings, args)
 
-    interview_gate_findings, interview_extras = interview_findings(planning_dir, "project")
-    findings.extend(interview_gate_findings)
+    interview_extras: dict[str, Any] = {"mode": "optional"}
+    if interview_artifact(planning_dir, "project"):
+        interview_gate_findings, interview_extras = interview_findings(planning_dir, "project")
+        findings.extend(interview_gate_findings)
 
     text = read_text(manifest_path)
-    meta, meta_errors = parse_forge_meta(text)
-    for error in meta_errors:
-        findings.append(
-            finding(
-                "low",
-                "metadata",
-                error,
-                manifest_path,
-                "Add a FORGE_META JSON block with artifact_type, depth_mode, and source fields.",
-            )
-        )
+    meta: dict[str, Any] | None = None
+    if FORGE_META_START in text or LEGACY_META_START in text:
+        meta, meta_errors = parse_forge_meta(text)
+        for error in meta_errors:
+            findings.append(finding("low", "metadata", error, manifest_path))
     if meta and meta.get("artifact_type") != "project_manifest":
         findings.append(finding("medium", "metadata-type", "FORGE_META artifact_type should be project_manifest.", manifest_path))
 
@@ -9735,11 +10061,125 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
     for error in manifest_errors:
         findings.append(finding("critical", "manifest-format", error, manifest_path))
 
+    rows = project_manifest_rows(text)
+    modern_contract = rows is not None or compact_project_session(planning_dir)
+    depth = project_artifact_depth(planning_dir, meta)
+    budgets = PROJECT_WORD_BUDGETS[depth]
+    if modern_contract:
+        add_budget_finding(findings, word_count(text), budgets["manifest"], "Project manifest", "project-manifest-too-large", manifest_path)
+    owned_requirements: dict[str, set[str]] = {split: set() for split in splits}
+    requirement_owners: dict[str, set[str]] = {}
+    dependencies: dict[str, list[str]] = {split: [] for split in splits}
+    boundaries: dict[str, str] = {}
+    boundary_owners: dict[str, set[str]] = {}
+    if rows is None:
+        if compact_project_session(planning_dir):
+            findings.append(
+                finding(
+                    "high",
+                    "missing-ownership-table",
+                    "Manifest lacks the compact Split/REQ/Depends on/Owns boundary/Next command table.",
+                    manifest_path,
+                )
+            )
+    else:
+        seen_rows: set[str] = set()
+        for row in rows:
+            row_splits = SPLIT_TOKEN_RE.findall(row["split"])
+            if not row_splits:
+                findings.append(finding("high", "invalid-split-row", "Manifest table row has no valid split.", manifest_path))
+                continue
+            split = row_splits[0]
+            if split not in owned_requirements:
+                findings.append(finding("high", "unknown-split-row", f"Manifest table names unknown split: {split}.", manifest_path))
+                continue
+            if split in seen_rows:
+                findings.append(finding("high", "duplicate-split-row", f"Manifest table repeats split: {split}.", manifest_path))
+            seen_rows.add(split)
+
+            reqs = set(requirement_ids(row["requirements"]))
+            if not reqs:
+                findings.append(finding("medium", "split-without-requirements", f"{split} owns no REQ-* IDs.", manifest_path))
+            owned_requirements[split].update(reqs)
+            for req_id in reqs:
+                requirement_owners.setdefault(req_id, set()).add(split)
+
+            deps = SPLIT_TOKEN_RE.findall(row["dependencies"])
+            dependencies[split] = deps
+            boundaries[split] = row["boundary"]
+            unknown = sorted(set(deps) - set(splits))
+            if unknown:
+                findings.append(
+                    finding(
+                        "high",
+                        "unknown-split-dependency",
+                        f"{split} depends on unknown split(s): {', '.join(unknown)}.",
+                        manifest_path,
+                    )
+                )
+
+            for path in extract_file_paths(row["boundary"]):
+                boundary_owners.setdefault(path, set()).add(split)
+            if "zagrosi-plan" not in row["command"].lower() or split not in row["command"] or "spec.md" not in row["command"]:
+                findings.append(
+                    finding(
+                        "medium",
+                        "invalid-next-command",
+                        f"{split} lacks its exact Zagrosi Plan spec command.",
+                        manifest_path,
+                    )
+                )
+
+        for split in sorted(set(splits) - seen_rows):
+            findings.append(finding("high", "missing-split-row", f"Manifest table omits split: {split}.", manifest_path))
+        for req_id, owners in sorted(requirement_owners.items()):
+            if len(owners) > 1:
+                findings.append(
+                    finding(
+                        "high",
+                        "duplicate-requirement-owner",
+                        f"{req_id} has multiple split owners: {', '.join(sorted(owners))}.",
+                        manifest_path,
+                    )
+                )
+        for path, owners in sorted(boundary_owners.items()):
+            if len(owners) > 1:
+                findings.append(
+                    finding(
+                        "high",
+                        "cross-split-path-collision",
+                        f"{path} is owned by multiple splits: {', '.join(sorted(owners))}.",
+                        manifest_path,
+                    )
+                )
+        if cycle := graph_cycle(dependencies):
+            findings.append(
+                finding(
+                    "high",
+                    "split-dependency-cycle",
+                    f"Split dependency cycle: {' -> '.join(cycle)}.",
+                    manifest_path,
+                )
+            )
+
+    source_path = project_requirement_source(planning_dir, meta)
+    source_ids = requirement_ids(read_text(source_path)) if source_path else []
+    missing_source_ids = sorted(set(source_ids) - set(requirement_owners)) if rows is not None else []
+    if missing_source_ids:
+        findings.append(
+            finding(
+                "high",
+                "unowned-source-requirements",
+                f"Source requirements lack split owners: {', '.join(missing_source_ids)}.",
+                source_path or manifest_path,
+            )
+        )
+
     require_terms(
         findings,
         text,
         {
-            "dependencies": ["dependency", "depends on", "blocks"],
+            "dependencies": ["dependency", "dependencies", "depends on", "blocks"],
             "execution-order": ["execution order", "run order", "sequence"],
             "parallelization": ["parallel", "concurrent"],
             "zagrosi-plan-commands": ["$zagrosi-plan", "zagrosi-plan", "$deep-plan", "deep-plan"],
@@ -9758,6 +10198,69 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
             findings.append(finding("medium", "missing-split-spec", f"Split spec is missing or empty: {split}/spec.md", spec_path))
             continue
         spec_text = read_text(spec_path)
+        if modern_contract:
+            add_budget_finding(findings, word_count(spec_text), budgets["spec"], f"{split}/spec.md", "split-spec-too-large", spec_path)
+        spec_ids = set(requirement_ids(spec_text))
+        missing_owned = sorted(owned_requirements.get(split, set()) - spec_ids)
+        if missing_owned:
+            findings.append(
+                finding(
+                    "high",
+                    "split-spec-missing-requirements",
+                    f"{split}/spec.md omits owned IDs: {', '.join(missing_owned)}.",
+                    spec_path,
+                )
+            )
+        foreign = sorted(
+            req_id
+            for req_id in spec_ids - owned_requirements.get(split, set())
+            if req_id in requirement_owners
+        )
+        if foreign:
+            findings.append(
+                finding(
+                    "high",
+                    "split-spec-foreign-requirements",
+                    f"{split}/spec.md claims IDs owned elsewhere: {', '.join(foreign)}.",
+                    spec_path,
+                )
+            )
+        if rows is not None:
+            dependency_declarations, boundary_declarations = split_spec_declarations(spec_text)
+            if not dependency_declarations:
+                findings.append(finding("high", "missing-spec-dependencies", f"{split}/spec.md lacks a Dependencies: declaration.", spec_path))
+            elif len(dependency_declarations) != 1:
+                findings.append(finding("high", "duplicate-spec-dependencies", f"{split}/spec.md must contain exactly one Dependencies: declaration.", spec_path))
+            else:
+                dependency_declaration = dependency_declarations[0]
+                actual_dependencies = set(SPLIT_TOKEN_RE.findall(dependency_declaration))
+                expected_dependencies = set(dependencies.get(split, []))
+                if actual_dependencies != expected_dependencies:
+                    findings.append(
+                        finding(
+                            "high",
+                            "split-spec-dependency-mismatch",
+                            f"{split}/spec.md dependencies differ from manifest: expected {sorted(expected_dependencies)}, got {sorted(actual_dependencies)}.",
+                            spec_path,
+                        )
+                    )
+            if not boundary_declarations:
+                findings.append(finding("high", "missing-spec-boundary", f"{split}/spec.md lacks a Boundary: declaration.", spec_path))
+            elif len(boundary_declarations) != 1:
+                findings.append(finding("high", "duplicate-spec-boundary", f"{split}/spec.md must contain exactly one Boundary: declaration.", spec_path))
+            else:
+                boundary_declaration = boundary_declarations[0]
+                expected_boundary = boundaries.get(split, "")
+                boundary_matches = normalized_boundary(boundary_declaration) == normalized_boundary(expected_boundary)
+                if not boundary_matches:
+                    findings.append(
+                        finding(
+                            "high",
+                            "split-spec-boundary-mismatch",
+                            f"{split}/spec.md boundary differs from the manifest.",
+                            spec_path,
+                        )
+                    )
         require_terms(
             findings,
             spec_text,
@@ -9765,7 +10268,9 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
                 "acceptance-criteria": ["acceptance criteria", "done when", "success criteria"],
                 "scope": ["in scope", "out of scope", "non-goals"],
                 "testing": ["test", "tests", "verification"],
-                "open-questions": ["open question", "unknown", "assumption"],
+                "dependencies": ["dependency", "dependencies", "depends on", "input", "output"],
+                "boundary": ["boundary", "owns", "ownership"],
+                "risks-or-stops": ["risk", "open question", "unknown", "assumption", "stop"],
             },
             spec_path,
             "low",
@@ -9775,18 +10280,29 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
         "project-manifest",
         findings,
         args,
-        {"planning_dir": str(planning_dir), "manifest": str(manifest_path), "splits": splits, "interview": interview_extras},
+        {
+            "planning_dir": str(planning_dir),
+            "manifest": str(manifest_path),
+            "source": str(source_path) if source_path else None,
+            "splits": splits,
+            "requirement_owners": {req_id: sorted(owners) for req_id, owners in sorted(requirement_owners.items())},
+            "dependencies": dependencies,
+            "depth_mode": depth,
+            "word_budgets": budgets,
+            "interview": interview_extras,
+        },
     )
     return emit_payload(payload, args)
 
 
 def lint_plan(args: argparse.Namespace) -> int:
     planning_dir = resolve_path(args.planning_dir)
-    depth = args.depth or "standard"
-    targets = word_targets(depth)
+    depth = args.depth or planning_depth(planning_dir)
+    compact = is_lean_depth(depth)
+    budgets = word_budgets(depth)
     findings: list[Finding] = []
 
-    spec_path = artifact(planning_dir, ["codex-spec.md", "claude-spec.md"])
+    spec_path = requirement_source_spec(planning_dir)
     plan_path = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
     tdd_path = artifact(planning_dir, ["codex-plan-tdd.md", "claude-plan-tdd.md"])
 
@@ -9794,8 +10310,10 @@ def lint_plan(args: argparse.Namespace) -> int:
         findings.append(finding("critical", "missing-plan", "Implementation plan is missing.", planning_dir / "codex-plan.md"))
         return emit_quality("plan", findings, args)
 
-    interview_gate_findings, interview_extras = interview_findings(planning_dir, "plan")
-    findings.extend(interview_gate_findings)
+    interview_extras: dict[str, Any] = {"mode": "optional"}
+    if interview_artifact(planning_dir, "plan"):
+        interview_gate_findings, interview_extras = interview_findings(planning_dir, "plan")
+        findings.extend(interview_gate_findings)
 
     plan_text = read_text(plan_path)
     meta, meta_errors = parse_forge_meta(plan_text)
@@ -9805,40 +10323,49 @@ def lint_plan(args: argparse.Namespace) -> int:
         findings.append(finding("medium", "metadata-type", "FORGE_META artifact_type should be implementation_plan.", plan_path))
 
     plan_words = word_count(plan_text)
-    add_depth_finding(findings, plan_words, targets["plan"], "Implementation plan", "plan-too-thin", plan_path, 500)
-
-    require_terms(
-        findings,
-        plan_text,
-        {
-            "goals": ["goal", "non-goal", "out of scope"],
-            "architecture": ["architecture", "design", "approach"],
-            "file-plan": ["file", "path", "module"],
-            "testing": ["test", "tdd", "verification"],
-            "security-privacy": ["security", "privacy", "permission", "auth"],
-            "risk": ["risk", "edge case", "failure"],
-            "migration": ["migration", "schema", "data migration", "backward", "compatibility"],
-            "rollout": ["rollout", "release", "deploy", "ship", "feature flag"],
-            "rollback": ["rollback", "revert", "disable", "back out"],
-            "acceptance": ["acceptance", "done when", "success criteria"],
-        },
-        plan_path,
-    )
-    require_terms(findings, plan_text, PLAN_DETAIL_TERMS, plan_path, "medium")
+    add_budget_finding(findings, plan_words, budgets["plan"], "Implementation plan", "plan-too-large", plan_path)
+    require_terms(findings, plan_text, LEAN_PLAN_TERMS, plan_path, "medium")
+    if not compact:
+        require_terms(
+            findings,
+            plan_text,
+            {
+                "rationale": ["why", "rationale", "tradeoff", "alternative"],
+                "security-privacy": ["security", "privacy", "permission", "auth"],
+                "migration": ["migration", "schema", "data migration", "backward", "compatibility"],
+            },
+            plan_path,
+        )
     if not FILE_PATH_RE.search(plan_text):
         findings.append(finding("high", "no-file-paths", "Plan does not name concrete files or paths.", plan_path))
 
     if not spec_path:
-        findings.append(finding("high", "missing-normalized-spec", "codex-spec.md is missing.", planning_dir / "codex-spec.md"))
+        findings.append(
+            finding(
+                "high",
+                "missing-source-spec",
+                "Source spec is missing.",
+                planning_dir / "spec.md",
+            )
+        )
         spec_ids: list[str] = []
         spec_words = 0
     else:
         spec_text = read_text(spec_path)
         spec_words = word_count(spec_text)
-        add_depth_finding(findings, spec_words, targets["spec"], "Normalized spec", "spec-too-thin", spec_path, 250)
+        normalized_spec = artifact(planning_dir, ["codex-spec.md", "claude-spec.md"])
+        configured_source = configured_source_spec(planning_dir)
+        if (
+            normalized_spec
+            and spec_path == normalized_spec
+            and (configured_source is None or normalized_spec.resolve() != configured_source.resolve())
+        ):
+            add_budget_finding(findings, spec_words, budgets["spec"], "Normalized spec", "spec-too-large", spec_path)
         spec_ids = requirement_ids(spec_text)
         if not spec_ids:
-            findings.append(finding("medium", "no-requirement-ids", "Spec has no REQ-* identifiers.", spec_path))
+            spec_ids = requirement_ids(plan_text)
+            if not compact:
+                findings.append(finding("medium", "no-requirement-ids", "Spec has no REQ-* identifiers.", spec_path))
         missing_in_plan = [req_id for req_id in spec_ids if req_id not in plan_text]
         if missing_in_plan:
             findings.append(
@@ -9851,67 +10378,48 @@ def lint_plan(args: argparse.Namespace) -> int:
             )
 
     if not tdd_path:
-        findings.append(finding("high", "missing-tdd-plan", "codex-plan-tdd.md is missing.", planning_dir / "codex-plan-tdd.md"))
         tdd_words = 0
     else:
         tdd_text = read_text(tdd_path)
         tdd_words = word_count(tdd_text)
-        add_depth_finding(findings, tdd_words, targets["tdd"], "TDD plan", "tdd-plan-too-thin", tdd_path, 200)
+        add_budget_finding(findings, tdd_words, budgets["tdd"], "TDD plan", "tdd-plan-too-large", tdd_path)
         if not contains_any(tdd_text, ["test_", "it(", "describe(", "pytest", "cargo test", "go test", "expected failure"]):
             findings.append(finding("medium", "thin-tdd-plan", "TDD plan does not include concrete test names or commands.", tdd_path))
         missing_in_tdd = [req_id for req_id in spec_ids if req_id not in tdd_text]
         if missing_in_tdd:
-            findings.append(finding("medium", "tdd-traceability-gap", f"Requirement IDs missing from TDD plan: {', '.join(missing_in_tdd)}", tdd_path))
+            severity = "low" if compact else "medium"
+            findings.append(finding(severity, "tdd-traceability-gap", f"Requirement IDs missing from TDD plan: {', '.join(missing_in_tdd)}", tdd_path))
 
     research_path = artifact(planning_dir, ["codex-research.md", "claude-research.md"])
     research_words = None
     if research_path:
         research_words = word_count(read_text(research_path))
-        add_depth_finding(findings, research_words, targets["research"], "Research artifact", "research-too-thin", research_path, 250)
+        add_budget_finding(findings, research_words, budgets["research"], "Research artifact", "research-too-large", research_path)
     interview_path = artifact(planning_dir, ["codex-interview.md", "claude-interview.md"])
     integration_path = artifact(planning_dir, ["codex-integration-notes.md", "claude-integration-notes.md"])
     integration_words = None
     if integration_path:
         integration_words = word_count(read_text(integration_path))
-        add_depth_finding(
+        add_budget_finding(
             findings,
             integration_words,
-            targets["integration_notes"],
+            budgets["integration_notes"],
             "Integration notes",
-            "integration-notes-too-thin",
+            "integration-notes-too-large",
             integration_path,
-            250,
         )
 
     review_files = sorted((planning_dir / "reviews").glob("*.md")) if (planning_dir / "reviews").exists() else []
     review_word_counts = {path.name: word_count(read_text(path)) for path in review_files}
     for review_path in review_files:
-        add_depth_finding(
+        add_budget_finding(
             findings,
             review_word_counts[review_path.name],
-            targets["review"],
+            budgets["review"],
             f"Review file {review_path.name}",
-            "review-too-thin",
+            "review-too-large",
             review_path,
-            250,
         )
-
-    for name, path in default_governance_files(planning_dir, depth).items():
-        if not path.exists():
-            findings.append(finding("medium", f"missing-{name}", f"{path.name} is missing.", path))
-
-    if depth == "deep":
-        review_file_stems = {path.stem for path in review_files}
-        missing_reviews = [item for item in REVIEW_BOARD_PASSES if item not in review_file_stems]
-        if missing_reviews:
-            findings.append(
-                finding(
-                    "medium",
-                    "missing-review-board-passes",
-                    f"Deep mode review files missing: {', '.join(missing_reviews)}",
-                    planning_dir / "reviews",
-                )
-            )
 
     payload = quality_from_args(
         "plan",
@@ -9923,7 +10431,7 @@ def lint_plan(args: argparse.Namespace) -> int:
             "requirement_ids": spec_ids,
             "depth_mode": depth,
             "interview": interview_extras,
-            "depth_targets": targets,
+            "word_budgets": budgets,
             "word_counts": {
                 "spec": spec_words,
                 "research": research_words,
@@ -9940,8 +10448,9 @@ def lint_plan(args: argparse.Namespace) -> int:
 
 def lint_sections(args: argparse.Namespace) -> int:
     planning_dir = resolve_path(args.planning_dir)
-    depth = args.depth or "standard"
-    targets = word_targets(depth)
+    depth = args.depth or planning_depth(planning_dir)
+    compact = is_lean_depth(depth)
+    budgets = word_budgets(depth)
     findings: list[Finding] = []
     progress = check_section_progress(planning_dir)
     if progress["state"] == "invalid_index":
@@ -9955,28 +10464,27 @@ def lint_sections(args: argparse.Namespace) -> int:
     index_path = planning_dir / "sections" / "index.md"
     index_text = read_text(index_path)
     index_words = word_count(index_text)
-    add_depth_finding(
+    add_budget_finding(
         findings,
         index_words,
-        targets["section_index"],
+        budgets["section_index"],
         "Section index",
-        "section-index-too-thin",
+        "section-index-too-large",
         index_path,
-        150,
     )
     dependencies = parse_section_dependencies(index_text, progress["sections"])
     require_terms(
         findings,
         index_text,
         {
-            "dependencies": ["dependency", "depends on", "blocks"],
+            "dependencies": ["dependency", "dependencies", "depends on", "blocks"],
             "execution-order": ["execution order", "sequence", "run order"],
             "parallelization": ["parallel", "concurrent"],
         },
         index_path,
     )
 
-    spec_path = artifact(planning_dir, ["codex-spec.md", "claude-spec.md"])
+    spec_path = requirement_source_spec(planning_dir)
     spec_ids = requirement_ids(read_text(spec_path)) if spec_path else []
     all_section_text = ""
     estimates: list[dict[str, Any]] = []
@@ -10015,7 +10523,7 @@ def lint_sections(args: argparse.Namespace) -> int:
         if slug in VAGUE_SECTION_NAMES or slug_tokens.intersection(VAGUE_SECTION_NAMES):
             findings.append(
                 finding(
-                    "medium",
+                    "high",
                     "vague-section-name",
                     f"{section} is too vague to be a strong implementation boundary.",
                     section_path,
@@ -10029,14 +10537,13 @@ def lint_sections(args: argparse.Namespace) -> int:
         metrics = section_metrics(section, section_path, dependencies)
         estimates.append(metrics)
         all_section_text += "\n" + text
-        add_depth_finding(
+        add_budget_finding(
             findings,
             metrics["word_count"],
-            targets["section"],
+            budgets["section"],
             section,
-            "section-too-thin",
+            "section-too-large",
             section_path,
-            150,
         )
         if metrics["word_count"] > 5000:
             findings.append(finding("low", "section-too-large", f"{section} may be too large for focused implementation.", section_path))
@@ -10067,17 +10574,7 @@ def lint_sections(args: argparse.Namespace) -> int:
                     section_path,
                 )
             )
-        require_terms(
-            findings,
-            text,
-            {
-                "tests-first": ["test", "tests first", "expected failure", "red"],
-                "implementation": ["implementation", "create", "modify", "file"],
-                "acceptance": ["acceptance", "done when", "verification"],
-            },
-            section_path,
-        )
-        require_terms(findings, text, SECTION_DETAIL_TERMS, section_path, "medium")
+        require_terms(findings, text, LEAN_SECTION_TERMS, section_path, "medium")
         if not FILE_PATH_RE.search(text):
             findings.append(finding("medium", "section-no-file-paths", f"{section} does not name concrete files.", section_path))
         allowed_owners = predecessor_closure[section] | {section}
@@ -10125,7 +10622,7 @@ def lint_sections(args: argparse.Namespace) -> int:
         {
             "planning_dir": str(planning_dir),
             "depth_mode": depth,
-            "depth_targets": targets,
+            "word_budgets": budgets,
             "section_progress": progress,
             "requirement_ids": spec_ids,
             "section_index_word_count": index_words,
@@ -10146,6 +10643,7 @@ def lint_implementation_state(args: argparse.Namespace) -> int:
         state_path = legacy_state_path
     code_review_dir = planning_dir / "implementation" / "code_review"
     usage_path = planning_dir / "implementation" / "usage.md"
+    compact = is_lean_depth(planning_depth(planning_dir))
 
     if progress["state"] in {"invalid_index", "no_index"}:
         findings.append(finding("critical", "invalid-sections", "Cannot validate implementation without valid sections/index.md.", sections_dir / "index.md"))
@@ -10168,33 +10666,40 @@ def lint_implementation_state(args: argparse.Namespace) -> int:
         record = completed[section]
         if not record.get("completed_at"):
             findings.append(finding("low", "missing-completed-at", f"{section} has no completed_at timestamp.", state_path))
-        if not record.get("commit"):
+        if not compact and not record.get("commit"):
             findings.append(finding("low", "missing-commit", f"{section} has no commit recorded.", state_path))
-        review_path = code_review_dir / f"{section}-review.md"
-        diff_path = code_review_dir / f"{section}-diff.md"
-        decisions_path = code_review_dir / f"{section}-decisions.md"
-        if not review_path.exists():
-            findings.append(finding("medium", "missing-review", f"Review file missing for {section}.", review_path))
-        if not diff_path.exists():
-            findings.append(finding("low", "missing-diff", f"Diff file missing for {section}.", diff_path))
-        if not decisions_path.exists():
-            findings.append(
-                finding(
-                    "medium",
-                    "missing-review-decisions",
-                    f"Review decisions file missing for {section}.",
-                    decisions_path,
-                    "Write a decisions artifact that records accepted, rejected, and deferred review findings.",
+        if compact:
+            if record.get("review_status") not in {"pass", "fixed"}:
+                findings.append(finding("high", "missing-review-status", f"{section} lacks a passing machine review status.", state_path))
+            if not record.get("verification"):
+                findings.append(finding("high", "missing-verification", f"{section} has no verification command recorded.", state_path))
+        else:
+            review_path = code_review_dir / f"{section}-review.md"
+            diff_path = code_review_dir / f"{section}-diff.md"
+            decisions_path = code_review_dir / f"{section}-decisions.md"
+            if not review_path.exists():
+                findings.append(finding("medium", "missing-review", f"Review file missing for {section}.", review_path))
+            if not diff_path.exists():
+                findings.append(finding("low", "missing-diff", f"Diff file missing for {section}.", diff_path))
+            if not decisions_path.exists():
+                findings.append(
+                    finding(
+                        "medium",
+                        "missing-review-decisions",
+                        f"Review decisions file missing for {section}.",
+                        decisions_path,
+                        "Write a decisions artifact that records accepted, rejected, and deferred review findings.",
+                    )
                 )
-            )
-        if "files_changed" in record and not record.get("files_changed"):
-            findings.append(finding("low", "missing-file-evidence", f"{section} has no changed files recorded.", state_path))
-        if "test_files" in record and not record.get("test_files"):
-            findings.append(finding("low", "missing-test-evidence", f"{section} has no test files recorded.", state_path))
-        if "review_artifacts" in record and not record.get("review_artifacts"):
-            findings.append(finding("low", "missing-review-evidence", f"{section} has no review artifacts recorded.", state_path))
+        if not compact:
+            if "files_changed" in record and not record.get("files_changed"):
+                findings.append(finding("low", "missing-file-evidence", f"{section} has no changed files recorded.", state_path))
+            if "test_files" in record and not record.get("test_files"):
+                findings.append(finding("low", "missing-test-evidence", f"{section} has no test files recorded.", state_path))
+            if "review_artifacts" in record and not record.get("review_artifacts"):
+                findings.append(finding("low", "missing-review-evidence", f"{section} has no review artifacts recorded.", state_path))
 
-    if not usage_path.exists():
+    if not compact and not usage_path.exists():
         findings.append(finding("medium", "missing-usage", "implementation/usage.md is missing.", usage_path))
 
     payload = quality_from_args(
@@ -10346,22 +10851,22 @@ def workflow_options(args: argparse.Namespace) -> int:
     text = "\n".join(part for part in brief_parts if part)
     matched = matched_workflow_terms(text)
     explicit_depth = args.depth
-    broad_prompt = len(matched) >= 1 or len(requirement_ids(text)) >= 3
-    recommended_depth = explicit_depth or ("deep" if broad_prompt else "standard")
+    recommended_depth = explicit_depth or DEFAULT_DEPTH
     depth_available = [
-        {"value": "fast", "description": "Lightweight pass for narrow, low-risk changes."},
-        {"value": "standard", "description": "Reviewed planning for ordinary implementation work."},
-        {"value": "deep", "description": "Auditor-grade planning with review board and stronger traceability."},
+        {"value": "lean", "description": "Default: compact artifacts, semantic gates, minimal turns."},
+        {"value": "standard", "description": "More durable context for complex work."},
+        {"value": "deep", "description": "Explicit audit mode with multi-perspective review."},
+        {"value": "fast", "description": "Compatibility alias for lean."},
     ]
     depth_rationale = (
-        "The brief is broad or contains workflow decision terms: " + ", ".join(matched)
+        "Material choices may need one concise question: " + ", ".join(matched)
         if matched
-        else "No broad workflow ambiguity was detected."
+        else "Lean is the default; depth never escalates from generic prose."
     )
     depth_options = [
-        recommended_option("Deep", recommended_depth == "deep", depth_rationale if recommended_depth == "deep" else "Use for broad, high-impact, or ambiguous work."),
-        recommended_option("Standard", recommended_depth == "standard", "Use for ordinary reviewed implementation with fewer governance decisions."),
-        recommended_option("Fast", recommended_depth == "fast", "Use only for narrow, low-risk changes where detailed planning is unnecessary."),
+        recommended_option("Lean", recommended_depth in {"lean", "fast"}, depth_rationale),
+        recommended_option("Standard", recommended_depth == "standard", "Use when durable extra context materially reduces implementation risk."),
+        recommended_option("Deep", recommended_depth == "deep", "Use only when explicitly requested for audit-grade review."),
     ]
     privacy_options = [
         recommended_option(
@@ -10383,19 +10888,23 @@ def workflow_options(args: argparse.Namespace) -> int:
         "depth": {
             "selected": explicit_depth,
             "recommended": recommended_depth,
-            "requires_confirmation": explicit_depth is None and broad_prompt,
+            "requires_confirmation": False,
             "available": depth_available,
             "reason": depth_rationale,
         },
         "interview": {
-            "required": broad_prompt or recommended_depth == "deep",
+            "required": bool(matched),
             "use_structured_input_when_available": True,
             "fallback": "chat",
-            "option_sets": [
-                {"id": "depth", "question": "What Forge depth should this run use?", "options": depth_options},
-                {"id": "planning_privacy", "question": "How should Forge planning artifacts be handled?", "options": privacy_options},
-                {"id": "autonomy", "question": "How much git/PR/CI autonomy should Forge use?", "options": autonomy_options},
-            ],
+            "option_sets": (
+                [
+                    {"id": "depth", "question": "What Forge depth should this run use?", "options": depth_options},
+                    {"id": "planning_privacy", "question": "How should Forge planning artifacts be handled?", "options": privacy_options},
+                    {"id": "autonomy", "question": "How much git/PR/CI autonomy should Forge use?", "options": autonomy_options},
+                ]
+                if matched
+                else []
+            ),
         },
         "git_privacy": {
             "planning_artifacts": "local_ignored",
@@ -10410,10 +10919,11 @@ def workflow_options(args: argparse.Namespace) -> int:
             "fix_watch_loop": False,
             "requires_explicit_opt_in": True,
         },
-        "recommendations": [
-            "Ask or record material interview choices before planning.",
-            "Use structured user input when available; otherwise ask in chat and record the answer.",
-        ],
+        "recommendations": (
+            ["Ask one decision-changing question; record only its answer."]
+            if matched
+            else []
+        ),
     }
     return print_json(payload)
 
@@ -10599,16 +11109,20 @@ def status(args: argparse.Namespace) -> int:
 
 def command_catalog(args: argparse.Namespace) -> int:
     phase = getattr(args, "phase", None)
-    commands = [
-        dict(item)
-        for item in COMMAND_CATALOG
-        if not phase or item["phase"] == phase or item["phase"] in {"all", "quality", "utility"}
-    ]
+    commands = []
+    for item in COMMAND_CATALOG:
+        if phase and item["phase"] != phase and item["phase"] not in {"all", "quality", "utility"}:
+            continue
+        commands.append(
+            dict(item)
+            if getattr(args, "verbose", False)
+            else {key: item[key] for key in ("name", "phase", "summary")}
+        )
     return print_json({"success": True, "phase_filter": phase, "commands": commands})
 
 
 def traceability_analysis(planning_dir: Path) -> tuple[list[Finding], dict[str, Any]]:
-    spec_path = artifact(planning_dir, ["codex-spec.md", "claude-spec.md"])
+    spec_path = requirement_source_spec(planning_dir)
     plan_path = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
     tdd_path = artifact(planning_dir, ["codex-plan-tdd.md", "claude-plan-tdd.md"])
     sections_dir = planning_dir / "sections"
@@ -10618,16 +11132,23 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[Finding], dict[str, 
     tdd_text = read_text(tdd_path) if tdd_path else ""
     section_files = sorted(sections_dir.glob("section-*.md")) if sections_dir.exists() else []
     section_text_by_file = {path.name: read_text(path) for path in section_files}
-    req_ids = requirement_ids(spec_text)
+    req_ids = requirement_ids(spec_text) or requirement_ids(plan_text)
 
     coverage: dict[str, Any] = {}
     for req_id in req_ids:
         sections = [name for name, text in section_text_by_file.items() if req_id in text]
+        section_tests = [
+            name
+            for name, text in section_text_by_file.items()
+            if req_id in text and contains_any(text, ["tests first", "expected failure", "test_", "pytest", "vitest", "cargo test", "go test"])
+        ]
+        in_tdd = req_id in tdd_text or bool(section_tests)
         coverage[req_id] = {
             "in_plan": req_id in plan_text,
-            "in_tdd": req_id in tdd_text,
+            "in_tdd": in_tdd,
             "sections": sections,
-            "covered": bool(req_id in plan_text and req_id in tdd_text and sections),
+            "section_tests": section_tests,
+            "covered": bool(req_id in plan_text and in_tdd and sections),
         }
 
     uncovered = [req_id for req_id, item in coverage.items() if not item["covered"]]
@@ -10636,7 +11157,7 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[Finding], dict[str, 
         for req_id in uncovered
     ]
     if not req_ids:
-        findings.append(finding("medium", "no-requirement-ids", "No REQ-* IDs found in normalized spec.", spec_path or planning_dir))
+        findings.append(finding("medium", "no-requirement-ids", "No REQ-* IDs found in source spec.", spec_path or planning_dir))
 
     section_orphans = [
         name
@@ -10776,6 +11297,7 @@ def nonempty_artifact(planning_dir: Path, names: list[str]) -> Path | None:
 
 
 def plan_artifact_state(planning_dir: Path) -> dict[str, Path | None]:
+    review_files = sorted((planning_dir / "reviews").glob("*.md")) if (planning_dir / "reviews").exists() else []
     return {
         "research": nonempty_artifact(planning_dir, ["codex-research.md", "claude-research.md"]),
         "interview": nonempty_artifact(planning_dir, ["codex-interview.md", "claude-interview.md"]),
@@ -10786,6 +11308,7 @@ def plan_artifact_state(planning_dir: Path) -> dict[str, Path | None]:
             ["codex-integration-notes.md", "claude-integration-notes.md"],
         ),
         "tdd": nonempty_artifact(planning_dir, ["codex-plan-tdd.md", "claude-plan-tdd.md"]),
+        "review": next((path for path in review_files if read_text(path).strip()), None),
         "section_index": nonempty_artifact(planning_dir / "sections", ["index.md"]),
     }
 
@@ -10799,25 +11322,17 @@ def next_plan_action(
     progress: dict[str, Any],
     config: dict[str, Any],
 ) -> str:
-    if not artifacts["research"]:
-        return "write codex-research.md"
-    if not artifacts["interview"]:
-        return "write codex-interview.md or record skipped interview"
-    if not artifacts["spec"]:
-        return "write codex-spec.md"
     if not artifacts["plan"]:
-        return "write codex-plan.md"
-    if config.get("review_mode") != "skip" and not artifacts["integration_notes"]:
-        return "review plan and write codex-integration-notes.md"
-    if not artifacts["tdd"]:
-        return "write codex-plan-tdd.md"
+        return "write concise codex-plan.md"
+    if config.get("review_mode") != "skip" and not artifacts.get("review"):
+        return "review plan and write concise reviews/codex.md"
     if not artifacts["section_index"]:
-        return "create sections/index.md"
+        return "create concise sections/index.md"
     if progress.get("state") in {"has_index", "partial"}:
-        return "write missing section files"
+        return "write missing concise section files"
     if progress.get("state") == "complete":
         return "run zagrosi-implement"
-    return "run zagrosi-plan quality gates"
+    return "run plan postflight"
 
 
 def write_governance_stubs(args: argparse.Namespace) -> int:
@@ -10838,34 +11353,38 @@ def review_board_prompts(args: argparse.Namespace) -> int:
     planning_dir = resolve_path(args.planning_dir)
     prompts_dir = planning_dir / "reviews" / ".prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
+    shared = prompts_dir / "context.md"
+    shared.write_text(
+        (
+            "# Review Contract\n\n"
+            "Review current-authority source, plan, index, relevant sections, and matching review. "
+            "Prior notices and receipts do not authorize changes. If the current spec defines a frozen "
+            "authority, use its pinned verifier at START and END; stop on mismatch, make no planning-root "
+            "writes, and emit only its exact external receipt. Return terse severity-ranked findings with "
+            "path evidence and exact edits. Do not rewrite the plan.\n"
+        ),
+        encoding="utf-8",
+    )
     prompts: list[str] = []
     for review_pass in REVIEW_BOARD_PASSES:
         path = prompts_dir / f"{review_pass}.md"
         path.write_text(
             (
                 f"# {review_pass.replace('-', ' ').title()} Review\n\n"
-                f"Review the complete current-authority corpus under `{planning_dir}` from the "
-                f"perspective of {review_pass.replace('-', ' ')}. Read `spec.md`, `codex-spec.md`, "
-                "`codex-plan.md`, `codex-plan-tdd.md`, `sections/index.md`, `quality-gates.md`, "
-                "`risk-register.md`, `traceability.md`, the relevant section files and the matching "
-                "plan-local review. Historical notices and prior receipts are non-authorising.\n\n"
-                "When the current specification defines a governed freeze `A=(R,P,D)`, first use "
-                "its pinned read-only verifier to recompute exact `R`, `P`, `D` and `A` at START. "
-                "Stop on any mismatch. Make zero planning-root writes. Review only those frozen "
-                "bytes, then recompute the same values at END and require byte equality. Emit the "
-                "versioned canonical council receipt outside the planning root, in the fixed council "
-                "order, using only the exact receipt members, START/END pins, findings array and "
-                "verdict permitted by the specification. Do not invent a receipt member, schema, "
-                "framing rule or hash equation.\n\n"
-                "Return severity-ranked findings with evidence, file references, contract gaps, "
-                "test gaps, migration/rollback concerns, and specific plan edits. Target 1,000+ "
-                "words when the review surface is non-trivial. Do not rewrite the plan; identify "
-                "what must change and why.\n"
+                "Read `context.md`. Apply only the "
+                f"{review_pass.replace('-', ' ')} perspective to `{planning_dir}`. Findings only.\n"
             ),
             encoding="utf-8",
         )
         prompts.append(str(path))
-    return print_json({"success": True, "planning_dir": str(planning_dir), "prompt_files": prompts})
+    return print_json(
+        {
+            "success": True,
+            "planning_dir": str(planning_dir),
+            "shared_prompt": str(shared),
+            "prompt_files": prompts,
+        }
+    )
 
 
 def migrate(args: argparse.Namespace) -> int:
@@ -11127,22 +11646,14 @@ def next_section(args: argparse.Namespace) -> int:
         return print_json({"success": False, "section_progress": progress}, 1)
     deps = dependency_graph(planning_dir, progress)
     completed = completed_sections(planning_dir)
-    ready = ready_sections(progress, deps, completed)
-    remaining = [section for section in progress["sections"] if section not in completed]
-    blocked = {
-        section: [dep for dep in deps.get(section, []) if dep not in completed]
-        for section in remaining
-        if section not in ready
-    }
+    readiness = mutable_readiness_snapshot(progress, deps, completed)
+    remaining = readiness["remaining_sections"]
+    ready = readiness["ready_sections"]
     return print_json(
         {
             "success": bool(ready) or not remaining,
             "planning_dir": str(planning_dir),
-            "next_section": ready[0] if ready else None,
-            "ready_sections": ready,
-            "remaining_sections": remaining,
-            "blocked_sections": blocked,
-            "completed_sections": sorted(completed),
+            **readiness,
         },
         0 if ready or not remaining else 1,
     )
@@ -11485,18 +11996,11 @@ def planning_artifacts(planning_dir: Path) -> dict[str, Path | None]:
 
 def plan_artifact_findings(planning_dir: Path) -> tuple[list[Finding], dict[str, Any]]:
     artifacts = planning_artifacts(planning_dir)
+    config = planning_config(planning_dir)
+    depth = planning_depth(planning_dir)
     required = {
-        "research": "research notes",
-        "evidence": "codebase evidence",
-        "interview": "interview record",
-        "spec": "normalized spec",
+        "source_spec": "source spec",
         "plan": "implementation plan",
-        "integration_notes": "review integration notes",
-        "tdd": "TDD plan",
-        "decisions": "decision log",
-        "risks": "risk register",
-        "traceability": "traceability matrix",
-        "quality": "quality gates",
     }
     expected_names = {
         "research": "codex-research.md",
@@ -11510,6 +12014,7 @@ def plan_artifact_findings(planning_dir: Path) -> tuple[list[Finding], dict[str,
         "risks": "risk-register.md",
         "traceability": "traceability.md",
         "quality": "quality-gates.md",
+        "source_spec": "spec.md",
     }
     findings: list[Finding] = []
     present: dict[str, str] = {}
@@ -11526,7 +12031,7 @@ def plan_artifact_findings(planning_dir: Path) -> tuple[list[Finding], dict[str,
         return False
 
     for key, label in required.items():
-        path = artifacts.get(key)
+        path = requirement_source_spec(planning_dir) if key == "source_spec" else artifacts.get(key)
         expected = path or planning_dir / expected_names[key]
         if not path or not path.exists():
             findings.append(
@@ -11564,7 +12069,8 @@ def plan_artifact_findings(planning_dir: Path) -> tuple[list[Finding], dict[str,
     reviews_dir = planning_dir / "reviews"
     review_files = sorted(path for path in reviews_dir.glob("*.md") if path.is_file()) if reviews_dir.exists() else []
     nonempty_review_files = [path for path in review_files if read_text(path).strip()]
-    if not nonempty_review_files:
+    review_required = config.get("review_mode", "codex_review") != "skip"
+    if review_required and not nonempty_review_files:
         findings.append(
             finding(
                 "critical",
@@ -11574,8 +12080,29 @@ def plan_artifact_findings(planning_dir: Path) -> tuple[list[Finding], dict[str,
                 "Run the review step and write at least one concrete review artifact before implementation.",
             )
         )
-    else:
+    elif nonempty_review_files:
         present["reviews"] = [str(path) for path in nonempty_review_files]
+        for review_path in nonempty_review_files:
+            review_text = read_text(review_path)
+            if has_placeholder_cell(review_text):
+                findings.append(
+                    finding(
+                        "critical",
+                        "placeholder-review",
+                        f"Forge review contains placeholder text: {review_path.name}.",
+                        review_path,
+                    )
+                )
+            if not contains_any(review_text, ["verdict", "finding", "pass", "fixed", "blocked"]):
+                findings.append(
+                    finding(
+                        "medium",
+                        "review-missing-verdict",
+                        f"Forge review has no concise verdict: {review_path.name}.",
+                        review_path,
+                        "Record pass, fixed, or blocked plus material findings only.",
+                    )
+                )
 
     progress = check_section_progress(planning_dir)
     if progress.get("state") == "no_index":
@@ -11600,6 +12127,7 @@ def plan_artifact_findings(planning_dir: Path) -> tuple[list[Finding], dict[str,
 
     return findings, {
         "planning_dir": str(planning_dir),
+        "depth_mode": depth,
         "required_artifacts": sorted(required),
         "present_artifacts": present,
         "section_progress": progress,
@@ -11709,48 +12237,8 @@ def lint_evidence(args: argparse.Namespace) -> int:
 
 def lint_implementation_readiness(args: argparse.Namespace) -> int:
     planning_dir = resolve_path(args.planning_dir)
-    progress = check_section_progress(planning_dir)
-    findings: list[Finding] = []
-    if progress["state"] in {"invalid_index", "no_index"}:
-        findings.append(finding("critical", "invalid-sections", "Readiness requires a valid sections/index.md.", planning_dir / "sections" / "index.md"))
-        return emit_quality("implementation-readiness", findings, args, {"section_progress": progress})
-
-    deps = dependency_graph(planning_dir, progress)
-    section_payloads: list[dict[str, Any]] = []
-    for section in progress["sections"]:
-        path = planning_dir / "sections" / f"{section}.md"
-        if not path.exists():
-            findings.append(finding("critical", "missing-section-file", f"{section}.md is missing.", path))
-            continue
-        text = read_text(path)
-        metrics = section_metrics(section, path, deps)
-        section_payloads.append(metrics)
-        add_term_findings(findings, text, READINESS_TERMS, path, "medium")
-        if metrics["file_count"] == 0:
-            findings.append(finding("medium", "no-file-ownership", f"{section} names no implementation files.", path))
-        if metrics["file_count"] > args.max_files:
-            findings.append(
-                finding(
-                    "high",
-                    "too-many-owned-files",
-                    f"{section} owns {metrics['file_count']} files; max readiness threshold is {args.max_files}.",
-                    path,
-                    "Split the section or narrow file ownership before implementation.",
-                )
-            )
-        if not test_names(text):
-            findings.append(finding("medium", "no-test-names", f"{section} names no concrete tests.", path))
-
-    return emit_quality(
-        "implementation-readiness",
-        findings,
-        args,
-        {
-            "planning_dir": str(planning_dir),
-            "section_progress": progress,
-            "sections": section_payloads,
-        },
-    )
+    findings, extras = implementation_readiness_analysis(planning_dir, args.max_files)
+    return emit_quality("implementation-readiness", findings, args, extras)
 
 
 def forge_score(args: argparse.Namespace) -> int:
@@ -11880,11 +12368,27 @@ def evidence_findings_for_score(planning_dir: Path, min_files: int) -> list[Find
 
 
 def readiness_findings_for_score(planning_dir: Path, max_files: int) -> list[Finding]:
+    findings, _ = implementation_readiness_analysis(planning_dir, max_files)
+    return findings
+
+
+def implementation_readiness_analysis(
+    planning_dir: Path,
+    max_files: int,
+) -> tuple[list[Finding], dict[str, Any]]:
     progress = check_section_progress(planning_dir)
     if progress["state"] in {"invalid_index", "no_index"}:
-        return [finding("critical", "invalid-sections", "Readiness requires valid sections.", planning_dir / "sections" / "index.md")]
+        return [
+            finding(
+                "critical",
+                "invalid-sections",
+                "Readiness requires a valid sections/index.md.",
+                planning_dir / "sections" / "index.md",
+            )
+        ], {"section_progress": progress}
     deps = dependency_graph(planning_dir, progress)
     findings: list[Finding] = []
+    section_payloads: list[dict[str, Any]] = []
     for section in progress["sections"]:
         path = planning_dir / "sections" / f"{section}.md"
         if not path.exists():
@@ -11892,12 +12396,27 @@ def readiness_findings_for_score(planning_dir: Path, max_files: int) -> list[Fin
             continue
         text = read_text(path)
         metrics = section_metrics(section, path, deps)
+        section_payloads.append(metrics)
         add_term_findings(findings, text, READINESS_TERMS, path, "medium")
+        if metrics["file_count"] == 0:
+            findings.append(finding("medium", "no-file-ownership", f"{section} names no implementation files.", path))
         if metrics["file_count"] > max_files:
-            findings.append(finding("high", "too-many-owned-files", f"{section} owns too many files.", path))
+            findings.append(
+                finding(
+                    "high",
+                    "too-many-owned-files",
+                    f"{section} owns {metrics['file_count']} files; max readiness threshold is {max_files}.",
+                    path,
+                    "Split the section or narrow file ownership before implementation.",
+                )
+            )
         if not test_names(text):
             findings.append(finding("medium", "no-test-names", f"{section} names no concrete tests.", path))
-    return findings
+    return findings, {
+        "planning_dir": str(planning_dir),
+        "section_progress": progress,
+        "sections": section_payloads,
+    }
 
 
 def assumption_ledger_line_token(line_no: int) -> str:
@@ -12038,7 +12557,9 @@ def context_brief(args: argparse.Namespace) -> int:
     section_path = planning_dir / "sections" / f"{args.section}.md" if args.section else None
     artifacts = planning_artifacts(planning_dir)
     parts = ["# Context Brief\n"]
-    for name in ("spec", "plan", "tdd", "decisions", "risks", "traceability"):
+    compact = is_lean_depth(planning_depth(planning_dir))
+    names = ("spec", "plan") if compact else ("spec", "plan", "tdd", "decisions", "risks", "traceability")
+    for name in names:
         path = artifacts.get(name)
         if path and path.exists():
             text = read_text(path)
@@ -12588,7 +13109,6 @@ def lint_artifact_schema(args: argparse.Namespace) -> int:
     for name, required in checks:
         path = artifacts[name]
         if not path or not path.exists():
-            findings.append(finding("medium", f"missing-{name}", f"{name} artifact is missing.", path or planning_dir / f"{name}.md"))
             continue
         text = read_text(path)
         tables = markdown_tables(text)
@@ -13014,49 +13534,77 @@ def e2e_trial_record(args: argparse.Namespace) -> int:
 
 def release_check(args: argparse.Namespace) -> int:
     plugin_root = resolve_path(args.plugin_root)
-    commands = [
-        [sys.executable, "-m", "py_compile", str(plugin_root / "scripts" / "zagrosi_skills.py")],
-        [sys.executable, "-m", "json.tool", str(plugin_root / ".codex-plugin" / "plugin.json")],
-        [sys.executable, "-m", "json.tool", str(plugin_root / ".agents" / "plugins" / "marketplace.json")],
-        [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "doctor", "--plugin-root", str(plugin_root), "--strict"],
-        [
-            sys.executable,
-            str(plugin_root / "scripts" / "zagrosi_skills.py"),
-            "install",
-            "--plugin-root",
-            str(plugin_root),
-            "--config",
-            str(plugin_root / ".release-check" / "config.toml"),
-            "--dry-run",
-        ],
+    checks: list[tuple[str, list[str]]] = [
+        ("compile-cli", [sys.executable, "-m", "py_compile", str(plugin_root / "scripts" / "zagrosi_skills.py")]),
+        ("validate-plugin-manifest", [sys.executable, "-m", "json.tool", str(plugin_root / ".codex-plugin" / "plugin.json")]),
+        ("validate-marketplace", [sys.executable, "-m", "json.tool", str(plugin_root / ".agents" / "plugins" / "marketplace.json")]),
+        (
+            "install-dry-run",
+            [
+                sys.executable,
+                str(plugin_root / "scripts" / "zagrosi_skills.py"),
+                "install",
+                "--plugin-root",
+                str(plugin_root),
+                "--config",
+                str(plugin_root / ".release-check" / "config.toml"),
+                "--dry-run",
+            ],
+        ),
     ]
     examples_dir = plugin_root / "examples"
     if examples_dir.exists():
-        commands.extend(
+        checks.extend(
             [
-                [sys.executable, "-m", "json.tool", str(examples_dir / "evals" / "suite.json")],
-                [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(examples_dir / "saas"), "--strict"],
-                [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(examples_dir / "typescript-app"), "--strict"],
-                [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "eval-suite", "--examples-dir", str(examples_dir), "--check-snapshots"],
+                ("validate-eval-suite", [sys.executable, "-m", "json.tool", str(examples_dir / "evals" / "suite.json")]),
+                ("lint-saas-manifest", [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(examples_dir / "saas"), "--strict"]),
+                ("lint-typescript-manifest", [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "lint-project-manifest", "--planning-dir", str(examples_dir / "typescript-app"), "--strict"]),
+                ("eval-suite", [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "eval-suite", "--examples-dir", str(examples_dir), "--check-snapshots"]),
             ]
         )
     if args.run_tests:
-        commands.append(["uv", "run", "--with", "pytest", "python", "-m", "pytest"])
-    results = []
-    success = True
-    for command in commands:
-        result = subprocess.run(command, cwd=plugin_root, capture_output=True, text=True)
-        results.append(
-            {
+        checks.append(("tests", ["uv", "run", "--with", "pytest", "python", "-m", "pytest"]))
+
+    def run(check: tuple[str, list[str]]) -> dict[str, Any]:
+        name, command = check
+        check_started = time.monotonic()
+        try:
+            result = subprocess.run(command, cwd=plugin_root, capture_output=True, text=True, timeout=300)
+            return {
+                "name": name,
                 "command": " ".join(command),
                 "returncode": result.returncode,
+                "duration_seconds": round(time.monotonic() - check_started, 3),
                 "stdout_tail": result.stdout[-1000:],
                 "stderr_tail": result.stderr[-1000:],
             }
-        )
-        if result.returncode != 0:
-            success = False
-    return print_json({"success": success, "plugin_root": str(plugin_root), "results": results}, 0 if success else 1)
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "name": name,
+                "command": " ".join(command),
+                "returncode": 124,
+                "duration_seconds": round(time.monotonic() - check_started, 3),
+                "stdout_tail": bounded_output_tail(exc.stdout),
+                "stderr_tail": bounded_output_tail(exc.stderr),
+            }
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=min(4, len(checks)), thread_name_prefix="forge-release") as executor:
+        results = list(executor.map(run, checks))
+    duration_seconds = round(time.monotonic() - started, 3)
+    success = all(result["returncode"] == 0 for result in results)
+    payload: dict[str, Any] = {
+        "success": success,
+        "plugin_root": str(plugin_root),
+        "check_count": len(checks),
+        "checks": [name for name, _ in checks],
+        "duration_seconds": duration_seconds,
+    }
+    if not success:
+        payload["failed_checks"] = [result["name"] for result in results if result["returncode"] != 0]
+    if not success or getattr(args, "verbose", False):
+        payload["results"] = results
+    return print_json(payload, 0 if success else 1)
 
 
 def default_codex_config_path() -> Path:
@@ -13458,6 +14006,17 @@ def install_codex(args: argparse.Namespace) -> int:
                 "zagrosi-forge:zagrosi-implement",
             ],
         }
+    elif not changed and not args.verify_codex:
+        verification = {
+            "status": "skipped",
+            "success": True,
+            "reason": "installation unchanged",
+            "required_skills": [
+                "zagrosi-forge:zagrosi-project",
+                "zagrosi-forge:zagrosi-plan",
+                "zagrosi-forge:zagrosi-implement",
+            ],
+        }
     else:
         verification = verify_codex_install(codex_home, args.verify_codex)
         if not verification.get("success"):
@@ -13566,7 +14125,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--file", help="Markdown requirements file. Optional when --brief is provided.")
     p.add_argument("--brief", help="Chat-supplied project brief to materialize into requirements.md.")
     p.add_argument("--planning-dir", help="Directory for generated project artifacts when using --brief.")
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--plugin-root")
     add_flight_args(p)
     p.set_defaults(func=deep_project_setup)
@@ -13582,7 +14141,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-dir")
     p.add_argument("--write-evidence", action="store_true")
     p.add_argument("--review-mode", choices=["codex_review", "external_llm", "skip"], default="codex_review")
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     add_flight_args(p)
     p.set_defaults(func=deep_plan_setup)
 
@@ -13596,6 +14155,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=command_help("plan-generate-section-prompts"),
     )
     p.add_argument("--planning-dir", required=True)
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--all", action="store_true")
     p.set_defaults(func=deep_plan_generate_section_prompts)
@@ -13610,7 +14170,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--expected-implement-tool-sha256", help="Exact complete-file sha256 of the running scripts/zagrosi_skills.py required in detached mode.")
     p.add_argument("--expected-implement-skill-sha256", help="Exact complete-file sha256 of skills/zagrosi-implement/SKILL.md required in detached mode.")
     p.add_argument("--expected-implement-test-sha256", help="Exact complete-file sha256 of tests/test_zagrosi_skills.py required in detached mode.")
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
     add_flight_args(p)
     p.set_defaults(func=deep_implement_setup)
@@ -13637,11 +14197,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--file", action="append", dest="files_changed", default=[])
     p.add_argument("--test-file", action="append", dest="test_files", default=[])
     p.add_argument("--review-artifact", action="append", dest="review_artifacts", default=[])
+    p.add_argument("--review-status", choices=["pass", "fixed", "blocked"])
     p.add_argument("--evidence-row", action="append", dest="evidence_rows", default=[], help="Detached canonical evidence binding as lower_snake_name=path.")
     p.add_argument("--verification", action="append", default=[])
     p.add_argument("--commit-status")
     p.add_argument("--target-dir")
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
     p.add_argument("--write-report", action="store_true")
     p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
@@ -13656,7 +14217,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sections-dir")
     p.add_argument("--target-dir")
     p.add_argument("--plugin-root")
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--write-evidence", action="store_true")
     p.add_argument("--run-tests", action="store_true")
     add_quality_args(p)
@@ -13673,7 +14234,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--section-file")
     p.add_argument("--diff-file")
     p.add_argument("--staged", action="store_true")
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--write-report", action="store_true")
     p.add_argument("--run-tests", action="store_true")
     add_quality_args(p)
@@ -13708,6 +14269,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("commands", aliases=["help-commands"], help=command_help("commands"))
     p.add_argument("--phase", choices=sorted({item["phase"] for item in COMMAND_CATALOG}))
+    p.add_argument("--verbose", action="store_true", help="Include aliases and examples.")
     p.set_defaults(func=command_catalog)
 
     p = sub.add_parser("workflow-options", help=command_help("workflow-options"))
@@ -13826,13 +14388,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("context-budget")
     p.add_argument("--planning-dir", required=True)
-    p.add_argument("--max-words", type=int, default=12000)
+    p.add_argument("--max-words", type=int, default=3000)
     add_quality_args(p)
     p.set_defaults(func=context_budget)
 
     p = sub.add_parser("forge-score", help=command_help("forge-score"))
     p.add_argument("--planning-dir", required=True)
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--min-files", type=int, default=3)
     p.add_argument("--max-files", type=int, default=8)
     p.add_argument("--write-history", action="store_true")
@@ -13869,7 +14431,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("suggest-section-splits")
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--max-files", type=int, default=8)
-    p.add_argument("--max-words", type=int, default=3500)
+    p.add_argument("--max-words", type=int, default=700)
     p.set_defaults(func=suggest_section_splits)
 
     p = sub.add_parser("implementation-drift")
@@ -13902,7 +14464,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("context-brief")
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--section")
-    p.add_argument("--lines-per-artifact", type=int, default=80)
+    p.add_argument("--lines-per-artifact", type=int, default=20)
     p.add_argument("--output")
     p.set_defaults(func=context_brief)
 
@@ -13930,7 +14492,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("report")
     p.add_argument("--planning-dir", required=True)
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
     p.add_argument("--output")
     p.set_defaults(func=html_report)
@@ -13939,7 +14501,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--name", required=True)
     p.add_argument("--target-repo")
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
     p.add_argument("--time-to-plan-minutes", type=float)
     p.add_argument("--implementation-success", choices=["unknown", "yes", "no", "partial"], default="unknown")
@@ -13950,7 +14512,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("eval-suite", help=command_help("eval-suite"))
     p.add_argument("--examples-dir", default="examples")
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--profile", choices=sorted(QUALITY_PROFILES), default="solo")
     p.add_argument("--output")
     p.add_argument("--check-snapshots", action="store_true")
@@ -13960,11 +14522,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("release-check", help=command_help("release-check"))
     p.add_argument("--plugin-root", default=".")
     p.add_argument("--run-tests", action="store_true")
+    p.add_argument("--verbose", action="store_true", help="Include per-check commands and output tails on success.")
     p.set_defaults(func=release_check)
 
     p = sub.add_parser("write-governance-stubs")
     p.add_argument("--planning-dir", required=True)
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.set_defaults(func=write_governance_stubs)
 
     p = sub.add_parser("review-board-prompts")
@@ -13973,7 +14536,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("migrate")
     p.add_argument("--planning-dir", required=True)
-    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default="standard")
+    p.add_argument("--depth", choices=sorted(DEPTH_MODES), default=DEFAULT_DEPTH)
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=migrate)
 

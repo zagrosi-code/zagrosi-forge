@@ -1,12 +1,12 @@
 {
   "benchmarks": [
     {
-      "depth": "standard",
+      "depth": "lean",
       "name": "saas-authentication",
       "planning_dir": "../saas/01-authentication"
     },
     {
-      "depth": "standard",
+      "depth": "lean",
       "name": "typescript-auth-preferences",
       "planning_dir": "../typescript-app/01-auth"
     }
