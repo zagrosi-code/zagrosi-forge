@@ -25,6 +25,7 @@ IMPLEMENTATION_SOURCE_RELATIVE_PATHS = {
     "skill": Path("skills/zagrosi-implement/SKILL.md"),
     "test": Path("tests/test_zagrosi_skills.py"),
 }
+DETACHED_CONTRACT_RELATIVE_PATH = Path("skills/zagrosi-implement/references/detached-frozen.md")
 
 
 def run_cmd(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> dict:
@@ -1279,7 +1280,7 @@ def implementation_source_args(plugin_root: Path = ROOT, **overrides: str) -> tu
 
 def copy_implementation_plugin(destination: Path) -> Path:
     plugin_root = destination / "plugin"
-    for relative in IMPLEMENTATION_SOURCE_RELATIVE_PATHS.values():
+    for relative in (*IMPLEMENTATION_SOURCE_RELATIVE_PATHS.values(), DETACHED_CONTRACT_RELATIVE_PATH):
         target = plugin_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, target)
@@ -1636,7 +1637,11 @@ def test_project_setup_and_create_dirs(tmp_path: Path) -> None:
 
     setup = run_cmd("project-setup", "--file", str(req))
     assert setup["success"] is True
-    assert setup["resume_step"] == 1
+    assert setup["depth_mode"] == "lean"
+    assert setup["resume_step"] == 2
+    assert setup["resume_label"] == "split_analysis"
+    assert not (tmp_path / "zagrosi_project_interview.md").exists()
+    assert json.loads((tmp_path / ".zagrosi-project" / "session.json").read_text())["contract_version"] == "compact-v1"
     assert setup["preflight"]["phase"] == "project"
     assert setup["preflight"]["stage"] == "preflight"
 
@@ -1665,7 +1670,10 @@ def test_project_setup_from_chat_brief_materializes_requirements(tmp_path: Path)
     assert setup["input_mode"] == "chat"
     assert setup["initial_file"] == str(generated)
     assert setup["generated_requirements_file"] == str(generated)
-    assert setup["resume_step"] == 1
+    assert setup["depth_mode"] == "lean"
+    assert setup["resume_step"] == 2
+    assert setup["resume_label"] == "split_analysis"
+    assert not (tmp_path / "zagrosi_project_interview.md").exists()
     assert setup["preflight"]["input_mode"] == "chat"
     assert setup["preflight"]["gates"][0]["name"] == "chat-brief"
     assert generated.exists()
@@ -1688,11 +1696,15 @@ def test_plan_setup_sections_and_prompts(tmp_path: Path) -> None:
 
     setup = run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT))
     assert setup["success"] is True
-    assert setup["resume_step"] == 6
+    assert setup["depth_mode"] == "lean"
+    assert setup["resume_step"] == 11
+    assert setup["resume_label"] == "write_plan"
     assert setup["preflight"]["phase"] == "plan"
     assert (tmp_path / "zagrosi_plan_config.json").exists()
-    assert (tmp_path / "decisions.md").exists()
-    assert (tmp_path / "risk-register.md").exists()
+    assert not (tmp_path / "codex-research.md").exists()
+    assert not (tmp_path / "codex-interview.md").exists()
+    assert not (tmp_path / "decisions.md").exists()
+    assert not (tmp_path / "risk-register.md").exists()
 
     sections = tmp_path / "sections"
     sections.mkdir()
@@ -1782,38 +1794,23 @@ def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
     run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
 
     status = run_cmd("status", "--path", str(tmp_path))
-    assert "codex-research.md" in status["next_action"]
-
-    (tmp_path / "codex-research.md").write_text("# Research\n\nCurrent state verified with `rg` and `uv run pytest`.\n")
-    status = run_cmd("status", "--path", str(tmp_path))
-    assert "codex-interview.md" in status["next_action"]
-
-    (tmp_path / "codex-interview.md").write_text(
-        "interview_mode: skipped_with_reason\n"
-        "skip_reason: Fixture has enough detail to proceed.\n"
-    )
-    status = run_cmd("status", "--path", str(tmp_path))
-    assert "codex-spec.md" in status["next_action"]
-
-    (tmp_path / "codex-spec.md").write_text("# Spec\n\nREQ-001: Improve status.\n")
-    status = run_cmd("status", "--path", str(tmp_path))
-    assert "codex-plan.md" in status["next_action"]
+    assert status["next_action"] == "write concise codex-plan.md"
+    assert status["plan_artifacts"]["research"] is None
+    assert status["plan_artifacts"]["interview"] is None
 
     (tmp_path / "codex-plan.md").write_text("")
     status = run_cmd("status", "--path", str(tmp_path))
-    assert "codex-plan.md" in status["next_action"]
+    assert status["next_action"] == "write concise codex-plan.md"
 
     (tmp_path / "codex-plan.md").write_text("# Plan\n\nREQ-001 implementation plan.\n")
     status = run_cmd("status", "--path", str(tmp_path))
-    assert "review" in status["next_action"].lower()
+    assert status["next_action"] == "review plan and write concise reviews/codex.md"
 
-    (tmp_path / "codex-integration-notes.md").write_text("# Review Integration\n\nAccepted review items.\n")
+    reviews = tmp_path / "reviews"
+    reviews.mkdir()
+    (reviews / "codex.md").write_text("# Review\n\nPASS: no material findings.\n")
     status = run_cmd("status", "--path", str(tmp_path))
-    assert "codex-plan-tdd.md" in status["next_action"]
-
-    (tmp_path / "codex-plan-tdd.md").write_text("# TDD\n\n`test_status_reports_plan_artifact_sequence` fails first.\n")
-    status = run_cmd("status", "--path", str(tmp_path))
-    assert "sections/index.md" in status["next_action"]
+    assert status["next_action"] == "create concise sections/index.md"
 
     sections = tmp_path / "sections"
     sections.mkdir()
@@ -1828,7 +1825,13 @@ def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
         "# Sections\n"
     )
     status = run_cmd("status", "--path", str(tmp_path))
-    assert "section files" in status["next_action"]
+    assert status["next_action"] == "write missing concise section files"
+
+    (sections / "section-01-status.md").write_text(
+        "# section-01-status\n\nREQ-001 tests first; implement, verify, accept, and rollback.\n"
+    )
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert status["next_action"] == "run zagrosi-implement"
 
 
 def test_status_exposes_plan_artifact_state(tmp_path: Path) -> None:
@@ -1858,8 +1861,15 @@ def test_commands_catalog_outputs_grouped_json_and_pretty_text() -> None:
         entry = by_name[name]
         assert entry["phase"]
         assert entry["summary"]
-        assert isinstance(entry["aliases"], list)
-        assert entry["examples"]
+        assert "aliases" not in entry
+        assert "examples" not in entry
+    assert len(json.dumps(catalog)) < 4000
+
+    verbose = run_cmd("commands", "--verbose")
+    verbose_by_name = {entry["name"]: entry for entry in verbose["commands"]}
+    for name in required:
+        assert isinstance(verbose_by_name[name]["aliases"], list)
+        assert verbose_by_name[name]["examples"]
 
     plan_catalog = run_cmd("commands", "--phase", "plan")
     assert plan_catalog["commands"]
@@ -1872,7 +1882,7 @@ def test_commands_catalog_outputs_grouped_json_and_pretty_text() -> None:
 
 
 def test_command_catalog_matches_parser_aliases() -> None:
-    catalog = run_cmd("commands")
+    catalog = run_cmd("commands", "--verbose")
     entries = catalog["commands"]
     names = {entry["name"] for entry in entries}
     aliases = {alias for entry in entries for alias in entry["aliases"]}
@@ -1956,7 +1966,12 @@ def test_implement_setup_and_record(tmp_path: Path) -> None:
         "section-01-foundation\n"
         "END_MANIFEST -->\n"
     )
-    (sections / "section-01-foundation.md").write_text("# Section\n\nTests first.\n")
+    (sections / "section-01-foundation.md").write_text(
+        "# Section\n\n"
+        "REQ-001: Goal and dependencies: none. Tests first in `tests/test_zagrosi_skills.py`; "
+        "implementation modifies `scripts/zagrosi_skills.py`. Acceptance uses verification; "
+        "risks use rollback.\n"
+    )
     write_required_plan_artifacts(tmp_path)
 
     setup = run_cmd(
@@ -1979,9 +1994,13 @@ def test_implement_setup_and_record(tmp_path: Path) -> None:
         "section-01-foundation",
         "--commit",
         "abc123",
+        "--review-status",
+        "pass",
+        "--verification",
+        "pytest -q",
     )
     assert record["success"] is True
-    assert record["postflight"]["phase"] == "implement"
+    assert "postflight" not in record
     state = json.loads((tmp_path / "implementation" / "zagrosi_implement_state.json").read_text())
     assert state["completed_sections"]["section-01-foundation"]["commit"] == "abc123"
 
@@ -1993,6 +2012,7 @@ def test_implement_setup_and_record(tmp_path: Path) -> None:
 def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) -> None:
     sections = tmp_path / "sections"
     sections.mkdir()
+    (tmp_path / "zagrosi_plan_config.json").write_text('{"depth_mode":"standard"}\n')
     (tmp_path / "codex-spec.md").write_text("# Spec\n\nREQ-001: Implement status.\nREQ-002: Document status.\n")
     (tmp_path / "codex-plan.md").write_text("# Plan\n\nREQ-001 in `scripts/tool.py`.\nREQ-002 in `README.md`.\n")
     (tmp_path / "codex-plan-tdd.md").write_text(
@@ -2046,6 +2066,7 @@ def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) 
 
 def test_implement_record_section_stores_evidence_and_refreshes_traceability(tmp_path: Path) -> None:
     sections = write_single_section_fixture(tmp_path)
+    (tmp_path / "zagrosi_plan_config.json").write_text('{"depth_mode":"standard"}\n')
     (tmp_path / "implementation" / "code_review" / "section-01-foundation-decisions.md").write_text(
         "# Decisions\n\nAccepted implementation evidence and traceability updates.\n"
     )
@@ -2121,6 +2142,7 @@ def test_traceability_handles_legacy_implementation_records(tmp_path: Path) -> N
 
 def test_implementation_state_requires_review_decisions(tmp_path: Path) -> None:
     sections = write_single_section_fixture(tmp_path)
+    (tmp_path / "zagrosi_plan_config.json").write_text('{"depth_mode":"standard"}\n')
     run_cmd(
         "implement-record-section",
         "--sections-dir",
@@ -2154,7 +2176,7 @@ def test_implementation_state_requires_review_decisions(tmp_path: Path) -> None:
     assert passed["success"] is True
 
 
-def test_implement_setup_blocks_incomplete_forge_process_even_with_flight_off(tmp_path: Path) -> None:
+def test_implement_setup_blocks_missing_core_plan_artifacts_even_with_flight_off(tmp_path: Path) -> None:
     sections = tmp_path / "sections"
     sections.mkdir()
     (tmp_path / "spec.md").write_text("# Fix Forge\n\nREQ-001: Fix workflow shortcuts.\n")
@@ -2203,9 +2225,9 @@ def test_implement_setup_blocks_incomplete_forge_process_even_with_flight_off(tm
     assert payload["success"] is False
     assert payload["gate"] == "plan-artifacts"
     codes = {item["code"] for item in payload["findings"]}
-    assert "missing-research" in codes
-    assert "missing-plan" in codes
-    assert "placeholder-decisions" in codes
+    assert {"missing-plan", "missing-review"} <= codes
+    assert "missing-research" not in codes
+    assert "placeholder-decisions" not in codes
 
 
 def test_detached_implementation_mode_uses_dependency_ready_order_and_preserves_planning_bytes(tmp_path: Path) -> None:
@@ -5899,6 +5921,49 @@ def test_detached_setup_requires_all_implementation_source_hashes_and_rejects_wr
     assert planning_tree_snapshot(planning) == expected_planning
 
 
+def test_detached_contract_reference_is_transitively_tool_pinned(tmp_path: Path) -> None:
+    module = load_zagrosi_module()
+    contract = ROOT / DETACHED_CONTRACT_RELATIVE_PATH
+    assert file_sha256(contract) == module.DETACHED_CONTRACT_SHA256
+    assert module.DETACHED_CONTRACT_SHA256.removeprefix("sha256:") in (
+        ROOT / IMPLEMENTATION_SOURCE_RELATIVE_PATHS["skill"]
+    ).read_text()
+
+    planning = tmp_path / "planning"
+    sections = write_non_topological_section_fixture(planning)
+    target = tmp_path / "target"
+    target.mkdir()
+    admission_pinner = write_test_admission_pinner(tmp_path / "admission-pinner.json")
+    plugin_root = copy_implementation_plugin(tmp_path / "tampered-contract")
+    copied_contract = plugin_root / DETACHED_CONTRACT_RELATIVE_PATH
+    copied_contract.write_text(copied_contract.read_text() + "\nTampered.\n")
+    implementation_root = tmp_path / "detached-implementation"
+
+    result = run_script_raw(
+        plugin_root / IMPLEMENTATION_SOURCE_RELATIVE_PATHS["tool"],
+        "implement-setup",
+        "--sections-dir",
+        str(sections),
+        "--target-dir",
+        str(target),
+        "--implementation-root",
+        str(implementation_root),
+        "--admission-pinner",
+        str(admission_pinner),
+        "--expected-admission-pinner-sha256",
+        file_sha256(admission_pinner),
+        *implementation_source_args(plugin_root),
+        "--flight",
+        "off",
+    )
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["error_code"] == "implement-contract-drift"
+    assert payload["implement_source"] == "contract"
+    assert not implementation_root.exists()
+
+
 def test_detached_setup_rejects_missing_symlinked_and_hardlinked_implementation_sources(tmp_path: Path) -> None:
     planning = tmp_path / "planning"
     sections = write_non_topological_section_fixture(planning)
@@ -7088,7 +7153,7 @@ def test_quality_gates_traceability_and_status(tmp_path: Path) -> None:
         "--planning-dir",
         str(planning),
         "--depth",
-        "fast",
+        "standard",
         "--profile",
         "enterprise",
         "--strict",
@@ -7099,7 +7164,7 @@ def test_quality_gates_traceability_and_status(tmp_path: Path) -> None:
     assert plan["score"] == 100
     assert export_path.exists()
 
-    sections = run_cmd("lint-sections", "--planning-dir", str(planning), "--depth", "fast")
+    sections = run_cmd("lint-sections", "--planning-dir", str(planning), "--depth", "standard")
     assert sections["success"] is True
     assert sections["section_estimates"][0]["effort"] in {"small", "medium", "large"}
 
@@ -7137,12 +7202,12 @@ def test_quality_gates_traceability_and_status(tmp_path: Path) -> None:
     assert readiness["success"] is True
     assert readiness["sections"][0]["section"] == "section-01-auth"
 
-    score = run_cmd("forge-score", "--planning-dir", str(planning), "--depth", "fast")
+    score = run_cmd("forge-score", "--planning-dir", str(planning), "--depth", "standard")
     assert score["forge_score"] >= 90
     assert score["components"]["traceability"] == 100
 
-    first_history = run_cmd("forge-score", "--planning-dir", str(planning), "--depth", "fast", "--write-history")
-    second_history = run_cmd("forge-score", "--planning-dir", str(planning), "--depth", "fast", "--write-history")
+    first_history = run_cmd("forge-score", "--planning-dir", str(planning), "--depth", "standard", "--write-history")
+    second_history = run_cmd("forge-score", "--planning-dir", str(planning), "--depth", "standard", "--write-history")
     assert Path(first_history["history_path"]).exists()
     assert second_history["trend_delta"] == 0
 
@@ -7271,7 +7336,7 @@ def test_assumption_ledger_uses_canonical_typed_line_tokens_and_replays_determin
     assert re.search(r"(?<![0-9A-Za-z])211(?![0-9A-Za-z])", rows_json) is None
 
 
-def test_workflow_options_recommends_deep_and_interview_for_ambiguous_prompt() -> None:
+def test_workflow_options_defaults_to_lean_without_routine_interview() -> None:
     payload = run_cmd(
         "workflow-options",
         "--brief",
@@ -7279,9 +7344,10 @@ def test_workflow_options_recommends_deep_and_interview_for_ambiguous_prompt() -
     )
 
     assert payload["success"] is True
-    assert payload["depth"]["recommended"] == "deep"
-    assert payload["depth"]["requires_confirmation"] is True
-    assert payload["interview"]["required"] is True
+    assert payload["depth"]["recommended"] == "lean"
+    assert payload["depth"]["requires_confirmation"] is False
+    assert payload["interview"]["required"] is False
+    assert payload["interview"]["option_sets"] == []
     assert payload["interview"]["use_structured_input_when_available"] is True
     assert payload["interview"]["fallback"] == "chat"
     assert payload["autonomy"]["auto_commit"] is False
@@ -7291,11 +7357,11 @@ def test_workflow_options_recommends_deep_and_interview_for_ambiguous_prompt() -
 
 
 def test_workflow_options_respects_explicit_depth() -> None:
-    payload = run_cmd("workflow-options", "--brief", "small docs fix", "--depth", "fast")
+    payload = run_cmd("workflow-options", "--brief", "small docs fix", "--depth", "deep")
 
     assert payload["success"] is True
-    assert payload["depth"]["selected"] == "fast"
-    assert payload["depth"]["recommended"] == "fast"
+    assert payload["depth"]["selected"] == "deep"
+    assert payload["depth"]["recommended"] == "deep"
     assert payload["depth"]["requires_confirmation"] is False
 
 
@@ -7303,7 +7369,7 @@ def test_workflow_options_includes_recommended_interview_choices_with_rationale(
     payload = run_cmd(
         "workflow-options",
         "--brief",
-        "maybe use external review, web research, auto PR, whatever you recommend",
+        "TBD architecture tradeoff: external review, web research, or automatic PR",
     )
 
     option_sets = payload["interview"]["option_sets"]
@@ -7319,6 +7385,778 @@ def test_workflow_options_includes_recommended_interview_choices_with_rationale(
             option = recommended[0]
             assert option["recommended_label"].endswith("(Recommended)")
             assert option["rationale"]
+
+
+def write_lean_plan_fixture(planning_dir: Path) -> Path:
+    planning_dir.mkdir(parents=True, exist_ok=True)
+    source_spec = planning_dir / "spec.md"
+    source_spec.write_text(
+        "# Spec\n\n"
+        "REQ-001: Add compact Forge planning with semantic checks and bounded output.\n"
+    )
+    (planning_dir / "zagrosi_plan_config.json").write_text(
+        json.dumps(
+            {
+                "initial_file": str(source_spec),
+                "planning_dir": str(planning_dir),
+                "review_mode": "codex_review",
+                "depth_mode": "lean",
+                "workflow": "zagrosi-plan",
+            }
+        )
+    )
+    (planning_dir / "codex-plan.md").write_text(
+        '<!-- FORGE_META\n{"artifact_type":"implementation_plan","workflow":"zagrosi-plan",'
+        '"depth_mode":"lean","source":"spec.md","requirement_ids":["REQ-001"]}\nEND_FORGE_META -->\n\n'
+        "# Plan\n\n"
+        "Goal: REQ-001 makes Forge concise. Non-goal: weaken safety gates.\n\n"
+        "Current-state evidence: `scripts/zagrosi_skills.py` duplicates checks; "
+        "`tests/test_zagrosi_skills.py` covers CLI behavior.\n\n"
+        "Design and contract: add lean defaults in `scripts/zagrosi_skills.py`; retain explicit standard/deep modes. "
+        "Tests first: `test_workflow_options_defaults_to_lean_without_routine_interview`.\n\n"
+        "Risk/security: compact output could omit a required invariant. Mitigate with semantic lint, exact path ownership, "
+        "traceability, adversarial review, and final verification. Rollback: revert lean mode.\n\n"
+        "Acceptance: default setup selects lean; required tests pass.\n"
+    )
+    reviews = planning_dir / "reviews"
+    reviews.mkdir()
+    (reviews / "codex.md").write_text(
+        "# Review\n\nPASS — semantic checks, TDD, ownership, traceability, and rollback remain required.\n"
+    )
+    sections = planning_dir / "sections"
+    sections.mkdir()
+    (sections / "index.md").write_text(
+        "<!-- PROJECT_CONFIG\n"
+        "runtime: python-uv\n"
+        "test_command: uv run pytest tests/test_zagrosi_skills.py -q\n"
+        "END_PROJECT_CONFIG -->\n\n"
+        "<!-- SECTION_MANIFEST\n"
+        "section-01-lean-default\n"
+        "END_MANIFEST -->\n\n"
+        "Dependencies: none. Execution order: section-01-lean-default. Parallel: no.\n"
+    )
+    (sections / "section-01-lean-default.md").write_text(
+        "# section-01-lean-default\n\n"
+        "Goal: implement REQ-001. Dependencies: none.\n\n"
+        "## Exact Path Ownership\n\n"
+        "- `scripts/zagrosi_skills.py`\n"
+        "- `tests/test_zagrosi_skills.py`\n\n"
+        "## Tests First\n\n"
+        "Add `test_workflow_options_defaults_to_lean_without_routine_interview`; expected failure: default is standard/deep.\n\n"
+        "## Implementation\n\nModify default selection and compact artifact validation. Contract: explicit deep remains explicit.\n\n"
+        "## Risks And Rollback\n\nRisk: missing safety coverage. Keep semantic gates. Rollback: revert lean default.\n\n"
+        "## Acceptance And Verification\n\nREQ-001 done when `uv run pytest tests/test_zagrosi_skills.py -q` passes.\n"
+    )
+    return planning_dir
+
+
+def write_compact_project_fixture(planning_dir: Path) -> Path:
+    planning_dir.mkdir(parents=True, exist_ok=True)
+    (planning_dir / "requirements.md").write_text(
+        "# Requirements\n\nREQ-001: Add auth.\nREQ-002: Add billing.\n"
+    )
+    (planning_dir / "project-manifest.md").write_text(
+        '<!-- FORGE_META\n'
+        '{"artifact_type":"project_manifest","depth_mode":"lean","source":"requirements.md"}\n'
+        'END_FORGE_META -->\n\n'
+        '<!-- SPLIT_MANIFEST\n01-auth\n02-billing\nEND_MANIFEST -->\n\n'
+        "# Project Manifest\n\n"
+        "| Split | REQ | Depends on | Owns/boundary | Next command |\n"
+        "|---|---|---|---|---|\n"
+        "| 01-auth | REQ-001 | none | `src/auth.py` | `$zagrosi-plan 01-auth/spec.md` |\n"
+        "| 02-billing | REQ-002 | 01-auth | `src/billing.py` | `$zagrosi-plan 02-billing/spec.md` |\n\n"
+        "Execution order: 01-auth then 02-billing. Dependencies are listed above. "
+        "Parallel work is blocked by the dependency. Shared concerns: tests only.\n"
+    )
+    specs = {
+        "01-auth": ("REQ-001", "src/auth.py", "none"),
+        "02-billing": ("REQ-002", "src/billing.py", "01-auth"),
+    }
+    for split, (req_id, path, dependency) in specs.items():
+        split_dir = planning_dir / split
+        split_dir.mkdir()
+        (split_dir / "spec.md").write_text(
+            f"# {split}\n\nDependencies: {dependency}\nBoundary: `{path}`\n\n"
+            f"In scope: {req_id}. Out of scope: other splits. "
+            "Tests verify behavior. Risk: boundary drift. Acceptance criteria: done when tests pass.\n"
+        )
+    return planning_dir
+
+
+def test_successful_project_and_plan_postflights_have_compact_gate_records(tmp_path: Path) -> None:
+    project = write_compact_project_fixture(tmp_path / "project")
+    plan = write_lean_plan_fixture(tmp_path / "plan")
+
+    project_result = run_raw(
+        "postflight",
+        "--phase",
+        "project",
+        "--planning-dir",
+        str(project),
+        "--depth",
+        "lean",
+        "--flight",
+        "strict",
+    )
+    plan_result = run_raw(
+        "postflight",
+        "--phase",
+        "plan",
+        "--planning-dir",
+        str(plan),
+        "--depth",
+        "lean",
+        "--flight",
+        "strict",
+    )
+
+    assert project_result.returncode == 0, project_result.stderr + project_result.stdout
+    assert plan_result.returncode == 0, plan_result.stderr + plan_result.stdout
+    assert len(project_result.stdout.encode()) <= 700
+    assert len(plan_result.stdout.encode()) <= 1_500
+    for result in (project_result, plan_result):
+        payload = json.loads(result.stdout)
+        for gate in payload["gates"]:
+            assert "command" not in gate
+            assert "returncode" not in gate
+            assert "stderr_tail" not in gate
+            assert gate.get("payload") != {}
+
+
+def test_opt_in_plan_report_retains_its_output_path(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path / "plan")
+
+    payload = run_cmd(
+        "postflight",
+        "--phase",
+        "plan",
+        "--planning-dir",
+        str(planning),
+        "--depth",
+        "lean",
+        "--flight",
+        "strict",
+        "--write-report",
+    )
+
+    report_gate = next(gate for gate in payload["gates"] if gate["name"] == "report")
+    assert Path(report_gate["payload"]["output"]).exists()
+
+
+def test_gate_compaction_preserves_full_failure_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_zagrosi_module()
+    completed = SimpleNamespace(
+        returncode=2,
+        stdout='{"success":false,"error":"broken gate"}\n',
+        stderr="diagnostic trace\n",
+    )
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: completed)
+
+    failed = module.run_internal_gate("broken", ["lint-plan", "--strict"])
+    malformed_completed = SimpleNamespace(returncode=0, stdout="not-json\n", stderr="")
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: malformed_completed)
+    malformed = module.run_internal_gate("malformed", ["lint-plan"])
+
+    def time_out(*args: object, **kwargs: object) -> object:
+        raise module.subprocess.TimeoutExpired(
+            cmd=["lint-plan"],
+            timeout=9,
+            output=b"partial progress\n",
+            stderr=b"timeout detail\n",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", time_out)
+    timed_out = module.run_internal_gate("slow", ["lint-plan"], timeout_seconds=9)
+    passed_direct = module.direct_gate("ready", True, {})
+    passed_quality = module.direct_gate(
+        "quality",
+        True,
+        {
+            "success": True,
+            "gate": "sections",
+            "score": 100,
+            "finding_count": 0,
+            "findings": [],
+            "planning_dir": "/tmp/large-and-redundant",
+        },
+    )
+    passed_progress = module.direct_gate(
+        "implementation-progress",
+        True,
+        {
+            "deferred_gate": "lint-implementation-state",
+            "recorded_sections": [],
+            "remaining_sections": ["section-01-example"],
+        },
+        required=False,
+    )
+    failed_direct = module.direct_gate("not-ready", False, {"error": "missing"})
+    legacy_flight = module.flight_payload(
+        phase="plan",
+        stage="postflight",
+        mode="strict",
+        gates=[
+            {
+                "name": "ready",
+                "required": True,
+                "success": True,
+                "returncode": 0,
+                "command": "internal",
+                "payload": {},
+                "stderr_tail": "",
+            }
+        ],
+    )
+
+    assert failed == {
+        "name": "broken",
+        "required": True,
+        "success": False,
+        "returncode": 2,
+        "command": "lint-plan --strict",
+        "payload": {"success": False, "error": "broken gate"},
+        "stderr_tail": "diagnostic trace\n",
+    }
+    assert malformed == {
+        "name": "malformed",
+        "required": True,
+        "success": False,
+        "returncode": 0,
+        "command": "lint-plan",
+        "payload": {"error_code": "invalid-gate-json", "stdout": "not-json\n"},
+        "stderr_tail": "",
+    }
+    assert timed_out == {
+        "name": "slow",
+        "required": True,
+        "success": False,
+        "returncode": 124,
+        "command": "lint-plan",
+        "payload": {
+            "error_code": "gate-timeout",
+            "timeout_seconds": 9,
+            "stdout": "partial progress\n",
+        },
+        "stderr_tail": "timeout detail\n",
+    }
+    assert passed_direct == {"name": "ready", "required": True, "success": True}
+    assert passed_quality == {
+        "name": "quality",
+        "required": True,
+        "success": True,
+        "payload": {"gate": "sections", "score": 100, "finding_count": 0},
+    }
+    assert passed_progress == {
+        "name": "implementation-progress",
+        "required": False,
+        "success": True,
+        "payload": {"deferred_gate": "lint-implementation-state"},
+    }
+    assert failed_direct == {
+        "name": "not-ready",
+        "required": True,
+        "success": False,
+        "returncode": 1,
+        "command": "internal",
+        "payload": {"error": "missing"},
+        "stderr_tail": "",
+    }
+    assert legacy_flight["gates"] == [{"name": "ready", "required": True, "success": True}]
+
+
+def project_manifest_codes(planning_dir: Path) -> set[str]:
+    result = run_raw("lint-project-manifest", "--planning-dir", str(planning_dir), "--strict")
+    assert result.returncode != 0, result.stderr + result.stdout
+    return {item["code"] for item in json.loads(result.stdout)["findings"]}
+
+
+def test_compact_project_manifest_rejects_duplicate_requirement_ownership(tmp_path: Path) -> None:
+    planning = write_compact_project_fixture(tmp_path)
+    manifest = planning / "project-manifest.md"
+    manifest.write_text(manifest.read_text().replace("| 02-billing | REQ-002 |", "| 02-billing | REQ-001, REQ-002 |"))
+
+    assert "duplicate-requirement-owner" in project_manifest_codes(planning)
+
+
+def test_compact_project_manifest_rejects_dependency_cycles(tmp_path: Path) -> None:
+    planning = write_compact_project_fixture(tmp_path)
+    manifest = planning / "project-manifest.md"
+    manifest.write_text(manifest.read_text().replace("| 01-auth | REQ-001 | none |", "| 01-auth | REQ-001 | 02-billing |"))
+
+    assert "split-dependency-cycle" in project_manifest_codes(planning)
+
+
+def test_compact_project_manifest_rejects_cross_split_path_collisions(tmp_path: Path) -> None:
+    planning = write_compact_project_fixture(tmp_path)
+    manifest = planning / "project-manifest.md"
+    manifest.write_text(manifest.read_text().replace("| `src/billing.py` |", "| `src/auth.py` |"))
+
+    assert "cross-split-path-collision" in project_manifest_codes(planning)
+
+
+def test_compact_project_manifest_rejects_owned_requirement_missing_from_spec(tmp_path: Path) -> None:
+    planning = write_compact_project_fixture(tmp_path)
+    spec = planning / "02-billing" / "spec.md"
+    spec.write_text(spec.read_text().replace("REQ-002", "billing behavior"))
+
+    assert "split-spec-missing-requirements" in project_manifest_codes(planning)
+
+
+def test_compact_project_manifest_rejects_spec_contract_drift(tmp_path: Path) -> None:
+    planning = write_compact_project_fixture(tmp_path / "dependencies")
+    spec = planning / "02-billing" / "spec.md"
+    spec.write_text(spec.read_text().replace("Dependencies: 01-auth", "Dependencies: none"))
+
+    assert "split-spec-dependency-mismatch" in project_manifest_codes(planning)
+
+    planning = write_compact_project_fixture(tmp_path / "boundary")
+    spec = planning / "02-billing" / "spec.md"
+    spec.write_text(spec.read_text().replace("Boundary: `src/billing.py`", "Boundary: `src/auth.py`"))
+
+    assert "split-spec-boundary-mismatch" in project_manifest_codes(planning)
+
+    planning = write_compact_project_fixture(tmp_path / "duplicates")
+    spec = planning / "02-billing" / "spec.md"
+    spec.write_text(spec.read_text() + "\nDependencies: none\nBoundary: `src/auth.py`\n")
+    codes = project_manifest_codes(planning)
+
+    assert {"duplicate-spec-dependencies", "duplicate-spec-boundary"} <= codes
+
+
+def test_compact_project_artifacts_have_upper_budgets(tmp_path: Path) -> None:
+    planning = write_compact_project_fixture(tmp_path / "manifest")
+    manifest = planning / "project-manifest.md"
+    manifest.write_text(manifest.read_text() + (" filler" * 500))
+
+    assert "project-manifest-too-large" in project_manifest_codes(planning)
+
+    planning = write_compact_project_fixture(tmp_path / "spec")
+    spec = planning / "02-billing" / "spec.md"
+    spec.write_text(spec.read_text() + (" filler" * 500))
+
+    assert "split-spec-too-large" in project_manifest_codes(planning)
+
+    postflight = run_raw("postflight", "--phase", "project", "--planning-dir", str(planning), "--depth", "lean")
+    assert postflight.returncode != 0
+    assert "lint-project-manifest" in json.loads(postflight.stdout)["blocking_gates"]
+
+
+@pytest.mark.parametrize("session_dir", [None, ".zagrosi-project", ".deep-project"])
+def test_legacy_project_manifest_remains_accepted_when_resumed(tmp_path: Path, session_dir: str | None) -> None:
+    (tmp_path / "requirements.md").write_text("# Requirements\n\nREQ-001: Legacy behavior.\n")
+    (tmp_path / "project-manifest.md").write_text(
+        "<!-- SPLIT_MANIFEST\n01-legacy\nEND_MANIFEST -->\n\n"
+        "# Project Manifest\n\n"
+        "Execution order: 01-legacy. Dependencies: none. Parallel: no. "
+        "Shared concerns: tests. Next: $zagrosi-plan 01-legacy/spec.md.\n"
+    )
+    split = tmp_path / "01-legacy"
+    split.mkdir()
+    (split / "spec.md").write_text(
+        "# Legacy\n\nREQ-001. In scope: behavior. Out of scope: migration. "
+        "Dependencies: none. Boundary: legacy module. Risk: drift. "
+        "Tests verify acceptance criteria.\n"
+    )
+    if session_dir:
+        state_dir = tmp_path / session_dir
+        state_dir.mkdir()
+        (state_dir / "session.json").write_text(
+            json.dumps({"initial_file": str(tmp_path / "requirements.md"), "depth_mode": "standard"})
+        )
+
+    result = run_raw("lint-project-manifest", "--planning-dir", str(tmp_path), "--strict")
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert "missing-ownership-table" not in {item["code"] for item in payload["findings"]}
+
+
+def test_plan_setup_defaults_to_lean_without_governance_stubs(tmp_path: Path) -> None:
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Spec\n\nREQ-001: Compact planning.\n")
+
+    payload = run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
+
+    assert payload["depth_mode"] == "lean"
+    assert not (tmp_path / "decisions.md").exists()
+    assert not (tmp_path / "risk-register.md").exists()
+    assert not (tmp_path / "traceability.md").exists()
+    assert not (tmp_path / "quality-gates.md").exists()
+
+
+def test_lean_plan_accepts_minimal_dense_artifacts(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path)
+
+    artifacts = run_cmd("lint-plan-artifacts", "--planning-dir", str(planning), "--strict")
+    plan = run_cmd("lint-plan", "--planning-dir", str(planning), "--depth", "lean", "--strict")
+    sections = run_cmd("lint-sections", "--planning-dir", str(planning), "--depth", "lean", "--strict")
+    trace = run_cmd("traceability", "--planning-dir", str(planning), "--strict")
+
+    assert artifacts["success"] is True
+    assert artifacts["required_artifacts"] == ["plan", "source_spec"]
+    assert plan["success"] is True
+    assert sections["success"] is True
+    assert trace["coverage"]["REQ-001"]["covered"] is True
+
+
+@pytest.mark.parametrize("depth", ["lean", "fast"])
+def test_lean_and_fast_reject_bloat_not_brevity(tmp_path: Path, depth: str) -> None:
+    planning = write_lean_plan_fixture(tmp_path)
+    plan_path = planning / "codex-plan.md"
+    plan_path.write_text(plan_path.read_text() + (" filler" * 1000))
+
+    result = run_raw("lint-plan", "--planning-dir", str(planning), "--depth", depth, "--strict")
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert "plan-too-large" in {item["code"] for item in payload["findings"]}
+    assert not any(item["code"].endswith("too-thin") for item in payload["findings"])
+
+
+@pytest.mark.parametrize("source_name", ["spec.md", "codex-spec.md"])
+def test_lean_plan_does_not_budget_the_unchanged_source_spec(tmp_path: Path, source_name: str) -> None:
+    planning = write_lean_plan_fixture(tmp_path)
+    source = planning / "spec.md"
+    if source_name != source.name:
+        renamed = planning / source_name
+        source.rename(renamed)
+        source = renamed
+        config_path = planning / "zagrosi_plan_config.json"
+        config = json.loads(config_path.read_text())
+        config["initial_file"] = str(source)
+        config_path.write_text(json.dumps(config))
+    source.write_text(source.read_text() + (" detailed requirement" * 1000))
+
+    result = run_raw("lint-plan", "--planning-dir", str(planning), "--depth", "lean", "--strict")
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "spec-too-large" not in {item["code"] for item in json.loads(result.stdout)["findings"]}
+
+
+def test_lean_section_prompts_are_bounded_and_reference_context(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path)
+
+    payload = run_cmd(
+        "plan-generate-section-prompts",
+        "--planning-dir",
+        str(planning),
+        "--depth",
+        "lean",
+        "--all",
+    )
+    prompt = Path(payload["prompt_files"][0]).read_text()
+
+    assert "300 words max" in prompt
+    assert "Do not copy" in prompt
+    assert "1,000" not in prompt
+    assert "1,500" not in prompt
+
+
+def test_migrated_section_prompt_resolves_actual_artifacts(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path)
+    (planning / "codex-plan.md").rename(planning / "claude-plan.md")
+
+    payload = run_cmd(
+        "plan-generate-section-prompts",
+        "--planning-dir",
+        str(planning),
+        "--depth",
+        "lean",
+        "--all",
+    )
+    prompt = Path(payload["prompt_files"][0]).read_text()
+
+    assert str(planning / "claude-plan.md") in prompt
+    assert str(planning / "spec.md") in prompt
+    assert "codex-plan.md" not in prompt
+    assert "zagrosi_plan_config.json" not in prompt
+
+
+def test_default_json_output_is_compact() -> None:
+    output = run_text("workflow-options", "--brief", "small change")
+
+    assert "\n  \"" not in output
+    assert len(output) < 5000
+
+
+@pytest.mark.parametrize(
+    ("depth", "expected_plan_budget"),
+    [("lean", 800), ("fast", 800), ("standard", 2500), ("deep", 4000)],
+)
+def test_all_depths_have_upper_budgets_without_word_floors(
+    tmp_path: Path,
+    depth: str,
+    expected_plan_budget: int,
+) -> None:
+    planning = write_lean_plan_fixture(tmp_path)
+
+    result = run_raw("lint-plan", "--planning-dir", str(planning), "--depth", depth, "--strict")
+    payload = json.loads(result.stdout)
+
+    assert not any(item["code"].endswith("too-thin") for item in payload["findings"])
+    assert payload["word_budgets"]["plan"] == expected_plan_budget
+
+
+def test_lean_implementation_uses_machine_record_and_one_final_gate(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path)
+    sections = planning / "sections"
+
+    record = run_cmd(
+        "implement-record-section",
+        "--sections-dir",
+        str(sections),
+        "--section",
+        "section-01-lean-default",
+        "--review-status",
+        "pass",
+        "--verification",
+        "pytest tests/test_zagrosi_skills.py -q",
+        "--flight",
+        "off",
+    )
+
+    assert record["record"]["review_status"] == "pass"
+    assert record["traceability_matrix"] is None
+    assert record["next_section"] is None
+    assert record["ready_sections"] == []
+    assert record["remaining_sections"] == []
+    assert record["blocked_sections"] == {}
+    assert "postflight" not in record
+    assert not (planning / "implementation" / "code_review").exists()
+
+    state = run_cmd("lint-implementation-state", "--sections-dir", str(sections), "--strict")
+    assert state["success"] is True
+
+    postflight = run_cmd(
+        "postflight",
+        "--phase",
+        "implement",
+        "--planning-dir",
+        str(planning),
+        "--sections-dir",
+        str(sections),
+        "--target-dir",
+        str(tmp_path),
+        "--depth",
+        "lean",
+        "--flight",
+        "strict",
+    )
+    gate_names = [gate["name"] for gate in postflight["gates"]]
+    assert postflight["success"] is True
+    assert "lint-implementation-state" in gate_names
+    assert "forge-score" not in gate_names
+
+
+def test_lean_implement_preflight_uses_one_in_process_analysis(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path / "planning")
+
+    result = run_raw(
+        "preflight",
+        "--phase",
+        "implement",
+        "--sections-dir",
+        str(planning / "sections"),
+        "--target-dir",
+        str(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert len(result.stdout.encode()) <= 1_500
+    preflight = json.loads(result.stdout)
+    assert preflight["success"] is True
+    names = {gate["name"] for gate in preflight["gates"]}
+    assert names == {
+        "sections-directory",
+        "target-directory",
+        "lint-plan-artifacts",
+        "lint-sections",
+        "traceability",
+        "lint-implementation-readiness",
+    }
+    assert {"doctor", "next-section", "suggest-section-splits", "status"}.isdisjoint(names)
+
+
+def test_implement_preflight_preserves_readiness_findings_and_metrics(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path / "planning")
+    section = planning / "sections" / "section-01-lean-default.md"
+    section.write_text(
+        "# section-01-lean-default\n\n"
+        "Goal: implement REQ-001. Dependencies: none.\n\n"
+        "## Exact Path Ownership\n\n- Runtime module and focused tests.\n\n"
+        "## Tests First\n\nAdd `test_missing_ownership`; expected failure comes first.\n\n"
+        "## Implementation\n\nModify the runtime. Contract: explicit deep remains explicit.\n\n"
+        "## Risks And Rollback\n\nRisk: missing coverage. Rollback: revert the change.\n\n"
+        "## Acceptance And Verification\n\nREQ-001 is done when pytest passes.\n"
+    )
+
+    readiness_result = run_raw(
+        "lint-implementation-readiness",
+        "--planning-dir",
+        str(planning),
+        "--strict",
+    )
+    preflight_result = run_raw(
+        "preflight",
+        "--phase",
+        "implement",
+        "--sections-dir",
+        str(planning / "sections"),
+        "--target-dir",
+        str(tmp_path),
+        "--flight",
+        "strict",
+    )
+
+    assert readiness_result.returncode != 0
+    assert preflight_result.returncode != 0
+    readiness = json.loads(readiness_result.stdout)
+    preflight = json.loads(preflight_result.stdout)
+    gate = next(gate for gate in preflight["gates"] if gate["name"] == "lint-implementation-readiness")
+    assert gate["success"] is False
+    assert gate["payload"] == readiness
+    assert {item["code"] for item in readiness["findings"]} == {"no-file-ownership"}
+    assert readiness["sections"][0]["section"] == "section-01-lean-default"
+    assert readiness["sections"][0]["file_count"] == 0
+    assert readiness["sections"][0]["files"] == []
+
+
+def test_mutable_implement_setup_propagates_preflight_failure(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path / "planning")
+    sections = planning / "sections"
+    (sections / "section-01-lean-default.md").write_text(
+        "# section-01-lean-default\n\nREQ-001 changes `scripts/zagrosi_skills.py`.\n"
+    )
+
+    result = run_raw(
+        "implement-setup",
+        "--sections-dir",
+        str(sections),
+        "--target-dir",
+        str(tmp_path),
+        "--flight",
+        "strict",
+    )
+
+    assert result.returncode == 1, result.stderr + result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert payload["preflight"]["success"] is False
+    assert "lint-sections" in payload["preflight"]["blocking_gates"]
+    assert "lint-implementation-readiness" in payload["preflight"]["blocking_gates"]
+
+
+def test_detached_implement_setup_propagates_preflight_failure_without_planning_writes(
+    tmp_path: Path,
+) -> None:
+    planning = write_lean_plan_fixture(tmp_path / "planning")
+    sections = planning / "sections"
+    (sections / "section-01-lean-default.md").write_text(
+        "# section-01-lean-default\n\nREQ-001 changes `scripts/zagrosi_skills.py`.\n"
+    )
+    target = tmp_path / "target"
+    target.mkdir()
+    implementation_root = tmp_path / "detached-implementation"
+    admission_pinner = write_test_admission_pinner(
+        tmp_path / "admission-pinner.json",
+        planning_dir=planning,
+    )
+    expected_planning = planning_tree_snapshot(planning)
+
+    result = run_raw(
+        "implement-setup",
+        "--sections-dir",
+        str(sections),
+        "--target-dir",
+        str(target),
+        "--implementation-root",
+        str(implementation_root),
+        "--admission-pinner",
+        str(admission_pinner),
+        "--expected-admission-pinner-sha256",
+        file_sha256(admission_pinner),
+        *implementation_source_args(),
+        "--flight",
+        "strict",
+    )
+
+    assert result.returncode == 1, result.stderr + result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert payload["mode"] == "detached-frozen"
+    assert payload["preflight"]["success"] is False
+    assert "lint-sections" in payload["preflight"]["blocking_gates"]
+    assert "lint-implementation-readiness" in payload["preflight"]["blocking_gates"]
+    assert planning_tree_snapshot(planning) == expected_planning
+
+
+def test_lean_record_rejects_incomplete_review_or_verification(tmp_path: Path) -> None:
+    planning = write_lean_plan_fixture(tmp_path)
+    sections = planning / "sections"
+
+    blocked = run_raw(
+        "implement-record-section",
+        "--sections-dir",
+        str(sections),
+        "--section",
+        "section-01-lean-default",
+        "--review-status",
+        "blocked",
+        "--verification",
+        "pytest -q",
+        "--flight",
+        "off",
+    )
+    unverified = run_raw(
+        "implement-record-section",
+        "--sections-dir",
+        str(sections),
+        "--section",
+        "section-01-lean-default",
+        "--review-status",
+        "pass",
+        "--flight",
+        "off",
+    )
+
+    assert blocked.returncode != 0
+    assert unverified.returncode != 0
+    assert json.loads(blocked.stdout)["error_code"] == "incomplete-lean-record"
+    assert not (planning / "implementation" / "zagrosi_implement_state.json").exists()
+
+    state_dir = planning / "implementation"
+    state_dir.mkdir()
+    (state_dir / "zagrosi_implement_state.json").write_text(
+        json.dumps(
+            {
+                "completed_sections": {
+                    "section-01-lean-default": {
+                        "completed_at": "2026-09-01T00:00:00Z",
+                        "review_status": "blocked",
+                        "verification": [],
+                    }
+                }
+            }
+        )
+    )
+    postflight = run_raw(
+        "postflight",
+        "--phase",
+        "implement",
+        "--planning-dir",
+        str(planning),
+        "--sections-dir",
+        str(sections),
+        "--target-dir",
+        str(tmp_path),
+        "--depth",
+        "lean",
+    )
+
+    assert postflight.returncode != 0
+    payload = json.loads(postflight.stdout)
+    assert "lint-implementation-state" in payload["blocking_gates"]
 
 
 def test_capability_inventory_redacts_secrets_and_reports_tools(tmp_path: Path) -> None:
@@ -7377,7 +8215,7 @@ def test_review_capabilities_warns_on_skip_mode(tmp_path: Path) -> None:
     assert any("skip" in item.lower() and "review" in item.lower() for item in payload["recommendations"])
 
 
-def test_lint_plan_thin_artifacts_recommend_questions_before_padding(tmp_path: Path) -> None:
+def test_lint_plan_never_requires_padding_short_optional_artifacts(tmp_path: Path) -> None:
     planning = write_quality_plan_fixture(tmp_path)
     review_file = planning / "reviews" / "architecture.md"
     review_file.parent.mkdir(exist_ok=True)
@@ -7385,13 +8223,11 @@ def test_lint_plan_thin_artifacts_recommend_questions_before_padding(tmp_path: P
 
     result = run_raw("lint-plan", "--planning-dir", str(planning), "--depth", "deep", "--strict")
 
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stderr + result.stdout
     payload = json.loads(result.stdout)
-    thin_findings = [item for item in payload["findings"] if item["code"].endswith("too-thin")]
-    assert thin_findings
-    recommendation = " ".join(item.get("recommendation", "") for item in thin_findings).lower()
-    assert "ask relevant questions" in recommendation or "targeted research" in recommendation or "missing decisions" in recommendation
-    assert "add more words" not in recommendation
+    assert payload["success"] is True
+    assert payload["word_counts"]["reviews"]["architecture.md"] == 5
+    assert not any(item["code"].endswith("too-thin") for item in payload["findings"])
 
 
 def test_planning_consistency_reports_missing_late_requirement(tmp_path: Path) -> None:
@@ -7441,39 +8277,35 @@ def test_doctor_and_requirement_extraction(tmp_path: Path) -> None:
     assert extracted["requirements"][1]["id"] == "REQ-002"
 
 
-def test_interview_gate_blocks_missing_and_fake_interviews(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    (project / "project-manifest.md").write_text(
-        "<!-- SPLIT_MANIFEST\n"
-        "01-auth\n"
-        "END_MANIFEST -->\n\n"
-        "# Project Manifest\n\n"
-        "## Execution Order\nRun `01-auth` first.\n\n"
-        "## Dependencies\n`01-auth` depends on no earlier split and blocks later work.\n\n"
-        "## Parallelization\nNo parallel work is needed for this fixture.\n\n"
-        "## Shared Concerns\nTesting and docs are shared concerns.\n\n"
-        "## Commands\nUse `$zagrosi-plan` on `01-auth/spec.md`.\n"
-    )
-    split = project / "01-auth"
-    split.mkdir()
-    (split / "spec.md").write_text(
-        "# Auth Spec\n\n"
-        "## In Scope\nREQ-001: Implement auth.\n\n"
-        "## Out Of Scope\nBilling is out of scope.\n\n"
-        "## Acceptance Criteria\nDone when auth tests pass.\n\n"
-        "## Testing\nRun pytest.\n\n"
-        "## Open Questions\nUnknown provider details remain.\n"
-    )
+def test_interview_is_optional_but_existing_artifacts_must_be_valid(tmp_path: Path) -> None:
+    project = write_compact_project_fixture(tmp_path / "project")
 
-    missing = run_raw("lint-project-manifest", "--planning-dir", str(project), "--strict")
-    assert missing.returncode != 0
-    missing_codes = {item["code"] for item in json.loads(missing.stdout)["findings"]}
-    assert "missing-interview" in missing_codes
+    missing = run_cmd("lint-project-manifest", "--planning-dir", str(project), "--strict")
+    assert missing["success"] is True
+    assert missing["interview"] == {"mode": "optional"}
+    assert not any(item["code"] == "missing-interview" for item in missing["findings"])
 
-    postflight = run_raw("postflight", "--phase", "project", "--planning-dir", str(project), "--flight", "strict")
-    assert postflight.returncode != 0
-    assert "lint-interview" in json.loads(postflight.stdout)["blocking_gates"]
+    postflight = run_cmd("postflight", "--phase", "project", "--planning-dir", str(project), "--flight", "strict")
+    assert "lint-interview" not in {gate["name"] for gate in postflight["gates"]}
+
+    (project / "zagrosi_project_interview.md").write_text(
+        "user_interviewed: true\n\nQ: TBD\nA: TBD\n"
+    )
+    malformed = run_raw("lint-project-manifest", "--planning-dir", str(project), "--strict")
+    assert malformed.returncode != 0
+    assert "placeholder-interview" in {item["code"] for item in json.loads(malformed.stdout)["findings"]}
+
+    malformed_postflight = run_raw(
+        "postflight",
+        "--phase",
+        "project",
+        "--planning-dir",
+        str(project),
+        "--flight",
+        "strict",
+    )
+    assert malformed_postflight.returncode != 0
+    assert "lint-interview" in json.loads(malformed_postflight.stdout)["blocking_gates"]
 
     (project / "zagrosi_project_interview.md").write_text(
         "interview_mode: skipped_with_reason\n"
@@ -7642,6 +8474,20 @@ def test_install_codex_verifies_prompt_input_with_cached_plugin(tmp_path: Path) 
     assert installed["verification"]["status"] == "passed"
     assert installed["verification"]["missing"] == []
 
+    fake_codex.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    unchanged = run_cmd(
+        "install",
+        "--plugin-root",
+        str(ROOT),
+        "--config",
+        str(config),
+        env=env,
+    )
+    assert unchanged["success"] is True
+    assert unchanged["changed"] is False
+    assert unchanged["verification"]["status"] == "skipped"
+    assert unchanged["verification"]["reason"] == "installation unchanged"
+
 
 def test_strict_profile_blocks_medium_findings(tmp_path: Path) -> None:
     (tmp_path / "codex-plan.md").write_text(
@@ -7669,6 +8515,9 @@ def test_review_board_governance_and_migration(tmp_path: Path) -> None:
     assert prompts["success"] is True
     assert len(prompts["prompt_files"]) == 6
     assert all(Path(path).exists() for path in prompts["prompt_files"])
+    assert Path(prompts["shared_prompt"]).exists()
+    generated_words = sum(len(Path(path).read_text().split()) for path in [prompts["shared_prompt"], *prompts["prompt_files"]])
+    assert generated_words < 250
 
     stubs_dir = tmp_path / "new"
     stubs = run_cmd("write-governance-stubs", "--planning-dir", str(stubs_dir), "--depth", "deep")
@@ -7804,7 +8653,24 @@ def test_advanced_operational_commands_and_snapshots(tmp_path: Path) -> None:
         "advisory",
     )
     assert pre["success"] is True
-    assert {gate["name"] for gate in pre["gates"]} >= {"spec-file", "doctor", "codebase-evidence"}
+    preflight_gates = {gate["name"] for gate in pre["gates"]}
+    assert preflight_gates >= {"spec-file", "doctor", "status"}
+    assert "codebase-evidence" in preflight_gates
+
+    evidence_pre = run_cmd(
+        "preflight",
+        "--phase",
+        "plan",
+        "--file",
+        str(planning / "codex-spec.md"),
+        "--target-dir",
+        str(ROOT),
+        "--write-evidence",
+        "--flight",
+        "advisory",
+    )
+    evidence_gate = next(gate for gate in evidence_pre["gates"] if gate["name"] == "codebase-evidence")
+    assert Path(evidence_gate["payload"]["output"]).exists()
 
     pretty = run_text(
         "preflight",
@@ -7825,8 +8691,6 @@ def test_advanced_operational_commands_and_snapshots(tmp_path: Path) -> None:
         "plan",
         "--planning-dir",
         str(planning),
-        "--depth",
-        "fast",
         "--flight",
         "advisory",
     )
@@ -7849,7 +8713,9 @@ def test_advanced_operational_commands_and_snapshots(tmp_path: Path) -> None:
         "advisory",
     )
     assert impl_pre["success"] is True
-    assert "suggest-section-splits" in {gate["name"] for gate in impl_pre["gates"]}
+    impl_gate_names = {gate["name"] for gate in impl_pre["gates"]}
+    assert {"lint-plan-artifacts", "lint-sections", "traceability", "lint-implementation-readiness"} <= impl_gate_names
+    assert {"doctor", "next-section", "suggest-section-splits", "status"}.isdisjoint(impl_gate_names)
 
     schema = run_cmd("lint-artifact-schema", "--planning-dir", str(planning), "--strict")
     assert schema["success"] is True
@@ -7931,8 +8797,10 @@ def test_advanced_operational_commands_and_snapshots(tmp_path: Path) -> None:
             "components": actual["components"],
         } == expected
 
-    release = run_cmd("release-check", "--plugin-root", str(ROOT))
+    release = run_cmd("release-check", "--plugin-root", str(ROOT), "--verbose")
     assert release["success"] is True
+    assert "doctor" not in release["checks"]
+    assert "install-dry-run" in release["checks"]
     assert any(".agents/plugins/marketplace.json" in row["command"] for row in release["results"])
     assert any("eval-suite" in row["command"] and "--check-snapshots" in row["command"] for row in release["results"])
 
@@ -7950,7 +8818,7 @@ def test_release_check_skips_example_gates_when_examples_are_absent(tmp_path: Pa
     for filename in [".codexignore", "LICENSE", "NOTICE.md", "README.md", "pyproject.toml"]:
         shutil.copy2(ROOT / filename, package / filename)
 
-    release = run_cmd("release-check", "--plugin-root", str(package))
+    release = run_cmd("release-check", "--plugin-root", str(package), "--verbose")
 
     assert release["success"] is True
     command_text = "\n".join(row["command"] for row in release["results"])
@@ -7958,6 +8826,77 @@ def test_release_check_skips_example_gates_when_examples_are_absent(tmp_path: Pa
     assert "lint-project-manifest" not in command_text
     assert "eval-suite" not in command_text
     assert ".agents/plugins/marketplace.json" in command_text
+
+
+def test_release_check_success_is_byte_bounded_and_verbose_is_explicit(tmp_path: Path) -> None:
+    package = tmp_path / "bundle"
+    for relative in [".agents", ".codex-plugin", "assets", "scripts", "skills"]:
+        shutil.copytree(ROOT / relative, package / relative)
+    for filename in [".codexignore", "LICENSE", "NOTICE.md", "README.md", "pyproject.toml"]:
+        shutil.copy2(ROOT / filename, package / filename)
+
+    compact = run_raw("release-check", "--plugin-root", str(package))
+
+    assert compact.returncode == 0, compact.stderr + compact.stdout
+    assert len(compact.stdout.encode()) <= 1_000
+    payload = json.loads(compact.stdout)
+    assert payload["success"] is True
+    assert payload["check_count"] == len(payload["checks"])
+    assert payload["duration_seconds"] >= 0
+    assert "results" not in payload
+    assert "validate-marketplace" in payload["checks"]
+    assert "install-dry-run" in payload["checks"]
+    assert "doctor" not in payload["checks"]
+
+
+def test_release_check_failure_always_includes_command_diagnostics(tmp_path: Path) -> None:
+    broken_plugin = tmp_path / "broken-plugin"
+    broken_plugin.mkdir()
+
+    result = run_raw("release-check", "--plugin-root", str(broken_plugin))
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert payload["results"]
+    failed = [row for row in payload["results"] if row["returncode"] != 0]
+    assert failed
+    assert all(row["command"] for row in failed)
+    assert all("stdout_tail" in row and "stderr_tail" in row for row in failed)
+
+
+def test_release_postflight_allows_the_release_check_timeout_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = load_zagrosi_module()
+    captured: dict[str, object] = {}
+
+    def fake_gate(name: str, command: list[str], **kwargs: object) -> dict[str, object]:
+        captured.update(name=name, command=command, **kwargs)
+        return {
+            "name": name,
+            "required": True,
+            "success": True,
+            "payload": {
+                "check_count": 4,
+                "checks": ["compile-cli", "validate-plugin-manifest", "validate-marketplace", "install-dry-run"],
+                "duration_seconds": 0.2,
+                "results": [{"command": "too verbose"}],
+            },
+        }
+
+    monkeypatch.setattr(module, "run_internal_gate", fake_gate)
+    report = module.release_postflight_report(
+        Path("/tmp/plugin"),
+        SimpleNamespace(flight="strict", run_tests=True),
+    )
+
+    assert report["success"] is True
+    assert captured["timeout_seconds"] == 600
+    assert "--run-tests" in captured["command"]
+    assert report["gates"][0]["payload"] == {
+        "check_count": 4,
+        "checks": ["compile-cli", "validate-plugin-manifest", "validate-marketplace", "install-dry-run"],
+        "duration_seconds": 0.2,
+    }
 
 
 def test_lint_project_manifest_fixture() -> None:
@@ -8267,24 +9206,27 @@ def test_typescript_fixture_and_invalid_fixture_snapshots() -> None:
     assert "vague-section-name" in codes
 
 
-def test_readme_documents_operator_quality_commands() -> None:
+def test_readme_documents_the_concise_lean_contract() -> None:
     readme = (ROOT / "README.md").read_text().lower()
 
     for phrase in (
+        "lean mode is default",
+        "no minimum prose quotas",
+        "size caps",
+        "one setup",
+        "one final gate",
+        "minimum sufficient artifacts",
+        "project-manifest.md",
+        "codex-plan.md",
+        "machine-readable section records",
+        "`fast` remains a compatibility alias for `lean`",
         "commands --pretty",
-        "commands --phase plan",
-        "plan-aware status",
-        "plan_artifacts",
-        "expanded codebase evidence",
-        "source files",
-        "eval-suite --examples-dir examples --check-snapshots",
-        "update-snapshots",
         "release-check --plugin-root .",
         "update-check",
         "self-update",
-        "does not poll git remotes automatically",
     ):
         assert phrase in readme
+    assert len(readme.split()) < 700
 
 
 def test_validate_workflow_mentions_snapshot_eval() -> None:
@@ -8297,34 +9239,64 @@ def test_skill_files_are_codex_native() -> None:
     for skill in (ROOT / "skills").glob("*/SKILL.md"):
         content = skill.read_text()
         assert "[TODO:" not in content
+        assert len(content.split()) < 1000
         for token in banned:
             assert token not in content, f"{token} leaked into {skill}"
 
-    plan_skill = (ROOT / "skills" / "zagrosi-plan" / "SKILL.md").read_text().lower()
-    assert "source files" in plan_skill
-    assert "plan artifact" in plan_skill
-    assert "lint-plan-artifacts" in plan_skill
-    assert "capability-inventory" in plan_skill
-    assert "review-capabilities" in plan_skill
-    assert "planning-consistency" in plan_skill
-    assert "ask relevant questions" in plan_skill
-    assert "targeted research" in plan_skill
-    assert "(recommended)" in plan_skill
+    plan_skill = " ".join((ROOT / "skills" / "zagrosi-plan" / "SKILL.md").read_text().lower().split())
+    for phrase in (
+        "smallest implementation-ready plan",
+        "depth is `lean`",
+        "source spec, unchanged",
+        "reviews/codex.md",
+        "tests before implementation",
+        "at most 300 words",
+        "one bundled postflight",
+        "adversarially review",
+        "do not implement unless asked",
+    ):
+        assert phrase in plan_skill
 
-    implement_skill = (ROOT / "skills" / "zagrosi-implement" / "SKILL.md").read_text().lower()
-    assert "consolidated commit" in implement_skill
-    assert "section commits" in implement_skill
-    assert "lint-plan-artifacts" in implement_skill
-    assert "--review-artifact" in implement_skill
-    assert "--verification" in implement_skill
-    assert "review decisions" in implement_skill
-    assert "refresh" in implement_skill
-    assert "ci watch" in implement_skill
+    implement_skill = " ".join((ROOT / "skills" / "zagrosi-implement" / "SKILL.md").read_text().lower().split())
+    for phrase in (
+        "least process",
+        "detached-frozen.md",
+        "do not load that large reference",
+        "do not run the full suite per section",
+        "--review-status pass",
+        "--verification",
+        "one final postflight",
+        "never bypass hooks",
+        "do not push",
+    ):
+        assert phrase in implement_skill
 
-    project_skill = (ROOT / "skills" / "zagrosi-project" / "SKILL.md").read_text().lower()
-    assert "workflow-options" in project_skill
-    assert "capability-inventory" in project_skill
-    assert "structured" in project_skill
-    assert "chat" in project_skill
-    assert "(recommended)" in project_skill
-    assert "consistency review" in project_skill
+    project_skill = " ".join((ROOT / "skills" / "zagrosi-project" / "SKILL.md").read_text().lower().split())
+    for phrase in (
+        "fewest independently plannable units",
+        "depth is `lean`",
+        "compact `project-manifest.md`",
+        "material boundary",
+        "ask no routine approval question",
+        "one bundled postflight",
+        "do not start zagrosi plan unless asked",
+    ):
+        assert phrase in project_skill
+
+    assert "--depth lean --strict" in project_skill
+    review_guidance = (ROOT / "skills" / "zagrosi-plan" / "references" / "review.md").read_text()
+    assert "`Verdict: pass.`" in review_guidance
+    assert "`No blockers` is" not in review_guidance
+
+
+def test_planning_depth_defaults_lean_and_honors_configless_plan_metadata(tmp_path: Path) -> None:
+    module = load_zagrosi_module()
+    assert module.planning_depth(tmp_path) == "lean"
+
+    (tmp_path / "codex-plan.md").write_text(
+        '<!-- FORGE_META\n{"artifact_type":"implementation_plan","depth_mode":"deep"}\nEND_FORGE_META -->\n'
+    )
+    assert module.planning_depth(tmp_path) == "deep"
+
+    (tmp_path / "zagrosi_plan_config.json").write_text('{"depth_mode":"standard"}\n')
+    assert module.planning_depth(tmp_path) == "standard"

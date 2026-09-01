@@ -1,32 +1,7 @@
-# SaaS Platform Requirements
+# SaaS Requirements
 
-Build a small B2B SaaS platform that supports authenticated users, paid plan
-access, and an operational dashboard. The project should be decomposed into
-planning units that can be implemented safely with tests-first development.
+- REQ-001: OAuth registration/sign-in creates a durable local session.
+- REQ-002: Authenticated accounts can hold paid subscription state.
+- REQ-003: Account-scoped dashboard shows usage and billing status.
 
-## Product Context
-
-The first release needs a trustworthy identity foundation before any money or
-business data is handled. Authentication should establish a stable local user
-and session contract. Billing should later depend on that authenticated user
-contract rather than coupling itself to OAuth providers. The dashboard should
-depend on both authentication and billing status so it can show account-specific
-metrics without exposing data across users.
-
-## Requirements
-
-- Users can register and sign in through OAuth.
-- Authenticated users have a durable local session the rest of the app can
-  trust.
-- Paid subscription state can be attached to authenticated accounts.
-- The dashboard can show account-specific usage and billing status.
-- Security, privacy, audit logging, provider configuration, and test fixtures
-  should be treated as cross-cutting concerns across all splits.
-
-## Constraints
-
-Use the existing runtime, persistence, and test conventions of the target
-repository. Do not introduce billing, dashboard, or team behavior inside the
-auth split. Do not let later splits duplicate authentication logic. Each split
-should produce clear specs, plans, TDD plans, implementation sections, and
-traceability evidence.
+Order: identity -> billing -> dashboard. Reuse target runtime, persistence, and tests. Keep auth free of billing/dashboard behavior; later splits consume, never duplicate, auth. Security, privacy, audit logs, provider config, rollback, fake fixtures, and traceability cross-cut all splits.

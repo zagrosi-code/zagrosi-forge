@@ -1,55 +1,24 @@
 <!-- FORGE_META
-{
-  "artifact_type": "split_spec",
-  "workflow": "zagrosi-project",
-  "depth_mode": "standard",
-  "requirement_ids": ["REQ-001"]
-}
+{"artifact_type":"split_spec","workflow":"zagrosi-project","depth_mode":"lean","requirement_ids":["REQ-001"]}
 END_FORGE_META -->
 
 # Authentication Spec
 
-## Purpose
+Dependencies: none
+Boundary: OAuth callback/config/session delegation
 
-Implement REQ-001: users can register and sign in through OAuth, and valid
-callbacks create local authenticated sessions that later SaaS features can
-trust.
+## In scope
 
-## In Scope
+REQ-001: validate OAuth callback/config; resolve or create local account by existing policy; create existing-style session. Fail invalid/missing/expired/replayed state before provider work; fail denial, disabled/incomplete config, or ambiguous identity without session. Never log codes, tokens, cookies, or profiles.
 
-- OAuth callback validation and provider error handling.
-- Provider configuration validation.
-- Local account resolution or creation through existing policy.
-- Session creation through the existing session mechanism.
-- Tests for success, invalid state, provider denial, config errors, ambiguous
-  accounts, and token logging safety.
+## Out of scope
 
-## Out Of Scope
+Billing, dashboard, teams, MFA, password reset, provider admin/linking UI, or unapproved schema migration.
 
-- Billing plans, payment provider integration, and entitlements.
-- Dashboard analytics or reporting.
-- Account-linking UI, provider administration, password reset, multi-factor
-  auth, and team membership.
-- Database migration unless the target repository has no external identity
-  storage and a separate migration plan is approved.
+## Tests and acceptance
 
-## Acceptance Criteria
+Offline fakes in `tests/auth/test_oauth.py`; run `uv run pytest tests/auth/test_oauth.py`, then `uv run pytest`. Done when valid callbacks create sessions and every failure above is side-effect-free and redacted.
 
-REQ-001 is done when a valid callback creates a session, invalid or replayed
-state rejects before provider work, provider denial does not create a session,
-disabled or incomplete config fails safely, ambiguous accounts do not silently
-link, and logs do not expose provider tokens or authorization codes.
+## Open questions
 
-## Testing And Verification
-
-Add pytest coverage in `tests/auth/test_oauth.py`. Use fake provider adapters,
-fake state stores, fake account repositories, session creation spies, and log
-capture. Run `uv run pytest tests/auth/test_oauth.py` during implementation and
-`uv run pytest` before completion.
-
-## Open Questions
-
-- Which OAuth provider is enabled first?
-- Does the target repository already store provider identity?
-- What is the explicit account-linking policy for duplicate provider emails?
-- Does route-level integration coverage already exist?
+First provider; existing external-identity store; duplicate-email policy; route test harness.

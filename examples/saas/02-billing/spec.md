@@ -1,57 +1,24 @@
 <!-- FORGE_META
-{
-  "artifact_type": "split_spec",
-  "workflow": "zagrosi-project",
-  "depth_mode": "standard",
-  "requirement_ids": ["REQ-002"]
-}
+{"artifact_type":"split_spec","workflow":"zagrosi-project","depth_mode":"lean","requirement_ids":["REQ-002"]}
 END_FORGE_META -->
 
 # Billing Spec
 
-## Purpose
+Dependencies: 01-authentication
+Boundary: billing/provider state
 
-Implement REQ-002: authenticated users can subscribe to paid plans, and the
-application can determine current billing status for protected SaaS features.
+## In scope
 
-## In Scope
+REQ-002: authenticated account plan/entitlement, provider-adapter checkout, verified idempotent webhooks, status read contract. Test checkout, bad signatures, replay, failure, cancellation, entitlement, redaction.
 
-- Subscription plan model and account entitlement status.
-- Payment provider checkout session creation through a provider adapter.
-- Webhook verification and idempotent subscription state updates.
-- Billing status lookup for authenticated accounts.
-- Tests for checkout creation, webhook signature rejection, duplicate webhook
-  handling, payment failure, cancellation, and entitlement reads.
+## Out of scope
 
-## Out Of Scope
+Auth/OAuth/session implementation, dashboard UI, taxes, coupons, invoices, enterprise contracts, provider admin.
 
-- Authentication implementation, OAuth callback handling, and session creation.
-- Dashboard UI beyond exposing a billing status contract.
-- Invoicing UI, tax calculation, coupons, enterprise contracts, and provider
-  administration screens.
+## Acceptance
 
-## Dependency And Assumptions
+Outputs status while consuming the authentication user/session contract. Done when checkout starts, verified webhooks update once, invalid signatures fail, status is readable, and disabling checkout preserves stored state. Use fake provider/webhook fixtures; run focused then full configured tests.
 
-This split depends on `01-authentication`. Billing must consume the stable
-authenticated user/session contract rather than duplicating auth checks. Payment
-provider secrets must be loaded through the repository's configuration boundary
-and excluded from logs.
+## Open questions
 
-## Acceptance Criteria
-
-REQ-002 is done when authenticated accounts can start checkout, verified
-webhooks update subscription state idempotently, invalid webhook signatures are
-rejected, billing status can be read by later dashboard work, and rollback can
-disable checkout without corrupting stored subscription state.
-
-## Testing And Verification
-
-Use provider adapter fakes and webhook fixtures. Run targeted billing tests
-first, then the full configured test command. Include replayed webhook tests
-and log redaction assertions for provider secrets.
-
-## Open Questions
-
-- Which payment provider is used first?
-- What plan tiers exist for the initial release?
-- Does the repository already have an account or organization billing model?
+Provider, initial tiers, account/organization billing model.

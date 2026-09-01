@@ -2,55 +2,26 @@
 {
   "artifact_type": "split_spec",
   "workflow": "zagrosi-project",
-  "depth_mode": "standard",
+  "depth_mode": "lean",
   "requirement_ids": ["REQ-001", "REQ-002"]
 }
 END_FORGE_META -->
 
 # Auth And Preferences Spec
 
-## Purpose
+Dependencies: none
+Boundary: `01-auth/spec.md`, `src/auth`, `src/settings`
 
-Implement REQ-001 OAuth callback handling and REQ-002 authenticated account
-display preferences for a TypeScript application.
+## In scope, dependencies, and boundary
 
-## In Scope
+REQ-001: parse OAuth callbacks; validate state; reject provider denial, replay, and ambiguous linking; create sessions only through the shared session module. REQ-002 depends on REQ-001's session output: authenticate through shared lookup before validating or writing display preferences.
 
-- OAuth callback parsing, state validation, provider denial handling, replay
-  handling, and session creation through the shared session module.
-- Preference validation and authenticated preference writes through the shared
-  session lookup.
-- Vitest coverage for callback success, callback failure, unauthenticated
-  preference writes, invalid preference payloads, and successful updates.
-- Safe logging that excludes tokens, authorization codes, cookies, and raw
-  provider payloads.
+Tests: `src/auth/callback.test.ts`, `src/settings/preferences.test.ts`; fake providers, sessions, and stores; structured results, not UI copy. Logs exclude tokens, codes, cookies, and raw provider payloads. `npm test` must pass.
 
-## Out Of Scope
+## Out of scope
 
-- Billing, teams, organization membership, provider admin, account-linking UI,
-  profile redesign, notification settings, and dashboard behavior.
-- Adding a second auth framework or duplicating cookie/session policy in route
-  handlers.
+Out of scope: billing, teams, organizations, provider admin, linking UI, profiles, notifications, dashboards, a second auth framework, or route-local cookie policy.
 
-## Acceptance Criteria
+## Acceptance criteria and open questions
 
-REQ-001 is done when valid callbacks create sessions, invalid state and
-provider denial do not, replay is rejected, and ambiguous accounts do not link
-silently. REQ-002 is done when unauthenticated users cannot update preferences,
-invalid payloads fail for authenticated users, and valid authenticated payloads
-persist. The full `npm test` command must pass.
-
-## Testing And Verification
-
-Add tests in `src/auth/callback.test.ts` and
-`src/settings/preferences.test.ts`. Use fake provider payloads, fake session
-helpers, and fake preference stores. The tests should assert structured results
-rather than UI copy.
-
-## Open Questions
-
-- What provider is enabled first?
-- Does the repository already have a replay store or state-consumption helper?
-- What preference values are supported in the product UI?
-- Does account-linking policy exist, or should ambiguity return a stop-line
-  result?
+Done when REQ-001 valid callbacks create sessions, every callback failure creates none, REQ-002 authenticated updates persist, and unauthenticated/invalid updates do not. Open: first provider, replay helper, supported preference values, linking policy. Missing policy is a stop line; do not invent it.
