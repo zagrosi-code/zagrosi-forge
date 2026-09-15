@@ -90,11 +90,10 @@ their established physical plan/review contract and separate operational records
 
 ## Context and Performance
 
-Section context keeps the complete section, selects relevant requirement excerpts,
-and points to omitted sources. `context-brief` and `implementation-packet` default
-to a 2,000-word budget; use `--max-words` to adjust it. An oversized section fails
-explicitly instead of losing its contract. Skills load phase-specific guidance;
-domain packs and the detailed detached protocol are read only when needed.
+Section context preserves the section, selects relevant requirements, and links
+omitted sources. `context-brief` and `implementation-packet` use a 2,000-word budget
+(`--max-words` adjusts it). Oversized sections fail explicitly. Skills load only
+applicable guidance, domain packs, and detached protocol details.
 
 The shared [engineering standard](skills/zagrosi-implement/references/engineering.md)
 draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers,
@@ -104,7 +103,6 @@ responsibilities within the task; update ownership before broader edits.
 Characterize weakly covered behavior before refactoring, run targeted regression
 checks around changes, and run the full suite once at integration.
 
-Planning gates reuse their parser and unchanged reads within one invocation.
 On macOS/Linux, known read-only gates avoid repeated process startup; other gates
 retain process isolation and timeouts. Compare stable local checkouts:
 
@@ -123,17 +121,19 @@ postflight 4.43–4.45× faster across all depths and section context reduced fr
 loads; detached reading falls from 3,547 to 1,177 words. Results are local to the
 recorded environment and fixture.
 
-[Coding trials](examples/evals/coding/README.md) independently check feature work,
-cleanup, deep planning, and resume behavior. Reports separate structural metrics,
-execution results, and optional model usage.
+[Coding trials](examples/evals/coding/README.md) cover features, cleanup, deep
+planning, and resume. Separate verdicts check behavior, workflow completion, and
+independently reviewed cleanup. Unchanged fixtures cannot pass cleanup. Reviews
+and provenance bind the candidate, baseline, plugin runtime, and evaluator.
 
 ## Runtime
 
-The CLI imports focused modules on demand. Its SHA-256 manifests bind runtime
-and extracted test sources. Runtime verification checks every
-bound source before execution and compiles those exact bytes without bytecode
-caches. Detached admission and completion reverify sources while preserving
-ownership, locking, immutable-source, and process-isolation controls.
+The CLI imports modules on demand. SHA-256 manifests bind runtime and test
+sources. Verification checks every source and compiles those exact bytes without
+bytecode caches. Detached admission and completion reverify sources, ownership,
+locks, and immutable inputs while preserving process isolation.
+Read-only checks reuse unchanged text, ownership parsing, and preceding score
+components within one command. Changed inputs force fresh analysis.
 
 ## Compatibility
 

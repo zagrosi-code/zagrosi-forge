@@ -120,8 +120,9 @@ def run_internal_gate(
     cwd: Path | None = None,
     timeout_seconds: int = 120,
 ) -> dict[str, Any]:
+    local = cwd is None and timeout_seconds == 120 and local_gate_available(name, command)
     try:
-        if cwd is None and timeout_seconds == 120 and local_gate_available(name, command):
+        if local:
             result = run_local_gate(command, timeout_seconds)
         else:
             result = subprocess.run(
@@ -156,6 +157,12 @@ def run_internal_gate(
         valid_json_object = True
     else:
         payload = {"error_code": "invalid-gate-json", "stdout": result.stdout[-1000:]}
+    context = _session._CLI_CONTEXT.get()
+    if (
+        local and result.returncode == (0 if payload.get("success") is True else 1)
+        and context is not None and (inputs := context.get("score_inputs")) is not None
+    ):
+        inputs.record(name, payload)
     command_success = result.returncode == 0 and valid_json_object and payload.get("success", True) is not False
     cleaned_payload = sanitize_gate_payload(payload)
     return compact_gate_record(

@@ -244,8 +244,7 @@ def lint_sections(args: argparse.Namespace) -> int:
     for section in progress["sections"]:
         section_path = planning_dir / "sections" / f"{section}.md"
         slug = section.split("-", 2)[2] if len(section.split("-", 2)) == 3 else section
-        slug_tokens = set(slug.split("-"))
-        if slug in _policy.VAGUE_SECTION_NAMES or slug_tokens.intersection(_policy.VAGUE_SECTION_NAMES):
+        if slug in _policy.VAGUE_SECTION_NAMES:
             findings.append(
                 _quality.finding(
                     "high",
@@ -383,7 +382,11 @@ def plan_artifact_findings(planning_dir: Path, *, allow_compact: bool = True) ->
     findings = _artifacts.compact_plan_findings(planning_dir, allow_compact=allow_compact)
     present: dict[str, str] = {}
     def has_placeholder_cell(text: str) -> bool:
-        for line in text.splitlines():
+        blocks, lines = _markdown.split_markdown_fences_with_closure(text)
+        for _, content, closed in blocks:
+            if not closed:
+                lines.extend(content)
+        for line in lines:
             stripped = line.strip()
             if stripped.lower() in {"tbd", "todo"} or stripped.lower().startswith("[todo:"):
                 return True
@@ -461,14 +464,14 @@ def plan_artifact_findings(planning_dir: Path, *, allow_compact: bool = True) ->
                         review_path,
                     )
                 )
-            if not _markdown.contains_any(review_text, ["verdict", "finding", "pass", "fixed", "blocked"]):
+            if not _markdown.passing_review(review_text, allow_legacy=True):
                 findings.append(
                     _quality.finding(
-                        "medium",
+                        "high",
                         "review-missing-verdict",
-                        f"Forge review has no concise verdict: {review_path.name}.",
+                        f"Forge review lacks a passing verdict and reviewed scope: {review_path.name}.",
                         review_path,
-                        "Record pass, fixed, or blocked plus material findings only.",
+                        "Resolve blocked findings; record pass/fixed with reviewed scope or a supported legacy review summary.",
                     )
                 )
 

@@ -388,7 +388,7 @@ def test_fixed_stat_dependency_accepts_supported_link_count_only_with_safe_metad
     )
 
     def fake_fstat(file_fd):
-        observed = real_fstat(file_fd)
+        real_fstat(file_fd)
         return SimpleNamespace(
             st_mode=stat.S_IFREG | mode,
             st_nlink=link_count,

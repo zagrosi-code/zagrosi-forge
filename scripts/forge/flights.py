@@ -17,6 +17,7 @@ from . import projects as _projects
 from . import quality as _quality
 from . import scoring as _scoring
 from . import sections as _sections
+from . import session as _session
 from . import state as _state
 from . import storage as _storage
 from . import traceability as _traceability
@@ -133,9 +134,8 @@ def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict
     if _artifacts.interview_artifact(planning_dir, "plan"):
         jobs.append(("lint-interview", _gates.append_strict(["lint-interview", "--phase", "plan", "--planning-dir", str(planning_dir), "--profile", profile], mode), True))
     jobs.append(("lint-plan", _gates.append_strict(["lint-plan", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode), True))
-    if compact:
-        jobs.append(("lint-plan-artifacts", _gates.append_strict(["lint-plan-artifacts", "--planning-dir", str(planning_dir), "--profile", profile], mode), True))
-    else:
+    jobs.append(("lint-plan-artifacts", _gates.append_strict(["lint-plan-artifacts", "--planning-dir", str(planning_dir), "--profile", profile], mode), True))
+    if not compact:
         jobs.extend(
             [
                 ("lint-evidence", _gates.append_strict(["lint-evidence", "--planning-dir", str(planning_dir), "--profile", profile], mode), True),
@@ -155,7 +155,21 @@ def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict
         if getattr(args, "write_report", False):
             jobs.append(("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], False))
     jobs.append(("status", ["status", "--path", str(planning_dir)], False))
-    gates = _gates.run_internal_gate_batch(jobs)
+    context = _session._CLI_CONTEXT.get()
+    previous_inputs = context.get("score_inputs") if context is not None else None
+    reuse = (
+        not compact and not getattr(args, "write_report", False)
+        and context is not None and context["texts"] is not None
+        and _gates.local_gate_available("forge-score", ["forge-score", "--planning-dir", str(planning_dir)])
+        and _artifacts.compact_plan_descriptor(planning_dir) is None
+    )
+    if reuse:
+        context["score_inputs"] = _scoring.FlightScoreInputs(planning_dir, depth, context["texts"])
+    try:
+        gates = _gates.run_internal_gate_batch(jobs)
+    finally:
+        if reuse:
+            context["score_inputs"] = previous_inputs
     return _gates.flight_payload(phase="plan", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir)})
 
 
@@ -235,7 +249,6 @@ def implement_postflight_report(
     depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", _policy.DEFAULT_DEPTH) or _policy.DEFAULT_DEPTH)
     compact = _markdown.is_lean_depth(depth)
     profile = getattr(args, "profile", "solo")
-    sections_dir = _storage.resolve_path(getattr(args, "sections_dir", None)) if getattr(args, "sections_dir", None) else planning_dir / "sections"
     target_dir = _storage.resolve_path(getattr(args, "target_dir", None)) if getattr(args, "target_dir", None) else Path.cwd()
     recording_status = _state.implementation_recording_status(planning_dir, candidate_state)
     final_state_gates = recording_status["sections_recorded_complete"]

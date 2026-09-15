@@ -7,21 +7,22 @@ import ast
 from collections import Counter
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
+TOOLS = ROOT / "tools"
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+
+from coding_trial_evidence import (
+    cleanup_verdict, evaluator_files, files, plugin_files, plugin_provenance, review_template, semantic_files,
+)
+from coding_trial_process import execute
+
 PACK = ROOT / "examples/evals/coding"
 CASES = json.loads((PACK / "cases.json").read_text())
-
-
-def files(root: Path) -> dict[str, str]:
-    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted(root.rglob("*")) if p.is_file() and not set(p.parts) & {"__pycache__", ".git", ".pytest_cache"}}
 
 
 def code_metrics(workspace: Path) -> dict:
@@ -73,38 +74,41 @@ def prepare(trial: Path, case: str, depth: str | None = None) -> dict:
               f"Set PYTHONPATH to src and run existing/added tests with `{sys.executable} -m unittest discover -s tests`.\n"
               "Report tests, cleanup, remaining issues, and observed usage if available.\n")
     (trial / "prompt.md").write_text(prompt)
-    sources = [ROOT / "scripts/zagrosi_skills.py", *sorted((ROOT / "skills").rglob("*.md"))]
     record = {"case": case, "depth": selected, "baseline_files": files(workspace),
+              "baseline_semantics": semantic_files(workspace), "provenance_version": 2,
               "baseline_metrics": code_metrics(workspace), "oracle_sha256": hashlib.sha256(
                   oracle.read_bytes()).hexdigest(),
               "fixture_sha256": files(fixture),
-              "plugin_sha256": {p.relative_to(ROOT).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}}
+              "evaluator_sha256": evaluator_files(ROOT, oracle, PACK / "cases.json"),
+              "plugin_sha256": plugin_files(ROOT)}
     (trial / "trial.json").write_text(json.dumps(record, indent=2) + "\n")
     return {"workspace": str(workspace), "prompt": str(trial / "prompt.md"), "case": case, "depth": selected}
 
 
-def execute(argv: list[str], workspace: Path, *, prompt: str | None = None, timeout: int = 60) -> dict:
-    start = time.monotonic()
-    env = {**os.environ, "PYTHONPATH": str(workspace / "src"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"}
+def workflow_verdict(workspace: Path, depth: str) -> dict:
+    result = execute([sys.executable, "-B", str(Path(__file__).with_name("coding_trial_evidence.py")),
+                      str(ROOT), str(workspace), depth], workspace)
     try:
-        result = subprocess.run(argv, cwd=workspace, input=prompt, text=True, capture_output=True, timeout=timeout, env=env)
-        return {"returncode": result.returncode, "seconds": round(time.monotonic() - start, 3),
-                "stdout": result.stdout[-12000:], "stderr": result.stderr[-12000:]}
-    except subprocess.TimeoutExpired:
-        return {"returncode": 124, "seconds": round(time.monotonic() - start, 3), "stderr": "Timed out"}
+        report = json.loads(result.get("stdout", ""))
+    except json.JSONDecodeError:
+        report = None
+    success = (result["returncode"] == 0 and isinstance(report, dict)
+               and report.get("success") is True and report.get("sections_recorded_complete") is True)
+    return {"success": success, "process": result, "report": report}
 
 
-def check(trial: Path, telemetry: Path | None = None) -> dict:
+def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = None) -> dict:
     record = json.loads((trial / "trial.json").read_text())
     workspace = trial / "workspace"
-    actual = files(workspace)
-    changed = sorted(name for name in actual.keys() | record["baseline_files"].keys()
-                     if actual.get(name) != record["baseline_files"].get(name))
-    outside_scope = [name for name in changed if not name.startswith(("src/", "tests/", ".planning/"))]
     oracle_path = ROOT / CASES[record["case"]].get("oracle", "tools/coding_trial_checks.py")
     fixture = PACK / CASES[record["case"]].get("fixture", "fixture")
     oracle = execute([sys.executable, "-B", str(oracle_path), str(workspace), record["case"]], workspace)
     tests = execute([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"], workspace)
+    workflow = workflow_verdict(workspace, record["depth"])
+    actual = files(workspace)
+    changed = sorted(name for name in actual.keys() | record["baseline_files"].keys()
+                     if actual.get(name) != record["baseline_files"].get(name))
+    outside_scope = [name for name in changed if not name.startswith(("src/", "tests/", ".planning/"))]
     try:
         oracle_complete = json.loads(oracle.get("stdout", "")) == {"case": record["case"], "assertions": CASES[record["case"]]["assertions"]}
     except json.JSONDecodeError:
@@ -116,32 +120,43 @@ def check(trial: Path, telemetry: Path | None = None) -> dict:
     reported = json.loads(telemetry.read_text()) if telemetry else None
     evaluator_changed = record["oracle_sha256"] != hashlib.sha256(oracle_path.read_bytes()).hexdigest()
     evaluator_changed |= record["fixture_sha256"] != files(fixture)
-    result = {"success": oracle["returncode"] == tests["returncode"] == 0 and oracle_complete and not outside_scope
-              and "error" not in metrics and not metrics.get("external_imports") and not evaluator_changed
-              and (record.get("runner") or {}).get("returncode", 0) == 0,
+    if record.get("evaluator_sha256") is not None:
+        evaluator_changed |= record["evaluator_sha256"] != evaluator_files(ROOT, oracle_path, PACK / "cases.json")
+    provenance = plugin_provenance(record, ROOT)
+    behavior = {"success": oracle["returncode"] == tests["returncode"] == 0 and oracle_complete
+               and not evaluator_changed}
+    cleanup = cleanup_verdict(record, workspace, CASES[record["case"]].get("cleanup_required", False), review)
+    result = {"success": behavior["success"] and workflow["success"] and cleanup["success"] is not False
+              and provenance["success"] and not outside_scope and "error" not in metrics
+              and not metrics.get("external_imports") and (record.get("runner") or {}).get("returncode", 0) == 0,
               "case": record["case"], "depth": record["depth"], "changed_files": changed, "outside_scope": outside_scope,
               "evaluator_changed": evaluator_changed,
+              "behavior": behavior, "workflow": workflow, "cleanup": cleanup,
+              "plugin_provenance": provenance,
               "oracle_complete": oracle_complete,
               "before": record["baseline_metrics"], "after": metrics, "oracle": oracle, "tests": tests,
               "runner": record.get("runner"), "reported_telemetry": reported,
-              "limits": "Structural metrics are review aids, not readability scores. Missing model usage is unknown. Resume uses a prepared interruption checkpoint."}
+              "limits": "Structural metrics and AST changes are review aids, not proof of useful cleanup. Independent review is an external attestation, not authenticated identity. Trials are not a security sandbox. POSIX timeout cleanup covers the process group; detached sessions may escape. Windows tree cleanup uses taskkill and is reported if unproven. Missing model usage is unknown. Resume uses a prepared interruption checkpoint."}
     (trial / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("prepare", "check", "run"))
+    parser.add_argument("operation", choices=("prepare", "check", "run", "review-template"))
     parser.add_argument("trial", type=Path)
     parser.add_argument("--case", choices=CASES, default="summary")
     parser.add_argument("--depth", choices=("lean", "standard", "deep"))
     parser.add_argument("--telemetry", type=Path)
+    parser.add_argument("--review", type=Path, help="Independent review JSON outside the candidate workspace")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--runner", nargs=argparse.REMAINDER, help="Agent argv; prompt arrives on stdin, cwd is the disposable workspace")
     args = parser.parse_args()
     trial = args.trial.resolve()
     if args.operation == "check":
-        result = check(trial, args.telemetry)
+        result = check(trial, args.telemetry, review=args.review)
+    elif args.operation == "review-template":
+        result = review_template(trial)
     else:
         if args.operation == "run" and not args.runner:
             parser.error("run requires --runner followed by an agent executable and arguments")
@@ -151,7 +166,7 @@ def main() -> int:
             record = json.loads((trial / "trial.json").read_text())
             record["runner"] = runner
             (trial / "trial.json").write_text(json.dumps(record, indent=2) + "\n")
-            result = check(trial, args.telemetry)
+            result = check(trial, args.telemetry, review=args.review)
             result["success"] = result["success"] and runner["returncode"] == 0
             (trial / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))

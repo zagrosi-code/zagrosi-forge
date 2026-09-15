@@ -239,7 +239,7 @@ PROMPT_TYPES = {
 
 EVIDENCE_TERMS = {
     "file-evidence": ["current state", "existing", "verified", "found in", "file tree", "rg --files", "grep"],
-    "command-evidence": ["rg ", "rg --files", "pytest", "npm test", "uv run", "cargo test", "go test", "pnpm", "yarn"],
+    "command-evidence": ["rg ", "rg --files", "pytest", "unittest", "npm test", "npm run", "uv run", "cargo test", "go test", "pnpm", "yarn", "bun "],
     "test-discovery": ["existing test", "tests discovered", "test command", "test matrix", "fixtures"],
     "runtime-detection": ["package.json", "pyproject.toml", "go.mod", "cargo.toml", "runtime", "framework"],
     "assumption-ledger": ["assumption", "unknown", "open question", "stop-line", "stop line"],

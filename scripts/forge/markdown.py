@@ -210,6 +210,47 @@ def split_markdown_fences(text: str) -> tuple[list[tuple[str, list[str]]], list[
     return [(language, lines) for language, lines, _ in blocks], plain_lines
 
 
+def passing_review(text: str, *, allow_legacy: bool = False) -> bool:
+    """Validate current verdicts; fenced examples cannot supply review evidence."""
+    blocks, lines = split_markdown_fences_with_closure(text)
+    if any(not closed for _, _, closed in blocks):
+        return False
+    fields: dict[str, list[str]] = {"verdict": [], "reviewed": []}
+    body: list[str] = []
+    legacy_verdicts: list[str] = []
+    normalized: list[str] = []
+    for raw in lines:
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip().replace("**", "")
+        normalized.append(line)
+        match = re.match(r"(?i)^(verdict|reviewed):\s*(.*)$", line)
+        if match:
+            fields[match[1].lower()].append(match[2].strip())
+        elif line and not line.startswith("#"):
+            body.append(line)
+            if re.match(r"(?i)^(?:pass|fixed|blocked|fail|failed|pending|unresolved)[ \t]*[:—-]", line):
+                legacy_verdicts.append(line)
+    verdicts = fields["verdict"] + legacy_verdicts
+    if verdicts and not all(
+        re.match(r"(?i)^(?:pass|fixed)\b", verdict)
+        and not re.search(r"(?i)(?:^|[/|,;:—(\[]|\s-\s|\b(?:and|or)\b)\s*(?:blocked|fail(?:ed)?|pending|unresolved)\b", verdict)
+        for verdict in verdicts
+    ):
+        return False
+    reviewed = fields["reviewed"]
+    substantive_scope = bool(reviewed) and all(
+        value.strip("`*. ").lower() not in {"", "none", "n/a", "tbd", "todo", "pending"}
+        for value in reviewed
+    )
+    if not allow_legacy:
+        return bool(fields["verdict"] and substantive_scope)
+    legacy_pass = re.search(
+        r"(?im)^(?:pass:[ \t]*)?no (?:blocking|material) findings(?:[.!]|\s*$)", "\n".join(normalized),
+    )
+    if reviewed:
+        return bool((verdicts or legacy_pass) and substantive_scope)
+    return bool(legacy_pass or verdicts and body)
+
+
 def markdown_headings(text: str) -> list[str]:
     return [line.strip("# ").strip() for line in text.splitlines() if line.startswith("#")]
 

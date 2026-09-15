@@ -133,11 +133,7 @@ def compact_plan_findings(planning_dir: Path, *, depth: str | None = None, allow
         findings.append(_quality.finding("high", "compact-plan-no-ownership", "Compact plan has no explicit owned files.", path))
     if not _markdown.has_verification(headings.get("tests first", "")):
         findings.append(_quality.finding("high", "compact-plan-no-tests", "Tests first needs a regression case and command, or justified inspection with an expected result.", path))
-    _, review_lines = _markdown.split_markdown_fences_with_closure(headings.get("review", ""))
-    review = "\n".join(review_lines)
-    verdict = re.search(r"(?im)^Verdict:[ \t]*(pass|fixed|blocked)\b", review)
-    scope = re.search(r"(?im)^Reviewed:[ \t]*(\S.*)$", review)
-    if not verdict or verdict[1].lower() == "blocked" or not scope or scope[1].strip().lower() in {"none", "tbd", "todo", "n/a"}:
+    if not _markdown.passing_review(headings.get("review", "")):
         findings.append(_quality.finding("high", "compact-review-incomplete", "Embedded review needs pass/fixed plus concrete Reviewed scope; blocked findings must be resolved.", path))
     return findings
 

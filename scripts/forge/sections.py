@@ -21,6 +21,9 @@ def check_section_progress(planning_dir: Path) -> dict[str, Any]:
     config, config_errors = _markdown.parse_project_config(text)
     sections, manifest_errors = _markdown.parse_numbered_manifest(text, "SECTION_MANIFEST", _policy.SECTION_RE, prefix="section-")
     errors = config_errors + manifest_errors
+    if not errors:
+        _, dependency_errors = section_dependency_analysis(text, sections)
+        errors.extend(dependency_errors)
     if errors:
         return {"state": "invalid_index", "sections_dir": str(sections_dir), "errors": errors}
 
@@ -58,36 +61,78 @@ def check_section_progress(planning_dir: Path) -> dict[str, Any]:
     }
 
 
-def parse_section_dependencies(index_text: str, sections: list[str]) -> dict[str, list[str]]:
+def section_dependency_analysis(index_text: str, sections: list[str]) -> tuple[dict[str, list[str]], list[str]]:
     known = set(sections)
     dependencies = {section: [] for section in sections}
+    errors: list[str] = []
 
-    def add_dependencies(section: str, deps: list[str]) -> None:
-        if section not in known:
+    def add_dependencies(dependent: str, predecessors: str) -> None:
+        candidates = set(_policy.SECTION_TOKEN_RE.findall(dependent))
+        if len(candidates) != 1 or not candidates <= known:
+            errors.append(f"Dependency row must name exactly one known section: {dependent!r}")
             return
+        section = candidates.pop()
+        references = list(_policy.SECTION_TOKEN_RE.finditer(predecessors))
+        deps = [match[0] for match in references]
+        starts = {match.start() for match in references}
+        if any(match.start() not in starts for match in re.finditer(r"\bsection-", predecessors)):
+            errors.append(f"Malformed predecessor reference for {section}: {predecessors!r}")
+        if not deps and predecessors.strip("`* .").lower() not in {"", "none", "-", "—", "n/a", "no dependencies", "independent"}:
+            errors.append(f"Unrecognized dependencies for {section}: {predecessors!r}")
+        if section in deps:
+            errors.append(f"Section cannot depend on itself: {section}")
         current = dependencies.setdefault(section, [])
         for dep in deps:
-            if dep != section and dep not in current:
+            if dep not in current:
                 current.append(dep)
 
-    for line in index_text.splitlines():
+    blocks, lines = _markdown.split_markdown_fences_with_closure(index_text)
+    if any(not closed for _, _, closed in blocks):
+        errors.append("Unclosed Markdown fence in sections index.")
+    dependency_column: int | None = 1
+    dependency_table = False
+    for line in lines:
         stripped = line.strip()
         if "|" in stripped:
             cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-            if cells and cells[0] in known:
-                depends_cell = cells[1] if len(cells) > 1 else ""
-                add_dependencies(cells[0], _policy.SECTION_TOKEN_RE.findall(depends_cell))
+            labels = [cell.strip("`* ").lower() for cell in cells]
+            if labels[0] == "section":
+                incoming_label = r"(?:depends on|dependenc(?:y|ies)|predecessors?|after|requires)\b"
+                outgoing_label = r"(?:blocks|dependents?|dependants?|successors?)\b"
+                relationship = rf"\b(?:depends\b|{incoming_label}|{outgoing_label})"
+                columns = {i for i, label in enumerate(labels) if re.search(relationship, label)}
+                incoming = [i for i in columns if re.match(incoming_label, labels[i])
+                            and not re.search(rf"\b{outgoing_label}", labels[i])]
+                outgoing = {i for i in columns if re.match(outgoing_label, labels[i])
+                            and not re.search(rf"\b(?:depends\b|{incoming_label})", labels[i])}
+                ambiguous = bool(columns) and (len(incoming) != 1 or bool(columns - set(incoming) - outgoing))
+                if ambiguous:
+                    errors.append(f"Ambiguous dependency table header: {stripped!r}")
+                dependency_column = incoming[0] if len(incoming) == 1 and not ambiguous else None
+                dependency_table = dependency_column is not None
+                continue
+            if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+                continue
+            if dependency_column is not None and (dependency_table or _policy.SECTION_TOKEN_RE.search(cells[0])):
+                if len(cells) <= dependency_column:
+                    errors.append(f"Dependency row has no predecessor cell: {stripped!r}")
+                else:
+                    add_dependencies(cells[0], cells[dependency_column])
             continue
 
+        dependency_column, dependency_table = 1, False
         lower = stripped.lower()
         if "depends on" not in lower:
             continue
         before, after = re.split(r"\bdepends on\b", stripped, maxsplit=1, flags=re.IGNORECASE)
-        dependent_candidates = _policy.SECTION_TOKEN_RE.findall(before)
-        if not dependent_candidates:
+        if not _policy.SECTION_TOKEN_RE.search(before):
             continue
-        add_dependencies(dependent_candidates[0], _policy.SECTION_TOKEN_RE.findall(after))
-    return dependencies
+        add_dependencies(before, after)
+    return dependencies, errors
+
+
+def parse_section_dependencies(index_text: str, sections: list[str]) -> dict[str, list[str]]:
+    return section_dependency_analysis(index_text, sections)[0]
 
 
 def transitive_section_predecessors(
