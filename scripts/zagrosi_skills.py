@@ -134,7 +134,7 @@ def bootstrap(manifest: dict[str, str], cli_path: Path, namespace: str):
                 module.__path__ = []
             if module.__name__ == namespace:
                 module.CLI_PATH = cli_path
-                module.MODULE_NAMES = MappingProxyType({str(path.relative_to(source_root)): name for name, (path, _) in modules.items()})
+                module.MODULE_NAMES = MappingProxyType({path.relative_to(source_root).as_posix(): name for name, (path, _) in modules.items()})
                 module.verify_sources = verify_sources
             exec(compile(sources[module.__name__], str(path), "exec", dont_inherit=True), module.__dict__)
 
@@ -198,7 +198,7 @@ RUNTIME_MANIFEST = {
     "forge/sections.py": "e505e1d093b5b53e7809063c915b48d94cd897db6e45c52f7c01a21e28288568",
     "forge/secure_io.py": "2c529854508436ff083d3a01c1ad97de4b5e5a532c1365b28a173c0cd0401108",
     "forge/session.py": "73429e3b1a2b8a5a9acf5b3816851895855904660b02602431ae4bdb1e2d9076",
-    "forge/sources.py": "7a0132ec0e8f087852c2b4e6dcb86367241608b677bdb7838bf55eb3441fd128",
+    "forge/sources.py": "396d4b3b51a791bff56cfd511824d0611cc7e6e2c1546eaa3aa3a3fc79df9334",
     "forge/state.py": "0b1bb5e3085c13c02c73a931aa5623a735df40000e5f68598d0816583c86941a",
     "forge/status.py": "6585354eeb27d5e7609ce4e29aaf358dcc121e3f98170195c0f5883d84e226ab",
     "forge/storage.py": "f67b9a4e704d8a25e5be84239e341212301aaee40a39aeb358e26abea1c8bbc3",

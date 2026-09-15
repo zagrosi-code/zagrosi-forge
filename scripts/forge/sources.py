@@ -57,7 +57,7 @@ TEST_MANIFEST = {
     "test_release.py": "a2d36f28691d9f37006eec10167281b0511e485fcbe9289b1c343ce29b453451",
     "test_resume_guidance.py": "85958980a061d550f5b51dd9c01344c5c110a3ad0cca2779a899f1b6608d3724",
     "test_runtime_binding.py": "5f10520b26f31e8c5af87ceb65b72e11ef2ac5807e98902620e90fbede6989b2",
-    "test_runtime_loading.py": "c25e4e5ecdb3b4879d413d797d658be596cc6bc0aa6613165ac3c3a3e8411f9f",
+    "test_runtime_loading.py": "b8b77461891f3cad76e1f5842a838d6f408f7b8e8e0e1fc45b13d003b95e668a",
     "test_runtime_performance.py": "e24116a603ad97c3ebdf5121b25227974d8f6a50a51e43afb76522dd35683bc8",
     "test_section_contracts.py": "de911d33ee7d8e71ba372fe540e476aac41663cce4cfc7c3a9ec100b3943ca6d",
     "test_test_binding.py": "d08862ff2eee423190dd6878e12da54b2af6e47080848f1655a14cbe703a7723",
