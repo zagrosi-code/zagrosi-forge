@@ -73,15 +73,8 @@ def run_text(*args: str, cwd: Path | None = None) -> str:
 
 
 def load_zagrosi_module(script: Path = SCRIPT):
-    import importlib.util
-
-    module_name = f"zagrosi_skills_under_test_{time.time_ns()}"
-    spec = importlib.util.spec_from_file_location(module_name, script)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    from runtime_support import load_runtime
+    return load_runtime(script)
 
 
 def write_required_plan_artifacts(planning_dir: Path) -> None:
@@ -581,7 +574,7 @@ def test_run_bounded_child_accepts_zombie_only_process_group_after_success(
     monkeypatch.setattr(module.os, "killpg", zombie_only_group)
     monkeypatch.setattr(module.sys, "platform", "linux")
     monkeypatch.setattr(
-        module,
+        module.owner("_linux_process_group_has_live_members"),
         "_linux_process_group_has_live_members",
         lambda process_group: False,
     )
@@ -723,7 +716,7 @@ def test_run_bounded_child_real_apple_git_dirty_probe_preserves_semantic_error(
         env=module.HANDOFF_GIT_ENV,
     )
     (repository / "dirty-untracked.txt").write_text("dirty\n")
-    monkeypatch.setattr(module, "HANDOFF_GIT", str(apple_git))
+    monkeypatch.setattr(module.owner("HANDOFF_GIT"), "HANDOFF_GIT", str(apple_git))
     cwd_fd = os.open(repository, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         with pytest.raises(module.DetachedImplementationError) as caught:
@@ -781,7 +774,7 @@ def test_protected_source_observation_uses_exact_git_and_raw_source_contract(
         assert argv[1] == "ls-tree"
         return 0, tree, b""
 
-    monkeypatch.setattr(module, "run_bounded_child", fake_child)
+    monkeypatch.setattr(module.owner("run_bounded_child"), "run_bounded_child", fake_child)
     target_fd = os.open(target, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         observed = module.derive_protected_source_observation(target_fd, contract)
@@ -866,7 +859,7 @@ def test_protected_source_observation_rejects_dirty_and_noncanonical_revision(
 ) -> None:
     module = load_zagrosi_module()
     frames = iter(probe_frames)
-    monkeypatch.setattr(module, "run_protected_source_probe", lambda *args, **kwargs: next(frames))
+    monkeypatch.setattr(module.owner("run_protected_source_probe"), "run_protected_source_probe", lambda *args, **kwargs: next(frames))
     target_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         with pytest.raises(module.DetachedImplementationError) as caught:
@@ -897,7 +890,7 @@ def test_protected_source_probe_distinguishes_unavailability_from_semantic_failu
 ) -> None:
     module = load_zagrosi_module()
     monkeypatch.setattr(
-        module,
+        module.owner("run_bounded_child"),
         "run_bounded_child",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             module.DetachedImplementationError(child_code, "value-bearing private detail")
@@ -1060,7 +1053,7 @@ def test_fixed_gate_runner_metadata_is_exact_and_no_follow(
             st_ctime_ns=observed.st_ctime_ns,
         )
 
-    monkeypatch.setattr(module, "open_root_owned_nonwritable_directory_chain", fake_parent)
+    monkeypatch.setattr(module.owner("open_root_owned_nonwritable_directory_chain"), "open_root_owned_nonwritable_directory_chain", fake_parent)
     monkeypatch.setattr(module.os, "fstat", fake_fstat)
     if accepted:
         assert module.read_fixed_gate_runner(contract) == raw
@@ -1106,7 +1099,7 @@ def test_fixed_stat_dependency_accepts_supported_link_count_only_with_safe_metad
     real_fstat = module.os.fstat
 
     monkeypatch.setattr(
-        module,
+        module.owner("open_root_owned_nonwritable_directory_chain"),
         "open_root_owned_nonwritable_directory_chain",
         lambda path: os.open(dependency_parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
     )
@@ -1137,7 +1130,7 @@ def test_fixed_executable_dependency_rejects_missing_and_symbolic_link(
     dependency_parent = tmp_path / "fixed-bin"
     dependency_parent.mkdir()
     monkeypatch.setattr(
-        module,
+        module.owner("open_root_owned_nonwritable_directory_chain"),
         "open_root_owned_nonwritable_directory_chain",
         lambda path: os.open(dependency_parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
     )
@@ -1160,7 +1153,7 @@ def test_handoff_platform_rejects_fixed_stat_path_mutation_before_spawn(
     monkeypatch.setattr(module.os, "geteuid", lambda: 501)
     monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(module.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(module, "HANDOFF_STAT", "/tmp/mutable-stat")
+    monkeypatch.setattr(module.owner("HANDOFF_STAT"), "HANDOFF_STAT", "/tmp/mutable-stat")
     child_calls = 0
 
     def forbidden_child(*args, **kwargs):
@@ -1168,7 +1161,7 @@ def test_handoff_platform_rejects_fixed_stat_path_mutation_before_spawn(
         child_calls += 1
         raise AssertionError("mutated stat path must fail before spawn")
 
-    monkeypatch.setattr(module, "run_bounded_child", forbidden_child)
+    monkeypatch.setattr(module.owner("run_bounded_child"), "run_bounded_child", forbidden_child)
     root_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         with pytest.raises(module.DetachedImplementationError) as caught:
@@ -1204,7 +1197,7 @@ def test_handoff_platform_apfs_probe_is_exact_and_closed(
     monkeypatch.setattr(module.platform, "machine", lambda: "arm64")
     executable_checks: list[tuple[str, bool]] = []
     monkeypatch.setattr(
-        module,
+        module.owner("require_fixed_handoff_executable"),
         "require_fixed_handoff_executable",
         lambda path, *, allow_multiple_links=False: executable_checks.append((path, allow_multiple_links)),
     )
@@ -1221,7 +1214,7 @@ def test_handoff_platform_apfs_probe_is_exact_and_closed(
         assert module.HANDOFF_ENV == {"LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
         return return_code, stdout, stderr
 
-    monkeypatch.setattr(module, "run_bounded_child", fake_child)
+    monkeypatch.setattr(module.owner("run_bounded_child"), "run_bounded_child", fake_child)
     root_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         if accepted:
@@ -1285,16 +1278,58 @@ def copy_implementation_plugin(destination: Path) -> Path:
         target = plugin_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, target)
+    shutil.copytree(ROOT / "scripts/forge", plugin_root / "scripts/forge", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     return plugin_root
 
 
+def instrument_runtime_modules(
+    plugin_root: Path,
+    module_names: tuple[str, ...],
+    insertion: str,
+    replacements: dict[str, str],
+) -> Path:
+    """Keep crash boundaries exact while targeting their extracted source modules."""
+    symbol_owners = {
+        "secure_io": ("_write_all", "load_canonical_json_at", "write_canonical_json_at", "read_single_link_regular_at"),
+        "transaction_io": ("write_new_fixed_file_at", "rename_fixed_file_no_replace_at", "section_record_entry_stat", "install_staged_section_pinner", "replace_state_from_transaction", "unlink_fixed_file_at"),
+        "detached_contract": ("DETACHED_JSON_CAP", "SECTION_RECORD_TRANSACTION_DIR"),
+        "locks": ("detached_global_lock",),
+        "storage": ("absolute_path_no_follow",),
+    }
+
+    def qualify(fragment: str, module: str) -> str:
+        for owner, symbols in symbol_owners.items():
+            if owner != module:
+                for symbol in symbols:
+                    fragment = re.sub(rf"(?<![\w.]){symbol}\b", f"_{owner}.{symbol}", fragment)
+        return fragment
+
+    texts = {name: (plugin_root / "scripts/forge" / f"{name}.py").read_text() for name in module_names}
+    changed = set()
+    for needle, replacement in replacements.items():
+        matches = [(name, qualify(needle, name)) for name, text in texts.items() if qualify(needle, name) in text]
+        assert sum(texts[name].count(qualified) for name, qualified in matches) == 1, needle
+        name, qualified = matches[0]
+        texts[name] = texts[name].replace(qualified, qualify(replacement, name), 1)
+        changed.add(name)
+    for name in changed:
+        path = plugin_root / "scripts/forge" / f"{name}.py"
+        anchor = "from __future__ import annotations\n"
+        helper = "\nimport os\nimport signal\nimport time\nfrom pathlib import Path\n" + qualify(insertion, name)
+        assert texts[name].count(anchor) == 1
+        text = texts[name].replace(anchor, anchor + helper, 1)
+        compile(text, str(path), "exec")
+        replace_file(path, text.encode(), mode=path.stat().st_mode & 0o777)
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "tools/update_runtime_manifest.py"), "--plugin-root", str(plugin_root)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    return plugin_root / IMPLEMENTATION_SOURCE_RELATIVE_PATHS["tool"]
+
+
 def instrument_record_crashpoints(plugin_root: Path) -> Path:
-    script = plugin_root / IMPLEMENTATION_SOURCE_RELATIVE_PATHS["tool"]
-    text = script.read_text()
     insertion = '''\n\ndef _test_record_crashpoint(name: str) -> None:\n    if name == "state-cas-fsync" and os.environ.get("ZAGROSI_TEST_FORCE_ROLLBACK") == "1":\n        Path(os.environ["ZAGROSI_TEST_FORCE_ROLLBACK_PATH"]).write_bytes(b'{"schema":"test-record-gate-v1","verdict":"DRIFT"}\\n')\n    requested = os.environ.get("ZAGROSI_TEST_RECORD_CRASHPOINT")\n    if requested == name:\n        os.kill(os.getpid(), signal.SIGKILL)\n    pausepoint = os.environ.get("ZAGROSI_TEST_RECORD_PAUSEPOINT")\n    if pausepoint == name:\n        ready = Path(os.environ["ZAGROSI_TEST_RECORD_READY"])\n        release = Path(os.environ["ZAGROSI_TEST_RECORD_RELEASE"])\n        ready.write_text("ready\\n")\n        while not release.exists():\n            time.sleep(0.01)\n\ndef _test_precreate_adopted_pinner(root_fd: int, transaction_fd: int, pinner_path: str) -> None:\n    mode = os.environ.get("ZAGROSI_TEST_RECORD_ADOPT_PREEXISTING")\n    if mode not in {"1", "wrong"}:\n        return\n    staged, raw = load_canonical_json_at(transaction_fd, "pinner.json")\n    published = staged if mode == "1" else {**staged, "notes": "wrong preexisting bytes"}\n    write_canonical_json_at(root_fd, pinner_path, published, immutable=True)\n    reopened = read_single_link_regular_at(root_fd, pinner_path, cap=DETACHED_JSON_CAP, require_mode=0o600)\n    if mode == "1" and reopened != raw:\n        raise AssertionError("adopted test pinner bytes changed")\n'''
-    anchor = '\n\ndef open_directory_chain_no_follow(path: Path, *, create: bool = False) -> int:\n'
-    assert text.count(anchor) == 1
-    text = text.replace(anchor, insertion + anchor)
     replacements = {
         '        _write_all(file_fd, raw)\n'
         '        os.fsync(file_fd)\n': (
@@ -1462,20 +1497,11 @@ def instrument_record_crashpoints(plugin_root: Path) -> Path:
             '        os.fsync(pinners_fd)\n'
         ),
     }
-    for needle, replacement in replacements.items():
-        assert text.count(needle) == 1, needle
-        text = text.replace(needle, replacement)
-    replace_file(script, text.encode(), mode=script.stat().st_mode & 0o777)
-    return script
+    return instrument_runtime_modules(plugin_root, ("transaction_io", "detached_record"), insertion, replacements)
 
 
 def instrument_root_lifecycle_points(plugin_root: Path) -> Path:
-    script = plugin_root / IMPLEMENTATION_SOURCE_RELATIVE_PATHS["tool"]
-    text = script.read_text()
     insertion = '''\n\ndef _test_root_lifecycle_point(name: str) -> None:\n    if os.environ.get("ZAGROSI_TEST_ROOT_CRASHPOINT") == name:\n        os.kill(os.getpid(), signal.SIGKILL)\n    if os.environ.get("ZAGROSI_TEST_ROOT_PAUSEPOINT") == name:\n        ready = Path(os.environ["ZAGROSI_TEST_ROOT_READY"])\n        release = Path(os.environ["ZAGROSI_TEST_ROOT_RELEASE"])\n        ready.write_text("ready\\n")\n        while not release.exists():\n            time.sleep(0.01)\n'''
-    anchor = '\n\ndef open_directory_chain_no_follow(path: Path, *, create: bool = False) -> int:\n'
-    assert text.count(anchor) == 1
-    text = text.replace(anchor, insertion + anchor)
     replacements = {
         '                os.fsync(temporary_fd)\n                os.close(temporary_fd)\n': (
             '                os.fsync(temporary_fd)\n'
@@ -1497,11 +1523,7 @@ def instrument_root_lifecycle_points(plugin_root: Path) -> Path:
             '        requested_root = absolute_path_no_follow(args.implementation_root)\n'
         ),
     }
-    for needle, replacement in replacements.items():
-        assert text.count(needle) == 1, needle
-        text = text.replace(needle, replacement)
-    replace_file(script, text.encode(), mode=script.stat().st_mode & 0o777)
-    return script
+    return instrument_runtime_modules(plugin_root, ("secure_io", "detached_state", "detached_setup"), insertion, replacements)
 
 
 def make_detached_record_fixture(
@@ -1795,17 +1817,17 @@ def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
     run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
 
     status = run_cmd("status", "--path", str(tmp_path))
-    assert status["next_action"] == "write concise codex-plan.md"
+    assert status["next_action"] == "write the canonical implementation plan"
     assert status["plan_artifacts"]["research"] is None
     assert status["plan_artifacts"]["interview"] is None
 
     (tmp_path / "codex-plan.md").write_text("")
     status = run_cmd("status", "--path", str(tmp_path))
-    assert status["next_action"] == "write concise codex-plan.md"
+    assert status["next_action"] == "write the canonical implementation plan"
 
     (tmp_path / "codex-plan.md").write_text("# Plan\n\nREQ-001 implementation plan.\n")
     status = run_cmd("status", "--path", str(tmp_path))
-    assert status["next_action"] == "review plan and write concise reviews/codex.md"
+    assert status["next_action"] == "review plan and record the verdict"
 
     reviews = tmp_path / "reviews"
     reviews.mkdir()
@@ -2414,10 +2436,10 @@ def test_identical_same_second_leaf_rerecord_refuses_before_transaction_publicat
     plugin_root = copy_implementation_plugin(tmp_path / "same-second-noop")
     fixture = make_detached_record_fixture(tmp_path / "fixture-same-second-noop", plugin_root=plugin_root)
     module = load_zagrosi_module(fixture.script)
-    monkeypatch.setattr(module, "now_iso", lambda: "2026-08-22T12:00:00Z")
+    monkeypatch.setattr(module.owner("now_iso"), "now_iso", lambda: "2026-08-22T12:00:00Z")
     captured: list[tuple[dict, int]] = []
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
@@ -2432,7 +2454,7 @@ def test_identical_same_second_leaf_rerecord_refuses_before_transaction_publicat
         publication_called = True
         raise AssertionError("no-op rerecord reached staged pinner publication")
 
-    monkeypatch.setattr(module, "publish_section_record_staged_pinner", refuse_publication)
+    monkeypatch.setattr(module.owner("publish_section_record_staged_pinner"), "publish_section_record_staged_pinner", refuse_publication)
     captured.clear()
     assert parsed.func(parsed) == 1
     assert captured[-1][0]["error_code"] == "section-record-state-conflict"
@@ -3098,19 +3120,19 @@ def test_candidate_recovery_rollback_failure_retains_transaction_for_retry(
     module = load_zagrosi_module(script)
     if failure == "state-rollback":
         monkeypatch.setattr(
-            module,
+            module.owner("replace_state_from_rollback"),
             "replace_state_from_rollback",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected rollback write failure")),
         )
     else:
         monkeypatch.setattr(
-            module,
+            module.owner("unlink_invocation_created_section_pinner"),
             "unlink_invocation_created_section_pinner",
             lambda *args, **kwargs: (_ for _ in ()).throw(OSError("injected pinner unlink failure")),
         )
     captured: list[tuple[dict, int]] = []
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
@@ -3628,9 +3650,9 @@ def test_pinners_directory_replacement_during_candidate_rolls_back_and_retains_t
         return replacement_raw
 
     captured: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "replace_state_from_transaction", replace_state_then_swap_pinners)
+    monkeypatch.setattr(module.owner("replace_state_from_transaction"), "replace_state_from_transaction", replace_state_then_swap_pinners)
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
@@ -3811,11 +3833,11 @@ def test_detached_setup_recovers_only_its_exact_authenticated_pending_prefix(
             raise OSError("injected closed setup write-before-fsync crash")
 
     captured: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "write_canonical_json_at", crash_after_exact_write)
-    monkeypatch.setattr(module, "ensure_detached_root_file_slot", crash_after_exact_slot)
-    monkeypatch.setattr(module, "_write_all", crash_after_slot_write)
+    monkeypatch.setattr(module.owner("write_canonical_json_at"), "write_canonical_json_at", crash_after_exact_write)
+    monkeypatch.setattr(module.owner("ensure_detached_root_file_slot"), "ensure_detached_root_file_slot", crash_after_exact_slot)
+    monkeypatch.setattr(module.owner("_write_all"), "_write_all", crash_after_slot_write)
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
@@ -3823,9 +3845,9 @@ def test_detached_setup_recovers_only_its_exact_authenticated_pending_prefix(
     assert crashed is True
     assert captured[-1][0]["error_code"] == "detached-io-failure"
 
-    monkeypatch.setattr(module, "write_canonical_json_at", original_write)
-    monkeypatch.setattr(module, "ensure_detached_root_file_slot", original_slot)
-    monkeypatch.setattr(module, "_write_all", original_write_all)
+    monkeypatch.setattr(module.owner("write_canonical_json_at"), "write_canonical_json_at", original_write)
+    monkeypatch.setattr(module.owner("ensure_detached_root_file_slot"), "ensure_detached_root_file_slot", original_slot)
+    monkeypatch.setattr(module.owner("_write_all"), "_write_all", original_write_all)
     assert parsed.func(parsed) == 0
     assert captured[-1][0]["success"] is True
     assert_canonical_json_file(implementation_root / "zagrosi_implement_config.json")
@@ -4030,14 +4052,14 @@ def test_detached_setup_rejects_impossible_authenticated_prefix_shapes_without_m
         return result
 
     captured: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "ensure_detached_root_file_slot", leave_invalid_prefix)
+    monkeypatch.setattr(module.owner("ensure_detached_root_file_slot"), "ensure_detached_root_file_slot", leave_invalid_prefix)
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
     assert parsed.func(parsed) == 1
-    monkeypatch.setattr(module, "ensure_detached_root_file_slot", original_slot)
+    monkeypatch.setattr(module.owner("ensure_detached_root_file_slot"), "ensure_detached_root_file_slot", original_slot)
     if invalid_shape == "missing-marker":
         (implementation_root / "pinners" / ".record-section.lock").unlink()
     before = planning_tree_snapshot(implementation_root)
@@ -4184,9 +4206,9 @@ def test_detached_record_derives_and_reverifies_exact_privileged_evidence_name_a
             return json.loads(raw), raw
 
         captured: list[tuple[dict, int]] = []
-        monkeypatch.setattr(module, "verify_stored_privileged_handoff", verify_stored)
+        monkeypatch.setattr(module.owner("verify_stored_privileged_handoff"), "verify_stored_privileged_handoff", verify_stored)
         monkeypatch.setattr(
-            module,
+            module.owner("print_json"),
             "print_json",
             lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
         )
@@ -4363,17 +4385,17 @@ def test_implement_evidence_handoff_uses_exact_transport_and_create_once_replay(
         return 0, handoff_verification_for_test(module, config, contract, request_raw, receipt_raw), b""
 
     emitted: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "require_handoff_platform", lambda root_fd: None)
-    monkeypatch.setattr(module, "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.owner("require_handoff_platform"), "require_handoff_platform", lambda root_fd: None)
+    monkeypatch.setattr(module.owner("require_fixed_handoff_dependencies"), "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
 
     monkeypatch.setattr(
-        module,
+        module.owner("derive_protected_source_observation"),
         "derive_protected_source_observation",
         lambda target_fd, selected_contract: source_observation,
     )
-    monkeypatch.setattr(module, "run_bounded_child", fake_bounded_child)
+    monkeypatch.setattr(module.owner("run_bounded_child"), "run_bounded_child", fake_bounded_child)
     monkeypatch.setattr(
-        module,
+        module.owner("emit_canonical_json"),
         "emit_canonical_json",
         lambda payload, exit_code=0: emitted.append((payload, exit_code)) or exit_code,
     )
@@ -4480,17 +4502,17 @@ def test_implement_evidence_handoff_transport_failures_leave_no_user_receipt(
         return 0, verification, b""
 
     emitted: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "require_handoff_platform", lambda root_fd: None)
-    monkeypatch.setattr(module, "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.owner("require_handoff_platform"), "require_handoff_platform", lambda root_fd: None)
+    monkeypatch.setattr(module.owner("require_fixed_handoff_dependencies"), "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
 
     monkeypatch.setattr(
-        module,
+        module.owner("derive_protected_source_observation"),
         "derive_protected_source_observation",
         lambda target_fd, selected_contract: source_observation,
     )
-    monkeypatch.setattr(module, "run_bounded_child", fake_bounded_child)
+    monkeypatch.setattr(module.owner("run_bounded_child"), "run_bounded_child", fake_bounded_child)
     monkeypatch.setattr(
-        module,
+        module.owner("emit_canonical_json"),
         "emit_canonical_json",
         lambda payload, exit_code=0: emitted.append((payload, exit_code)) or exit_code,
     )
@@ -4555,7 +4577,7 @@ def test_implement_evidence_handoff_public_failures_are_exact_bounded_and_privat
         )
     elif failure == "caller":
         monkeypatch.setattr(
-            module,
+            module.owner("require_handoff_platform"),
             "require_handoff_platform",
             lambda root_fd: (_ for _ in ()).throw(
                 module.DetachedImplementationError("unsafe-handoff-caller", str(fixture.implementation_root))
@@ -4563,26 +4585,26 @@ def test_implement_evidence_handoff_public_failures_are_exact_bounded_and_privat
         )
     elif failure == "platform":
         monkeypatch.setattr(
-            module,
+            module.owner("require_handoff_platform"),
             "require_handoff_platform",
             lambda root_fd: (_ for _ in ()).throw(
                 module.DetachedImplementationError("unsupported-handoff-platform", str(fixture.target))
             ),
         )
     elif failure == "fixed_dependency":
-        monkeypatch.setattr(module, "require_handoff_platform", lambda root_fd: None)
+        monkeypatch.setattr(module.owner("require_handoff_platform"), "require_handoff_platform", lambda root_fd: None)
         monkeypatch.setattr(
-            module,
+            module.owner("require_fixed_handoff_dependencies"),
             "require_fixed_handoff_dependencies",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 module.DetachedImplementationError("missing-handoff-dependency", str(fixture.admission_pinner))
             ),
         )
     elif failure == "git_output_cap":
-        monkeypatch.setattr(module, "require_handoff_platform", lambda root_fd: None)
-        monkeypatch.setattr(module, "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
+        monkeypatch.setattr(module.owner("require_handoff_platform"), "require_handoff_platform", lambda root_fd: None)
+        monkeypatch.setattr(module.owner("require_fixed_handoff_dependencies"), "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
         monkeypatch.setattr(
-            module,
+            module.owner("run_bounded_child"),
             "run_bounded_child",
             lambda *args, **kwargs: (_ for _ in ()).throw(
                 module.DetachedImplementationError(
@@ -4592,15 +4614,15 @@ def test_implement_evidence_handoff_public_failures_are_exact_bounded_and_privat
             ),
         )
     else:
-        monkeypatch.setattr(module, "require_handoff_platform", lambda root_fd: None)
+        monkeypatch.setattr(module.owner("require_handoff_platform"), "require_handoff_platform", lambda root_fd: None)
         monkeypatch.setattr(
-            module,
+            module.owner("verify_handoff_command_identities"),
             "verify_handoff_command_identities",
             lambda contract: (_ for _ in ()).throw(RuntimeError(str(fixture.planning))),
         )
     emitted: list[tuple[dict, int]] = []
     monkeypatch.setattr(
-        module,
+        module.owner("emit_canonical_json"),
         "emit_canonical_json",
         lambda payload, exit_code=0: emitted.append((payload, exit_code)) or exit_code,
     )
@@ -4650,12 +4672,12 @@ def test_implement_evidence_handoff_real_dirty_status_maps_to_authority_invalid(
     fake_git.write_text("#!/bin/sh\nprintf '?? dirty\\000'\nsleep 30\n")
     fake_git.chmod(0o755)
 
-    monkeypatch.setattr(module, "HANDOFF_GIT", str(fake_git))
-    monkeypatch.setattr(module, "require_handoff_platform", lambda root_fd: None)
-    monkeypatch.setattr(module, "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.owner("HANDOFF_GIT"), "HANDOFF_GIT", str(fake_git))
+    monkeypatch.setattr(module.owner("require_handoff_platform"), "require_handoff_platform", lambda root_fd: None)
+    monkeypatch.setattr(module.owner("require_fixed_handoff_dependencies"), "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
     emitted: list[tuple[dict, int]] = []
     monkeypatch.setattr(
-        module,
+        module.owner("emit_canonical_json"),
         "emit_canonical_json",
         lambda payload, exit_code=0: emitted.append((payload, exit_code)) or exit_code,
     )
@@ -4753,15 +4775,15 @@ def test_implement_evidence_handoff_immediate_dirty_status_reads_one_byte_and_pr
                 eventual_absence_proofs += 1
             raise
 
-    monkeypatch.setattr(module, "HANDOFF_GIT", str(fake_git))
+    monkeypatch.setattr(module.owner("HANDOFF_GIT"), "HANDOFF_GIT", str(fake_git))
     monkeypatch.setattr(module.subprocess.Popen, "poll", transient_poll)
     monkeypatch.setattr(module.os, "read", recording_read)
     monkeypatch.setattr(module.os, "killpg", transient_apple_killpg)
-    monkeypatch.setattr(module, "require_handoff_platform", lambda root_fd: None)
-    monkeypatch.setattr(module, "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.owner("require_handoff_platform"), "require_handoff_platform", lambda root_fd: None)
+    monkeypatch.setattr(module.owner("require_fixed_handoff_dependencies"), "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
     emitted: list[tuple[dict, int]] = []
     monkeypatch.setattr(
-        module,
+        module.owner("emit_canonical_json"),
         "emit_canonical_json",
         lambda payload, exit_code=0: emitted.append((payload, exit_code)) or exit_code,
     )
@@ -4894,8 +4916,8 @@ def test_implement_evidence_handoff_removes_new_receipt_on_late_authority_drift(
         return result
 
     emitted: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "require_handoff_platform", lambda root_fd: None)
-    monkeypatch.setattr(module, "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.owner("require_handoff_platform"), "require_handoff_platform", lambda root_fd: None)
+    monkeypatch.setattr(module.owner("require_fixed_handoff_dependencies"), "require_fixed_handoff_dependencies", lambda *args, **kwargs: None)
 
     def derive_observation(target_fd, selected_contract):
         if drift_timing == "post_write" and mutated:
@@ -4909,14 +4931,14 @@ def test_implement_evidence_handoff_removes_new_receipt_on_late_authority_drift(
         return source_observation
 
     monkeypatch.setattr(
-        module,
+        module.owner("derive_protected_source_observation"),
         "derive_protected_source_observation",
         derive_observation,
     )
-    monkeypatch.setattr(module, "run_bounded_child", fake_bounded_child)
-    monkeypatch.setattr(module, "write_canonical_json_at", write_then_drift)
+    monkeypatch.setattr(module.owner("run_bounded_child"), "run_bounded_child", fake_bounded_child)
+    monkeypatch.setattr(module.owner("write_canonical_json_at"), "write_canonical_json_at", write_then_drift)
     monkeypatch.setattr(
-        module,
+        module.owner("emit_canonical_json"),
         "emit_canonical_json",
         lambda payload, exit_code=0: emitted.append((payload, exit_code)) or exit_code,
     )
@@ -5001,17 +5023,17 @@ def test_implement_evidence_handoff_requires_current_readiness_before_any_child(
         raise AssertionError("readiness failure must occur before any child process")
 
     emitted: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "dependency_graph", lambda planning_dir, current: dependencies)
+    monkeypatch.setattr(module.owner("dependency_graph"), "dependency_graph", lambda planning_dir, current: dependencies)
     monkeypatch.setattr(
-        module,
+        module.owner("detached_completed_records"),
         "detached_completed_records",
         lambda root_fd, config, current: {section: {} for section in completed},
     )
     if expected_code == "handoff-section-not-ready":
-        monkeypatch.setattr(module, "ready_sections", lambda current, graph, done: [s28])
-    monkeypatch.setattr(module, "run_bounded_child", forbidden_child)
+        monkeypatch.setattr(module.owner("ready_sections"), "ready_sections", lambda current, graph, done: [s28])
+    monkeypatch.setattr(module.owner("run_bounded_child"), "run_bounded_child", forbidden_child)
     monkeypatch.setattr(
-        module,
+        module.owner("emit_canonical_json"),
         "emit_canonical_json",
         lambda payload, exit_code=0: emitted.append((payload, exit_code)) or exit_code,
     )
@@ -5161,8 +5183,8 @@ def test_detached_record_rechecks_every_late_input_before_pinner(
         captured.append((payload, exit_code))
         return exit_code
 
-    monkeypatch.setattr(module, "detached_evidence_rows", mutate_before_final_evidence_reopen)
-    monkeypatch.setattr(module, "print_json", capture_json)
+    monkeypatch.setattr(module.owner("detached_evidence_rows"), "detached_evidence_rows", mutate_before_final_evidence_reopen)
+    monkeypatch.setattr(module.owner("print_json"), "print_json", capture_json)
     args = module.build_parser().parse_args(
         detached_record_arguments(fixture, "--evidence-row", "record_gate=evidence/record-gate.json")
     )
@@ -5229,9 +5251,9 @@ def test_detached_record_rolls_back_new_pinner_on_post_pinner_authority_drift(
         return result
 
     captured: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "install_staged_section_pinner", replace_after_pinner_install)
+    monkeypatch.setattr(module.owner("install_staged_section_pinner"), "install_staged_section_pinner", replace_after_pinner_install)
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
@@ -5271,9 +5293,9 @@ def test_detached_record_rolls_back_state_and_pinner_on_post_state_evidence_drif
         return replacement_raw
 
     captured: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "replace_state_from_transaction", promote_then_replace_evidence)
+    monkeypatch.setattr(module.owner("replace_state_from_transaction"), "replace_state_from_transaction", promote_then_replace_evidence)
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
@@ -5592,9 +5614,9 @@ def test_detached_record_rolls_back_new_pinner_on_post_pinner_predecessor_drift(
         return result
 
     captured: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "install_staged_section_pinner", replace_parent_after_child_pinner)
+    monkeypatch.setattr(module.owner("install_staged_section_pinner"), "install_staged_section_pinner", replace_parent_after_child_pinner)
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
@@ -5854,9 +5876,9 @@ def test_detached_next_section_reopens_exact_config_after_mid_command_replacemen
         return completed
 
     captured: list[tuple[dict, int]] = []
-    monkeypatch.setattr(module, "detached_completed_records", completed_then_replace_config)
+    monkeypatch.setattr(module.owner("detached_completed_records"), "detached_completed_records", completed_then_replace_config)
     monkeypatch.setattr(
-        module,
+        module.owner("print_json"),
         "print_json",
         lambda payload, exit_code=0: captured.append((payload, exit_code)) or exit_code,
     )
@@ -6140,8 +6162,8 @@ def test_detached_next_section_rejects_mid_command_tool_source_drift(tmp_path: P
         captured.append((payload, exit_code))
         return exit_code
 
-    monkeypatch.setattr(module, "detached_completed_records", change_tool_after_initial_verification)
-    monkeypatch.setattr(module, "print_json", capture_json)
+    monkeypatch.setattr(module.owner("detached_completed_records"), "detached_completed_records", change_tool_after_initial_verification)
+    monkeypatch.setattr(module.owner("print_json"), "print_json", capture_json)
     result = module.detached_next_section(
         SimpleNamespace(planning_dir=str(planning), implementation_root=str(implementation_root))
     )
@@ -6939,7 +6961,7 @@ def test_implement_progress_preserves_overlapping_writes(tmp_path: Path, monkeyp
             time.sleep(0.05)
         original_write_json(path, payload)
 
-    monkeypatch.setattr(module, "write_json", slow_progress_write)
+    monkeypatch.setattr(module.owner("write_json"), "write_json", slow_progress_write)
 
     def record(stage: str) -> int:
         start.wait(timeout=2)
@@ -8814,6 +8836,7 @@ def test_release_check_skips_example_gates_when_examples_are_absent(tmp_path: Pa
         "assets",
         "scripts",
         "skills",
+        "tools",
     ]:
         shutil.copytree(ROOT / relative, package / relative)
     for filename in [".codexignore", "LICENSE", "NOTICE.md", "README.md", "pyproject.toml"]:
@@ -8831,7 +8854,7 @@ def test_release_check_skips_example_gates_when_examples_are_absent(tmp_path: Pa
 
 def test_release_check_success_is_byte_bounded_and_verbose_is_explicit(tmp_path: Path) -> None:
     package = tmp_path / "bundle"
-    for relative in [".agents", ".codex-plugin", "assets", "scripts", "skills"]:
+    for relative in [".agents", ".codex-plugin", "assets", "scripts", "skills", "tools"]:
         shutil.copytree(ROOT / relative, package / relative)
     for filename in [".codexignore", "LICENSE", "NOTICE.md", "README.md", "pyproject.toml"]:
         shutil.copy2(ROOT / filename, package / filename)
@@ -8884,7 +8907,7 @@ def test_release_postflight_allows_the_release_check_timeout_budget(monkeypatch:
             },
         }
 
-    monkeypatch.setattr(module, "run_internal_gate", fake_gate)
+    monkeypatch.setattr(module.owner("run_internal_gate"), "run_internal_gate", fake_gate)
     report = module.release_postflight_report(
         Path("/tmp/plugin"),
         SimpleNamespace(flight="strict", run_tests=True),
@@ -9213,12 +9236,17 @@ def test_readme_documents_the_concise_lean_contract() -> None:
     for phrase in (
         "lean mode is default",
         "no minimum prose quotas",
-        "size caps",
         "one setup",
         "one final gate",
         "minimum sufficient artifacts",
         "project-manifest.md",
-        "codex-plan.md",
+        "single-section plan",
+        "one canonical section",
+        "compact-plan format",
+        "scripts/forge/",
+        "compiles those exact bytes",
+        "update_runtime_manifest.py --check",
+        "targeted regression",
         "machine-readable section records",
         "`fast` remains a compatibility alias for `lean`",
         "commands --pretty",
@@ -9227,7 +9255,7 @@ def test_readme_documents_the_concise_lean_contract() -> None:
         "self-update",
     ):
         assert phrase in readme
-    assert len(readme.split()) < 700
+    assert len(readme.split()) < 900
 
 
 def test_validate_workflow_mentions_snapshot_eval() -> None:
@@ -9249,7 +9277,7 @@ def test_skill_files_are_codex_native() -> None:
         "smallest implementation-ready plan",
         "depth is `lean`",
         "source spec, unchanged",
-        "reviews/codex.md",
+        "the canonical plan",
         "tests before implementation",
         "at most 300 words",
         "one bundled postflight",

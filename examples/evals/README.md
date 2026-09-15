@@ -31,8 +31,9 @@ The report scores plan depth, section readiness, traceability, evidence
 quality, and implementation readiness. When `suite.json` exists, it is the
 benchmark contract: row names, row order, planning directories, depth, and the
 golden snapshot directory come from that file. If a suite file is absent,
-`eval-suite` keeps the older glob fallback and discovers valid `codex-plan.md`
-fixtures outside `examples/invalid`.
+`eval-suite` discovers valid `codex-plan.md`, `claude-plan.md`, and compact
+`sections/index.md` fixtures outside `invalid/` paths. Omitted row depths use
+compact metadata or the command's default.
 
 Golden snapshots live in `examples/evals/golden/`. They record the expected
 Forge Score component shape for the current valid tracks and are checked by the

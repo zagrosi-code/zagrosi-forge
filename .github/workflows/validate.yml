@@ -20,6 +20,8 @@ jobs:
           python -m json.tool .agents/plugins/marketplace.json >/dev/null
       - name: Run tests
         run: uv run --with pytest python -m pytest
+      - name: Check runtime manifest
+        run: python tools/update_runtime_manifest.py --check
       - name: Run strict example gates
         run: |
           python scripts/zagrosi_skills.py lint-project-manifest --planning-dir examples/saas --strict

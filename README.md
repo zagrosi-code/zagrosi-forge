@@ -22,10 +22,10 @@ one final gate.
 | `standard` | Explicit opt-in for wider research, traceability, or coordination. |
 | `deep` | Explicit opt-in for high-risk or architecture-heavy work. |
 
-Forge has no minimum prose quotas. Gates check meaning: requirements, decisions,
-file ownership, tests, risks, and completion evidence. Size caps stop artifacts
-from becoming context dumps. Extra research, interview, TDD, governance, and
-traceability files appear only when material or explicitly requested.
+Depth changes investigation and review rigor. Every mode uses compact, canonical
+contracts with stable requirement IDs, exact file ownership, observable acceptance,
+and verification. No minimum prose quotas or duplicate research, TDD, decision,
+and review files. Extra artifacts serve independent ownership or a material need.
 
 ## Install
 
@@ -60,12 +60,13 @@ Use $zagrosi-forge:zagrosi-implement on @planning/01-auth/sections/
 
 <img src="assets/readme-workflow.svg" alt="Zagrosi Forge artifact workflow" width="100%" />
 
-Lean output stays small:
+Output stays small at every depth:
 
 | Workflow | Required output |
 |----------|-----------------|
 | Project | `project-manifest.md` and child `spec.md` files |
-| Plan | `codex-plan.md`, `reviews/codex.md`, `sections/index.md`, compact `section-*.md` files |
+| Single-section plan | `sections/index.md` and one canonical section containing tests, evidence, decisions, risks, and review |
+| Multi-section plan | One shared plan and ordered sections that link shared contracts |
 | Implement | Tests, code, and compact machine-readable section records |
 
 Each phase runs one setup command, performs the work, then runs one strict
@@ -83,6 +84,56 @@ Project uses `project-setup`; implementation uses `implement-setup`. Run
 `commands --pretty` for the compact command catalog and
 `status --path PATH --pretty` to resume.
 
+Use the explicit [compact-plan format](skills/zagrosi-plan/references/plan-format.md).
+Legacy physical plans and reviews remain supported. Detached frozen runs retain
+their established physical plan/review contract and separate operational records.
+
+## Context and Performance
+
+Section context keeps the complete section, selects relevant requirement excerpts,
+and points to omitted sources. `context-brief` and `implementation-packet` default
+to a 2,000-word budget; use `--max-words` to adjust it. An oversized section fails
+explicitly instead of losing its contract. Skills load phase-specific guidance;
+domain packs and the detailed detached protocol are read only when needed.
+
+The shared [engineering standard](skills/zagrosi-implement/references/engineering.md)
+draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers,
+reuse existing code and standard libraries, and prefer meaningful names and
+direct flow. Repair encountered duplication, oversized modules, and mixed
+responsibilities within the task; update ownership before broader edits.
+Characterize weakly covered behavior before refactoring, run targeted regression
+checks around changes, and run the full suite once at integration.
+
+Planning gates reuse their parser and unchanged reads within one invocation.
+On macOS/Linux, known read-only gates avoid repeated process startup; other gates
+retain process isolation and timeouts. Compare stable local checkouts:
+
+```bash
+python3 tools/benchmark_forge.py \
+  --original-root /path/to/main --baseline-root /path/to/earlier-snapshot --runs 5
+```
+
+The benchmark uses identical disposable fixtures at `lean`, `standard`, and
+`deep`, checks that metadata selects the intended gates, and records source
+hashes, median latency, and context size. Documentation measurements list the
+references loaded for each scenario; archived protocol text is excluded from
+routine loads. These are reproducible reading scenarios, not model telemetry.
+
+The [recorded comparison](examples/evals/performance.json) found planning
+postflight 4.43–4.45× faster across all depths and section context reduced from
+381 to 317 words. Added engineering guidance increases some routine reference
+loads; detached reading falls from 3,547 to 1,177 words. Results are local to the
+recorded environment and fixture.
+
+## Runtime
+
+The CLI delegates to focused modules for planning, validation, context,
+installation, and detached execution. Ordinary commands import only the modules
+they need. The entrypoint embeds a SHA-256 manifest, verifies every bound source
+before execution, and compiles those exact bytes without using bytecode caches.
+Detached admission and completion reverify the bound runtime. Existing ownership,
+locking, immutable-source, and process-isolation controls remain enforced.
+
 ## Compatibility
 
 `fast` remains a compatibility alias for `lean`. Existing `zagrosi-*`,
@@ -97,16 +148,22 @@ python3 scripts/zagrosi_skills.py migrate --planning-dir planning/01-auth
 
 ```text
 skills/                    three Codex workflows
-scripts/zagrosi_skills.py  deterministic CLI and gates
+scripts/zagrosi_skills.py  verified entrypoint and runtime manifest
+scripts/forge/             focused CLI, workflow, and security modules
 scripts/deep_skills.py     compatibility wrapper
 examples/                  valid, invalid, and benchmark fixtures
 tests/                     CLI and gate tests
+tools/                     reproducible performance comparison
 assets/                    icon and README visuals
 ```
 
 ## Validate
 
+After editing runtime modules, run `python3 tools/update_runtime_manifest.py`;
+CI verifies the binding with `--check`.
+
 ```bash
+python3 tools/update_runtime_manifest.py --check
 uv run --with pytest python -m pytest
 python3 scripts/zagrosi_skills.py doctor --plugin-root . --strict --pretty
 python3 scripts/zagrosi_skills.py release-check --plugin-root . --pretty
