@@ -15,13 +15,13 @@ from test_resume_guidance import documented_detached_plan
 def reviewed_plan(path: Path, depth: str, form: str, review: str) -> Path:
     if form == "physical":
         plan = documented_detached_plan(path, depth)
-        (plan / "reviews/codex.md").write_text(review)
+        (plan / "reviews/codex.md").write_text(review, encoding="utf-8")
     else:
         plan = make_plan(path, depth)
         section = plan / "sections" / f"{SECTION}.md"
         before, rest = section.read_text().split("## Review\n", 1)
         _, after = rest.split("## Acceptance", 1)
-        section.write_text(before + "## Review\n" + review + "\n## Acceptance" + after)
+        section.write_text(before + "## Review\n" + review + "\n## Acceptance" + after, encoding="utf-8")
     return plan
 
 

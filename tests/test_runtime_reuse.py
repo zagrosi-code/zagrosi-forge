@@ -190,6 +190,7 @@ def test_postflight_recomputes_score_after_input_changes(tmp_path, monkeypatch, 
     assert forge.session._CLI_CONTEXT.get() is None
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Detached handoff requires POSIX file locks")
 def test_detached_ownership_parsing_stays_uncached(tmp_path, monkeypatch, capsys):
     forge = load_zagrosi_module()
 

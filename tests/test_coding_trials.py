@@ -412,7 +412,7 @@ def main(argv):
     return output.print_json({"phase":phase, "stage":"postflight", "success":True,
         "sections_recorded_complete":True, "gates":[{"details":"x" * 500000}],
         "remaining_sections":[], "pending_sections":[], "blocking_gates":[]})
-'''.replace("FAILING", repr(failing)))
+'''.replace("FAILING", repr(failing)), encoding="utf-8")
     monkeypatch.setattr(trials, "ROOT", plugin)
     result = trials.workflow_verdict(tmp_path, "deep")
     assert result["success"] is not failing
@@ -513,7 +513,7 @@ def test_execute_handles_prompt_and_missing_runner(tmp_path):
     result = trials.execute([sys.executable, "-c", "import sys; print(sys.stdin.read())"],
                             tmp_path, prompt="a reviewable prompt")
     assert result["returncode"] == 0
-    assert result["stdout"] == "a reviewable prompt\n"
+    assert result["stdout"] == "a reviewable prompt" + os.linesep
     missing = trials.execute([str(tmp_path / "missing-runner")], tmp_path)
     assert missing["returncode"] == 127
     assert missing["stderr"]
