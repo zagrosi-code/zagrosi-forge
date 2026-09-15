@@ -30,6 +30,272 @@ from . import sources as _sources
 from . import storage as _storage
 from . import validation as _validation
 
+def _validate_setup_replay(root_fd, pending_by_path, setup_config_payload, require_lock_authority) -> bool:
+    """Authenticate existing prefixes and slots before any recovery or publication."""
+    existing_top_level = set(os.listdir(root_fd)) - _detached_contract.DETACHED_ROOT_RECOVERABLE_TEMPS
+    existing_files = existing_top_level & _detached_contract.DETACHED_TOP_LEVEL_FILES
+    config_name = "zagrosi_implement_config.json"
+    if config_name not in existing_files and existing_files:
+        raise _models.DetachedImplementationError(
+            "detached-setup-prefix-conflict",
+            "Detached setup cannot adopt state/progress slots without its exact authenticated config prefix.",
+        )
+    if config_name in existing_files:
+        existing_config, _ = _secure_io.load_canonical_json_at(root_fd, config_name)
+        if existing_config.get("schema") == _detached_contract.DETACHED_SETUP_PREFIX_SCHEMA:
+            if existing_config != pending_by_path[config_name]:
+                raise _models.DetachedImplementationError(
+                    "detached-setup-prefix-conflict",
+                    "Existing detached setup prefix does not match the current authenticated setup inputs.",
+                )
+            if not _detached_contract.DETACHED_TOP_LEVEL_DIRECTORIES.issubset(existing_top_level):
+                raise _models.DetachedImplementationError(
+                    "detached-setup-prefix-conflict",
+                    "An authenticated config prefix requires all fixed root directories to pre-exist.",
+                )
+            allowed_pending_slot_sets = (
+                {config_name},
+                {config_name, "zagrosi_implement_state.json"},
+                set(_detached_contract.DETACHED_TOP_LEVEL_FILES),
+            )
+            if existing_files not in allowed_pending_slot_sets:
+                raise _models.DetachedImplementationError(
+                    "detached-setup-prefix-conflict",
+                    "Existing detached setup prefix slots violate config-to-state-to-progress publication order.",
+                )
+            for relative in existing_files - {config_name}:
+                existing, _ = _secure_io.load_canonical_json_at(root_fd, relative)
+                if existing != pending_by_path[relative]:
+                    raise _models.DetachedImplementationError(
+                        "detached-setup-prefix-conflict",
+                        "Existing detached setup prefix slots are not exact authenticated pending objects.",
+                    )
+            require_lock_authority(require_marker=True)
+        elif existing_config.get("schema") == _detached_contract.DETACHED_CONFIG_SCHEMA:
+            if existing_top_level != _detached_contract.DETACHED_TOP_LEVEL_ALLOWED:
+                raise _models.DetachedImplementationError(
+                    "detached-config-conflict",
+                    "A final detached config requires the complete exact six-member root before replay.",
+                )
+            _detached_state.require_detached_root_identity_through_recoverable_temps(
+                root_fd,
+                existing_config.get("detached_implementation_root_identity_digest"),
+            )
+            expected_existing_config = setup_config_payload(
+                existing_config["detached_implementation_root_identity_digest"]
+            )
+            if existing_config != expected_existing_config:
+                raise _models.DetachedImplementationError(
+                    "detached-config-conflict",
+                    "Existing final detached config does not equal the complete current authenticated setup config.",
+                )
+            existing_state, _ = _secure_io.load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+            existing_progress, _ = _secure_io.load_canonical_json_at(root_fd, "forge-progress.json")
+            state_pending_before_cleanup = (
+                existing_state == pending_by_path["zagrosi_implement_state.json"]
+            )
+            progress_pending_before_cleanup = (
+                existing_progress == pending_by_path["forge-progress.json"]
+            )
+            if not state_pending_before_cleanup:
+                _detached_state.load_detached_state(root_fd, existing_config)
+            if not progress_pending_before_cleanup:
+                _detached_state.load_detached_progress(root_fd, existing_config)
+            if (state_pending_before_cleanup, progress_pending_before_cleanup) not in {
+                (True, True),
+                (False, True),
+                (False, False),
+            }:
+                raise _models.DetachedImplementationError(
+                    "detached-setup-prefix-conflict",
+                    "Final detached setup slots violate config-to-state-to-progress promotion order.",
+                )
+            require_lock_authority(require_marker=True)
+        else:
+            raise _models.DetachedImplementationError(
+                "detached-setup-prefix-conflict",
+                "Detached setup refuses an arbitrary caller-planted config prefix.",
+            )
+    if config_name not in existing_files or existing_config.get("schema") == _detached_contract.DETACHED_SETUP_PREFIX_SCHEMA:
+        for directory in ("code_review", "evidence"):
+            if directory not in existing_top_level:
+                continue
+            existing_directory_fd = _secure_io.open_relative_directory(root_fd, directory)
+            try:
+                first_members = set(os.listdir(existing_directory_fd))
+                if first_members or set(os.listdir(existing_directory_fd)) != first_members:
+                    raise _models.DetachedImplementationError(
+                        "detached-setup-prefix-conflict",
+                        "Fresh or pending detached setup requires empty review and evidence directories.",
+                        directory=directory,
+                    )
+            finally:
+                os.close(existing_directory_fd)
+        if "pinners" in existing_top_level:
+            existing_pinners_fd = _secure_io.open_relative_directory(root_fd, "pinners")
+            try:
+                first_pinner_members = set(os.listdir(existing_pinners_fd))
+                unexpected_pinner_members = sorted(
+                    first_pinner_members - {Path(_detached_contract.SECTION_RECORD_LOCK_PATH).name}
+                )
+                if unexpected_pinner_members:
+                    raise _models.DetachedImplementationError(
+                        "detached-setup-prefix-conflict",
+                        "Fresh or pending detached setup refuses pre-planted pinner members.",
+                        unexpected_pinner_members=unexpected_pinner_members,
+                    )
+                if set(os.listdir(existing_pinners_fd)) != first_pinner_members:
+                    raise _models.DetachedImplementationError(
+                        "detached-setup-prefix-conflict",
+                        "Fresh or pending detached pinners inventory changed during authentication.",
+                    )
+            finally:
+                os.close(existing_pinners_fd)
+    return config_name in existing_files and existing_config.get("schema") == _detached_contract.DETACHED_CONFIG_SCHEMA
+
+
+def _publish_setup(root_fd, pending_by_path, setup_config_payload, require_lock_authority, complete):
+    """Promote authenticated slots in config, state, progress order."""
+    _detached_state.recover_detached_root_temps_locked(root_fd)
+    _detached_state.require_detached_top_level_inventory(
+        root_fd,
+        complete=complete,
+    )
+    require_lock_authority(create_marker=True)
+    for relative in ("code_review", "evidence", "pinners"):
+        directory_fd = _secure_io.open_relative_directory(root_fd, relative, create=True)
+        os.close(directory_fd)
+    observed_by_path: dict[str, dict[str, Any]] = {}
+    for relative in (
+        "zagrosi_implement_config.json",
+        "zagrosi_implement_state.json",
+        "forge-progress.json",
+    ):
+        _, observed, _ = _detached_state.ensure_detached_root_file_slot(
+            root_fd,
+            relative,
+            pending_by_path[relative],
+        )
+        observed_by_path[relative] = observed
+    root_identity_digest = _detached_state.detached_implementation_root_identity_digest(root_fd)
+
+    config = setup_config_payload(root_identity_digest)
+    observed_config = observed_by_path["zagrosi_implement_config.json"]
+    observed_state = observed_by_path["zagrosi_implement_state.json"]
+    observed_progress = observed_by_path["forge-progress.json"]
+    config_pending = observed_config == pending_by_path["zagrosi_implement_config.json"]
+    state_pending = observed_state == pending_by_path["zagrosi_implement_state.json"]
+    progress_pending = observed_progress == pending_by_path["forge-progress.json"]
+    config_final = observed_config == config
+    if not config_pending and not config_final:
+        raise _models.DetachedImplementationError(
+            "detached-config-conflict",
+            "Existing detached config is neither the exact authenticated pending prefix nor this setup's final config.",
+        )
+    if config_pending and (not state_pending or not progress_pending):
+        raise _models.DetachedImplementationError(
+            "detached-setup-prefix-conflict",
+            "Detached setup prefix slots are not in an exact recoverable creation order.",
+        )
+    if config_pending:
+        _secure_io.write_canonical_json_at(root_fd, "zagrosi_implement_config.json", config)
+    if state_pending:
+        state = _detached_state.detached_state_default(config)
+        _secure_io.write_canonical_json_at(root_fd, "zagrosi_implement_state.json", state)
+    else:
+        state = _detached_state.load_detached_state(root_fd, config)
+    if state_pending is False and config_pending:
+        raise _models.DetachedImplementationError(
+            "detached-setup-prefix-conflict",
+            "A pending config cannot authorise an already-final state.",
+        )
+    if state_pending and not progress_pending:
+        raise _models.DetachedImplementationError(
+            "detached-setup-prefix-conflict",
+            "A pending state requires the exact pending progress prefix.",
+        )
+    if progress_pending:
+        progress_state = _detached_state.detached_progress_default(config)
+        _secure_io.write_canonical_json_at(root_fd, "forge-progress.json", progress_state)
+    else:
+        _detached_state.load_detached_progress(root_fd, config)
+
+    return config, root_identity_digest
+
+
+def _setup_payload(args, config, root_fd, guard, progress, source_records):
+    """Project verified section readiness and setup details for the caller."""
+    planning_dir = Path(config["planning_dir"])
+    sections_dir = Path(config["sections_dir"])
+    target_dir = Path(config["target_dir"])
+    implementation_root = Path(config["implementation_root"])
+    dependencies = _sections.dependency_graph(planning_dir, progress)
+    known = set(progress["sections"])
+    unknown_dependencies = {
+        section: [dependency for dependency in dependencies.get(section, []) if dependency not in known]
+        for section in progress["sections"]
+        if any(dependency not in known for dependency in dependencies.get(section, []))
+    }
+    if unknown_dependencies:
+        raise _models.DetachedImplementationError(
+            "unknown-predecessors",
+            "Section dependency graph contains predecessors absent from the manifest.",
+            unknown_predecessors=unknown_dependencies,
+        )
+    completed_records = _pinners.detached_completed_records(root_fd, config, progress)
+    completed = set(completed_records)
+    ready = _sections.ready_sections(progress, dependencies, completed)
+    remaining = [section for section in progress["sections"] if section not in completed]
+    blocked = {
+        section: [dependency for dependency in dependencies.get(section, []) if dependency not in completed]
+        for section in remaining
+        if section not in ready
+    }
+    guard.verify_unchanged()
+
+    repo = _storage.git_info(target_dir)
+    warnings: list[str] = []
+    if repo.get("is_protected_branch"):
+        warnings.append(f"Current git branch is protected-looking: {repo.get('branch')}")
+    if repo.get("available") and not repo.get("working_tree_clean"):
+        warnings.append(f"Working tree has {len(repo.get('dirty_files', []))} uncommitted change(s)")
+    payload = {
+        "success": bool(ready) or not remaining,
+        "mode": "detached-frozen",
+        "sections_dir": str(sections_dir),
+        "target_dir": str(target_dir),
+        "implementation_root": str(implementation_root),
+        "state_dir": str(implementation_root),
+        "config_path": str(implementation_root / "zagrosi_implement_config.json"),
+        "state_path": str(implementation_root / "zagrosi_implement_state.json"),
+        "reviews_dir": str(implementation_root / "code_review"),
+        "evidence_dir": str(implementation_root / "evidence"),
+        "pinners_dir": str(implementation_root / "pinners"),
+        "planning_tree_sha256": guard.digest,
+        "planning_file_count": guard.file_count,
+        "planning_total_bytes": guard.total_bytes,
+        "admission_pinner_path": str(config["admission_pinner_path"]),
+        "admission_pinner_sha256": config["admission_pinner_sha256"],
+        "admission_state_sha256": config["admission_state_sha256"],
+        "detached_implementation_root_identity_digest": config["detached_implementation_root_identity_digest"],
+        "target_root_identity_digest": config["target_root_identity_digest"],
+        "implementation_sources": source_records,
+        "section_progress": progress,
+        "completed_sections": sorted(completed),
+        "next_section": ready[0] if ready else None,
+        "ready_sections": ready,
+        "remaining_sections": remaining,
+        "blocked_sections": blocked,
+        "git": repo,
+        "warnings": warnings,
+    }
+    if _gates.effective_flight_mode(args) != "off":
+        preflight = _flights.implement_preflight_report(sections_dir, target_dir, args)
+        payload["preflight"] = preflight
+        payload["success"] = bool(payload["success"] and preflight.get("success"))
+    return payload
+
+
 def detached_implement_setup(args: argparse.Namespace) -> int:
     sections_dir = _storage.absolute_path_no_follow(args.sections_dir)
     planning_dir = sections_dir.parent
@@ -204,196 +470,10 @@ def detached_implement_setup(args: argparse.Namespace) -> int:
             _handoff_wire.require_exact_fields(payload, _detached_contract.DETACHED_CONFIG_FIELDS, "Detached implementation config")
             return payload
 
-        existing_top_level = set(os.listdir(root_fd)) - _detached_contract.DETACHED_ROOT_RECOVERABLE_TEMPS
-        existing_files = existing_top_level & _detached_contract.DETACHED_TOP_LEVEL_FILES
-        config_name = "zagrosi_implement_config.json"
-        if config_name not in existing_files and existing_files:
-            raise _models.DetachedImplementationError(
-                "detached-setup-prefix-conflict",
-                "Detached setup cannot adopt state/progress slots without its exact authenticated config prefix.",
-            )
-        if config_name in existing_files:
-            existing_config, _ = _secure_io.load_canonical_json_at(root_fd, config_name)
-            if existing_config.get("schema") == _detached_contract.DETACHED_SETUP_PREFIX_SCHEMA:
-                if existing_config != pending_by_path[config_name]:
-                    raise _models.DetachedImplementationError(
-                        "detached-setup-prefix-conflict",
-                        "Existing detached setup prefix does not match the current authenticated setup inputs.",
-                    )
-                if not _detached_contract.DETACHED_TOP_LEVEL_DIRECTORIES.issubset(existing_top_level):
-                    raise _models.DetachedImplementationError(
-                        "detached-setup-prefix-conflict",
-                        "An authenticated config prefix requires all fixed root directories to pre-exist.",
-                    )
-                allowed_pending_slot_sets = (
-                    {config_name},
-                    {config_name, "zagrosi_implement_state.json"},
-                    set(_detached_contract.DETACHED_TOP_LEVEL_FILES),
-                )
-                if existing_files not in allowed_pending_slot_sets:
-                    raise _models.DetachedImplementationError(
-                        "detached-setup-prefix-conflict",
-                        "Existing detached setup prefix slots violate config-to-state-to-progress publication order.",
-                    )
-                for relative in existing_files - {config_name}:
-                    existing, _ = _secure_io.load_canonical_json_at(root_fd, relative)
-                    if existing != pending_by_path[relative]:
-                        raise _models.DetachedImplementationError(
-                            "detached-setup-prefix-conflict",
-                            "Existing detached setup prefix slots are not exact authenticated pending objects.",
-                        )
-                require_lock_authority(require_marker=True)
-            elif existing_config.get("schema") == _detached_contract.DETACHED_CONFIG_SCHEMA:
-                if existing_top_level != _detached_contract.DETACHED_TOP_LEVEL_ALLOWED:
-                    raise _models.DetachedImplementationError(
-                        "detached-config-conflict",
-                        "A final detached config requires the complete exact six-member root before replay.",
-                    )
-                _detached_state.require_detached_root_identity_through_recoverable_temps(
-                    root_fd,
-                    existing_config.get("detached_implementation_root_identity_digest"),
-                )
-                expected_existing_config = setup_config_payload(
-                    existing_config["detached_implementation_root_identity_digest"]
-                )
-                if existing_config != expected_existing_config:
-                    raise _models.DetachedImplementationError(
-                        "detached-config-conflict",
-                        "Existing final detached config does not equal the complete current authenticated setup config.",
-                    )
-                existing_state, _ = _secure_io.load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
-                existing_progress, _ = _secure_io.load_canonical_json_at(root_fd, "forge-progress.json")
-                state_pending_before_cleanup = (
-                    existing_state == pending_by_path["zagrosi_implement_state.json"]
-                )
-                progress_pending_before_cleanup = (
-                    existing_progress == pending_by_path["forge-progress.json"]
-                )
-                if not state_pending_before_cleanup:
-                    _detached_state.load_detached_state(root_fd, existing_config)
-                if not progress_pending_before_cleanup:
-                    _detached_state.load_detached_progress(root_fd, existing_config)
-                if (state_pending_before_cleanup, progress_pending_before_cleanup) not in {
-                    (True, True),
-                    (False, True),
-                    (False, False),
-                }:
-                    raise _models.DetachedImplementationError(
-                        "detached-setup-prefix-conflict",
-                        "Final detached setup slots violate config-to-state-to-progress promotion order.",
-                    )
-                require_lock_authority(require_marker=True)
-            else:
-                raise _models.DetachedImplementationError(
-                    "detached-setup-prefix-conflict",
-                    "Detached setup refuses an arbitrary caller-planted config prefix.",
-                )
-        if config_name not in existing_files or existing_config.get("schema") == _detached_contract.DETACHED_SETUP_PREFIX_SCHEMA:
-            for directory in ("code_review", "evidence"):
-                if directory not in existing_top_level:
-                    continue
-                existing_directory_fd = _secure_io.open_relative_directory(root_fd, directory)
-                try:
-                    first_members = set(os.listdir(existing_directory_fd))
-                    if first_members or set(os.listdir(existing_directory_fd)) != first_members:
-                        raise _models.DetachedImplementationError(
-                            "detached-setup-prefix-conflict",
-                            "Fresh or pending detached setup requires empty review and evidence directories.",
-                            directory=directory,
-                        )
-                finally:
-                    os.close(existing_directory_fd)
-            if "pinners" in existing_top_level:
-                existing_pinners_fd = _secure_io.open_relative_directory(root_fd, "pinners")
-                try:
-                    first_pinner_members = set(os.listdir(existing_pinners_fd))
-                    unexpected_pinner_members = sorted(
-                        first_pinner_members - {Path(_detached_contract.SECTION_RECORD_LOCK_PATH).name}
-                    )
-                    if unexpected_pinner_members:
-                        raise _models.DetachedImplementationError(
-                            "detached-setup-prefix-conflict",
-                            "Fresh or pending detached setup refuses pre-planted pinner members.",
-                            unexpected_pinner_members=unexpected_pinner_members,
-                        )
-                    if set(os.listdir(existing_pinners_fd)) != first_pinner_members:
-                        raise _models.DetachedImplementationError(
-                            "detached-setup-prefix-conflict",
-                            "Fresh or pending detached pinners inventory changed during authentication.",
-                        )
-                finally:
-                    os.close(existing_pinners_fd)
-        _detached_state.recover_detached_root_temps_locked(root_fd)
-        _detached_state.require_detached_top_level_inventory(
-            root_fd,
-            complete=existing_config.get("schema") == _detached_contract.DETACHED_CONFIG_SCHEMA
-            if config_name in existing_files
-            else False,
+        complete = _validate_setup_replay(root_fd, pending_by_path, setup_config_payload, require_lock_authority)
+        config, root_identity_digest = _publish_setup(
+            root_fd, pending_by_path, setup_config_payload, require_lock_authority, complete,
         )
-        require_lock_authority(create_marker=True)
-        for relative in ("code_review", "evidence", "pinners"):
-            directory_fd = _secure_io.open_relative_directory(root_fd, relative, create=True)
-            os.close(directory_fd)
-        observed_by_path: dict[str, dict[str, Any]] = {}
-        for relative in (
-            "zagrosi_implement_config.json",
-            "zagrosi_implement_state.json",
-            "forge-progress.json",
-        ):
-            _, observed, _ = _detached_state.ensure_detached_root_file_slot(
-                root_fd,
-                relative,
-                pending_by_path[relative],
-            )
-            observed_by_path[relative] = observed
-        root_identity_digest = _detached_state.detached_implementation_root_identity_digest(root_fd)
-
-        config = setup_config_payload(root_identity_digest)
-        observed_config = observed_by_path["zagrosi_implement_config.json"]
-        observed_state = observed_by_path["zagrosi_implement_state.json"]
-        observed_progress = observed_by_path["forge-progress.json"]
-        config_pending = observed_config == pending_by_path["zagrosi_implement_config.json"]
-        state_pending = observed_state == pending_by_path["zagrosi_implement_state.json"]
-        progress_pending = observed_progress == pending_by_path["forge-progress.json"]
-        config_final = observed_config == config
-        state_final = False
-        progress_final = False
-        if not config_pending and not config_final:
-            raise _models.DetachedImplementationError(
-                "detached-config-conflict",
-                "Existing detached config is neither the exact authenticated pending prefix nor this setup's final config.",
-            )
-        if config_pending and (not state_pending or not progress_pending):
-            raise _models.DetachedImplementationError(
-                "detached-setup-prefix-conflict",
-                "Detached setup prefix slots are not in an exact recoverable creation order.",
-            )
-        if config_pending:
-            _secure_io.write_canonical_json_at(root_fd, "zagrosi_implement_config.json", config)
-        if state_pending:
-            state = _detached_state.detached_state_default(config)
-            _secure_io.write_canonical_json_at(root_fd, "zagrosi_implement_state.json", state)
-        else:
-            state = _detached_state.load_detached_state(root_fd, config)
-            state_final = True
-        if state_pending is False and config_pending:
-            raise _models.DetachedImplementationError(
-                "detached-setup-prefix-conflict",
-                "A pending config cannot authorise an already-final state.",
-            )
-        if state_pending and not progress_pending:
-            raise _models.DetachedImplementationError(
-                "detached-setup-prefix-conflict",
-                "A pending state requires the exact pending progress prefix.",
-            )
-        if progress_pending:
-            progress_state = _detached_state.detached_progress_default(config)
-            _secure_io.write_canonical_json_at(root_fd, "forge-progress.json", progress_state)
-        else:
-            progress_state = _detached_state.load_detached_progress(root_fd, config)
-            progress_final = True
-        if config_final and state_final and progress_final:
-            pass
 
         _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
         _recovery.recover_section_record_transaction_locked(
@@ -408,70 +488,7 @@ def detached_implement_setup(args: argparse.Namespace) -> int:
         _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
         require_lock_authority()
 
-        dependencies = _sections.dependency_graph(planning_dir, progress)
-        known = set(progress["sections"])
-        unknown_dependencies = {
-            section: [dependency for dependency in dependencies.get(section, []) if dependency not in known]
-            for section in progress["sections"]
-            if any(dependency not in known for dependency in dependencies.get(section, []))
-        }
-        if unknown_dependencies:
-            raise _models.DetachedImplementationError(
-                "unknown-predecessors",
-                "Section dependency graph contains predecessors absent from the manifest.",
-                unknown_predecessors=unknown_dependencies,
-            )
-        completed_records = _pinners.detached_completed_records(root_fd, config, progress)
-        completed = set(completed_records)
-        ready = _sections.ready_sections(progress, dependencies, completed)
-        remaining = [section for section in progress["sections"] if section not in completed]
-        blocked = {
-            section: [dependency for dependency in dependencies.get(section, []) if dependency not in completed]
-            for section in remaining
-            if section not in ready
-        }
-        guard.verify_unchanged()
-
-        repo = _storage.git_info(target_dir)
-        warnings: list[str] = []
-        if repo.get("is_protected_branch"):
-            warnings.append(f"Current git branch is protected-looking: {repo.get('branch')}")
-        if repo.get("available") and not repo.get("working_tree_clean"):
-            warnings.append(f"Working tree has {len(repo.get('dirty_files', []))} uncommitted change(s)")
-        payload = {
-            "success": bool(ready) or not remaining,
-            "mode": "detached-frozen",
-            "sections_dir": str(sections_dir),
-            "target_dir": str(target_dir),
-            "implementation_root": str(implementation_root),
-            "state_dir": str(implementation_root),
-            "config_path": str(implementation_root / "zagrosi_implement_config.json"),
-            "state_path": str(implementation_root / "zagrosi_implement_state.json"),
-            "reviews_dir": str(implementation_root / "code_review"),
-            "evidence_dir": str(implementation_root / "evidence"),
-            "pinners_dir": str(implementation_root / "pinners"),
-            "planning_tree_sha256": guard.digest,
-            "planning_file_count": guard.file_count,
-            "planning_total_bytes": guard.total_bytes,
-            "admission_pinner_path": str(admission_path),
-            "admission_pinner_sha256": admission_sha256,
-            "admission_state_sha256": admission_state_sha256,
-            "detached_implementation_root_identity_digest": root_identity_digest,
-            "target_root_identity_digest": setup_target_identity_digest,
-            "implementation_sources": source_records,
-            "section_progress": progress,
-            "completed_sections": sorted(completed),
-            "next_section": ready[0] if ready else None,
-            "ready_sections": ready,
-            "remaining_sections": remaining,
-            "blocked_sections": blocked,
-            "git": repo,
-            "warnings": warnings,
-        }
-        if _gates.effective_flight_mode(args) != "off":
-            preflight = _flights.implement_preflight_report(sections_dir, target_dir, args)
-            payload["preflight"] = preflight
-            payload["success"] = bool(payload["success"] and preflight.get("success"))
+        payload = _setup_payload(args, config, root_fd, guard, progress, source_records)
         _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
         require_lock_authority()
         return _output.print_json(payload, 0 if payload["success"] else 1)

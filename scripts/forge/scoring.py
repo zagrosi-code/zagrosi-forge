@@ -19,6 +19,60 @@ from . import storage as _storage
 from . import traceability as _traceability
 from . import validation as _validation
 
+def findings_from_payload(payload: dict[str, Any]) -> list[_models.Finding]:
+    return [_models.Finding(item["severity"], item["code"], item["message"], item.get("path"), item.get("recommendation"), item.get("category", "general")) for item in payload["findings"]]
+
+
+class FlightScoreInputs:
+    """Score the preceding local gates only while their observed inputs match."""
+
+    GATES = {
+        "lint-plan": "plan_depth",
+        "lint-sections": "section_readiness",
+        "traceability": "traceability",
+        "lint-implementation-readiness": "implementation_readiness",
+    }
+
+    def __init__(self, planning_dir: Path, depth: str, texts: dict):
+        self.planning_dir, self.depth, self.texts = planning_dir, depth, texts
+        self.findings: dict[str, list[_models.Finding]] = {}
+        # Directory identities cover newly selected plan/review/section/state files.
+        directories = {planning_dir, *(planning_dir / name for name in ("sections", "reviews", "implementation"))}
+        source = _artifacts.planning_config(planning_dir).get("initial_file")
+        if isinstance(source, str) and source.strip():
+            candidate = Path(source).expanduser()
+            directories.add((candidate if candidate.is_absolute() else planning_dir / candidate).parent)
+        self.signatures = {path: self.signature(path) for path in directories}
+        self.signatures.update((path, item[0]) for path, item in texts.items())
+
+    @staticmethod
+    def signature(path: Path):
+        try:
+            return _storage.file_signature(path)
+        except OSError:
+            return None
+
+    def record(self, name: str, payload: dict[str, Any]) -> None:
+        if (
+            name not in self.GATES or not isinstance(payload.get("findings"), list)
+            or payload.get("finding_count") != len(payload["findings"])
+        ):
+            return
+        self.findings[self.GATES[name]] = findings_from_payload(payload)
+        for path, (signature, _) in self.texts.items():
+            # Keep the earliest observation, including a rewrite seen by later gates.
+            self.signatures.setdefault(path, signature)
+
+    def reusable(self, planning_dir: Path, depth: str, max_files: int) -> dict[str, list[_models.Finding]]:
+        if (
+            planning_dir != self.planning_dir or depth != self.depth or max_files != 8
+            or self.findings.keys() != set(self.GATES.values())
+            or any(self.signature(path) != signature for path, signature in self.signatures.items())
+        ):
+            return {}
+        return self.findings
+
+
 def lint_implementation_readiness(args: argparse.Namespace) -> int:
     planning_dir = _storage.resolve_path(args.planning_dir)
     findings, extras = implementation_readiness_analysis(planning_dir, args.max_files)
@@ -84,7 +138,7 @@ def lint_findings_for_score(handler: Any, planning_dir: Path, depth: str) -> tup
         handler(args)
     finally:
         _session._QUALITY_CAPTURE.reset(token)
-    findings = [_models.Finding(item["severity"], item["code"], item["message"], item.get("path"), item.get("recommendation"), item.get("category", "general")) for item in captured["findings"]]
+    findings = findings_from_payload(captured)
     return findings, {key: value for key, value in captured.items() if key not in {"findings", "success", "score", "finding_count"}}
 
 
@@ -164,11 +218,22 @@ def implementation_readiness_analysis(
 def forge_score_analysis(
     planning_dir: Path, depth: str, profile: str, *, min_files: int = 3, max_files: int = 8,
 ) -> tuple[list[_models.Finding], dict[str, int], int]:
-    plan_findings, _ = plan_findings_for_score(planning_dir, depth)
-    section_findings, _ = section_findings_for_score(planning_dir, depth)
-    trace_findings, _ = _traceability.traceability_analysis(planning_dir)
-    evidence_findings = evidence_findings_for_score(planning_dir, min_files)
-    readiness_findings = readiness_findings_for_score(planning_dir, max_files)
+    context = _session._CLI_CONTEXT.get()
+    inputs = context.get("score_inputs") if context is not None else None
+    evidence_findings = evidence_findings_for_score(planning_dir, min_files) if inputs is not None else None
+    reused = inputs.reusable(planning_dir, depth, max_files) if inputs is not None else {}
+    if reused:
+        plan_findings = reused["plan_depth"]
+        section_findings = reused["section_readiness"]
+        trace_findings = reused["traceability"]
+        readiness_findings = reused["implementation_readiness"]
+    else:
+        plan_findings, _ = plan_findings_for_score(planning_dir, depth)
+        section_findings, _ = section_findings_for_score(planning_dir, depth)
+        trace_findings, _ = _traceability.traceability_analysis(planning_dir)
+        if evidence_findings is None:
+            evidence_findings = evidence_findings_for_score(planning_dir, min_files)
+        readiness_findings = readiness_findings_for_score(planning_dir, max_files)
     components = {
         "plan_depth": _quality.quality_score(plan_findings, profile),
         "section_readiness": _quality.quality_score(section_findings, profile),

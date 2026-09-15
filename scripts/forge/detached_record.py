@@ -26,6 +26,267 @@ from . import transaction_io as _transaction_io
 from . import transaction_state as _transaction_state
 from . import validation as _validation
 
+def _record_predecessors(planning_dir, root_fd, config, args):
+    """Admit a known section only after every predecessor has a closed receipt."""
+    progress = _sections.check_section_progress(planning_dir)
+    if progress["state"] in {"invalid_index", "no_index"}:
+        raise _models.DetachedImplementationError(
+            "invalid-sections-index",
+            "Cannot record detached implementation against an invalid sections index.",
+            section_progress=progress,
+        )
+    artifact_payload = _validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True, allow_compact=False))
+    if not artifact_payload["success"]:
+        raise _models.DetachedImplementationError(
+            "incomplete-plan-artifacts",
+            "Forge planning process is incomplete; finish zagrosi-plan before recording implementation.",
+            findings=artifact_payload.get("findings", []),
+        )
+    section = args.section
+    known = set(progress["sections"])
+    if section not in known:
+        raise _models.DetachedImplementationError(
+            "unknown-section",
+            f"Section is absent from SECTION_MANIFEST: {section}",
+            section=section,
+        )
+    dependencies = _sections.dependency_graph(planning_dir, progress)
+    unknown_predecessors = sorted(dependency for dependency in dependencies.get(section, []) if dependency not in known)
+    if unknown_predecessors:
+        raise _models.DetachedImplementationError(
+            "unknown-predecessors",
+            f"Section names predecessors absent from SECTION_MANIFEST: {section}",
+            section=section,
+            unknown_predecessors=unknown_predecessors,
+        )
+    completed_records = _pinners.detached_completed_records(root_fd, config, progress)
+    initial_state, _ = _secure_io.load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+    if initial_state.get("completed_sections") != completed_records:
+        raise _models.DetachedImplementationError(
+            "detached-state-drift",
+            "Detached implementation state changed during initial predecessor validation.",
+            section=section,
+        )
+    completed_dependants = _pinners.completed_transitive_dependants(
+        section,
+        dependencies,
+        set(completed_records),
+    )
+    if section in completed_records and completed_dependants:
+        raise _models.DetachedImplementationError(
+            "completed-dependent-pinner-conflict",
+            f"Section cannot be re-recorded while completed transitive dependants pin its current receipt: {section}",
+            section=section,
+            completed_dependants=completed_dependants,
+        )
+    incomplete_predecessors = [dependency for dependency in dependencies.get(section, []) if dependency not in completed_records]
+    if incomplete_predecessors:
+        raise _models.DetachedImplementationError(
+            "incomplete-predecessors",
+            f"Section cannot be recorded before every predecessor pinner closes: {section}",
+            section=section,
+            incomplete_predecessors=incomplete_predecessors,
+        )
+
+    return progress, dependencies, completed_records
+
+
+def _record_pinner(planning_dir, context, args, progress, dependencies, completed_records):
+    """Revalidate evidence at each existing checkpoint before constructing the receipt."""
+    implementation_root, root_fd, config, guard, _ = context
+    section = args.section
+    evidence_values = _detached_state.detached_section_evidence_values(section, args.evidence_rows)
+    review_rows = _detached_state.detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
+    if section in _detached_contract.HANDOFF_CONTRACT_BY_SECTION:
+        _handoff_host.verify_stored_privileged_handoff(
+            planning_dir,
+            implementation_root,
+            root_fd,
+            config,
+            guard,
+            section,
+        )
+    evidence_rows = _detached_state.detached_evidence_rows(root_fd, implementation_root, evidence_values)
+    _detached_state.require_privileged_section_evidence(section, evidence_rows)
+    verification = _markdown.normalize_repeated(args.verification)
+    if evidence_rows and not verification:
+        raise _models.DetachedImplementationError(
+            "missing-evidence-verification",
+            "Detached evidence rows require at least one section verification command that semantically validates them.",
+            section=section,
+        )
+
+    final_review_rows = _detached_state.detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
+    if final_review_rows != review_rows:
+        raise _models.DetachedImplementationError(
+            "detached-review-drift",
+            f"Detached review artifacts changed before section pinner creation: {section}",
+            section=section,
+        )
+    if section in _detached_contract.HANDOFF_CONTRACT_BY_SECTION:
+        _handoff_host.verify_stored_privileged_handoff(
+            planning_dir,
+            implementation_root,
+            root_fd,
+            config,
+            guard,
+            section,
+        )
+    final_evidence_rows = _detached_state.detached_evidence_rows(root_fd, implementation_root, evidence_values)
+    _detached_state.require_privileged_section_evidence(section, final_evidence_rows)
+    if final_evidence_rows != evidence_rows:
+        raise _models.DetachedImplementationError(
+            "detached-evidence-drift",
+            f"Detached evidence changed before section pinner creation: {section}",
+            section=section,
+            expected_evidence_rows=evidence_rows,
+            actual_evidence_rows=final_evidence_rows,
+        )
+    _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+    final_completed_records = _pinners.detached_completed_records(root_fd, config, progress)
+    if final_completed_records != completed_records:
+        raise _models.DetachedImplementationError(
+            "detached-state-drift",
+            f"Detached predecessor state changed before section pinner creation: {section}",
+            section=section,
+        )
+    _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+
+    predecessor_pinners: list[dict[str, Any]] = []
+    for predecessor in dependencies.get(section, []):
+        predecessor_record = final_completed_records[predecessor]
+        _, file_sha256 = _pinners.verify_section_pinner(root_fd, config, predecessor, predecessor_record)
+        predecessor_pinners.append(
+            {
+                "section": predecessor,
+                "pinner_path": predecessor_record["pinner_path"],
+                "pinner_file_sha256": file_sha256,
+            }
+        )
+
+    last_completed_records = _pinners.detached_completed_records(root_fd, config, progress)
+    if last_completed_records != final_completed_records:
+        raise _models.DetachedImplementationError(
+            "detached-state-drift",
+            f"Detached predecessor state changed during final section validation: {section}",
+            section=section,
+        )
+    last_review_rows = _detached_state.detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
+    if last_review_rows != final_review_rows:
+        raise _models.DetachedImplementationError(
+            "detached-review-drift",
+            f"Detached review artifacts changed during final section validation: {section}",
+            section=section,
+        )
+    last_evidence_rows = _detached_state.detached_evidence_rows(root_fd, implementation_root, evidence_values)
+    _detached_state.require_privileged_section_evidence(section, last_evidence_rows)
+    if last_evidence_rows != final_evidence_rows:
+        raise _models.DetachedImplementationError(
+            "detached-evidence-drift",
+            f"Detached evidence changed during final section validation: {section}",
+            section=section,
+            expected_evidence_rows=final_evidence_rows,
+            actual_evidence_rows=last_evidence_rows,
+        )
+    _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+    privileged_receipt_raw: bytes | None = None
+    if section in _detached_contract.HANDOFF_CONTRACT_BY_SECTION:
+        _, privileged_receipt_raw = _handoff_host.verify_stored_privileged_handoff(
+            planning_dir,
+            implementation_root,
+            root_fd,
+            config,
+            guard,
+            section,
+        )
+    _detached_state.require_verified_privileged_evidence_bytes(section, last_evidence_rows, privileged_receipt_raw)
+
+    completed_at = _storage.now_iso()
+    files_changed = _markdown.normalize_repeated(args.files_changed)
+    test_files = _markdown.normalize_repeated(args.test_files)
+    commit_status = args.commit_status or ("recorded" if args.commit else "not_recorded")
+    pinner = {
+        "schema": _detached_contract.SECTION_PINNER_SCHEMA,
+        "section": section,
+        "planning_tree_sha256": config["planning_tree_sha256"],
+        "admission_pinner_sha256": config["admission_pinner_sha256"],
+        "admission_state_sha256": config["admission_state_sha256"],
+        "detached_implementation_root_identity_digest": config[
+            "detached_implementation_root_identity_digest"
+        ],
+        "target_root_identity_digest": config["target_root_identity_digest"],
+        "implement_tool_sha256": config["implement_tool_sha256"],
+        "implement_skill_sha256": config["implement_skill_sha256"],
+        "implement_test_sha256": config["implement_test_sha256"],
+        "completed_at": completed_at,
+        "commit": args.commit,
+        "commit_status": commit_status,
+        "notes": args.notes,
+        "files_changed": files_changed,
+        "test_files": test_files,
+        "review_artifacts": final_review_rows,
+        "evidence_rows": final_evidence_rows,
+        "verification": verification,
+        "predecessor_pinners": predecessor_pinners,
+    }
+    _handoff_wire.require_exact_fields(pinner, _detached_contract.SECTION_PINNER_FIELDS, f"Section pinner for {section}")
+    pinner_raw = _handoff_wire.canonical_json_bytes(pinner)
+    state_record = _transaction_state.pinner_state_record(pinner, pinner_raw)
+
+    return pinner, pinner_raw, state_record
+
+
+def _record_payload(planning_dir, context, args, progress, dependencies, candidate_state, state_record):
+    """Describe the candidate result; publication sets its final transaction status."""
+    implementation_root, _, config, guard, _ = context
+    section = args.section
+    pinner_path = state_record["pinner_path"]
+    pinner_file_sha256 = state_record["pinner_file_sha256"]
+    completed_after = set(candidate_state["completed_sections"])
+    ready_after = _sections.ready_sections(progress, dependencies, completed_after)
+    remaining_after = [candidate for candidate in progress["sections"] if candidate not in completed_after]
+    payload = {
+        "success": True,
+        "mode": "detached-frozen",
+        "planning_dir": str(planning_dir),
+        "implementation_root": str(implementation_root),
+        "planning_tree_sha256": guard.digest,
+        "admission_pinner_sha256": config["admission_pinner_sha256"],
+        "admission_state_sha256": config["admission_state_sha256"],
+        "detached_implementation_root_identity_digest": config[
+            "detached_implementation_root_identity_digest"
+        ],
+        "state_path": str(implementation_root / "zagrosi_implement_state.json"),
+        "section": section,
+        "record": state_record,
+        "pinner_path": str(implementation_root / pinner_path),
+        "pinner_file_sha256": pinner_file_sha256,
+        "traceability_matrix": None,
+        "completed_sections": sorted(completed_after),
+        "next_section": ready_after[0] if ready_after else None,
+        "ready_sections": ready_after,
+        "remaining_sections": remaining_after,
+        "transaction_status": "pending",
+        "transaction_cleanup_pending": False,
+    }
+    if _gates.effective_flight_mode(args) != "off":
+        payload["postflight"] = _gates.flight_payload(
+            phase="implement",
+            stage="postflight",
+            mode=_gates.effective_flight_mode(args),
+            gates=[
+                _gates.direct_gate(
+                    "detached-section-pinner",
+                    True,
+                    {"path": payload["pinner_path"], "sha256": pinner_file_sha256},
+                ),
+                _gates.direct_gate("frozen-planning-tree", True, {"sha256": guard.digest}),
+            ],
+            extras={"planning_dir": str(planning_dir), "implementation_root": str(implementation_root)},
+        )
+    return payload
+
+
 def detached_implement_record_section(args: argparse.Namespace) -> int:
     sections_dir = _storage.absolute_path_no_follow(args.sections_dir)
     planning_dir = sections_dir.parent
@@ -35,211 +296,20 @@ def detached_implement_record_section(args: argparse.Namespace) -> int:
             planning_dir,
             args.implementation_root,
             sections_dir=sections_dir,
-        ) as (implementation_root, root_fd, config, guard, require_lock_authority):
-            progress = _sections.check_section_progress(planning_dir)
-            if progress["state"] in {"invalid_index", "no_index"}:
-                raise _models.DetachedImplementationError(
-                    "invalid-sections-index",
-                    "Cannot record detached implementation against an invalid sections index.",
-                    section_progress=progress,
-                )
-            artifact_payload = _validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True, allow_compact=False))
-            if not artifact_payload["success"]:
-                raise _models.DetachedImplementationError(
-                    "incomplete-plan-artifacts",
-                    "Forge planning process is incomplete; finish zagrosi-plan before recording implementation.",
-                    findings=artifact_payload.get("findings", []),
-                )
+        ) as context:
+            implementation_root, root_fd, config, guard, require_lock_authority = context
             section = args.section
-            known = set(progress["sections"])
-            if section not in known:
-                raise _models.DetachedImplementationError(
-                    "unknown-section",
-                    f"Section is absent from SECTION_MANIFEST: {section}",
-                    section=section,
-                )
-            dependencies = _sections.dependency_graph(planning_dir, progress)
-            unknown_predecessors = sorted(dependency for dependency in dependencies.get(section, []) if dependency not in known)
-            if unknown_predecessors:
-                raise _models.DetachedImplementationError(
-                    "unknown-predecessors",
-                    f"Section names predecessors absent from SECTION_MANIFEST: {section}",
-                    section=section,
-                    unknown_predecessors=unknown_predecessors,
-                )
-            completed_records = _pinners.detached_completed_records(root_fd, config, progress)
-            initial_state, initial_state_raw = _secure_io.load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
-            if initial_state.get("completed_sections") != completed_records:
-                raise _models.DetachedImplementationError(
-                    "detached-state-drift",
-                    "Detached implementation state changed during initial predecessor validation.",
-                    section=section,
-                )
-            completed_dependants = _pinners.completed_transitive_dependants(
-                section,
-                dependencies,
-                set(completed_records),
+            progress, dependencies, completed_records = _record_predecessors(planning_dir, root_fd, config, args)
+            pinner, pinner_raw, state_record = _record_pinner(
+                planning_dir, context, args, progress, dependencies, completed_records,
             )
-            if section in completed_records and completed_dependants:
-                raise _models.DetachedImplementationError(
-                    "completed-dependent-pinner-conflict",
-                    f"Section cannot be re-recorded while completed transitive dependants pin its current receipt: {section}",
-                    section=section,
-                    completed_dependants=completed_dependants,
-                )
-            incomplete_predecessors = [dependency for dependency in dependencies.get(section, []) if dependency not in completed_records]
-            if incomplete_predecessors:
-                raise _models.DetachedImplementationError(
-                    "incomplete-predecessors",
-                    f"Section cannot be recorded before every predecessor pinner closes: {section}",
-                    section=section,
-                    incomplete_predecessors=incomplete_predecessors,
-                )
-
-            evidence_values = _detached_state.detached_section_evidence_values(section, args.evidence_rows)
-            review_rows = _detached_state.detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
-            if section in _detached_contract.HANDOFF_CONTRACT_BY_SECTION:
-                _handoff_host.verify_stored_privileged_handoff(
-                    planning_dir,
-                    implementation_root,
-                    root_fd,
-                    config,
-                    guard,
-                    section,
-                )
-            evidence_rows = _detached_state.detached_evidence_rows(root_fd, implementation_root, evidence_values)
-            _detached_state.require_privileged_section_evidence(section, evidence_rows)
-            verification = _markdown.normalize_repeated(args.verification)
-            if evidence_rows and not verification:
-                raise _models.DetachedImplementationError(
-                    "missing-evidence-verification",
-                    "Detached evidence rows require at least one section verification command that semantically validates them.",
-                    section=section,
-                )
-
-            final_review_rows = _detached_state.detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
-            if final_review_rows != review_rows:
-                raise _models.DetachedImplementationError(
-                    "detached-review-drift",
-                    f"Detached review artifacts changed before section pinner creation: {section}",
-                    section=section,
-                )
-            if section in _detached_contract.HANDOFF_CONTRACT_BY_SECTION:
-                _handoff_host.verify_stored_privileged_handoff(
-                    planning_dir,
-                    implementation_root,
-                    root_fd,
-                    config,
-                    guard,
-                    section,
-                )
-            final_evidence_rows = _detached_state.detached_evidence_rows(root_fd, implementation_root, evidence_values)
-            _detached_state.require_privileged_section_evidence(section, final_evidence_rows)
-            if final_evidence_rows != evidence_rows:
-                raise _models.DetachedImplementationError(
-                    "detached-evidence-drift",
-                    f"Detached evidence changed before section pinner creation: {section}",
-                    section=section,
-                    expected_evidence_rows=evidence_rows,
-                    actual_evidence_rows=final_evidence_rows,
-                )
-            _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
-            final_completed_records = _pinners.detached_completed_records(root_fd, config, progress)
-            if final_completed_records != completed_records:
-                raise _models.DetachedImplementationError(
-                    "detached-state-drift",
-                    f"Detached predecessor state changed before section pinner creation: {section}",
-                    section=section,
-                )
-            _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
-
-            predecessor_pinners: list[dict[str, Any]] = []
-            for predecessor in dependencies.get(section, []):
-                predecessor_record = final_completed_records[predecessor]
-                _, file_sha256 = _pinners.verify_section_pinner(root_fd, config, predecessor, predecessor_record)
-                predecessor_pinners.append(
-                    {
-                        "section": predecessor,
-                        "pinner_path": predecessor_record["pinner_path"],
-                        "pinner_file_sha256": file_sha256,
-                    }
-                )
-
-            last_completed_records = _pinners.detached_completed_records(root_fd, config, progress)
-            if last_completed_records != final_completed_records:
-                raise _models.DetachedImplementationError(
-                    "detached-state-drift",
-                    f"Detached predecessor state changed during final section validation: {section}",
-                    section=section,
-                )
-            last_review_rows = _detached_state.detached_review_rows(root_fd, implementation_root, section, args.review_artifacts)
-            if last_review_rows != final_review_rows:
-                raise _models.DetachedImplementationError(
-                    "detached-review-drift",
-                    f"Detached review artifacts changed during final section validation: {section}",
-                    section=section,
-                )
-            last_evidence_rows = _detached_state.detached_evidence_rows(root_fd, implementation_root, evidence_values)
-            _detached_state.require_privileged_section_evidence(section, last_evidence_rows)
-            if last_evidence_rows != final_evidence_rows:
-                raise _models.DetachedImplementationError(
-                    "detached-evidence-drift",
-                    f"Detached evidence changed during final section validation: {section}",
-                    section=section,
-                    expected_evidence_rows=final_evidence_rows,
-                    actual_evidence_rows=last_evidence_rows,
-                )
-            _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
-            privileged_receipt_raw: bytes | None = None
-            if section in _detached_contract.HANDOFF_CONTRACT_BY_SECTION:
-                _, privileged_receipt_raw = _handoff_host.verify_stored_privileged_handoff(
-                    planning_dir,
-                    implementation_root,
-                    root_fd,
-                    config,
-                    guard,
-                    section,
-                )
-            _detached_state.require_verified_privileged_evidence_bytes(section, last_evidence_rows, privileged_receipt_raw)
-
-            completed_at = _storage.now_iso()
-            files_changed = _markdown.normalize_repeated(args.files_changed)
-            test_files = _markdown.normalize_repeated(args.test_files)
-            commit_status = args.commit_status or ("recorded" if args.commit else "not_recorded")
-            pinner = {
-                "schema": _detached_contract.SECTION_PINNER_SCHEMA,
-                "section": section,
-                "planning_tree_sha256": config["planning_tree_sha256"],
-                "admission_pinner_sha256": config["admission_pinner_sha256"],
-                "admission_state_sha256": config["admission_state_sha256"],
-                "detached_implementation_root_identity_digest": config[
-                    "detached_implementation_root_identity_digest"
-                ],
-                "target_root_identity_digest": config["target_root_identity_digest"],
-                "implement_tool_sha256": config["implement_tool_sha256"],
-                "implement_skill_sha256": config["implement_skill_sha256"],
-                "implement_test_sha256": config["implement_test_sha256"],
-                "completed_at": completed_at,
-                "commit": args.commit,
-                "commit_status": commit_status,
-                "notes": args.notes,
-                "files_changed": files_changed,
-                "test_files": test_files,
-                "review_artifacts": final_review_rows,
-                "evidence_rows": final_evidence_rows,
-                "verification": verification,
-                "predecessor_pinners": predecessor_pinners,
-            }
-            _handoff_wire.require_exact_fields(pinner, _detached_contract.SECTION_PINNER_FIELDS, f"Section pinner for {section}")
-            pinner_raw = _handoff_wire.canonical_json_bytes(pinner)
-            state_record = _transaction_state.pinner_state_record(pinner, pinner_raw)
             pinner_path = state_record["pinner_path"]
             pinner_file_sha256 = state_record["pinner_file_sha256"]
 
             require_lock_authority()
             _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
             locked_completed_records = _pinners.detached_completed_records(root_fd, config, progress)
-            if locked_completed_records != final_completed_records:
+            if locked_completed_records != completed_records:
                 raise _models.DetachedImplementationError(
                     "detached-state-drift",
                     f"Detached predecessor/current state changed before transaction preparation: {section}",
@@ -263,48 +333,7 @@ def detached_implement_record_section(args: argparse.Namespace) -> int:
                     "Section record is an exact no-op against the current canonical state.",
                     section=section,
                 )
-            completed_after = set(candidate_state["completed_sections"])
-            ready_after = _sections.ready_sections(progress, dependencies, completed_after)
-            remaining_after = [candidate for candidate in progress["sections"] if candidate not in completed_after]
-            payload = {
-                "success": True,
-                "mode": "detached-frozen",
-                "planning_dir": str(planning_dir),
-                "implementation_root": str(implementation_root),
-                "planning_tree_sha256": guard.digest,
-                "admission_pinner_sha256": config["admission_pinner_sha256"],
-                "admission_state_sha256": config["admission_state_sha256"],
-                "detached_implementation_root_identity_digest": config[
-                    "detached_implementation_root_identity_digest"
-                ],
-                "state_path": str(implementation_root / "zagrosi_implement_state.json"),
-                "section": section,
-                "record": state_record,
-                "pinner_path": str(implementation_root / pinner_path),
-                "pinner_file_sha256": pinner_file_sha256,
-                "traceability_matrix": None,
-                "completed_sections": sorted(completed_after),
-                "next_section": ready_after[0] if ready_after else None,
-                "ready_sections": ready_after,
-                "remaining_sections": remaining_after,
-                "transaction_status": "pending",
-                "transaction_cleanup_pending": False,
-            }
-            if _gates.effective_flight_mode(args) != "off":
-                payload["postflight"] = _gates.flight_payload(
-                    phase="implement",
-                    stage="postflight",
-                    mode=_gates.effective_flight_mode(args),
-                    gates=[
-                        _gates.direct_gate(
-                            "detached-section-pinner",
-                            True,
-                            {"path": payload["pinner_path"], "sha256": pinner_file_sha256},
-                        ),
-                        _gates.direct_gate("frozen-planning-tree", True, {"sha256": guard.digest}),
-                    ],
-                    extras={"planning_dir": str(planning_dir), "implementation_root": str(implementation_root)},
-                )
+            payload = _record_payload(planning_dir, context, args, progress, dependencies, candidate_state, state_record)
             transaction = {
                 "schema": _detached_contract.SECTION_RECORD_TRANSACTION_SCHEMA,
                 "section": section,

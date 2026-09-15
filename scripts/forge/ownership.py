@@ -7,6 +7,9 @@ import shlex
 
 from . import markdown as _markdown
 from . import policy as _policy
+from . import session as _session
+
+_OWNERSHIP_CACHE_LIMIT = 256
 
 def extract_file_paths(text: str) -> list[str]:
     paths = {match.group(0).strip("`").removeprefix("./") for match in _policy.FILE_PATH_RE.finditer(text)}
@@ -77,6 +80,18 @@ def owned_paths_from_body(body: str) -> list[str]:
 
 
 def extract_section_owned_paths(text: str) -> list[str]:
+    """Reuse pure parsing of identical text only within the current command."""
+    context = _session._CLI_CONTEXT.get()
+    cache = context.get("owned_paths") if context is not None else None
+    if cache is not None and text in cache:
+        return list(cache[text])
+    paths = _parse_section_owned_paths(text)
+    if cache is not None and len(cache) < _OWNERSHIP_CACHE_LIMIT:
+        cache[text] = tuple(paths)
+    return paths
+
+
+def _parse_section_owned_paths(text: str) -> list[str]:
     found_ownership_section = False
     for title, body in _markdown.markdown_h2_sections(text):
         title_declares_ownership = bool(_policy.OWNERSHIP_TITLE_RE.search(title))

@@ -396,7 +396,8 @@ def write_lean_plan_fixture(planning_dir: Path) -> Path:
     reviews = planning_dir / "reviews"
     reviews.mkdir()
     (reviews / "codex.md").write_text(
-        "# Review\n\nPASS — semantic checks, TDD, ownership, traceability, and rollback remain required.\n"
+        "# Review\n\nPASS — semantic checks, TDD, ownership, traceability, and rollback remain required.\n",
+        encoding="utf-8",
     )
     sections = planning_dir / "sections"
     sections.mkdir()

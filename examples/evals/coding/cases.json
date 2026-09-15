@@ -5,8 +5,9 @@
     "assertions": 633
   },
   "cleanup": {
+    "cleanup_required": true,
     "depth": "standard",
-    "request": "Simplify the existing invoice code and repair encountered duplication and mixed responsibilities. Preserve every existing public entrypoint, output, and error. Add meaningful regression coverage before cleanup.",
+    "request": "Simplify the existing invoice code and repair encountered duplication and mixed responsibilities. Preserve every existing public entrypoint, output, and error. Verify regression coverage before cleanup; add tests for uncovered behavior.",
     "assertions": 507
   },
   "discount": {
@@ -15,6 +16,7 @@
     "assertions": 2403
   },
   "godfile": {
+    "cleanup_required": true,
     "fixture": "godfile",
     "oracle": "tools/godfile_trial_checks.py",
     "assertions": 75,

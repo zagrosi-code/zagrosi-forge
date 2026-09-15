@@ -306,7 +306,6 @@ def test_candidate_recovery_rollback_failure_retains_transaction_for_retry(
         tmp_path / f"fixture-candidate-rollback-failure-{failure}",
         plugin_root=plugin_root,
     )
-    base_state_raw = (fixture.implementation_root / "zagrosi_implement_state.json").read_bytes()
     environment = dict(os.environ)
     environment["ZAGROSI_TEST_RECORD_CRASHPOINT"] = "state-cas-fsync"
     crashed = run_script_raw(

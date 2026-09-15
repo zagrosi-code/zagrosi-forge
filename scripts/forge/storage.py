@@ -22,13 +22,17 @@ def read_text(path: Path) -> str:
     if context is None or context["texts"] is None:
         return path.read_text(encoding="utf-8")
     path = path.absolute()
-    current = path.stat()
-    signature = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+    signature = file_signature(path)
     cached = context["texts"].get(path)
     if cached is None or cached[0] != signature:
         cached = (signature, path.read_text(encoding="utf-8"))
         context["texts"][path] = cached
     return cached[1]
+
+
+def file_signature(path: Path) -> tuple[int, int, int, int, int]:
+    current = path.stat()
+    return (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:

@@ -537,9 +537,11 @@ def main(argv: list[str] | None = None) -> int:
         or args.handler[1] in {"deep_project_setup", "deep_plan_setup"}
         or (args.command in {"preflight", "postflight"} and args.phase in {"project", "plan"})
     )
+    read_cache = local_gates or (args.command == "preflight" and args.phase == "implement")
     token = _session._CLI_CONTEXT.set({
         "parser": parser, "pretty": pretty or getattr(args, "pretty", False),
-        "local_gates": local_gates, "texts": {} if local_gates else None,
+        "local_gates": local_gates, "texts": {} if read_cache else None,
+        "owned_paths": {} if read_cache else None,
     })
     try:
         return args.func(args)

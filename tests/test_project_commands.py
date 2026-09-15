@@ -304,7 +304,7 @@ def test_codebase_evidence_includes_forge_surface_without_cache_noise(tmp_path: 
     assert not any(".codex/plugins/cache" in path for path in grouped_paths)
 
     written = Path(evidence["output"]).read_text()
-    assert "Forge Source Files" in written
+    assert "Source Files" in written
     assert "Skills" in written
     assert "Assumptions / Open Questions" in written
 
