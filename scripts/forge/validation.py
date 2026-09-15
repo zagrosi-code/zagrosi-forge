@@ -88,7 +88,8 @@ def lint_plan(args: argparse.Namespace) -> int:
             spec_ids = _markdown.requirement_ids(plan_text)
             if not compact:
                 findings.append(_quality.finding("medium", "no-requirement-ids", "Spec has no REQ-* identifiers.", spec_path))
-        missing_in_plan = [req_id for req_id in spec_ids if req_id not in plan_text]
+        plan_ids = set(_markdown.requirement_ids(plan_text))
+        missing_in_plan = [req_id for req_id in spec_ids if req_id not in plan_ids]
         if missing_in_plan:
             findings.append(
                 _quality.finding(
@@ -107,7 +108,8 @@ def lint_plan(args: argparse.Namespace) -> int:
         _quality.add_budget_finding(findings, tdd_words, budgets["tdd"], "TDD plan", "tdd-plan-too-large", tdd_path)
         if not _markdown.has_verification(tdd_text):
             findings.append(_quality.finding("medium", "thin-tdd-plan", "TDD plan needs a regression case and command, or justified inspection with an expected result.", tdd_path))
-        missing_in_tdd = [req_id for req_id in spec_ids if req_id not in tdd_text]
+        tdd_ids = set(_markdown.requirement_ids(tdd_text))
+        missing_in_tdd = [req_id for req_id in spec_ids if req_id not in tdd_ids]
         if missing_in_tdd:
             severity = "low" if compact else "medium"
             findings.append(_quality.finding(severity, "tdd-traceability-gap", f"Requirement IDs missing from TDD plan: {', '.join(missing_in_tdd)}", tdd_path))
@@ -327,7 +329,8 @@ def lint_sections(args: argparse.Namespace) -> int:
                 )
             )
 
-    missing_requirements = [req_id for req_id in spec_ids if req_id not in all_section_text]
+    section_ids = set(_markdown.requirement_ids(all_section_text))
+    missing_requirements = [req_id for req_id in spec_ids if req_id not in section_ids]
     if missing_requirements:
         findings.append(
             _quality.finding(

@@ -226,7 +226,9 @@ def implement_preflight_report(
     )
 
 
-def implement_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+def implement_postflight_report(
+    planning_dir: Path, args: argparse.Namespace, *, candidate_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     mode = _gates.effective_flight_mode(args)
     if mode == "off":
         return _gates.flight_payload(phase="implement", stage="postflight", mode=mode, gates=[])
@@ -235,7 +237,7 @@ def implement_postflight_report(planning_dir: Path, args: argparse.Namespace) ->
     profile = getattr(args, "profile", "solo")
     sections_dir = _storage.resolve_path(getattr(args, "sections_dir", None)) if getattr(args, "sections_dir", None) else planning_dir / "sections"
     target_dir = _storage.resolve_path(getattr(args, "target_dir", None)) if getattr(args, "target_dir", None) else Path.cwd()
-    recording_status = _state.implementation_recording_status(planning_dir)
+    recording_status = _state.implementation_recording_status(planning_dir, candidate_state)
     final_state_gates = recording_status["sections_recorded_complete"]
     jobs: list[tuple[str, list[str], bool]] = []
     if getattr(args, "diff_file", None) or getattr(args, "staged", False):
@@ -263,8 +265,10 @@ def implement_postflight_report(planning_dir: Path, args: argparse.Namespace) ->
                 "message": "Implementation postflight requires a valid sections/index.md.",
             },
         )
-    elif final_state_gates:
-        jobs.append(("lint-implementation-state", _gates.append_strict(["lint-implementation-state", "--sections-dir", str(sections_dir), "--profile", profile], mode), True))
+    elif final_state_gates or (candidate_state is None and recording_status["invalid_completed_sections"]):
+        findings, extras = _state.implementation_state_analysis(planning_dir, candidate_state)
+        state_payload = _quality.quality_payload("implementation-state", findings, extras, profile, mode == "strict")
+        progress_gate = _gates.direct_gate("lint-implementation-state", state_payload["success"], state_payload)
     else:
         progress_gate = _gates.direct_gate(
             "implementation-progress",
@@ -289,6 +293,11 @@ def implement_postflight_report(planning_dir: Path, args: argparse.Namespace) ->
     gates = _gates.run_internal_gate_batch(jobs)
     if progress_gate is not None:
         gates.append(progress_gate)
+    if candidate_state is None and recording_status["pending_sections"]:
+        gates.append(_gates.direct_gate("pending-completion", False, {
+            "pending_sections": recording_status["pending_sections"],
+            "message": "Retry completion recording to resolve pending or failed postflight checks.",
+        }))
     return _gates.flight_payload(
         phase="implement",
         stage="postflight",

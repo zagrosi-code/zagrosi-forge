@@ -5,34 +5,44 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import argparse
+import re
 
-from . import artifacts as _artifacts
 from . import markdown as _markdown
 from . import models as _models
 from . import output as _output
+from . import policy as _policy
 from . import quality as _quality
 from . import sections as _sections
 from . import storage as _storage
 
-def completed_sections(planning_dir: Path) -> set[str]:
-    state_path = implementation_state_path(planning_dir)
-    if not state_path.exists():
-        return set()
-    state = _storage.load_json(state_path)
+def completed_sections(planning_dir: Path, state: dict[str, Any] | None = None) -> set[str]:
+    state = load_implementation_state(planning_dir) if state is None else state
     completed = state.get("completed_sections", {})
-    return set(completed) if isinstance(completed, dict) else set()
+    if not isinstance(completed, dict):
+        return set()
+    return {
+        section for section, record in completed.items()
+        if section not in state.get("pending_sections", {})
+        and not completion_evidence_findings(planning_dir, section, record)
+    }
 
 
-def implementation_recording_status(planning_dir: Path) -> dict[str, Any]:
+def implementation_recording_status(planning_dir: Path, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    state = load_implementation_state(planning_dir) if state is None else state
     progress = _sections.check_section_progress(planning_dir)
     sections = progress.get("sections", []) if progress.get("state") not in {"invalid_index", "no_index"} else []
     known_sections = set(sections)
-    recorded = completed_sections(planning_dir)
-    recorded_known = sorted(section for section in recorded if section in known_sections)
+    recorded = completed_sections(planning_dir, state)
+    recorded_known = sorted(recorded & known_sections)
     remaining = [section for section in sections if section not in recorded]
-    sections_recorded_complete = bool(sections) and not remaining and progress.get("state") == "complete"
+    pending = sorted(state.get("pending_sections", {}))
+    raw_completed = state.get("completed_sections", {})
+    invalid = sorted(set(raw_completed) - recorded - set(pending)) if isinstance(raw_completed, dict) else []
+    sections_recorded_complete = bool(sections) and not remaining and not pending and progress.get("state") == "complete"
     if sections_recorded_complete:
         recording_state = "complete"
+    elif pending:
+        recording_state = "pending"
     elif recorded_known:
         recording_state = "partial"
     else:
@@ -43,7 +53,9 @@ def implementation_recording_status(planning_dir: Path) -> dict[str, Any]:
         "sections_recorded_complete": sections_recorded_complete,
         "recorded_sections": recorded_known,
         "remaining_sections": remaining,
-        "unknown_recorded_sections": sorted(section for section in recorded if section not in known_sections),
+        "pending_sections": pending,
+        "invalid_completed_sections": invalid,
+        "unknown_recorded_sections": sorted(recorded - known_sections),
     }
 
 
@@ -108,84 +120,84 @@ def compact_section_evidence(record: dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "-"
 
 
-def lint_implementation_state(args: argparse.Namespace) -> int:
-    sections_dir = _storage.resolve_path(args.sections_dir)
-    planning_dir = sections_dir.parent
+def completion_evidence_findings(planning_dir: Path, section: str, record: Any) -> list[_models.Finding]:
+    """Use the same evidence contract for new records, legacy records, and readiness."""
+    path = implementation_state_path(planning_dir)
+    if not _policy.SECTION_RE.fullmatch(section) or not isinstance(record, dict):
+        return [_quality.finding("high", "invalid-completion-record", f"{section} completion must be an object.", path)]
+    review_path = planning_dir / "implementation" / "code_review" / f"{section}-review.md"
+    legacy_text = ""
+    if not record.get("review_status") or not record.get("verification"):
+        if review_path.is_file():
+            _, lines = _markdown.split_markdown_fences_with_closure(_storage.read_text(review_path))
+            legacy_text = "\n".join(lines)
+    status = record.get("review_status")
+    if status is None:
+        verdicts = re.findall(r"(?im)^Verdict:[ \t]*(\w+)\b", legacy_text)
+        reviewed = re.search(r"(?im)^Reviewed:[ \t]*(?!none\b|tbd\b|pending\b|n/a\b)\S.+", legacy_text)
+        passing_review = bool(
+            verdicts and all(value.lower() in {"pass", "fixed"} for value in verdicts) and reviewed
+            or not verdicts and re.search(r"(?im)^\s*No (?:blocking|material) findings[.!]?\s*$", legacy_text)
+        )
+    else:
+        passing_review = isinstance(status, str) and status in {"pass", "fixed"}
+    verification = record.get("verification")
+    if isinstance(verification, str):
+        verification = [verification]
+    verified = isinstance(verification, list) and any(
+        isinstance(value, str) and value.strip().strip("`*. ").lower() not in {"", "none", "n/a", "tbd", "todo", "pending"}
+        for value in verification
+    )
+    if not verified:
+        verified = bool(re.search(
+            r"(?im)^(?:Verification|Verified|Tests):[ \t]*`[^`]+`[ \t:—-]*(?:passed|successful)\b(?![^\n]*\b(?:failed|blocked|pending)\b)[^\n]*$",
+            legacy_text,
+        ))
+    findings = []
+    if not passing_review:
+        findings.append(_quality.finding("high", "missing-review-status", f"{section} lacks a passing review verdict.", path))
+    if not verified:
+        findings.append(_quality.finding("high", "missing-verification", f"{section} has no verification evidence recorded.", path))
+    return findings
+
+
+def implementation_state_analysis(
+    planning_dir: Path, state: dict[str, Any] | None = None,
+) -> tuple[list[_models.Finding], dict[str, Any]]:
     findings: list[_models.Finding] = []
     progress = _sections.check_section_progress(planning_dir)
-    state_path = planning_dir / "implementation" / "zagrosi_implement_state.json"
-    legacy_state_path = planning_dir / "implementation" / "deep_implement_state.json"
-    if not state_path.exists() and legacy_state_path.exists():
-        state_path = legacy_state_path
-    code_review_dir = planning_dir / "implementation" / "code_review"
-    usage_path = planning_dir / "implementation" / "usage.md"
-    compact = _markdown.is_lean_depth(_artifacts.planning_depth(planning_dir))
-
+    state_path = implementation_state_path(planning_dir)
     if progress["state"] in {"invalid_index", "no_index"}:
-        findings.append(_quality.finding("critical", "invalid-sections", "Cannot validate implementation without valid sections/index.md.", sections_dir / "index.md"))
-        return _quality.emit_quality("implementation-state", findings, args)
-
-    if not state_path.exists():
-        findings.append(_quality.finding("high", "missing-state", "zagrosi_implement_state.json is missing.", state_path))
-        completed: dict[str, Any] = {}
-    else:
-        state = _storage.load_json(state_path)
-        completed = state.get("completed_sections", {})
-        if not isinstance(completed, dict):
-            findings.append(_quality.finding("critical", "invalid-state", "completed_sections must be an object.", state_path))
-            completed = {}
-
+        findings.append(_quality.finding("critical", "invalid-sections", "Cannot validate implementation without valid sections/index.md.", planning_dir / "sections" / "index.md"))
+        return findings, {}
+    if state is None:
+        if not state_path.exists():
+            findings.append(_quality.finding("high", "missing-state", "zagrosi_implement_state.json is missing.", state_path))
+        state = load_implementation_state(planning_dir)
+    completed = state.get("completed_sections", {})
+    if not isinstance(completed, dict):
+        findings.append(_quality.finding("critical", "invalid-state", "completed_sections must be an object.", state_path))
+        completed = {}
     for section in progress["sections"]:
         if section not in completed:
             findings.append(_quality.finding("medium", "section-not-recorded", f"{section} is not recorded complete.", state_path))
             continue
         record = completed[section]
-        if not record.get("completed_at"):
+        findings.extend(completion_evidence_findings(planning_dir, section, record))
+        if isinstance(record, dict) and not record.get("completed_at"):
             findings.append(_quality.finding("low", "missing-completed-at", f"{section} has no completed_at timestamp.", state_path))
-        if not compact and not record.get("commit"):
-            findings.append(_quality.finding("low", "missing-commit", f"{section} has no commit recorded.", state_path))
-        if compact:
-            if record.get("review_status") not in {"pass", "fixed"}:
-                findings.append(_quality.finding("high", "missing-review-status", f"{section} lacks a passing machine review status.", state_path))
-            if not record.get("verification"):
-                findings.append(_quality.finding("high", "missing-verification", f"{section} has no verification command recorded.", state_path))
-        else:
-            review_path = code_review_dir / f"{section}-review.md"
-            diff_path = code_review_dir / f"{section}-diff.md"
-            decisions_path = code_review_dir / f"{section}-decisions.md"
-            if not review_path.exists():
-                findings.append(_quality.finding("medium", "missing-review", f"Review file missing for {section}.", review_path))
-            if not diff_path.exists():
-                findings.append(_quality.finding("low", "missing-diff", f"Diff file missing for {section}.", diff_path))
-            if not decisions_path.exists():
-                findings.append(
-                    _quality.finding(
-                        "medium",
-                        "missing-review-decisions",
-                        f"Review decisions file missing for {section}.",
-                        decisions_path,
-                        "Write a decisions artifact that records accepted, rejected, and deferred review findings.",
-                    )
-                )
-        if not compact:
-            if "files_changed" in record and not record.get("files_changed"):
-                findings.append(_quality.finding("low", "missing-file-evidence", f"{section} has no changed files recorded.", state_path))
-            if "test_files" in record and not record.get("test_files"):
-                findings.append(_quality.finding("low", "missing-test-evidence", f"{section} has no test files recorded.", state_path))
-            if "review_artifacts" in record and not record.get("review_artifacts"):
-                findings.append(_quality.finding("low", "missing-review-evidence", f"{section} has no review artifacts recorded.", state_path))
+    pending = sorted(state.get("pending_sections", {}))
+    if pending:
+        findings.append(_quality.finding("high", "pending-completion", f"Completion checks must be retried for: {', '.join(pending)}.", state_path))
+    return findings, {
+        "sections_dir": str(planning_dir / "sections"),
+        "state_path": str(state_path),
+        "completed_sections": sorted(completed),
+        "pending_sections": pending,
+    }
 
-    if not compact and not usage_path.exists():
-        findings.append(_quality.finding("medium", "missing-usage", "implementation/usage.md is missing.", usage_path))
 
-    payload = _quality.quality_from_args(
-        "implementation-state",
-        findings,
-        args,
-        {
-            "sections_dir": str(sections_dir),
-            "state_path": str(state_path),
-            "completed_sections": sorted(completed.keys()),
-        },
-    )
-    return _quality.emit_payload(payload, args)
+def lint_implementation_state(args: argparse.Namespace) -> int:
+    planning_dir = _storage.resolve_path(args.sections_dir).parent
+    findings, extras = implementation_state_analysis(planning_dir)
+    return _quality.emit_quality("implementation-state", findings, args, extras)

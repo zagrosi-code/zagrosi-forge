@@ -9,9 +9,11 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          cache-dependency-glob: pyproject.toml
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Validate JSON
@@ -36,3 +38,28 @@ jobs:
           python scripts/zagrosi_skills.py forge-score --planning-dir examples/typescript-app/01-auth --depth standard --strict
       - name: Run eval suite
         run: python scripts/zagrosi_skills.py eval-suite --examples-dir examples --check-snapshots --output examples/evals/latest.json
+
+  compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: macos-latest
+            python: "3.12"
+          - os: windows-latest
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install "pytest>=8"
+      - run: python tools/update_runtime_manifest.py --check
+      - name: Check portable workflows and runtime loading
+        run: python -m pytest -q tests/test_compact_plan.py tests/test_completion_contracts.py tests/test_context_packets.py tests/test_coding_trials.py tests/test_runtime_loading.py
+      - name: Check native processes on macOS
+        if: runner.os == 'macOS'
+        run: python -m pytest -q tests/test_native_process.py

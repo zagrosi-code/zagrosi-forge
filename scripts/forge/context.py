@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 import argparse
-import os
 import re
-import sys
 
 from . import artifacts as _artifacts
 from . import markdown as _markdown
@@ -17,9 +16,6 @@ from . import ownership as _ownership
 from . import policy as _policy
 from . import quality as _quality
 from . import storage as _storage
-
-if TYPE_CHECKING:
-    from . import planning_snapshot as _planning_snapshot
 
 def context_budget(args: argparse.Namespace) -> int:
     planning_dir = _storage.resolve_path(args.planning_dir)
@@ -271,60 +267,57 @@ def implementation_packet(args: argparse.Namespace) -> int:
 
     planning_dir = _storage.absolute_path_no_follow(args.planning_dir) if detached else _storage.resolve_path(args.planning_dir)
     implementation_root: Path | None = None
-    root_fd: int | None = None
-    guard: _planning_snapshot.FrozenPlanningTree | None = None
-    record_lock_context: Any = None
-    require_lock_authority = None
     try:
-        if detached:
-            if not args.output_dir:
-                raise _models.DetachedImplementationError(
-                    "missing-detached-output-dir",
-                    "Detached implementation packets require an explicit external --output-dir.",
-                )
-            implementation_root, root_fd, config, guard, record_lock_context, require_lock_authority = _detached_context.open_detached_context(
-                planning_dir,
-                args.implementation_root,
-            )
-        section = args.section
-        packet = build_context(planning_dir, section, args.max_words)
-        if not packet["success"]:
-            return _output.print_json(packet, 1)
-        section_path = planning_dir / "sections" / f"{section}.md"
-        section_text = _storage.read_text(section_path)
-        artifacts = _artifacts.planning_artifacts(planning_dir)
-        artifacts["spec"] = _artifacts.requirement_source_spec(planning_dir) or artifacts["plan"]
-        ids = {name: context_requirement_ids(_artifacts.planning_artifact_text(planning_dir, name, path)) if (path := artifacts.get(name)) else set()
-               for name in ("spec", "plan", "tdd")}
-        section_tests = _markdown.contains_any(section_text, ["tests first", "expected failure", "test_", "pytest", "vitest", "cargo test", "go test"])
-        gaps = {req: [name for name in ("spec", "plan", "tdd") if req not in ids[name] and not (name == "tdd" and section_tests)]
-                for req in packet["requirements"]}
-        gaps = {req: missing for req, missing in gaps.items() if missing}
-        if not packet["requirements"] or gaps:
-            return _output.print_json({"success": False, "error": "Selected section has incomplete requirement coverage.", "coverage_gaps": gaps}, 1)
-        content = packet.pop("content")
-        filename = f"{section}-packet.md"
-        if detached:
-            assert implementation_root is not None and root_fd is not None and guard is not None
-            output = _storage.absolute_path_no_follow(args.output_dir) / filename
-            relative = _detached_state.detached_artifact_relative(implementation_root, str(output))
-            if Path(relative).parts[0] != "code_review":
-                raise _models.DetachedImplementationError(
-                    "invalid-detached-output-dir",
-                    "Detached generated packets must stay beneath the fixed code_review directory.",
-                    path=str(output),
-                )
-            _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
-            _secure_io.write_regular_bytes_at(root_fd, relative, content.encode("utf-8"), cap=_detached_contract.DETACHED_REVIEW_CAP)
-            _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
-            require_lock_authority()
-            output = implementation_root / relative
-        else:
-            output_dir = _storage.resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "packets"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output = output_dir / filename
-            output.write_text(content, encoding="utf-8")
-        return _output.print_json({**packet, "planning_dir": str(planning_dir), "section": section, "output": str(output)})
+        with ExitStack() as contexts:
+            if detached:
+                if not args.output_dir:
+                    raise _models.DetachedImplementationError(
+                        "missing-detached-output-dir",
+                        "Detached implementation packets require an explicit external --output-dir.",
+                    )
+                implementation_root, root_fd, config, guard, require_lock_authority = contexts.enter_context(_detached_context.open_detached_context(
+                    planning_dir,
+                    args.implementation_root,
+                ))
+            section = args.section
+            packet = build_context(planning_dir, section, args.max_words)
+            if not packet["success"]:
+                return _output.print_json(packet, 1)
+            section_path = planning_dir / "sections" / f"{section}.md"
+            section_text = _storage.read_text(section_path)
+            artifacts = _artifacts.planning_artifacts(planning_dir)
+            artifacts["spec"] = _artifacts.requirement_source_spec(planning_dir) or artifacts["plan"]
+            ids = {name: context_requirement_ids(_artifacts.planning_artifact_text(planning_dir, name, path)) if (path := artifacts.get(name)) else set()
+                   for name in ("spec", "plan", "tdd")}
+            section_tests = _markdown.contains_any(section_text, ["tests first", "expected failure", "test_", "pytest", "vitest", "cargo test", "go test"])
+            gaps = {req: [name for name in ("spec", "plan", "tdd") if req not in ids[name] and not (name == "tdd" and section_tests)]
+                    for req in packet["requirements"]}
+            gaps = {req: missing for req, missing in gaps.items() if missing}
+            if not packet["requirements"] or gaps:
+                return _output.print_json({"success": False, "error": "Selected section has incomplete requirement coverage.", "coverage_gaps": gaps}, 1)
+            content = packet.pop("content")
+            filename = f"{section}-packet.md"
+            if detached:
+                assert implementation_root is not None and root_fd is not None and guard is not None
+                output = _storage.absolute_path_no_follow(args.output_dir) / filename
+                relative = _detached_state.detached_artifact_relative(implementation_root, str(output))
+                if Path(relative).parts[0] != "code_review":
+                    raise _models.DetachedImplementationError(
+                        "invalid-detached-output-dir",
+                        "Detached generated packets must stay beneath the fixed code_review directory.",
+                        path=str(output),
+                    )
+                _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+                _secure_io.write_regular_bytes_at(root_fd, relative, content.encode("utf-8"), cap=_detached_contract.DETACHED_REVIEW_CAP)
+                _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+                require_lock_authority()
+                output = implementation_root / relative
+            else:
+                output_dir = _storage.resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "packets"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output = output_dir / filename
+                output.write_text(content, encoding="utf-8")
+            return _output.print_json({**packet, "planning_dir": str(planning_dir), "section": section, "output": str(output)})
     except _models.DetachedImplementationError as exc:
         if not detached:
             raise
@@ -349,13 +342,6 @@ def implementation_packet(args: argparse.Namespace) -> int:
             ),
             1,
         )
-    finally:
-        if record_lock_context is not None:
-            record_lock_context.__exit__(*sys.exc_info())
-        if guard is not None:
-            guard.close()
-        if root_fd is not None:
-            os.close(root_fd)
 
 
 def context_brief(args: argparse.Namespace) -> int:
@@ -386,58 +372,55 @@ def tdd_skeletons(args: argparse.Namespace) -> int:
 
     planning_dir = _storage.absolute_path_no_follow(args.planning_dir) if detached else _storage.resolve_path(args.planning_dir)
     implementation_root: Path | None = None
-    root_fd: int | None = None
-    guard: _planning_snapshot.FrozenPlanningTree | None = None
-    record_lock_context: Any = None
-    require_lock_authority = None
     try:
-        if detached:
-            if not args.output_dir:
-                raise _models.DetachedImplementationError(
-                    "missing-detached-output-dir",
-                    "Detached TDD skeletons require an explicit external --output-dir.",
-                )
-            implementation_root, root_fd, config, guard, record_lock_context, require_lock_authority = _detached_context.open_detached_context(
-                planning_dir,
-                args.implementation_root,
-            )
-        artifacts = _artifacts.planning_artifacts(planning_dir)
-        if not artifacts["tdd"] or not artifacts["tdd"].exists():
-            return _output.print_json({"success": False, "error": "codex-plan-tdd.md is missing"}, 1)
-        text = _storage.read_text(artifacts["tdd"])
-        tests = _markdown.test_names(text)
-        ext = {"pytest": "py", "vitest": "ts", "go": "go", "rust": "rs"}[args.framework]
-        filename = f"test_skeleton.{ext}"
-        if args.framework == "pytest":
-            body = "\n\n".join(f"def {name}():\n    \"\"\"Generated from Forge TDD plan. Replace with real red test.\"\"\"\n    raise AssertionError(\"red test not implemented\")" for name in tests if name.startswith("test_"))
-        elif args.framework == "vitest":
-            body = "import { describe, it, expect } from 'vitest';\n\n" + "\n\n".join(f"it('{name}', () => {{\n  expect.fail('red test not implemented');\n}});" for name in tests)
-        elif args.framework == "go":
-            body = "package tests\n\nimport \"testing\"\n\n" + "\n\n".join(f"func Test{re.sub(r'[^A-Za-z0-9]', '', name.title())}(t *testing.T) {{\n\tt.Fatal(\"red test not implemented\")\n}}" for name in tests)
-        else:
-            body = "\n\n".join(f"#[test]\nfn {re.sub(r'[^a-zA-Z0-9_]', '_', name.lower())}() {{\n    panic!(\"red test not implemented\");\n}}" for name in tests)
-        raw = (body + "\n").encode("utf-8")
-        if detached:
-            assert implementation_root is not None and root_fd is not None and guard is not None
-            output = _storage.absolute_path_no_follow(args.output_dir) / filename
-            relative = _detached_state.detached_artifact_relative(implementation_root, str(output))
-            if Path(relative).parts[0] != "code_review":
-                raise _models.DetachedImplementationError(
-                    "invalid-detached-output-dir",
-                    "Detached generated TDD skeletons must stay beneath the fixed code_review directory.",
-                    path=str(output),
-                )
-            _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
-            _secure_io.write_regular_bytes_at(root_fd, relative, raw, cap=_detached_contract.DETACHED_REVIEW_CAP)
-            _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
-            require_lock_authority()
-            output = implementation_root / relative
-        else:
-            output_dir = _storage.resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "tdd-skeletons"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output = output_dir / filename
-            output.write_bytes(raw)
-        return _output.print_json({"success": True, "planning_dir": str(planning_dir), "framework": args.framework, "tests": tests, "output": str(output)})
+        with ExitStack() as contexts:
+            if detached:
+                if not args.output_dir:
+                    raise _models.DetachedImplementationError(
+                        "missing-detached-output-dir",
+                        "Detached TDD skeletons require an explicit external --output-dir.",
+                    )
+                implementation_root, root_fd, config, guard, require_lock_authority = contexts.enter_context(_detached_context.open_detached_context(
+                    planning_dir,
+                    args.implementation_root,
+                ))
+            artifacts = _artifacts.planning_artifacts(planning_dir)
+            if not artifacts["tdd"] or not artifacts["tdd"].exists():
+                return _output.print_json({"success": False, "error": "codex-plan-tdd.md is missing"}, 1)
+            text = _storage.read_text(artifacts["tdd"])
+            tests = _markdown.test_names(text)
+            ext = {"pytest": "py", "vitest": "ts", "go": "go", "rust": "rs"}[args.framework]
+            filename = f"test_skeleton.{ext}"
+            if args.framework == "pytest":
+                body = "\n\n".join(f"def {name}():\n    \"\"\"Generated from Forge TDD plan. Replace with real red test.\"\"\"\n    raise AssertionError(\"red test not implemented\")" for name in tests if name.startswith("test_"))
+            elif args.framework == "vitest":
+                body = "import { describe, it, expect } from 'vitest';\n\n" + "\n\n".join(f"it('{name}', () => {{\n  expect.fail('red test not implemented');\n}});" for name in tests)
+            elif args.framework == "go":
+                body = "package tests\n\nimport \"testing\"\n\n" + "\n\n".join(f"func Test{re.sub(r'[^A-Za-z0-9]', '', name.title())}(t *testing.T) {{\n\tt.Fatal(\"red test not implemented\")\n}}" for name in tests)
+            else:
+                body = "\n\n".join(f"#[test]\nfn {re.sub(r'[^a-zA-Z0-9_]', '_', name.lower())}() {{\n    panic!(\"red test not implemented\");\n}}" for name in tests)
+            raw = (body + "\n").encode("utf-8")
+            if detached:
+                assert implementation_root is not None and root_fd is not None and guard is not None
+                output = _storage.absolute_path_no_follow(args.output_dir) / filename
+                relative = _detached_state.detached_artifact_relative(implementation_root, str(output))
+                if Path(relative).parts[0] != "code_review":
+                    raise _models.DetachedImplementationError(
+                        "invalid-detached-output-dir",
+                        "Detached generated TDD skeletons must stay beneath the fixed code_review directory.",
+                        path=str(output),
+                    )
+                _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+                _secure_io.write_regular_bytes_at(root_fd, relative, raw, cap=_detached_contract.DETACHED_REVIEW_CAP)
+                _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
+                require_lock_authority()
+                output = implementation_root / relative
+            else:
+                output_dir = _storage.resolve_path(args.output_dir) if args.output_dir else planning_dir / ".forge" / "tdd-skeletons"
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output = output_dir / filename
+                output.write_bytes(raw)
+            return _output.print_json({"success": True, "planning_dir": str(planning_dir), "framework": args.framework, "tests": tests, "output": str(output)})
     except _models.DetachedImplementationError as exc:
         if not detached:
             raise
@@ -462,13 +445,6 @@ def tdd_skeletons(args: argparse.Namespace) -> int:
             ),
             1,
         )
-    finally:
-        if record_lock_context is not None:
-            record_lock_context.__exit__(*sys.exc_info())
-        if guard is not None:
-            guard.close()
-        if root_fd is not None:
-            os.close(root_fd)
 
 
 def plan_diff(args: argparse.Namespace) -> int:

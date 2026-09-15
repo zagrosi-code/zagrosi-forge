@@ -251,7 +251,7 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
     }
     _storage.write_json(config_path, config)
 
-    completed = set(state.get("completed_sections", {}).keys())
+    completed = _state.completed_sections(planning_dir, state)
     dependencies = _sections.dependency_graph(planning_dir, progress)
     readiness = _state.mutable_readiness_snapshot(progress, dependencies, completed)
     repo = _storage.git_info(target_dir)
@@ -327,7 +327,7 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
             1,
         )
     completed = state.get("completed_sections", {})
-    completed_names = set(completed) if isinstance(completed, dict) else set()
+    completed_names = _state.completed_sections(planning_dir, state)
     incomplete_predecessors = [dependency for dependency in dependencies.get(args.section, []) if dependency not in completed_names]
     if incomplete_predecessors:
         return _output.print_json(
@@ -343,16 +343,6 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
     compact = _markdown.is_lean_depth(_artifacts.planning_depth(planning_dir))
     verification = _markdown.normalize_repeated(args.verification)
     review_status = getattr(args, "review_status", None)
-    if compact and (review_status not in {"pass", "fixed"} or not verification):
-        return _output.print_json(
-            {
-                "success": False,
-                "error_code": "incomplete-lean-record",
-                "error": "Lean completion requires --review-status pass|fixed and at least one --verification command.",
-                "section": args.section,
-            },
-            1,
-        )
     section_record = {
         "completed_at": _storage.now_iso(),
         "commit": args.commit,
@@ -365,22 +355,58 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
         "verification": verification,
         "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
     }
-    state.setdefault("completed_sections", {})[args.section] = section_record
+    findings = _state.completion_evidence_findings(planning_dir, args.section, section_record)
+    if findings:
+        return _output.print_json({
+            "success": False,
+            "error_code": "incomplete-lean-record" if compact else "incomplete-completion-record",
+            "error": "Completion requires a passing review and recorded verification evidence.",
+            "section": args.section,
+            "findings": [finding.to_dict() for finding in findings],
+        }, 1)
+
+    completed = dict(completed) if isinstance(completed, dict) else {}
+    pending = dict(state.get("pending_sections", {}))
+    candidate = {**state, "completed_sections": {**completed, args.section: section_record},
+                 "pending_sections": {name: record for name, record in pending.items() if name != args.section}}
+    mode = _gates.effective_flight_mode(args)
+    if args.section in pending and mode == "off":
+        return _output.print_json({
+            "success": False,
+            "error_code": "pending-completion",
+            "error": "Retry pending completion with postflight enabled; its checks have not passed.",
+            "section": args.section,
+        }, 1)
+    postflight = None
+    if mode != "off" and (not compact or mode == "strict" or args.section in pending):
+        # Publish evidence as pending first: interruptions and failed gates cannot unlock successors.
+        state["completed_sections"] = completed
+        state["pending_sections"] = {**pending, args.section: section_record}
+        _storage.write_json(state_path, state)
+        postflight = _flights.implement_postflight_report(planning_dir, args, candidate_state=candidate)
+        if not postflight["success"]:
+            state["pending_sections"][args.section] = {**section_record, "failed_postflight": postflight}
+        else:
+            state = candidate
+    else:
+        state = candidate
     _storage.write_json(state_path, state)
-    traceability_path = None if compact else _traceability.refresh_traceability_matrix(planning_dir)
+    traceability_path = None
+    if not compact and not _artifacts.compact_plan_descriptor(planning_dir):
+        traceability_path = _traceability.refresh_traceability_matrix(planning_dir)
     readiness = _state.mutable_readiness_snapshot(
         progress,
         dependencies,
-        completed_names | {args.section},
+        _state.completed_sections(planning_dir, state),
     )
     payload = {
-        "success": True,
+        "success": postflight is None or postflight["success"],
         "state_path": str(state_path),
         "section": args.section,
         "record": section_record,
         "traceability_matrix": str(traceability_path) if traceability_path else None,
         **readiness,
     }
-    if _gates.effective_flight_mode(args) != "off" and not compact:
-        payload["postflight"] = _flights.implement_postflight_report(sections_dir.parent, args)
-    return _output.print_json(payload)
+    if postflight is not None:
+        payload["postflight"] = postflight
+    return _output.print_json(payload, 0 if payload["success"] else 1)

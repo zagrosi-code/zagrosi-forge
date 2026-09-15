@@ -173,6 +173,7 @@ def add_plan_commands(sub: argparse._SubParsersAction) -> None:
 
     p = sub.add_parser("lint-plan-artifacts")
     p.add_argument("--planning-dir", required=True)
+    p.add_argument("--for-detached", dest="allow_compact", action="store_false", help="Check physical plan/review compatibility before freezing detached inputs.")
     add_quality_args(p)
     p.set_defaults(func=invoke_command, handler=('validation', 'lint_plan_artifacts'))
 

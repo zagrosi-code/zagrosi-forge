@@ -27,6 +27,7 @@ IDs/anchors. Sequence shared-file changes.
 Legacy physical artifacts remain supported. Detached frozen mode requires the
 established physical `codex-plan.md`/`claude-plan.md` and separate review artifacts;
 it rejects `compact_plan` metadata and embedded-review shortcuts.
+Choose the [detached authoring route](detached-plan-format.md) before writing or freezing.
 
 Preserve `REQ-*`, concrete inputs/outputs/errors, acceptance, ownership, and
 rollback. Put IDs in test headings/rows. Prefer existing code/native facilities;

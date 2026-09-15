@@ -80,12 +80,12 @@ def verify_section_pinner_bytes(
     predecessor_rows = pinner.get("predecessor_pinners")
     if not isinstance(predecessor_rows, list):
         raise _models.DetachedImplementationError("invalid-section-pinner", f"Predecessor pinners are invalid: {section}", section=section)
-    if verify_predecessors:
-        for row in predecessor_rows:
-            if not isinstance(row, dict) or set(row) != {"section", "pinner_path", "pinner_file_sha256"}:
-                raise _models.DetachedImplementationError("invalid-section-pinner", f"Predecessor pinner row is invalid: {section}", section=section)
-            if not all(isinstance(row.get(field), str) for field in ("section", "pinner_path", "pinner_file_sha256")):
-                raise _models.DetachedImplementationError("invalid-section-pinner", f"Predecessor pinner row types are invalid: {section}", section=section)
+    for row in predecessor_rows:
+        if not isinstance(row, dict) or set(row) != {"section", "pinner_path", "pinner_file_sha256"}:
+            raise _models.DetachedImplementationError("invalid-section-pinner", f"Predecessor pinner row is invalid: {section}", section=section)
+        if not all(isinstance(row.get(field), str) for field in ("section", "pinner_path", "pinner_file_sha256")):
+            raise _models.DetachedImplementationError("invalid-section-pinner", f"Predecessor pinner row types are invalid: {section}", section=section)
+        if verify_predecessors:
             predecessor, predecessor_raw = _secure_io.load_canonical_json_at(root_fd, row["pinner_path"])
             predecessor_sha256 = _handoff_wire.sha256_digest(predecessor_raw)
             expected_predecessor_path = (
@@ -176,9 +176,10 @@ def detached_completed_records(
                 record,
                 pending_pinner[1],
                 pending_pinner[2],
+                verify_predecessors=False,
             )
         else:
-            pinner, _ = verify_section_pinner(root_fd, config, section, record)
+            pinner, _ = verify_section_pinner(root_fd, config, section, record, verify_predecessors=False)
         reopened_pinners[section] = pinner
     dependencies = _sections.dependency_graph(_storage.absolute_path_no_follow(config["planning_dir"]), progress)
     for section, pinner in reopened_pinners.items():

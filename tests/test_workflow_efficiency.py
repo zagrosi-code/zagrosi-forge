@@ -12,10 +12,9 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-
-from test_runtime_performance import requires_interval_timer
+from forge_test_helpers import SCRIPT, load_zagrosi_module, write_lean_plan_fixture
 from runtime_support import load_entrypoint
-from test_zagrosi_skills import SCRIPT, load_zagrosi_module, write_lean_plan_fixture
+from test_runtime_performance import requires_interval_timer
 
 
 def test_normal_workflow_imports_leave_detached_engine_unloaded():
@@ -33,7 +32,7 @@ def test_normal_workflow_imports_leave_detached_engine_unloaded():
 
 def test_every_cli_command_resolves_its_lazy_handler():
     forge = load_zagrosi_module()
-    cli = forge.owner("build_parser")
+    cli = forge.cli
     parser = cli.build_parser()
     commands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
     for command, parser in commands.choices.items():
@@ -60,11 +59,11 @@ def test_preflight_only_launches_requested_writer(tmp_path, monkeypatch, capsys,
         calls.append(argv[2:])
         return process(argv, **kwargs)
 
-    monkeypatch.setattr(forge.subprocess, "run", tracked)
+    monkeypatch.setattr(subprocess, "run", tracked)
     args = ["preflight", "--phase", "plan", "--file", str(plan / "spec.md"), "--target-dir", str(tmp_path), "--depth", depth]
     if write_evidence:
         args.append("--write-evidence")
-    assert forge.main(args) == 0
+    assert forge.entrypoint.main(args) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["success"]
     evidence_expected = write_evidence or depth in {"standard", "deep"}
@@ -85,7 +84,7 @@ def test_report_writer_does_not_externalize_remaining_postflight_gates(tmp_path,
     config["depth_mode"] = depth
     config_path.write_text(json.dumps(config))
     args = ["postflight", "--phase", "plan", "--planning-dir", str(plan), "--depth", depth]
-    expected_rc = forge.main(args)
+    expected_rc = forge.entrypoint.main(args)
     expected = json.loads(capsys.readouterr().out)
     calls = []
 
@@ -94,8 +93,8 @@ def test_report_writer_does_not_externalize_remaining_postflight_gates(tmp_path,
         assert kwargs["timeout"] == 120
         return subprocess.CompletedProcess(argv, 0, '{"success":true}', "")
 
-    monkeypatch.setattr(forge.subprocess, "run", process)
-    assert forge.main([*args, "--write-report"]) == expected_rc
+    monkeypatch.setattr(subprocess, "run", process)
+    assert forge.entrypoint.main([*args, "--write-report"]) == expected_rc
     actual = json.loads(capsys.readouterr().out)
     assert actual["success"] == expected["success"]
     assert [gate for gate in actual["gates"] if gate["name"] != "report"] == expected["gates"]
@@ -109,9 +108,9 @@ def test_report_writer_does_not_externalize_remaining_postflight_gates(tmp_path,
 def test_score_command_and_row_share_exact_analysis(tmp_path, capsys, depth, profile):
     forge = load_zagrosi_module()
     plan = write_lean_plan_fixture(tmp_path / "plan")
-    forge.main(["forge-score", "--planning-dir", str(plan), "--depth", depth, "--profile", profile])
+    forge.entrypoint.main(["forge-score", "--planning-dir", str(plan), "--depth", depth, "--profile", profile])
     payload = json.loads(capsys.readouterr().out)
-    row = forge.forge_score_row(plan, name="example", depth=depth, profile=profile)
+    row = forge.evaluations.forge_score_row(plan, name="example", depth=depth, profile=profile)
     assert row["forge_score"] == payload["forge_score"]
     assert row["components"] == payload["components"]
     assert row["findings"] == payload["finding_count"]
@@ -120,26 +119,26 @@ def test_score_command_and_row_share_exact_analysis(tmp_path, capsys, depth, pro
 def test_score_capture_is_thread_local_and_restored_after_errors(tmp_path):
     forge = load_zagrosi_module()
     barrier = threading.Barrier(2)
-    original_emit = forge.emit_payload
+    original_emit = forge.quality.emit_payload
 
     def handler(args):
         barrier.wait(timeout=2)
-        return forge.emit_quality("test", [forge.finding("low", args.depth, "captured")], args)
+        return forge.quality.emit_quality("test", [forge.quality.finding("low", args.depth, "captured")], args)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda depth: forge.lint_findings_for_score(handler, tmp_path, depth), ["lean", "deep"]))
+        results = list(pool.map(lambda depth: forge.scoring.lint_findings_for_score(handler, tmp_path, depth), ["lean", "deep"]))
     assert [findings[0].code for findings, _ in results] == ["lean", "deep"]
-    assert forge.emit_payload is original_emit
-    assert forge._QUALITY_CAPTURE.get() is None
+    assert forge.quality.emit_payload is original_emit
+    assert forge.session._QUALITY_CAPTURE.get() is None
 
     def broken(_args):
         raise RuntimeError("failed analysis")
 
     with pytest.raises(RuntimeError, match="failed analysis"):
-        forge.lint_findings_for_score(broken, tmp_path, "lean")
+        forge.scoring.lint_findings_for_score(broken, tmp_path, "lean")
     with pytest.raises(KeyError, match="findings"):
-        forge.lint_findings_for_score(lambda _args: 0, tmp_path, "lean")
-    assert forge._QUALITY_CAPTURE.get() is None
+        forge.scoring.lint_findings_for_score(lambda _args: 0, tmp_path, "lean")
+    assert forge.session._QUALITY_CAPTURE.get() is None
 
 
 def test_html_report_evidence_and_readiness_are_analyzed_once(tmp_path, monkeypatch, capsys):
@@ -148,16 +147,16 @@ def test_html_report_evidence_and_readiness_are_analyzed_once(tmp_path, monkeypa
     calls = Counter()
 
     def track(name):
-        original = getattr(forge, name)
+        original = getattr(forge.scoring, name)
 
         def analysis(*args):
             calls[name] += 1
             return original(*args)
 
-        monkeypatch.setattr(forge.owner(name), name, analysis)
+        monkeypatch.setattr(forge.scoring, name, analysis)
 
     for name in ("evidence_findings_for_score", "readiness_findings_for_score"):
         track(name)
-    assert forge.html_report(argparse.Namespace(planning_dir=str(plan), depth="lean", profile="solo", output=None)) == 0
+    assert forge.evaluations.html_report(argparse.Namespace(planning_dir=str(plan), depth="lean", profile="solo", output=None)) == 0
     assert json.loads(capsys.readouterr().out)["success"]
     assert set(calls.values()) == {1}

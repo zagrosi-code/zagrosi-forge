@@ -113,11 +113,9 @@ python3 tools/benchmark_forge.py \
   --original-root /path/to/main --baseline-root /path/to/earlier-snapshot --runs 5
 ```
 
-The benchmark uses identical disposable fixtures at `lean`, `standard`, and
-`deep`, checks that metadata selects the intended gates, and records source
-hashes, median latency, and context size. Documentation measurements list the
-references loaded for each scenario; archived protocol text is excluded from
-routine loads. These are reproducible reading scenarios, not model telemetry.
+The benchmark checks identical disposable fixtures at every depth, recording
+source hashes, median latency, context size, and modeled reference loads.
+Archived protocol text is excluded. Model usage requires separate telemetry.
 
 The [recorded comparison](examples/evals/performance.json) found planning
 postflight 4.43–4.45× faster across all depths and section context reduced from
@@ -125,14 +123,17 @@ postflight 4.43–4.45× faster across all depths and section context reduced fr
 loads; detached reading falls from 3,547 to 1,177 words. Results are local to the
 recorded environment and fixture.
 
+[Coding trials](examples/evals/coding/README.md) independently check feature work,
+cleanup, deep planning, and resume behavior. Reports separate structural metrics,
+execution results, and optional model usage.
+
 ## Runtime
 
-The CLI delegates to focused modules for planning, validation, context,
-installation, and detached execution. Ordinary commands import only the modules
-they need. The entrypoint embeds a SHA-256 manifest, verifies every bound source
-before execution, and compiles those exact bytes without using bytecode caches.
-Detached admission and completion reverify the bound runtime. Existing ownership,
-locking, immutable-source, and process-isolation controls remain enforced.
+The CLI imports focused modules on demand. Its SHA-256 manifests bind runtime
+and extracted test sources. Runtime verification checks every
+bound source before execution and compiles those exact bytes without bytecode
+caches. Detached admission and completion reverify sources while preserving
+ownership, locking, immutable-source, and process-isolation controls.
 
 ## Compatibility
 
@@ -152,15 +153,17 @@ scripts/zagrosi_skills.py  verified entrypoint and runtime manifest
 scripts/forge/             focused CLI, workflow, and security modules
 scripts/deep_skills.py     compatibility wrapper
 examples/                  valid, invalid, and benchmark fixtures
-tests/                     CLI and gate tests
-tools/                     reproducible performance comparison
+tests/                     focused CLI, gate, recovery, and coding-trial tests
+tools/                     runtime binding, performance comparison, coding trials
 assets/                    icon and README visuals
 ```
 
 ## Validate
 
-After editing runtime modules, run `python3 tools/update_runtime_manifest.py`;
-CI verifies the binding with `--check`.
+After editing runtime or test sources, run `python3 tools/update_runtime_manifest.py`;
+CI verifies the binding with `--check`. The full suite runs on Linux/Python 3.12;
+focused compatibility checks cover Python 3.11, macOS, and Windows. Tests import
+only the runtime modules they exercise, with fresh instances for patch isolation.
 
 ```bash
 python3 tools/update_runtime_manifest.py --check
