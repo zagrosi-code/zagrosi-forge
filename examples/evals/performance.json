@@ -1,0 +1,974 @@
+{
+  "python": "3.14.5",
+  "platform": "Darwin",
+  "runs": 5,
+  "method": "Identical legacy SaaS fixture per depth; fresh temporary copies and tiny target per invocation; fixture setup excluded; one warmup; interleaved runtimes; median wall time; no application tests executed. Flights receive conflicting CLI depth and must select metadata depth. Paths normalized in payload sizes. Skill loads are explicit scenarios, not live model telemetry.",
+  "fixture_sha256": {
+    "codex-plan.md": "e839489584bc8eeb88d5fe25173672ea28044e3ac93ef7d887415997e68f7be2",
+    "reviews/codex.md": "ab4b31030439170b0b463f36fb9e9bc7a9d87ff12948f61d6d46f247d92c8c39",
+    "sections/index.md": "c567ca661f6eb0074c3d80de3d78e43b075be195f3a73f25029c909383669382",
+    "sections/section-01-oauth-foundation.md": "52984c293552d9db6fdcc94d23296d75725dc023d6624c010c98c6878a427d90",
+    "spec.md": "8d709f4c53229391ac501edc7eadd6955d19c78ccf95477117446e263fe0d5b4"
+  },
+  "results": {
+    "original": {
+      "base_commit": "8829fdd1a396729f6d423deae7408277e9577e1a",
+      "script_sha256": "35b0d77a0b4cd7b46a2a872e98375eeb4e7db8a9f5ed4f7bbcdb9ab801dca405",
+      "runtime_sha256": {},
+      "skill_loads": {
+        "method": "Modeled core reference loads, deduplicated per scenario; optional packs/interviews and diagnostic-only detached-protocol.md excluded. Extra source/code/plan context is workload-dependent.",
+        "entry_words": 952,
+        "scenarios": {
+          "project": {
+            "words": 447,
+            "paths": [
+              "zagrosi-project/SKILL.md",
+              "zagrosi-project/references/manifest-format.md",
+              "zagrosi-project/references/spec-format.md",
+              "zagrosi-project/references/splitting.md"
+            ]
+          },
+          "plan_lean": {
+            "words": 626,
+            "paths": [
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "implement_mutable": {
+            "words": 370,
+            "paths": [
+              "zagrosi-implement/SKILL.md"
+            ]
+          },
+          "plan_standard": {
+            "words": 900,
+            "paths": [
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/depth-standards.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/research.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "plan_deep": {
+            "words": 900,
+            "paths": [
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/depth-standards.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/research.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "implement_detached": {
+            "words": 3547,
+            "paths": [
+              "zagrosi-implement/SKILL.md",
+              "zagrosi-implement/references/detached-frozen.md"
+            ]
+          }
+        }
+      },
+      "depths": {
+        "lean": {
+          "status": {
+            "median_ms": 104.47,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 104.78,
+            "stdout_bytes": 531,
+            "context_words": null,
+            "depth_mode": "lean",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 106.0,
+            "stdout_bytes": 525,
+            "context_words": null,
+            "depth_mode": "lean",
+            "requested_depth": "lean",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 103.72,
+            "stdout_bytes": 3466,
+            "context_words": 381,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 214.81,
+            "stdout_bytes": 396,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 114.68,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 335.68,
+            "stdout_bytes": 804,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "lint-plan",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "status"
+            ]
+          }
+        },
+        "standard": {
+          "status": {
+            "median_ms": 104.96,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 104.85,
+            "stdout_bytes": 539,
+            "context_words": null,
+            "depth_mode": "standard",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 107.99,
+            "stdout_bytes": 529,
+            "context_words": null,
+            "depth_mode": "standard",
+            "requested_depth": "standard",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 103.22,
+            "stdout_bytes": 3470,
+            "context_words": 381,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 220.23,
+            "stdout_bytes": 483,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "codebase-evidence",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 114.62,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 345.6,
+            "stdout_bytes": 1057,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "lint-plan",
+              "lint-evidence",
+              "lint-artifact-schema",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "forge-score",
+              "status"
+            ]
+          }
+        },
+        "deep": {
+          "status": {
+            "median_ms": 102.74,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 105.55,
+            "stdout_bytes": 536,
+            "context_words": null,
+            "depth_mode": "deep",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 106.58,
+            "stdout_bytes": 525,
+            "context_words": null,
+            "depth_mode": "deep",
+            "requested_depth": "deep",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 102.91,
+            "stdout_bytes": 3466,
+            "context_words": 381,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 220.33,
+            "stdout_bytes": 483,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "codebase-evidence",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 112.95,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 339.43,
+            "stdout_bytes": 1057,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "lint-plan",
+              "lint-evidence",
+              "lint-artifact-schema",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "forge-score",
+              "status"
+            ]
+          }
+        }
+      }
+    },
+    "baseline": {
+      "base_commit": "8829fdd1a396729f6d423deae7408277e9577e1a",
+      "script_sha256": "c2881f67126f00de9a76f68ccfc22a5fa8bad7a4f41a58d0086ac38aef909024",
+      "runtime_sha256": {},
+      "skill_loads": {
+        "method": "Modeled core reference loads, deduplicated per scenario; optional packs/interviews and diagnostic-only detached-protocol.md excluded. Extra source/code/plan context is workload-dependent.",
+        "entry_words": 968,
+        "scenarios": {
+          "project": {
+            "words": 441,
+            "paths": [
+              "zagrosi-project/SKILL.md",
+              "zagrosi-project/references/manifest-format.md",
+              "zagrosi-project/references/spec-format.md",
+              "zagrosi-project/references/splitting.md"
+            ]
+          },
+          "plan_lean": {
+            "words": 681,
+            "paths": [
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "implement_mutable": {
+            "words": 388,
+            "paths": [
+              "zagrosi-implement/SKILL.md"
+            ]
+          },
+          "plan_standard": {
+            "words": 955,
+            "paths": [
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/depth-standards.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/research.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "plan_deep": {
+            "words": 955,
+            "paths": [
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/depth-standards.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/research.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "implement_detached": {
+            "words": 3565,
+            "paths": [
+              "zagrosi-implement/SKILL.md",
+              "zagrosi-implement/references/detached-frozen.md"
+            ]
+          }
+        }
+      },
+      "depths": {
+        "lean": {
+          "status": {
+            "median_ms": 106.22,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 106.06,
+            "stdout_bytes": 531,
+            "context_words": null,
+            "depth_mode": "lean",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 106.89,
+            "stdout_bytes": 525,
+            "context_words": null,
+            "depth_mode": "lean",
+            "requested_depth": "lean",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 106.85,
+            "stdout_bytes": 2670,
+            "context_words": 317,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 105.27,
+            "stdout_bytes": 396,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 116.06,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 107.49,
+            "stdout_bytes": 804,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "lint-plan",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "status"
+            ]
+          }
+        },
+        "standard": {
+          "status": {
+            "median_ms": 106.03,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 105.79,
+            "stdout_bytes": 539,
+            "context_words": null,
+            "depth_mode": "standard",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 107.79,
+            "stdout_bytes": 529,
+            "context_words": null,
+            "depth_mode": "standard",
+            "requested_depth": "standard",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 105.22,
+            "stdout_bytes": 2670,
+            "context_words": 317,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 224.23,
+            "stdout_bytes": 483,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "codebase-evidence",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 116.02,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 108.76,
+            "stdout_bytes": 1057,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "lint-plan",
+              "lint-evidence",
+              "lint-artifact-schema",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "forge-score",
+              "status"
+            ]
+          }
+        },
+        "deep": {
+          "status": {
+            "median_ms": 104.43,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 107.04,
+            "stdout_bytes": 536,
+            "context_words": null,
+            "depth_mode": "deep",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 106.29,
+            "stdout_bytes": 525,
+            "context_words": null,
+            "depth_mode": "deep",
+            "requested_depth": "deep",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 105.2,
+            "stdout_bytes": 2670,
+            "context_words": 317,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 222.26,
+            "stdout_bytes": 483,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "codebase-evidence",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 115.25,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 107.52,
+            "stdout_bytes": 1057,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "lint-plan",
+              "lint-evidence",
+              "lint-artifact-schema",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "forge-score",
+              "status"
+            ]
+          }
+        }
+      }
+    },
+    "current": {
+      "base_commit": "8829fdd1a396729f6d423deae7408277e9577e1a",
+      "script_sha256": "b243abcac8e5ec24756b6994acccea64c610acf4aaa3da01ff58488dfef46720",
+      "runtime_sha256": {
+        "scripts/forge/__init__.py": "f6b2a10e6ee7118cac49c823f53216f5952058d206db18bf681db53864afa73f",
+        "scripts/forge/artifacts.py": "75481b5cea574f58aa5ed614de5341a9b4a69f95d62ecb2a8439723dc2a99780",
+        "scripts/forge/authority.py": "dc3b592eeb2deba8e5778887f68c1435c4b04a7b215bc6b7f028c8a995563b41",
+        "scripts/forge/capabilities.py": "e343bea5ebe632737ef32c5c84f94802ee428e9447ecc1a094ee88cbb42d297e",
+        "scripts/forge/cli.py": "65c4246affa8db5f12c1668a58e572116b2091164c5e71617004bfcca5a0b319",
+        "scripts/forge/context.py": "d2bf931f26f9194e0a813ff6893b1b7ecbac324aefeafa6ff7523b793165ce75",
+        "scripts/forge/detached_authority.py": "059cbcc328d299aed829d1e0e8c04685250bd0d213455cf3b265980e7971d0c8",
+        "scripts/forge/detached_context.py": "b58b36c1f298409caec92ac7b0262a00fbc5e8d5bc838fec3b5a872cfb7e050c",
+        "scripts/forge/detached_contract.py": "3be67a543a7309433123df5b4bf673821b1d1a9bdfcdbc06c05d1cfbf9b1ab6b",
+        "scripts/forge/detached_progress.py": "383f22f5524be50aecc8d372ff681c85f119eec0fce78e3974f1c64583825de1",
+        "scripts/forge/detached_record.py": "e16879b1c542e04b871b21bd46adf23486c3e41897fc46b99b4883a9c57ebb21",
+        "scripts/forge/detached_setup.py": "37b0bb36509f909cff8af15bc14b517dbe9917bb4f764fe7938966b8dfdf1816",
+        "scripts/forge/detached_state.py": "6a14bff32d2c3d2a93adef7c23a9230b36002db71f8234e04289eeae84fe661e",
+        "scripts/forge/diffs.py": "8ee0bd77fb807eeb418c40f30e8c61be10284546433d6c7504376b1f6d239c68",
+        "scripts/forge/doctor.py": "922b5b0f4da399fdfd1d7e3bdef04d083342b708ed526fa3c80c1c0fcf03567f",
+        "scripts/forge/evaluations.py": "ef9b1bca7d4dc8b0f5d85d0f4e9eb45b5741a161224c485dc353577b88bce2e9",
+        "scripts/forge/evidence.py": "e5d264336357937bbe55a7331cd71c88b02dd65730d8bdaaf8c6cd68b4180480",
+        "scripts/forge/flights.py": "dbbbc2e736cc91fc8aa3fa353f505fb7fa9fc9f543a9fadbc88355241c21d825",
+        "scripts/forge/gates.py": "cf20f84f2cfaf7f6ff5c9f73b1815dbcc544c806edfbd0e7ba017a59f5f8da10",
+        "scripts/forge/handoff.py": "bd1f9f47c2b2b83dc81bc30fa380b70853f34010bc60819e248c77230dd3327e",
+        "scripts/forge/handoff_host.py": "65fde29e25b77efc17d3d2df0e3f417bd193b64d052fd00b70ce6244ea8df010",
+        "scripts/forge/handoff_wire.py": "43477d8cc74aa8c015e6f5780ee3daade133182291ce84a99acf0725952bbed0",
+        "scripts/forge/installation.py": "bc2f23259cc5f3e083f51e0fa2389de173af11285c55e409c55adc47da7efec2",
+        "scripts/forge/locks.py": "9810b84e13ee0c6adda270756d73aa5a2abd7c6c43746dc3babe03c12130999a",
+        "scripts/forge/markdown.py": "e3f422f243d5377daa92bfe28c2a5ba691d158a84e608b18cdb6634013050e4d",
+        "scripts/forge/models.py": "32e241a6442e14753e91cf5c68949842a7d9d53d070f2f34efd87647fa5f18d3",
+        "scripts/forge/output.py": "cae3ddf50b54c235621d37d77fa309dfd564fe98136dd4117e0fbe9f858318e3",
+        "scripts/forge/ownership.py": "dac57fa5ea286107ad5f1c88d80fc2ad70417efc67d728b2a526c5f4bfbd80c6",
+        "scripts/forge/pinners.py": "0f5ad71300d8f102ce46d9b33942f8419f023f7f22d1f6ca37f51f888476ea38",
+        "scripts/forge/planning_snapshot.py": "4e38bb61e6c601cfdea492c1aa74e485792592f9b6594db58ce3fd2d3635d32e",
+        "scripts/forge/planning_tools.py": "62e79301e0949458974cf3a8779fb5808ce4d5f7848f25b2331ab317e15102e8",
+        "scripts/forge/policy.py": "4c7a7609124dd66f834675ec38a8ee0f39c363355b8ccf602370455ac7d19527",
+        "scripts/forge/processes.py": "c9dbfda15593d10f7904749252fe3bf05beb069cd3565a9a884ee52e2bd10e66",
+        "scripts/forge/projects.py": "28da68c0abb1e1f75745ad7eba44c806207566ff6062865070c6c3b15b7e8a13",
+        "scripts/forge/prompts.py": "f3b6eaffd5e7fa5617381ed3a0cc27d9f25fb6cd653559a4ff0d5be3a30bc970",
+        "scripts/forge/quality.py": "10105e6c19a442e1467edbb0a9873c10c62b3a9d2f01c05df364a58973b61621",
+        "scripts/forge/recovery.py": "66eb8dbbf6e964c3b5f7363eb55015a3b8ee6f6206c268a94f08ad1f52ee2ece",
+        "scripts/forge/scheduling.py": "af0d7773e86acea96f842fadc2e21f5b7948d92839ed4094e7bb9a8d1069e71f",
+        "scripts/forge/scoring.py": "430937d3640eee5223abc0f14c56c694ccd5d2b112ac9006c8653dc16724ff3e",
+        "scripts/forge/sections.py": "e505e1d093b5b53e7809063c915b48d94cd897db6e45c52f7c01a21e28288568",
+        "scripts/forge/secure_io.py": "2c529854508436ff083d3a01c1ad97de4b5e5a532c1365b28a173c0cd0401108",
+        "scripts/forge/session.py": "73429e3b1a2b8a5a9acf5b3816851895855904660b02602431ae4bdb1e2d9076",
+        "scripts/forge/sources.py": "266daf4d71579e3d4008ad8fb26b1cba2d841f25db0029cc6b4070e9881b4c4c",
+        "scripts/forge/state.py": "c7c497fe77d3308df84961ca0e178c914bec6a25765e84acf98e0b79fcfa7600",
+        "scripts/forge/status.py": "4b5b60da75878188a90bbec241c22b7fd1f45cdb4cd94bd9327d390f7efe1489",
+        "scripts/forge/storage.py": "f67b9a4e704d8a25e5be84239e341212301aaee40a39aeb358e26abea1c8bbc3",
+        "scripts/forge/traceability.py": "59e674a65646a376843a2af3d5cbb0487ec836610db375712cae15609ade44b0",
+        "scripts/forge/transaction_io.py": "1dad8fe6dab8d7d59b4bd12f9bbbd44200d7f661d8d1cc58c43b7cf93524a467",
+        "scripts/forge/transaction_state.py": "1ee1194d0816d63b3c4afae1ffd21408ed6251a013a50eea934f894a87fc3c8b",
+        "scripts/forge/validation.py": "8b65c2030d2b09bae794684a8cf5bd3a624ddf0430d70feacd10190b4a7dcd0a",
+        "scripts/forge/workflows.py": "be789db7cfc11f3934023021587ac206ca0c240b4fcd86a166ad04c7d267252b"
+      },
+      "skill_loads": {
+        "method": "Modeled core reference loads, deduplicated per scenario; optional packs/interviews and diagnostic-only detached-protocol.md excluded. Extra source/code/plan context is workload-dependent.",
+        "entry_words": 724,
+        "scenarios": {
+          "project": {
+            "words": 490,
+            "paths": [
+              "zagrosi-implement/references/engineering.md",
+              "zagrosi-project/SKILL.md",
+              "zagrosi-project/references/manifest-format.md",
+              "zagrosi-project/references/spec-format.md",
+              "zagrosi-project/references/splitting.md"
+            ]
+          },
+          "plan_lean": {
+            "words": 863,
+            "paths": [
+              "zagrosi-implement/references/engineering.md",
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/research.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "implement_mutable": {
+            "words": 484,
+            "paths": [
+              "zagrosi-implement/SKILL.md",
+              "zagrosi-implement/references/engineering.md"
+            ]
+          },
+          "plan_standard": {
+            "words": 986,
+            "paths": [
+              "zagrosi-implement/references/engineering.md",
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/depth-standards.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/research.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "plan_deep": {
+            "words": 986,
+            "paths": [
+              "zagrosi-implement/references/engineering.md",
+              "zagrosi-plan/SKILL.md",
+              "zagrosi-plan/references/depth-standards.md",
+              "zagrosi-plan/references/plan-format.md",
+              "zagrosi-plan/references/research.md",
+              "zagrosi-plan/references/review.md",
+              "zagrosi-plan/references/section-format.md"
+            ]
+          },
+          "implement_detached": {
+            "words": 1177,
+            "paths": [
+              "zagrosi-implement/SKILL.md",
+              "zagrosi-implement/references/detached-frozen.md",
+              "zagrosi-implement/references/engineering.md"
+            ]
+          }
+        }
+      },
+      "depths": {
+        "lean": {
+          "status": {
+            "median_ms": 59.94,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 63.12,
+            "stdout_bytes": 531,
+            "context_words": null,
+            "depth_mode": "lean",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 67.25,
+            "stdout_bytes": 525,
+            "context_words": null,
+            "depth_mode": "lean",
+            "requested_depth": "lean",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 61.85,
+            "stdout_bytes": 2670,
+            "context_words": 317,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 73.44,
+            "stdout_bytes": 396,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 80.02,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 75.37,
+            "stdout_bytes": 804,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "standard",
+            "gates": [
+              "lint-plan",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "status"
+            ]
+          }
+        },
+        "standard": {
+          "status": {
+            "median_ms": 59.43,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 63.57,
+            "stdout_bytes": 539,
+            "context_words": null,
+            "depth_mode": "standard",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 67.67,
+            "stdout_bytes": 529,
+            "context_words": null,
+            "depth_mode": "standard",
+            "requested_depth": "standard",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 61.88,
+            "stdout_bytes": 2670,
+            "context_words": 317,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 74.84,
+            "stdout_bytes": 483,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "codebase-evidence",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 81.19,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 77.94,
+            "stdout_bytes": 1057,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "lint-plan",
+              "lint-evidence",
+              "lint-artifact-schema",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "forge-score",
+              "status"
+            ]
+          }
+        },
+        "deep": {
+          "status": {
+            "median_ms": 59.46,
+            "stdout_bytes": 431,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "lint_plan": {
+            "median_ms": 64.69,
+            "stdout_bytes": 536,
+            "context_words": null,
+            "depth_mode": "deep",
+            "requested_depth": null,
+            "gates": []
+          },
+          "forge_score": {
+            "median_ms": 67.69,
+            "stdout_bytes": 525,
+            "context_words": null,
+            "depth_mode": "deep",
+            "requested_depth": "deep",
+            "gates": []
+          },
+          "context_brief": {
+            "median_ms": 61.89,
+            "stdout_bytes": 2670,
+            "context_words": 317,
+            "depth_mode": null,
+            "requested_depth": null,
+            "gates": []
+          },
+          "plan_preflight": {
+            "median_ms": 74.37,
+            "stdout_bytes": 483,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "spec-file",
+              "doctor",
+              "codebase-evidence",
+              "status"
+            ]
+          },
+          "implement_preflight": {
+            "median_ms": 80.08,
+            "stdout_bytes": 940,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "sections-directory",
+              "target-directory",
+              "lint-plan-artifacts",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness"
+            ]
+          },
+          "plan_postflight": {
+            "median_ms": 76.41,
+            "stdout_bytes": 1057,
+            "context_words": null,
+            "depth_mode": null,
+            "requested_depth": "lean",
+            "gates": [
+              "lint-plan",
+              "lint-evidence",
+              "lint-artifact-schema",
+              "lint-sections",
+              "traceability",
+              "lint-implementation-readiness",
+              "forge-score",
+              "status"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
