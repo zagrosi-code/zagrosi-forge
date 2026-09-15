@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SECTION = "section-01-normalize"
 
@@ -47,7 +46,7 @@ def make_plan(path: Path, depth: str = "lean") -> Path:
 
 
 def invoke(forge, capsys, *args: str) -> tuple[int, dict]:
-    code = forge.main(list(args))
+    code = forge.entrypoint.main(list(args))
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -63,8 +62,8 @@ def test_two_file_plan_passes_semantic_gates_at_each_depth(forge, tmp_path, caps
         code, payload = invoke(forge, capsys, command, "--planning-dir", str(planning), "--strict")
         assert code == 0, (command, payload)
         assert payload["success"] is True
-    assert forge.planning_depth(planning) == depth
-    assert forge.implementation_plan_path(planning) == planning / "sections" / f"{SECTION}.md"
+    assert forge.artifacts.planning_depth(planning) == depth
+    assert forge.artifacts.implementation_plan_path(planning) == planning / "sections" / f"{SECTION}.md"
     assert (planning / "spec.md").read_bytes() == source
     assert {p.relative_to(planning) for p in planning.rglob("*") if p.is_file()} == initial_files
 
@@ -132,13 +131,13 @@ def test_compact_views_preserve_physical_multisection_plans(forge, tmp_path, cap
     (planning / "sections/section-02-other.md").write_text(section.read_text())
     code, payload = invoke(forge, capsys, "lint-plan-artifacts", "--planning-dir", str(planning), "--strict")
     assert code == 0, payload
-    assert forge.implementation_plan_path(planning) == planning / "codex-plan.md"
-    assert forge.planning_artifact_text(planning, "review").startswith("Verdict: pass")
+    assert forge.artifacts.implementation_plan_path(planning) == planning / "codex-plan.md"
+    assert forge.artifacts.planning_artifact_text(planning, "review").startswith("Verdict: pass")
 
 
 def test_detached_artifact_gate_does_not_admit_the_new_compact_shape(forge, tmp_path):
     planning = make_plan(tmp_path / "planning")
-    payload = forge.plan_artifacts_payload(planning, SimpleNamespace(profile="solo", strict=True, allow_compact=False))
+    payload = forge.validation.plan_artifacts_payload(planning, SimpleNamespace(profile="solo", strict=True, allow_compact=False))
     assert not payload["success"]
     assert "compact-plan-not-supported" in {item["code"] for item in payload["findings"]}
 
@@ -159,7 +158,7 @@ def test_explicit_compact_source_wins_over_stale_normalized_copy(forge, tmp_path
     (planning / "codex-spec.md").write_text("REQ-999: Obsolete normalized requirements.\n")
     code, payload = invoke(forge, capsys, "traceability", "--planning-dir", str(planning), "--strict")
     assert code == 0, payload
-    assert forge.requirement_source_spec(planning) == planning / "spec.md"
+    assert forge.artifacts.requirement_source_spec(planning) == planning / "spec.md"
     assert "REQ-999" not in payload["coverage"]
 
 
@@ -185,7 +184,7 @@ def test_context_budget_counts_canonical_section_once(forge, tmp_path, capsys):
     planning = make_plan(tmp_path / "planning")
     code, payload = invoke(forge, capsys, "context-budget", "--planning-dir", str(planning))
     assert code == 0, payload
-    expected = sum(forge.word_count(path.read_text()) for path in (planning / "sections").glob("*.md"))
+    expected = sum(forge.markdown.word_count(path.read_text()) for path in (planning / "sections").glob("*.md"))
     assert payload["total_words"] == expected
 
 
@@ -209,13 +208,13 @@ def test_full_context_does_not_repeat_embedded_artifacts(forge, tmp_path, capsys
 def test_only_canonical_section_receives_the_plan_word_budget(forge, tmp_path, capsys, depth):
     planning = make_plan(tmp_path / "planning", depth)
     section = planning / "sections" / f"{SECTION}.md"
-    budgets = forge.word_budgets(depth)
+    budgets = forge.markdown.word_budgets(depth)
     text = section.read_text()
     case = 1
-    while forge.word_count(text) <= budgets["section"]:
+    while forge.markdown.word_count(text) <= budgets["section"]:
         text += f"\nREQ-001 fixture {case}: preserve exactly {case} internal spaces while removing edge whitespace.\n"
         case += 1
-    assert budgets["section"] < forge.word_count(text) < budgets["plan"]
+    assert budgets["section"] < forge.markdown.word_count(text) < budgets["plan"]
     section.write_text(text)
     code, payload = invoke(forge, capsys, "lint-sections", "--planning-dir", str(planning), "--strict")
     assert code == 0, payload
@@ -236,12 +235,12 @@ def test_canonical_section_prompts_include_budget_format_and_engineering(forge, 
     code, payload = invoke(forge, capsys, "plan-generate-section-prompts", "--planning-dir", str(planning), "--all")
     assert code == 0, payload
     text = Path(payload["prompt_files"][0]).read_text()
-    assert f'{forge.word_budgets(depth)["plan"]} words max' in text
+    assert f'{forge.markdown.word_budgets(depth)["plan"]} words max' in text
     assert str(ROOT / "skills/zagrosi-implement/references/engineering.md") in text
     assert str(ROOT / "skills/zagrosi-plan/references/section-format.md") in text
     assert all(f"## {heading}" in text for heading in ("Evidence", "Decisions", "Review"))
     assert "Reviewed:" in text
-    assert forge.word_count(text) <= 300
+    assert forge.markdown.word_count(text) <= 300
 
 
 def test_agent_prompts_link_the_engineering_standard(forge, tmp_path, capsys):
@@ -250,7 +249,7 @@ def test_agent_prompts_link_the_engineering_standard(forge, tmp_path, capsys):
     for path in payload["prompt_files"]:
         text = Path(path).read_text()
         assert str(ROOT / "skills/zagrosi-implement/references/engineering.md") in text
-        assert forge.word_count(text) <= 300
+        assert forge.markdown.word_count(text) <= 300
 
 
 @pytest.mark.parametrize("source_name", ["spec.md", "custom-source.md"])

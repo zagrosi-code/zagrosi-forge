@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -284,7 +285,11 @@ def update_check(args: argparse.Namespace) -> int:
     restart_required = not cache_current or not config_current
     next_steps: list[str] = []
     if restart_required:
-        next_steps.append("Run python3 scripts/zagrosi_skills.py self-update --plugin-root . to refresh Codex config and plugin cache.")
+        command = shlex.join([
+            sys.executable, str(plugin_root / "scripts/zagrosi_skills.py"), "self-update",
+            "--plugin-root", str(plugin_root), "--config", str(config_path),
+        ])
+        next_steps.append(f"Run {command} to refresh Codex config and plugin cache.")
         next_steps.append("Restart Codex after self-update reports changed cache or config.")
     else:
         next_steps.append("Codex config and Zagrosi Forge plugin cache are already current.")

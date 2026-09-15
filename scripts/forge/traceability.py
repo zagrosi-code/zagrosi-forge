@@ -27,21 +27,24 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[_models.Finding], di
     section_text_by_file = {path.name: _storage.read_text(path) for path in section_files}
     req_ids = _markdown.requirement_ids(spec_text) or _markdown.requirement_ids(plan_text)
 
+    plan_ids = set(_markdown.requirement_ids(plan_text))
+    tdd_ids = set(_markdown.requirement_ids(tdd_text))
+    section_ids = {name: set(_markdown.requirement_ids(text)) for name, text in section_text_by_file.items()}
+    tested_sections = {
+        name for name, text in section_text_by_file.items()
+        if _markdown.contains_any(text, ["tests first", "expected failure", "test_", "pytest", "vitest", "cargo test", "go test"])
+    }
     coverage: dict[str, Any] = {}
     for req_id in req_ids:
-        sections = [name for name, text in section_text_by_file.items() if req_id in text]
-        section_tests = [
-            name
-            for name, text in section_text_by_file.items()
-            if req_id in text and _markdown.contains_any(text, ["tests first", "expected failure", "test_", "pytest", "vitest", "cargo test", "go test"])
-        ]
-        in_tdd = req_id in tdd_text or bool(section_tests)
+        sections = [name for name, ids in section_ids.items() if req_id in ids]
+        section_tests = [name for name in sections if name in tested_sections]
+        in_tdd = req_id in tdd_ids or bool(section_tests)
         coverage[req_id] = {
-            "in_plan": req_id in plan_text,
+            "in_plan": req_id in plan_ids,
             "in_tdd": in_tdd,
             "sections": sections,
             "section_tests": section_tests,
-            "covered": bool(req_id in plan_text and in_tdd and sections),
+            "covered": bool(req_id in plan_ids and in_tdd and sections),
         }
 
     uncovered = [req_id for req_id, item in coverage.items() if not item["covered"]]
@@ -54,8 +57,8 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[_models.Finding], di
 
     section_orphans = [
         name
-        for name, text in section_text_by_file.items()
-        if not set(_markdown.requirement_ids(text)).intersection(req_ids)
+        for name, ids in section_ids.items()
+        if not ids.intersection(req_ids)
     ]
     if section_orphans:
         findings.append(
@@ -67,9 +70,8 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[_models.Finding], di
             )
         )
 
-    tdd_req_ids = _markdown.requirement_ids(tdd_text)
     test_orphans = []
-    if tdd_text and _markdown.contains_any(tdd_text, ["test_", "it(", "describe(", "pytest"]) and not tdd_req_ids:
+    if tdd_text and _markdown.contains_any(tdd_text, ["test_", "it(", "describe(", "pytest"]) and not tdd_ids:
         test_orphans.append(tdd_path.name if tdd_path else "codex-plan-tdd.md")
         findings.append(
             _quality.finding(

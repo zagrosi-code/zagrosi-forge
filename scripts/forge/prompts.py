@@ -56,6 +56,8 @@ def deep_plan_generate_section_prompts(args: argparse.Namespace) -> int:
                 index_path=index_path,
                 source_path=source_path,
                 max_words=budgets["plan"] if section_path == canonical_path else budgets["section"],
+                depth=depth,
+                depth_path=plugin_root / "skills/zagrosi-plan/references/depth-standards.md",
                 engineering_path=plugin_root / "skills/zagrosi-implement/references/engineering.md",
                 format_path=plugin_root / "skills/zagrosi-plan/references/section-format.md",
             ),

@@ -14,15 +14,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-from runtime_support import load_entrypoint, load_runtime
-from test_zagrosi_skills import (
-    ROOT,
+from detached_test_support import (
     copy_implementation_plugin,
     make_detached_record_fixture,
     planning_tree_snapshot,
-    run_script_raw,
 )
+from forge_test_helpers import ROOT, run_script_raw
+from runtime_support import load_entrypoint, load_runtime
 
 
 @pytest.fixture
@@ -222,7 +220,7 @@ def test_module_change_after_admission_cannot_mutate_detached_state(bundle, tmp_
 def test_module_change_during_detached_command_is_rechecked_before_success(bundle, tmp_path, monkeypatch, capsys):
     fixture = make_detached_record_fixture(tmp_path, plugin_root=bundle)
     forge = load_runtime(fixture.script)
-    original = forge.detached_completed_records
+    original = forge.pinners.detached_completed_records
     state_before = planning_tree_snapshot(fixture.implementation_root)
     source = bundle / "scripts/forge/status.py"
     changed = False
@@ -235,8 +233,8 @@ def test_module_change_during_detached_command_is_rechecked_before_success(bundl
             changed = True
         return result
 
-    monkeypatch.setattr(forge.owner("detached_completed_records"), "detached_completed_records", after_initial_checks)
-    assert forge.main([
+    monkeypatch.setattr(forge.pinners, "detached_completed_records", after_initial_checks)
+    assert forge.entrypoint.main([
         "next-section", "--planning-dir", str(fixture.planning),
         "--implementation-root", str(fixture.implementation_root),
     ]) == 1
@@ -254,8 +252,8 @@ def test_detached_reopen_converts_runtime_io_error_to_closed_source_failure(bund
         raise PermissionError("source cannot be reopened")
 
     monkeypatch.setattr(forge.entrypoint, "_read_source", unreadable)
-    with pytest.raises(forge.DetachedImplementationError) as caught:
-        forge.reopen_implementation_sources()
+    with pytest.raises(forge.models.DetachedImplementationError) as caught:
+        forge.sources.reopen_implementation_sources()
     assert caught.value.code == "implement-source-drift"
 
 

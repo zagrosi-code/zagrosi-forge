@@ -611,6 +611,7 @@ INTERVIEW_PLACEHOLDER_RE = re.compile(
 SECTION_PROMPT = """Write ONLY `{section}.md` as raw Markdown.
 
 Read `{index_path}` and the section format: `{format_path}`.
+Apply `{depth}` investigation/review depth: `{depth_path}`.
 Apply the engineering standard: `{engineering_path}`.
 Use `{plan_path}` for shared contracts when it is another existing file.
 Clarify only from `{source_path}` when required.

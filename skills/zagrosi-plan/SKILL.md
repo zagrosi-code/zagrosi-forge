@@ -11,6 +11,8 @@ and tests before implementation. Apply the all-depth
 plan root-cause repairs and cohesive modules, and update ownership.
 Depth is `lean` by default; honor requested
 `standard`/`deep` using [depth standards](references/depth-standards.md).
+When detached execution is requested, select the
+[physical authoring route](references/detached-plan-format.md) before writing.
 
 Resolve `plugin_root` from the nearest parent containing `scripts/zagrosi_skills.py`:
 
@@ -44,6 +46,9 @@ Run one bundled postflight:
 ```bash
 python3 {plugin_root}/scripts/zagrosi_skills.py postflight --phase plan --planning-dir "{planning_dir}" --depth "{depth}" --strict
 ```
+
+For detached execution, also run the physical compatibility check in that route
+before approving or freezing inputs. Never convert an already admitted tree.
 
 Fix blockers; diagnose narrowly. Return paths and next command. Do not implement
 unless asked; existing authorization counts.

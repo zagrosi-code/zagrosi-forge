@@ -16,6 +16,7 @@ Parallel: no siblings.
 ```
 
 Add [compact-plan metadata](plan-format.md) for a single canonical section.
+For detached execution, omit it and follow [physical authoring](detached-plan-format.md).
 For multiple sections, use `| Section | Depends on | REQ | Owns | Tests |`;
 record execution order/shared sequencing once.
 
