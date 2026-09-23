@@ -23,7 +23,7 @@ def test_unfinished_feature_fails_independent_oracle(tmp_path, case):
     result = trials.check(tmp_path / "trial")
     assert not result["success"]
     assert result["oracle"]["returncode"] != 0
-    assert result["tests"]["returncode"] == 0
+    assert (result["tests"]["returncode"] != 0) is (case == "resume")
     assert result["reported_telemetry"] is None
 
 

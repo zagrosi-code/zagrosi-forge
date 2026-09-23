@@ -258,7 +258,7 @@ def test_implement_evidence_handoff_real_dirty_status_maps_to_authority_invalid(
     )
     module = load_zagrosi_module(fixture.script)
     fake_git = tmp_path / "git-dirty"
-    fake_git.write_text("#!/bin/sh\nprintf '?? dirty\\000'\nsleep 30\n")
+    fake_git.write_text("#!/bin/sh\nprintf '?? dirty\\000'\nexec sleep 30\n")
     fake_git.chmod(0o755)
 
     monkeypatch.setattr(module.detached_contract, "HANDOFF_GIT", str(fake_git))

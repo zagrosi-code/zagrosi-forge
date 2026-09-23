@@ -9,6 +9,7 @@ import argparse
 import re
 
 from . import artifacts as _artifacts
+from . import context_links as _context_links
 from . import markdown as _markdown
 from . import models as _models
 from . import output as _output
@@ -185,7 +186,7 @@ def selected_context_blocks(text: str, reqs: set[str]) -> list[tuple[int, str]]:
     return selected
 
 
-def build_context(planning_dir: Path, section: str | None, max_words: int, line_limit: int = 20) -> dict[str, Any]:
+def build_context(planning_dir: Path, section: str | None, max_words: int, line_limit: int = 20, *, follow_links: bool = True) -> dict[str, Any]:
     if max_words <= 0 or line_limit <= 0:
         return {"success": False, "error": "Context budgets must be positive."}
     if not planning_dir.is_dir():
@@ -223,10 +224,35 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
     if not section and not sources:
         return {"success": False, "error": f"No planning sources found: {planning_dir}"}
     parts = [section_text.rstrip()] if section_path else [f"# Context: {planning_dir.name}"]
+    linked = {}
+    if follow_links:
+        seeds = [(section_path, section_text)] if section_path else []
+        seeds.extend((path, block) for _, path, blocks, *_ in sources for _, block in blocks)
+        try:
+            linked = _context_links.linked_contracts(planning_dir, seeds, known_paths=seen_paths)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {"success": False, "error": f"Cannot resolve linked contracts: {exc}"}
+        for path, spans in linked.items():
+            if section_path and path == section_path.resolve():
+                continue  # The complete section already includes its own anchors.
+            parts.extend(f"## contract: `{path}:{line}`\n\n{body}" for line, _, body in spans)
+        remaining_sources = []
+        for name, path, blocks, reference, cost, shared in sources:
+            covered = [body for _, _, body in linked.get(path.resolve(), [])]
+            if covered:
+                blocks = [(line, block) for line, block in blocks if not any(block.strip() in body for body in covered)]
+                shared = shared and any(
+                    not ids and block.strip() and not all(line.startswith("#") for line in block.splitlines())
+                    and not any(block.strip() in body for body in covered)
+                    for _, block, ids in context_blocks(_artifacts.planning_artifact_text(planning_dir, name, path))
+                )
+            if blocks or shared:
+                remaining_sources.append((name, path, blocks, reference, cost, shared))
+        sources = remaining_sources
     used = _markdown.word_count("\n\n".join(parts))
     reserved = sum(cost for _, _, _, _, cost, _ in sources)
     if used + reserved > max_words:
-        return {"success": False, "error": "The complete section and necessary source references exceed --max-words. Split the section or raise the budget; no contract was truncated.",
+        return {"success": False, "error": "The complete section, linked contracts, and necessary source references exceed --max-words. Split the section or raise the budget; no contract was truncated.",
                 "required_words": used + reserved, "max_words": max_words}
     omitted: list[str] = []
     for name, path, blocks, reference, cost, shared in sources:
@@ -280,7 +306,7 @@ def implementation_packet(args: argparse.Namespace) -> int:
                     args.implementation_root,
                 ))
             section = args.section
-            packet = build_context(planning_dir, section, args.max_words)
+            packet = build_context(planning_dir, section, args.max_words, follow_links=not detached)
             if not packet["success"]:
                 return _output.print_json(packet, 1)
             section_path = planning_dir / "sections" / f"{section}.md"

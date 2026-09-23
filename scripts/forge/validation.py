@@ -17,8 +17,12 @@ from . import sections as _sections
 from . import storage as _storage
 
 def lint_plan(args: argparse.Namespace) -> int:
-    planning_dir = _storage.resolve_path(args.planning_dir)
-    depth = args.depth or _artifacts.planning_depth(planning_dir)
+    findings, extras = plan_analysis(_storage.resolve_path(args.planning_dir), args.depth)
+    return _quality.emit_quality("plan", findings, args, extras)
+
+
+def plan_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list[_models.Finding], dict[str, Any]]:
+    depth = depth or _artifacts.planning_depth(planning_dir)
     compact = _markdown.is_lean_depth(depth)
     budgets = _markdown.word_budgets(depth)
     findings = _artifacts.compact_plan_findings(planning_dir, depth=depth)
@@ -29,7 +33,7 @@ def lint_plan(args: argparse.Namespace) -> int:
 
     if not plan_path:
         findings.append(_quality.finding("critical", "missing-plan", "Implementation plan is missing.", planning_dir / "codex-plan.md"))
-        return _quality.emit_quality("plan", findings, args)
+        return findings, {}
 
     interview_extras: dict[str, Any] = {"mode": "optional"}
     if _artifacts.interview_artifact(planning_dir, "plan"):
@@ -145,34 +149,32 @@ def lint_plan(args: argparse.Namespace) -> int:
             review_path,
         )
 
-    payload = _quality.quality_from_args(
-        "plan",
-        findings,
-        args,
-        {
-            "planning_dir": str(planning_dir),
-            "plan": str(plan_path),
-            "requirement_ids": spec_ids,
-            "depth_mode": depth,
-            "interview": interview_extras,
-            "word_budgets": budgets,
-            "word_counts": {
-                "spec": spec_words,
-                "research": research_words,
-                "interview": _markdown.word_count(_storage.read_text(interview_path)) if interview_path else None,
-                "plan": plan_words,
-                "tdd": tdd_words,
-                "integration_notes": integration_words,
-                "reviews": review_word_counts,
-            },
+    return findings, {
+        "planning_dir": str(planning_dir),
+        "plan": str(plan_path),
+        "requirement_ids": spec_ids,
+        "depth_mode": depth,
+        "interview": interview_extras,
+        "word_budgets": budgets,
+        "word_counts": {
+            "spec": spec_words,
+            "research": research_words,
+            "interview": _markdown.word_count(_storage.read_text(interview_path)) if interview_path else None,
+            "plan": plan_words,
+            "tdd": tdd_words,
+            "integration_notes": integration_words,
+            "reviews": review_word_counts,
         },
-    )
-    return _quality.emit_payload(payload, args)
+    }
 
 
 def lint_sections(args: argparse.Namespace) -> int:
-    planning_dir = _storage.resolve_path(args.planning_dir)
-    depth = args.depth or _artifacts.planning_depth(planning_dir)
+    findings, extras = section_analysis(_storage.resolve_path(args.planning_dir), args.depth)
+    return _quality.emit_quality("sections", findings, args, extras)
+
+
+def section_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list[_models.Finding], dict[str, Any]]:
+    depth = depth or _artifacts.planning_depth(planning_dir)
     budgets = _markdown.word_budgets(depth)
     findings = _artifacts.compact_plan_findings(planning_dir, depth=depth)
     canonical = _artifacts.compact_plan_descriptor(planning_dir)
@@ -181,10 +183,10 @@ def lint_sections(args: argparse.Namespace) -> int:
     if progress["state"] == "invalid_index":
         for error in progress.get("errors", []):
             findings.append(_quality.finding("critical", "invalid-section-index", error, planning_dir / "sections" / "index.md"))
-        return _quality.emit_quality("sections", findings, args, {"section_progress": progress})
+        return findings, {"section_progress": progress}
     if progress["state"] == "no_index":
         findings.append(_quality.finding("critical", "missing-section-index", "sections/index.md is missing.", planning_dir / "sections" / "index.md"))
-        return _quality.emit_quality("sections", findings, args, {"section_progress": progress})
+        return findings, {"section_progress": progress}
 
     index_path = planning_dir / "sections" / "index.md"
     index_text = _storage.read_text(index_path)
@@ -340,21 +342,15 @@ def lint_sections(args: argparse.Namespace) -> int:
             )
         )
 
-    payload = _quality.quality_from_args(
-        "sections",
-        findings,
-        args,
-        {
-            "planning_dir": str(planning_dir),
-            "depth_mode": depth,
-            "word_budgets": budgets,
-            "section_progress": progress,
-            "requirement_ids": spec_ids,
-            "section_index_word_count": index_words,
-            "section_estimates": estimates,
-        },
-    )
-    return _quality.emit_payload(payload, args)
+    return findings, {
+        "planning_dir": str(planning_dir),
+        "depth_mode": depth,
+        "word_budgets": budgets,
+        "section_progress": progress,
+        "requirement_ids": spec_ids,
+        "section_index_word_count": index_words,
+        "section_estimates": estimates,
+    }
 
 
 def plan_artifact_findings(planning_dir: Path, *, allow_compact: bool = True) -> tuple[list[_models.Finding], dict[str, Any]]:

@@ -36,11 +36,9 @@ def require_handoff_platform(root_fd: int) -> None:
             "unsupported-handoff-platform",
             "Privileged evidence handoff requires a Darwin arm64 host.",
         )
-    if _detached_contract.HANDOFF_STAT != "/usr/bin/stat":
-        raise _models.DetachedImplementationError(
-            "handoff-command-drift",
-            "The fixed APFS probe path does not match its frozen literal.",
-        )
+    from . import unit12_adapter
+
+    unit12_adapter.require_fixed_commands({"HANDOFF_STAT": _detached_contract.HANDOFF_STAT})
     require_fixed_handoff_executable(_detached_contract.HANDOFF_STAT, allow_multiple_links=True)
     return_code, stdout, stderr = _processes.run_bounded_child(
         [_detached_contract.HANDOFF_STAT, "-f", "%T", "."],
@@ -219,17 +217,13 @@ def read_fixed_gate_runner(contract: dict[str, Any]) -> bytes:
 
 
 def require_fixed_handoff_dependencies(contract: dict[str, Any], *, target_fd: int | None = None) -> None:
+    from . import unit12_adapter
+
     _handoff_wire.verify_handoff_command_identities(contract)
-    if (
-        _detached_contract.HANDOFF_SUDO != "/usr/bin/sudo"
-        or _detached_contract.HANDOFF_STAT != "/usr/bin/stat"
-        or _detached_contract.HANDOFF_PYTHON != "/usr/local/libexec/santander-unit12-prereqs/python-3.12.13/bin/python3.12"
-        or _detached_contract.HANDOFF_GIT != "/usr/local/libexec/santander-unit12-prereqs/git-2.50.1-apple-155"
-    ):
-        raise _models.DetachedImplementationError(
-            "handoff-command-drift",
-            "A fixed privileged handoff executable path does not match its frozen literal.",
-        )
+    unit12_adapter.require_fixed_commands({
+        name: getattr(_detached_contract, name)
+        for name in ("HANDOFF_SUDO", "HANDOFF_STAT", "HANDOFF_PYTHON", "HANDOFF_GIT")
+    })
     for raw_path in (_detached_contract.HANDOFF_SUDO, _detached_contract.HANDOFF_PYTHON, _detached_contract.HANDOFF_GIT):
         require_fixed_handoff_executable(raw_path)
     require_fixed_handoff_executable(_detached_contract.HANDOFF_STAT, allow_multiple_links=True)

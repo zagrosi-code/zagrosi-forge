@@ -2,18 +2,22 @@
   "summary": {
     "depth": "lean",
     "request": "Add invoice('summary', items, customer) returning customer, subtotal, tax, total, and item_count (sum of quantities). Preserve all existing actions, exact exports, and error behavior.",
-    "assertions": 633
+    "assertions": 1266,
+    "cleanup_required": true,
+    "protected_paths": [
+      "src/legacy_reports.py"
+    ]
   },
   "cleanup": {
     "cleanup_required": true,
     "depth": "standard",
     "request": "Simplify the existing invoice code and repair encountered duplication and mixed responsibilities. Preserve every existing public entrypoint, output, and error. Verify regression coverage before cleanup; add tests for uncovered behavior.",
-    "assertions": 507
+    "assertions": 1014
   },
   "discount": {
     "depth": "deep",
     "request": "Add optional discount_percent=0 to invoice. Accept only integers 0..100 (reject bool and other types with ValueError). Reduce aggregate subtotal by floor(subtotal * percent / 100), then compute existing tax and exports from that subtotal. Zero discount preserves existing behavior. Include a compact deep plan with evidence, alternatives, risks, review, and tests.",
-    "assertions": 2403
+    "assertions": 4806
   },
   "godfile": {
     "cleanup_required": true,
@@ -25,7 +29,15 @@
   },
   "resume": {
     "depth": "standard",
-    "request": "Resume the interrupted summary feature using .planning/progress.md. Complete invoice('summary', items, customer) with customer, subtotal, tax, total, and item_count (sum of quantities). Preserve existing exports/errors and previously added tests. Record remaining verification and completion.",
-    "assertions": 633
+    "request": "Resume the interrupted summary feature using Forge status, its admitted plan and the persisted implement-progress checkpoint. Complete invoice('summary', items, customer) with customer, subtotal, tax, total, and item_count (sum of quantities). Preserve existing exports/errors and previously added tests. Record remaining verification and completion.",
+    "assertions": 1266
+  },
+  "node-summary": {
+    "depth": "lean",
+    "runtime": "node",
+    "fixture": "node",
+    "oracle": "tools/node_trial_checks.cjs",
+    "assertions": 1266,
+    "request": "Add invoice('summary', items, customer) returning customer, subtotal, tax, total, and item_count (sum of quantities). Preserve existing exports, error messages and InvoiceManager. Use Node standard-library tests without adding a framework or dependencies."
   }
 }

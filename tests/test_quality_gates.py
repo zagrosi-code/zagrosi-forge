@@ -45,6 +45,12 @@ def test_quality_gates_traceability_and_status(tmp_path: Path) -> None:
     assert exported["success"] is True
     assert trace_csv.read_text().startswith("requirement,in_plan,in_tdd,sections,covered")
 
+    reviews = planning / "reviews"
+    reviews.mkdir()
+    (reviews / "plan.md").write_text(
+        "Verdict: pass\nReviewed: auth requirements, ownership, regression cases and failure behavior.\n",
+        encoding="utf-8",
+    )
     next_ready = run_cmd("next-section", "--planning-dir", str(planning))
     assert next_ready["next_section"] == "section-01-auth"
 

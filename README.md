@@ -41,6 +41,9 @@ Restart Codex after success. Preview with `install --dry-run --pretty`; compare
 the installed cache with `update-check --pretty`; refresh it with
 `self-update --pretty`.
 
+Updates prune development artifacts before scanning and preserve a recoverable
+installation during replacement. Cache cleanup does not shrink the repository.
+
 Codex marketplace install is also supported:
 
 ```bash
@@ -69,8 +72,7 @@ Output stays small at every depth:
 | Multi-section plan | One shared plan and ordered sections that link shared contracts |
 | Implement | Tests, code, and compact machine-readable section records |
 
-Each phase runs one setup command, performs the work, then runs one strict
-postflight. Example:
+Each phase runs setup, performs the work, then runs strict postflight:
 
 ```bash
 python3 scripts/zagrosi_skills.py plan-setup \
@@ -85,23 +87,27 @@ Project uses `project-setup`; implementation uses `implement-setup`. Run
 `status --path PATH --pretty` to resume.
 
 Use the explicit [compact-plan format](skills/zagrosi-plan/references/plan-format.md).
-Legacy physical plans and reviews remain supported. Detached frozen runs retain
-their established physical plan/review contract and separate operational records.
+Legacy plans and reviews remain supported. Detached frozen runs retain physical
+contracts and separate operational records.
 
 ## Context and Performance
 
-Section context preserves the section, selects relevant requirements, and links
-omitted sources. `context-brief` and `implementation-packet` use a 2,000-word budget
-(`--max-words` adjusts it). Oversized sections fail explicitly. Skills load only
-applicable guidance, domain packs, and detached protocol details.
+Context preserves complete sections and linked decisions/risks, selects relevant
+requirements, and identifies omissions. `context-brief` and `implementation-packet`
+default to 2,000 words; adjust `--max-words` when necessary. Broken links and
+oversized contracts fail explicitly. Setup and `next-section` include the packet.
+
+Saved progress supplies the resume stage and next action; changed inputs require
+fresh checks. New completion records bind requirements and dependencies. Contract
+edits reopen completion; code drift is reported for final integration because
+later sections can edit shared files. Legacy records remain readable, labeled unbound.
 
 The shared [engineering standard](skills/zagrosi-implement/references/engineering.md)
-draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers,
-reuse existing code and standard libraries, and prefer meaningful names and
-direct flow. Repair encountered duplication, oversized modules, and mixed
-responsibilities within the task; update ownership before broader edits.
-Characterize weakly covered behavior before refactoring, run targeted regression
-checks around changes, and run the full suite once at integration.
+draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse
+existing code and standard libraries, prefer clear names and direct flow. Repair
+encountered duplication, oversized modules and mixed responsibilities; update
+ownership before broader edits. Characterize weak coverage before refactoring,
+run targeted regression checks, then the full suite at integration.
 
 On macOS/Linux, known read-only gates avoid repeated process startup; other gates
 retain process isolation and timeouts. Compare stable local checkouts:
@@ -111,15 +117,10 @@ python3 tools/benchmark_forge.py \
   --original-root /path/to/main --baseline-root /path/to/earlier-snapshot --runs 5
 ```
 
-The benchmark checks identical disposable fixtures at every depth, recording
-source hashes, median latency, context size, and modeled reference loads.
-Archived protocol text is excluded. Model usage requires separate telemetry.
-
-The [recorded comparison](examples/evals/performance.json) found planning
-postflight 4.43–4.45× faster across all depths and section context reduced from
-381 to 317 words. Added engineering guidance increases some routine reference
-loads; detached reading falls from 3,547 to 1,177 words. Results are local to the
-recorded environment and fixture.
+Benchmarks use identical fixtures across depths: source hashes, median helper
+latency, context size and modeled reference loads. See the scoped
+[recorded comparison](examples/evals/performance.json). Whole-task speed and model
+usage require separate measurements.
 
 [Coding trials](examples/evals/coding/README.md) cover features, cleanup, deep
 planning, and resume. Separate verdicts check behavior, workflow completion, and
@@ -128,12 +129,12 @@ and provenance bind the candidate, baseline, plugin runtime, and evaluator.
 
 ## Runtime
 
-The CLI imports modules on demand. SHA-256 manifests bind runtime and test
-sources. Verification checks every source and compiles those exact bytes without
-bytecode caches. Detached admission and completion reverify sources, ownership,
-locks, and immutable inputs while preserving process isolation.
-Read-only checks reuse unchanged text, ownership parsing, and preceding score
-components within one command. Changed inputs force fresh analysis.
+The CLI imports modules on demand. SHA-256 manifests bind runtime/test sources;
+verification compiles those exact bytes without bytecode caches. Detached runs
+reverify sources, ownership, locks and immutable inputs with process isolation.
+Checks reuse unchanged parsing and score components within one command; analyses
+return structured results. Mutable writes are serialized and atomic. Privileged
+project policy loads through a source-bound adapter with frozen checks.
 
 ## Compatibility
 
@@ -160,10 +161,9 @@ assets/                    icon and README visuals
 
 ## Validate
 
-After editing runtime or test sources, run `python3 tools/update_runtime_manifest.py`;
-CI verifies the binding with `--check`. The full suite runs on Linux/Python 3.12;
-focused compatibility checks cover Python 3.11, macOS, and Windows. Tests import
-only the runtime modules they exercise, with fresh instances for patch isolation.
+After runtime/test edits, run `python3 tools/update_runtime_manifest.py`.
+CI checks bindings and the full suite on Linux/Python 3.12; focused checks cover
+Python 3.11, macOS and Windows.
 
 ```bash
 python3 tools/update_runtime_manifest.py --check

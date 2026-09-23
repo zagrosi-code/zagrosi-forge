@@ -14,14 +14,20 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from . import gates as _gates
 from . import output as _output
-from . import policy as _policy
+from .plugin_cache import materialize_plugin_cache, plugin_cache_status
 from . import storage as _storage
 
 def release_check(args: argparse.Namespace) -> int:
+    with tempfile.TemporaryDirectory(prefix="forge-release-check-") as directory:
+        return _release_check(args, Path(directory) / "config.toml")
+
+
+def _release_check(args: argparse.Namespace, config_path: Path) -> int:
     plugin_root = _storage.resolve_path(args.plugin_root)
     checks: list[tuple[str, list[str]]] = [
         ("compile-cli", [sys.executable, "-m", "py_compile", *map(str, sorted((plugin_root / "scripts").rglob("*.py")))]),
@@ -37,7 +43,7 @@ def release_check(args: argparse.Namespace) -> int:
                 "--plugin-root",
                 str(plugin_root),
                 "--config",
-                str(plugin_root / ".release-check" / "config.toml"),
+                str(config_path),
                 "--dry-run",
             ],
         ),
@@ -181,61 +187,6 @@ def plugin_cache_path(codex_home: Path, marketplace: str, plugin_name: str, vers
     return codex_home / "plugins" / "cache" / marketplace / plugin_name / version
 
 
-def should_skip_cache_path(path: Path) -> bool:
-    return any(part in _policy.PLUGIN_CACHE_IGNORE_DIRS for part in path.parts) or path.name in _policy.PLUGIN_CACHE_IGNORE_FILES
-
-
-def plugin_tree_fingerprint(root: Path) -> str:
-    import hashlib
-
-    digest = hashlib.sha256()
-    if not root.exists():
-        return ""
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        relative = path.relative_to(root)
-        if should_skip_cache_path(relative):
-            continue
-        digest.update(str(relative).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def copy_ignore(_: str, names: list[str]) -> set[str]:
-    return {name for name in names if name in _policy.PLUGIN_CACHE_IGNORE_DIRS or name in _policy.PLUGIN_CACHE_IGNORE_FILES}
-
-
-def materialize_plugin_cache(plugin_root: Path, cache_path: Path, dry_run: bool) -> dict[str, Any]:
-    source_fingerprint = plugin_tree_fingerprint(plugin_root)
-    cached_fingerprint = plugin_tree_fingerprint(cache_path)
-    cache_changed = source_fingerprint != cached_fingerprint
-    payload: dict[str, Any] = {
-        "path": str(cache_path),
-        "changed": cache_changed,
-        "source_fingerprint": source_fingerprint,
-        "cached_fingerprint": cached_fingerprint or None,
-    }
-    if dry_run:
-        payload["dry_run"] = True
-        return payload
-    if not cache_changed:
-        payload["dry_run"] = False
-        return payload
-
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-    temporary = cache_path.parent / f".{cache_path.name}.tmp-{stamp}"
-    if temporary.exists():
-        shutil.rmtree(temporary)
-    shutil.copytree(plugin_root, temporary, ignore=copy_ignore)
-    if cache_path.exists():
-        shutil.rmtree(cache_path)
-    temporary.rename(cache_path)
-    payload["dry_run"] = False
-    return payload
-
-
 def expected_codex_config(existing: str, plugin_root: Path) -> tuple[str, list[str]]:
     updated, marketplace_changes = upsert_toml_section(
         existing,
@@ -274,10 +225,9 @@ def update_check(args: argparse.Namespace) -> int:
     plugin_name = str(manifest.get("name") or "zagrosi-forge")
     plugin_version = str(manifest.get("version") or "0.0.0")
     cache_path = plugin_cache_path(codex_home, "zagrosi", plugin_name, plugin_version)
-    source_fingerprint = plugin_tree_fingerprint(plugin_root)
-    cached_fingerprint = plugin_tree_fingerprint(cache_path)
+    cache = plugin_cache_status(plugin_root, cache_path)
     cache_exists = cache_path.exists()
-    cache_current = cache_exists and source_fingerprint == cached_fingerprint
+    cache_current = cache_exists and not cache["changed"]
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     expected_config, config_changes = expected_codex_config(existing, plugin_root)
@@ -307,12 +257,9 @@ def update_check(args: argparse.Namespace) -> int:
         "network_policy": "local-only",
         "remote_checked": False,
         "cache": {
-            "path": str(cache_path),
+            **cache,
             "exists": cache_exists,
             "current": cache_current,
-            "changed": not cache_current,
-            "source_fingerprint": source_fingerprint,
-            "cached_fingerprint": cached_fingerprint or None,
         },
         "config": {
             "current": config_current,
@@ -457,7 +404,11 @@ def install_codex(args: argparse.Namespace) -> int:
     plugin_name = str(manifest.get("name") or "zagrosi-forge")
     plugin_version = str(manifest.get("version") or "0.0.0")
     cache_path = plugin_cache_path(codex_home, "zagrosi", plugin_name, plugin_version)
-    cache = materialize_plugin_cache(plugin_root, cache_path, args.dry_run)
+    try:
+        cache = materialize_plugin_cache(plugin_root, cache_path, args.dry_run)
+    except (OSError, ValueError) as exc:
+        return _output.print_json({"success": False, "operation": operation, "error": str(exc),
+                                   "cache_path": str(cache_path)}, 1)
 
     existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
     updated, changes = expected_codex_config(existing, plugin_root)

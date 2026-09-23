@@ -36,6 +36,7 @@ class FlightScoreInputs:
     def __init__(self, planning_dir: Path, depth: str, texts: dict):
         self.planning_dir, self.depth, self.texts = planning_dir, depth, texts
         self.findings: dict[str, list[_models.Finding]] = {}
+        self.analysis_signatures = {}
         # Directory identities cover newly selected plan/review/section/state files.
         directories = {planning_dir, *(planning_dir / name for name in ("sections", "reviews", "implementation"))}
         source = _artifacts.planning_config(planning_dir).get("initial_file")
@@ -59,6 +60,11 @@ class FlightScoreInputs:
         ):
             return
         self.findings[self.GATES[name]] = findings_from_payload(payload)
+        context = _session._CLI_CONTEXT.get() or {}
+        for cache in context.get("analyses", {}).values():
+            for observations, _ in cache.values():
+                for path, signature in observations.items():
+                    self.analysis_signatures.setdefault(path, signature)
         for path, (signature, _) in self.texts.items():
             # Keep the earliest observation, including a rewrite seen by later gates.
             self.signatures.setdefault(path, signature)
@@ -68,6 +74,7 @@ class FlightScoreInputs:
             planning_dir != self.planning_dir or depth != self.depth or max_files != 8
             or self.findings.keys() != set(self.GATES.values())
             or any(self.signature(path) != signature for path, signature in self.signatures.items())
+            or any(_session._path_signature(path) != signature for path, signature in self.analysis_signatures.items())
         ):
             return {}
         return self.findings
@@ -130,24 +137,12 @@ def forge_score(args: argparse.Namespace) -> int:
     return _quality.emit_payload(payload, args)
 
 
-def lint_findings_for_score(handler: Any, planning_dir: Path, depth: str) -> tuple[list[_models.Finding], dict[str, Any]]:
-    args = argparse.Namespace(planning_dir=str(planning_dir), depth=depth, profile="solo", strict=False, export=None, export_format="jsonl")
-    captured: dict[str, Any] = {}
-    token = _session._QUALITY_CAPTURE.set(captured)
-    try:
-        handler(args)
-    finally:
-        _session._QUALITY_CAPTURE.reset(token)
-    findings = findings_from_payload(captured)
-    return findings, {key: value for key, value in captured.items() if key not in {"findings", "success", "score", "finding_count"}}
-
-
 def plan_findings_for_score(planning_dir: Path, depth: str) -> tuple[list[_models.Finding], dict[str, Any]]:
-    return lint_findings_for_score(_validation.lint_plan, planning_dir, depth)
+    return _validation.plan_analysis(planning_dir, depth)
 
 
 def section_findings_for_score(planning_dir: Path, depth: str) -> tuple[list[_models.Finding], dict[str, Any]]:
-    return lint_findings_for_score(_validation.lint_sections, planning_dir, depth)
+    return _validation.section_analysis(planning_dir, depth)
 
 
 def evidence_findings_for_score(planning_dir: Path, min_files: int) -> list[_models.Finding]:

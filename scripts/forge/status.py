@@ -10,10 +10,10 @@ import sys
 
 from . import artifacts as _artifacts
 from . import output as _output
+from . import resume as _resume
 from . import sections as _sections
 from . import state as _state
 from . import storage as _storage
-from . import validation as _validation
 
 
 def detached_status(path: Path, implementation_root: Path) -> int:
@@ -85,23 +85,21 @@ def status(args: argparse.Namespace) -> int:
     if has_plan:
         next_action = _artifacts.next_plan_action(plan_artifacts or {}, section_progress, plan_config_payload)
         if section_progress["state"] == "complete":
-            admission = _validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile="solo", strict=True))
-            details["admission"] = {"success": True} if admission["success"] else admission
-            if not admission["success"]:
+            readiness = _state.mutable_admitted_readiness(planning_dir)
+            details.update({key: value for key, value in readiness.items() if key != "success"})
+            if not readiness["admission"]["success"]:
                 next_action = "repair planning admission findings before implementation"
             else:
-                readiness = _state.mutable_readiness_snapshot(
-                    section_progress,
-                    _sections.dependency_graph(planning_dir, section_progress),
-                    _state.completed_sections(planning_dir),
-                )
-                details.update(readiness)
-                pending = sorted(_state.load_implementation_state(planning_dir).get("pending_sections", {}))
-                details["pending_sections"] = pending
+                pending = readiness["pending_sections"]
                 if pending:
-                    next_action = f"resolve pending verification and retry recording {pending[0]}"
+                    brief = _resume.resume_brief(planning_dir, pending[0])
+                    details["resume"] = brief
+                    next_action = brief["next_action"] if brief else "recheck pending completion state"
                 elif readiness["next_section"] and implementation_state.exists():
-                    next_action = f"implement {readiness['next_section']}"
+                    section = readiness["next_section"]
+                    brief = _resume.resume_brief(planning_dir, section)
+                    details["resume"] = brief
+                    next_action = brief["next_action"] if brief else f"implement {section}"
                 elif readiness["remaining_sections"] and not readiness["ready_sections"]:
                     next_action = "resolve blocked section dependencies"
                 elif not readiness["remaining_sections"]:

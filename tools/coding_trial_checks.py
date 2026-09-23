@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+from copy import deepcopy
 import json
 import random
 import sys
@@ -17,6 +18,13 @@ def load(path, name):
     return module
 
 
+def compare(call, expected, items) -> int:
+    candidate_items = deepcopy(items)
+    assert call(candidate_items) == expected
+    assert candidate_items == items, "Candidate mutated invoice inputs"
+    return 2
+
+
 def verify(workspace: Path, case: str) -> int:
     sys.path.insert(0, str(workspace / "src"))
     baseline = load(FIXTURE, "baseline_ledger")
@@ -30,37 +38,40 @@ def verify(workspace: Path, case: str) -> int:
     for items in carts:
         for customer in ("Guest", "Zoë\nLtd", ""):
             for action in ("total", "json", "receipt"):
-                assert candidate.invoice(action, items, customer) == baseline.invoice(action, items, customer), (action, items)
-                assertions += 1
-            assert candidate.InvoiceManager().total(items) == baseline.InvoiceManager().total(items)
-            assertions += 1
+                expected = baseline.invoice(action, deepcopy(items), customer)
+                assertions += compare(lambda cart: candidate.invoice(action, cart, customer), expected, items)
+            expected = baseline.InvoiceManager().total(deepcopy(items))
+            assertions += compare(candidate.InvoiceManager().total, expected, items)
             if case in {"summary", "resume"}:
-                expected = json.loads(baseline.invoice("json", items, customer))
+                expected = json.loads(baseline.invoice("json", deepcopy(items), customer))
                 expected["item_count"] = sum(item["quantity"] for item in items)
-                assert candidate.invoice("summary", items, customer) == expected
-                assertions += 1
+                assertions += compare(lambda cart: candidate.invoice("summary", cart, customer), expected, items)
             elif case == "discount":
                 for percent in (0, 1, 25, 99, 100):
                     subtotal = sum(item["price"] * item["quantity"] for item in items)
                     subtotal -= subtotal * percent // 100
                     discounted = [{"price": subtotal, "quantity": 1}]
                     for action in ("total", "json", "receipt"):
-                        assert candidate.invoice(action, items, customer, discount_percent=percent) == baseline.invoice(action, discounted, customer)
-                        assertions += 1
+                        expected = baseline.invoice(action, deepcopy(discounted), customer)
+                        assertions += compare(lambda cart: candidate.invoice(action, cart, customer, discount_percent=percent), expected, items)
     for action in ("missing", None, 42):
+        items = []
         try:
-            candidate.invoice(action, [])
+            candidate.invoice(action, items)
         except ValueError as exc:
             assert str(exc) == "Unknown action: " + str(action)
-            assertions += 1
+            assert items == [], "Candidate mutated rejected inputs"
+            assertions += 2
         else:
             raise AssertionError("Unknown action accepted")
     if case == "discount":
         for value in (-1, 101, True, None, "10", 1.5):
+            items = []
             try:
-                candidate.invoice("total", [], discount_percent=value)
+                candidate.invoice("total", items, discount_percent=value)
             except ValueError:
-                assertions += 1
+                assert items == [], "Candidate mutated rejected inputs"
+                assertions += 2
             else:
                 raise AssertionError(f"Invalid discount accepted: {value!r}")
     return assertions

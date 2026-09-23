@@ -116,8 +116,15 @@ def test_plan_setup_sections_and_prompts(tmp_path: Path) -> None:
 
 
 def test_parallel_plan_parses_documented_dependency_graph_prose(tmp_path: Path) -> None:
+    from test_resume_guidance import documented_detached_plan
+
+    documented_detached_plan(tmp_path, "lean")
     sections = tmp_path / "sections"
-    sections.mkdir(parents=True)
+    original = sections / "section-01-normalize.md"
+    section_body = original.read_text()
+    original.unlink()
+    for name in ("section-01-foundation", "section-02-api", "section-03-ui"):
+        (sections / f"{name}.md").write_text(section_body.replace("section-01-normalize", name))
     (sections / "index.md").write_text(
         "<!-- PROJECT_CONFIG\n"
         "runtime: python-uv\n"
