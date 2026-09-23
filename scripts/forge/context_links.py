@@ -12,16 +12,45 @@ from . import storage as _storage
 
 
 LINK = re.compile(r'(?<!!)\[[^\]\n]+\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+["\'][^\n]*?["\'])?\s*\)')
+INLINE_TOKEN = re.compile(r"<!--|`+|(?<!!)\[")
 MAX_CONTRACTS = 64
 MAX_SOURCE_BYTES = 1_048_576
 
 
 def local_links(text: str) -> list[str]:
-    _, plain = _markdown.split_markdown_fences_with_closure(text)
-    text = "\n".join(plain)
-    code = [match.span() for match in re.finditer(r"(`+).*?\1", text, re.S)]
-    return [match[1] or match[2] for match in LINK.finditer(text)
-            if not any(start <= match.start() < end for start, end in code)]
+    """Scan in source order so comments and code cannot activate each other."""
+    links = []
+    offset = skip = 0
+    fence = None
+    for line in text.splitlines(keepends=True):
+        start, offset = offset, offset + len(line)
+        if fence:
+            if _markdown.markdown_fence_closes(line, *fence):
+                fence = None
+            continue
+        if skip >= offset:
+            continue
+        opening = _markdown.markdown_fence_opening(line) if skip <= start else None
+        if opening:
+            fence = opening[:2]
+            continue
+        for token in INLINE_TOKEN.finditer(line, max(0, skip - start)):
+            position = start + token.start()
+            if position < skip:
+                continue
+            if token[0] == "<!--":
+                close = text.find("-->", position + 4)
+                skip = len(text) if close < 0 else close + 3
+            elif token[0].startswith("`"):
+                close = re.compile(rf"(?<!`){token[0]}(?!`)").search(text, start + token.end())
+                if close:
+                    skip = close.end()
+            else:
+                link = LINK.match(text, position)
+                if link:
+                    links.append(link[1] or link[2])
+                    skip = link.end()
+    return links
 
 
 def heading_contract(text: str, anchor: str) -> tuple[int, int]:

@@ -394,6 +394,31 @@ def test_self_anchor_keeps_section_once_and_fenced_links_are_literal(forge, plan
     assert text.rstrip() in result["content"]
 
 
+@pytest.mark.parametrize("body,expected", [
+    ("[before](before.md) <!-- [hidden](missing.md) --> [after](after.md)", ["before.md", "after.md"]),
+    ("<!--\n[hidden](missing.md)\n-->\n[`DEC-001`](live.md)", ["live.md"]),
+    ("<!-- ` [hidden](missing.md) -->\n[`DEC-001`](live.md)", ["live.md"]),
+    ("<!--\n```markdown\n[hidden](missing.md)\n-->\n[live](live.md)", ["live.md"]),
+    ("`<!--` [live](live.md)", ["live.md"]),
+    ("`literal\n<!-- example\n` [live](\nlive.md\n)", ["live.md"]),
+    ("```markdown\n<!-- [example](missing.md)\n```\n[live](live.md)", ["live.md"]),
+    ("<!--\n[hidden](missing.md)", []),
+])
+def test_link_scanning_respects_comment_and_code_boundaries(forge, body, expected):
+    assert forge.context_links.local_links(body) == expected
+
+
+def test_commented_missing_links_do_not_block_context_or_linked_contracts(forge, plan):
+    section = plan / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() +
+                       "\n<!-- [obsolete](../missing.md) -->\n[`DEC-001`](../decisions.md#active)\n")
+    (plan / "decisions.md").write_text(
+        "## Active\n\nKeep the live contract.\n<!--\n[obsolete](also-missing.md)\n-->\n")
+    result = forge.context.build_context(plan, SECTION, 2000)
+    assert result["success"], result
+    assert "Keep the live contract." in result["content"]
+
+
 def test_whole_file_link_and_nested_anchor_are_merged(forge, plan):
     section = plan / "sections" / f"{SECTION}.md"
     section.write_text(section.read_text() + "\nRead [all](../decisions.md) and [detail](../decisions.md#detail).\n")

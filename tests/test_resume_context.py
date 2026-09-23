@@ -143,6 +143,17 @@ def test_mutable_setup_exposes_selected_packet_and_resume(forge, workspace, caps
     assert result["next_action"] == f"review {SECTION}"
 
 
+def test_mutable_setup_ignores_commented_contract_links(forge, workspace, capsys):
+    root, planning = workspace
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\n<!-- [obsolete](../missing.md) -->\n")
+    code, result = invoke(forge, capsys, "implement-setup", "--sections-dir", str(planning / "sections"),
+                          "--target-dir", str(root), "--flight", "off")
+    assert code == 0, result
+    assert result["packet"]["success"]
+    save_progress(forge, capsys, planning)
+
+
 @pytest.mark.parametrize("saved_progress", [False, True])
 def test_pending_postflight_overrides_verified_stage_at_every_entry(forge, workspace, capsys, saved_progress):
     root, planning = workspace
