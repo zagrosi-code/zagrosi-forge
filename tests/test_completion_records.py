@@ -635,7 +635,7 @@ def test_lean_record_rejects_incomplete_review_or_verification(tmp_path: Path) -
     assert not (planning / "implementation" / "zagrosi_implement_state.json").exists()
 
     state_dir = planning / "implementation"
-    state_dir.mkdir()
+    state_dir.mkdir(exist_ok=True)
     (state_dir / "zagrosi_implement_state.json").write_text(
         json.dumps(
             {

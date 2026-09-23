@@ -161,7 +161,6 @@ def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict
         not compact and not getattr(args, "write_report", False)
         and context is not None and context["texts"] is not None
         and _gates.local_gate_available("forge-score", ["forge-score", "--planning-dir", str(planning_dir)])
-        and _artifacts.compact_plan_descriptor(planning_dir) is None
     )
     if reuse:
         context["score_inputs"] = _scoring.FlightScoreInputs(planning_dir, depth, context["texts"])

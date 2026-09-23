@@ -13,6 +13,7 @@ from . import ownership as _ownership
 from . import policy as _policy
 from . import quality as _quality
 from . import sections as _sections
+from . import session as _session
 from . import storage as _storage
 
 def artifact(path: Path, names: list[str]) -> Path | None:
@@ -37,7 +38,13 @@ def planning_config(planning_dir: Path) -> dict[str, Any]:
 
 
 def compact_plan_descriptor(planning_dir: Path) -> dict[str, Any] | None:
+    return _session.cached_analysis("compact_plan", planning_dir, lambda observe: _compact_plan_descriptor(planning_dir, observe))
+
+
+def _compact_plan_descriptor(planning_dir: Path, observe) -> dict[str, Any] | None:
     """Resolve the explicitly selected canonical plan; legacy files win."""
+    for name in ("codex-plan.md", "claude-plan.md", "sections/index.md"):
+        observe(planning_dir / name)
     physical = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
     index = planning_dir / "sections" / "index.md"
     marker_path = physical or index
@@ -71,7 +78,7 @@ def compact_plan_descriptor(planning_dir: Path) -> dict[str, Any] | None:
         errors.append("Compact plan source must be an explicit path relative to the planning directory.")
     else:
         try:
-            candidate = (planning_dir / raw_source).resolve()
+            candidate = observe(planning_dir / raw_source).resolve()
             if candidate == (path.resolve() if path else None) or candidate.is_relative_to((planning_dir / "sections").resolve()):
                 errors.append("Compact plan source cannot be its plan, index, or a section.")
             elif not candidate.is_file() or candidate.suffix.lower() != ".md":
@@ -85,7 +92,7 @@ def compact_plan_descriptor(planning_dir: Path) -> dict[str, Any] | None:
         except (OSError, RuntimeError, ValueError):
             errors.append("Compact plan source cannot be resolved safely.")
     headings: dict[str, str] = {}
-    if path and path.is_file():
+    if path and observe(path).is_file():
         for title, body in _markdown.markdown_h2_sections(_storage.read_text(path)):
             key = title.casefold()
             if key in headings:

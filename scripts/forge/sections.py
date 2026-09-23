@@ -10,10 +10,15 @@ from . import markdown as _markdown
 from . import ownership as _ownership
 from . import policy as _policy
 from . import storage as _storage
+from . import session as _session
 
 def check_section_progress(planning_dir: Path) -> dict[str, Any]:
+    return _session.cached_analysis("section_progress", planning_dir, lambda observe: _check_section_progress(planning_dir, observe))
+
+
+def _check_section_progress(planning_dir: Path, observe) -> dict[str, Any]:
     sections_dir = planning_dir / "sections"
-    index_path = sections_dir / "index.md"
+    index_path = observe(sections_dir / "index.md")
     if not index_path.exists():
         return {"state": "no_index", "sections_dir": str(sections_dir)}
 
@@ -31,7 +36,7 @@ def check_section_progress(planning_dir: Path) -> dict[str, Any]:
     empty: list[str] = []
     complete: list[str] = []
     for section in sections:
-        path = sections_dir / f"{section}.md"
+        path = observe(sections_dir / f"{section}.md")
         if not path.exists():
             missing.append(section)
         elif not _storage.read_text(path).strip():
@@ -62,6 +67,10 @@ def check_section_progress(planning_dir: Path) -> dict[str, Any]:
 
 
 def section_dependency_analysis(index_text: str, sections: list[str]) -> tuple[dict[str, list[str]], list[str]]:
+    return _session.cached_analysis("dependencies", (index_text, tuple(sections)), lambda _observe: _section_dependency_analysis(index_text, sections))
+
+
+def _section_dependency_analysis(index_text: str, sections: list[str]) -> tuple[dict[str, list[str]], list[str]]:
     known = set(sections)
     dependencies = {section: [] for section in sections}
     errors: list[str] = []

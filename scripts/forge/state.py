@@ -15,16 +15,38 @@ from . import quality as _quality
 from . import sections as _sections
 from . import storage as _storage
 
+def contract_snapshot(planning_dir: Path, section: str, *, target_dir=None, files=()) -> dict:
+    from .mutable_inputs import contract_snapshot as snapshot
+
+    return snapshot(planning_dir, section, target_dir=target_dir, files=files)
+
+
+def code_observations_changed(record: dict) -> bool:
+    snapshot = record.get("input_snapshot")
+    if not isinstance(snapshot, dict):
+        return False
+    from .mutable_inputs import code_observations
+
+    try:
+        return code_observations(Path(snapshot["target_dir"]), snapshot["code"]) != snapshot["code"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+
+
 def completed_sections(planning_dir: Path, state: dict[str, Any] | None = None) -> set[str]:
     state = load_implementation_state(planning_dir) if state is None else state
     completed = state.get("completed_sections", {})
     if not isinstance(completed, dict):
         return set()
-    return {
+    valid = {
         section for section, record in completed.items()
         if section not in state.get("pending_sections", {})
         and not completion_evidence_findings(planning_dir, section, record)
     }
+    dependencies = _sections.dependency_graph(planning_dir)
+    while stale := {section for section in valid if any(dep not in valid for dep in dependencies.get(section, []))}:
+        valid.difference_update(stale)
+    return valid
 
 
 def implementation_recording_status(planning_dir: Path, state: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -56,6 +78,10 @@ def implementation_recording_status(planning_dir: Path, state: dict[str, Any] | 
         "pending_sections": pending,
         "invalid_completed_sections": invalid,
         "unknown_recorded_sections": sorted(recorded - known_sections),
+        "legacy_unbound_sections": sorted(section for section in recorded_known
+                                           if "input_snapshot" not in raw_completed[section]),
+        "changed_code_sections": sorted(section for section in recorded_known
+                                         if code_observations_changed(raw_completed[section])),
     }
 
 
@@ -93,6 +119,23 @@ def mutable_readiness_snapshot(
     }
 
 
+def mutable_admitted_readiness(planning_dir: Path, *, state=None, profile="solo", progress=None, admission=None) -> dict[str, Any]:
+    from . import validation
+
+    progress = _sections.check_section_progress(planning_dir) if progress is None else progress
+    admission = validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=profile, strict=True)) if admission is None else admission
+    state = load_implementation_state(planning_dir) if state is None else state
+    readiness = mutable_readiness_snapshot(
+        {**progress, "sections": progress.get("sections", [])},
+        _sections.dependency_graph(planning_dir, progress), completed_sections(planning_dir, state),
+    )
+    if not admission["success"]:
+        readiness.update(next_section=None, ready_sections=[])
+    return {"success": bool(admission["success"]), "admission": admission,
+            "section_progress": progress, **readiness,
+            "pending_sections": sorted(state.get("pending_sections", {}))}
+
+
 def implementation_evidence_by_section(planning_dir: Path) -> dict[str, dict[str, Any]]:
     state = load_implementation_state(planning_dir)
     completed = state.get("completed_sections", {})
@@ -127,18 +170,16 @@ def completion_evidence_findings(planning_dir: Path, section: str, record: Any) 
         return [_quality.finding("high", "invalid-completion-record", f"{section} completion must be an object.", path)]
     review_path = planning_dir / "implementation" / "code_review" / f"{section}-review.md"
     legacy_text = ""
+    legacy_review = ""
     if not record.get("review_status") or not record.get("verification"):
         if review_path.is_file():
-            _, lines = _markdown.split_markdown_fences_with_closure(_storage.read_text(review_path))
-            legacy_text = "\n".join(lines)
+            legacy_review = _storage.read_text(review_path)
+            blocks, lines = _markdown.split_markdown_fences_with_closure(legacy_review)
+            if all(closed for _, _, closed in blocks):
+                legacy_text = "\n".join(lines)
     status = record.get("review_status")
     if status is None:
-        verdicts = re.findall(r"(?im)^Verdict:[ \t]*(\w+)\b", legacy_text)
-        reviewed = re.search(r"(?im)^Reviewed:[ \t]*(?!none\b|tbd\b|pending\b|n/a\b)\S.+", legacy_text)
-        passing_review = bool(
-            verdicts and all(value.lower() in {"pass", "fixed"} for value in verdicts) and reviewed
-            or not verdicts and re.search(r"(?im)^\s*No (?:blocking|material) findings[.!]?\s*$", legacy_text)
-        )
+        passing_review = _markdown.passing_review(legacy_review, allow_legacy=True)
     else:
         passing_review = isinstance(status, str) and status in {"pass", "fixed"}
     verification = record.get("verification")
@@ -158,6 +199,18 @@ def completion_evidence_findings(planning_dir: Path, section: str, record: Any) 
         findings.append(_quality.finding("high", "missing-review-status", f"{section} lacks a passing review verdict.", path))
     if not verified:
         findings.append(_quality.finding("high", "missing-verification", f"{section} has no verification evidence recorded.", path))
+    if "input_snapshot" in record:
+        snapshot = record["input_snapshot"]
+        from .mutable_inputs import contract_inputs
+
+        try:
+            current, _ = contract_inputs(planning_dir, section)
+            fresh = snapshot.get("version") == 1 and snapshot["contract"] == current
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            fresh = False
+        if not fresh:
+            findings.append(_quality.finding("high", "stale-completion-contract",
+                                             f"{section} contract changed after verification; review and record it again.", path))
     return findings
 
 

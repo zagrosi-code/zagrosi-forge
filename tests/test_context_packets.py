@@ -337,3 +337,90 @@ def test_contract_tables_preserve_inherited_ownership_and_cross_references(forge
     text = f"## {heading}\n\n{table}\n"
     selected = forge.context.selected_context_blocks(text, {"REQ-001"})
     assert any(block == table for _, block in selected)
+
+
+def test_explicit_decision_and_risk_links_include_complete_cyclic_contracts(forge, plan):
+    section = plan / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\nUse [DEC-004](../codex-plan.md#dec-004-rounding).\n")
+    (plan / "codex-plan.md").write_text(
+        "# Plan\n\n## DEC-004 Rounding\n\nDiscount aggregate subtotal before tax.\n\n"
+        "### Examples\n\n" + "A required example.\n" * 30
+        + "\nApply [RISK-002](risks.md#risk-002).\n\n## Other decision\n\nUnrelated billing behavior.\n"
+    )
+    (plan / "risks.md").write_text(
+        "## RISK-002\n\nNever round per item. See [decision](codex-plan.md#dec-004-rounding).\n"
+    )
+    result = forge.context.build_context(plan, SECTION, 2000, line_limit=1)
+    assert result["success"]
+    assert result["content"].count("Discount aggregate subtotal before tax.") == 1
+    assert result["content"].count("A required example.") == 30
+    assert result["content"].count("Never round per item.") == 1
+    assert "Unrelated billing behavior." not in result["content"]
+
+
+@pytest.mark.parametrize("link", ["../missing.md#decision", "../codex-plan.md#missing-anchor"])
+def test_broken_explicit_contract_link_fails_without_writing_packet(forge, plan, capsys, link):
+    section = plan / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + f"\nUse [decision]({link}).\n")
+    code = forge.entrypoint.main(["implementation-packet", "--planning-dir", str(plan), "--section", SECTION])
+    result = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert not result["success"]
+    assert "linked" in result["error"]
+    assert not (plan / ".forge" / "packets").exists()
+
+
+def test_linked_contract_over_budget_is_not_omitted(forge, plan):
+    section = plan / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\nUse [decision](../decisions.md#decision).\n")
+    (plan / "decisions.md").write_text("## Decision\n\n" + "required " * 500)
+    result = forge.context.build_context(plan, SECTION, 200)
+    assert not result["success"]
+    assert result["required_words"] > result["max_words"]
+    assert "content" not in result
+
+
+def test_self_anchor_keeps_section_once_and_fenced_links_are_literal(forge, plan):
+    section = plan / "sections" / f"{SECTION}.md"
+    text = section.read_text() + (
+        "\n## Decision\n\nUse [local](#decision).\n"
+        "`[inline example](missing.md)`\n\n```markdown\n[example](also-missing.md)\n```\n"
+        "External [documentation](https://example.com/docs.md#example).\n"
+    )
+    section.write_text(text)
+    result = forge.context.build_context(plan, SECTION, 2000)
+    assert result["success"]
+    assert result["content"].count("Use [local](#decision).") == 1
+    assert text.rstrip() in result["content"]
+
+
+def test_whole_file_link_and_nested_anchor_are_merged(forge, plan):
+    section = plan / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\nRead [all](../decisions.md) and [detail](../decisions.md#detail).\n")
+    (plan / "decisions.md").write_text("# Decisions\n\nRoot contract.\n\n## Detail\n\nNested contract.\n")
+    result = forge.context.build_context(plan, SECTION, 2000)
+    assert result["success"]
+    assert result["content"].count("Root contract.") == 1
+    assert result["content"].count("Nested contract.") == 1
+    assert "omitted_sources" not in result
+
+
+def test_link_resolution_is_bounded_and_rejects_directory_escape(forge, plan):
+    section = plan / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\n[escape](../../outside.md#contract)\n")
+    assert "leaves the planning directory" in forge.context.build_context(plan, SECTION, 2000)["error"]
+    section.write_text("REQ-001: [start](../chain.md#contract-0)\n")
+    (plan / "chain.md").write_text("\n".join(
+        f"## Contract {number}\n\n[next](#contract-{number + 1})\n" for number in range(66)
+    ))
+    assert "reference limit" in forge.context.build_context(plan, SECTION, 2000)["error"]
+
+
+def test_inline_code_link_label_preserves_required_contract(forge, plan):
+    section = plan / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\nUse [`DEC-001`](../rounding.md#decision).\n"
+                       "`[literal example](missing.md)`\n")
+    (plan / "rounding.md").write_text("## Decision\n\nAlways round aggregate tax down.\n")
+    result = forge.context.build_context(plan, SECTION, 2000)
+    assert result["success"]
+    assert "Always round aggregate tax down." in result["content"]

@@ -13,7 +13,7 @@ def modules():
     root = Path(__file__).resolve().parents[1]
     from runtime_support import load_entrypoint
     package = load_entrypoint(root / "scripts/zagrosi_skills.py").load_runtime()
-    return SimpleNamespace(**{name: importlib.import_module(f"{package.__name__}.{name}") for name in ("markdown", "artifacts", "scoring", "validation", "session")})
+    return SimpleNamespace(**{name: importlib.import_module(f"{package.__name__}.{name}") for name in ("markdown", "artifacts", "scoring", "validation", "quality")})
 
 
 INSPECTION = (
@@ -76,14 +76,10 @@ def test_recorded_inspection_passes_readiness_and_tdd_at_every_depth(modules, tm
     findings, readiness = modules.scoring.implementation_readiness_analysis(planning, 12)
     assert not findings
     assert readiness["sections"][0]["files"] == ["docs/guide.md"]
-    args = SimpleNamespace(planning_dir=str(planning), depth=None, profile="solo", strict=True, export=None, export_format="jsonl")
-    captured = {}
-    token = modules.session._QUALITY_CAPTURE.set(captured)
-    try:
-        modules.validation.lint_plan(args)
-    finally:
-        modules.session._QUALITY_CAPTURE.reset(token)
-    assert captured["success"], captured
+    findings, extras = modules.validation.plan_analysis(planning)
+    payload = modules.quality.quality_payload("plan", findings, extras, strict=True)
+    assert payload["success"], payload
+
 
 
 @pytest.mark.parametrize("plan,expected", [(None, "write the canonical implementation plan"), (Path("section.md"), "review plan and record the verdict")])

@@ -87,7 +87,7 @@ def test_status_prioritizes_pending_verification_retry(tmp_path):
     state.write_text(json.dumps({"completed_sections": {}, "pending_sections": {SECTION: {"failed_postflight": {"success": False}}}}))
     payload = run_cmd("status", "--path", str(planning))
     assert payload["pending_sections"] == [SECTION]
-    assert payload["next_action"] == f"resolve pending verification and retry recording {SECTION}"
+    assert payload["next_action"] == f"resolve pending verification and retry recording {SECTION} with --flight strict"
 
 
 def test_status_accepts_mutable_implementation_state_path(tmp_path):

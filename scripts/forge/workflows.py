@@ -208,6 +208,19 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
         from . import detached_setup as _detached_setup
 
         return _detached_setup.detached_implement_setup(args)
+    return _mutable_lifecycle(args, _mutable_implement_setup)
+
+
+def _mutable_lifecycle(args: argparse.Namespace, operation) -> int:
+    planning_dir = _storage.resolve_path(args.sections_dir).parent
+    try:
+        with _storage.file_lock(planning_dir / "implementation" / ".mutable-state"):
+            return operation(args)
+    except (OSError, ValueError) as exc:
+        return _output.print_json({"success": False, "error": str(exc), "planning_dir": str(planning_dir)}, 1)
+
+
+def _mutable_implement_setup(args: argparse.Namespace) -> int:
     sections_dir = _storage.resolve_path(args.sections_dir)
     target_dir = _storage.resolve_path(args.target_dir or os.getcwd())
     if not sections_dir.exists() or not sections_dir.is_dir():
@@ -251,9 +264,9 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
     }
     _storage.write_json(config_path, config)
 
-    completed = _state.completed_sections(planning_dir, state)
-    dependencies = _sections.dependency_graph(planning_dir, progress)
-    readiness = _state.mutable_readiness_snapshot(progress, dependencies, completed)
+    readiness = _state.mutable_admitted_readiness(planning_dir, state=state, profile=args.profile,
+                                                progress=progress, admission=artifact_payload)
+    readiness.pop("admission")
     repo = _storage.git_info(target_dir)
     warnings: list[str] = []
     if repo.get("is_protected_branch"):
@@ -285,6 +298,11 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
         )
         payload["preflight"] = preflight
         payload["success"] = bool(payload["success"] and preflight.get("success"))
+    if payload["success"] and readiness["next_section"]:
+        from .resume import section_entry
+
+        entry = section_entry(planning_dir, readiness["next_section"], target_dir=target_dir)
+        payload.update(entry)
     return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
@@ -293,6 +311,10 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
         from . import detached_record as _detached_record
 
         return _detached_record.detached_implement_record_section(args)
+    return _mutable_lifecycle(args, _mutable_record_section)
+
+
+def _mutable_record_section(args: argparse.Namespace) -> int:
     sections_dir = _storage.resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
     artifact_payload = _validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
@@ -354,6 +376,11 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
         "evidence_rows": _markdown.normalize_repeated(getattr(args, "evidence_rows", [])),
         "verification": verification,
         "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
+        "input_snapshot": _state.contract_snapshot(
+            planning_dir, args.section,
+            target_dir=getattr(args, "target_dir", None),
+            files=_markdown.normalize_repeated(args.files_changed + args.test_files),
+        ),
     }
     findings = _state.completion_evidence_findings(planning_dir, args.section, section_record)
     if findings:

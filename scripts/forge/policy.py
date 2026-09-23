@@ -639,6 +639,11 @@ PLUGIN_CACHE_IGNORE_DIRS = {
     ".venv",
     "__pycache__",
     "planning",
+    "node_modules",
+    "dist",
+    "build",
+    ".release-check",
+    "reports",
 }
 
 

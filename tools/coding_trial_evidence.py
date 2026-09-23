@@ -23,8 +23,8 @@ def plugin_files(root: Path) -> dict[str, str]:
 
 
 def evaluator_files(root: Path, oracle: Path, cases: Path) -> dict[str, str]:
-    paths = [oracle, cases, *(root / "tools" / name for name in
-                             ("coding_trials.py", "coding_trial_process.py", "coding_trial_evidence.py"))]
+    paths = [oracle, cases, *sorted((cases.parent / "resume-plan").rglob("*.md")), *(root / "tools" / name for name in
+                             ("coding_trials.py", "coding_trial_process.py", "coding_trial_evidence.py", "coding_trial_resume.py"))]
     return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in paths if p.is_file()}
 

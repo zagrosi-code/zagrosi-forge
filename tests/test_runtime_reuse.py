@@ -112,7 +112,7 @@ def test_postflight_reuses_full_findings_with_exact_score_equivalence(tmp_path, 
         section.write_text("# Section\n\n" + "\n".join(f"REQ-{index:03d}: missing implementation." for index in range(1,30)))
     calls = Counter()
     for module, name in (
-        (forge.validation, "lint_plan"), (forge.validation, "lint_sections"),
+        (forge.validation, "plan_analysis"), (forge.validation, "section_analysis"),
         (forge.traceability, "traceability_analysis"), (forge.scoring, "implementation_readiness_analysis"),
     ):
         handler = getattr(module, name)

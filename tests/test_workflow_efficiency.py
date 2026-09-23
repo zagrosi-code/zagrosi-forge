@@ -116,28 +116,23 @@ def test_score_command_and_row_share_exact_analysis(tmp_path, capsys, depth, pro
     assert row["findings"] == payload["finding_count"]
 
 
-def test_score_capture_is_thread_local_and_restored_after_errors(tmp_path):
+def test_score_uses_direct_analysis_without_emitting_output(tmp_path, monkeypatch, capsys):
     forge = load_zagrosi_module()
     barrier = threading.Barrier(2)
-    original_emit = forge.quality.emit_payload
 
-    def handler(args):
+    def analysis(_path, depth):
         barrier.wait(timeout=2)
-        return forge.quality.emit_quality("test", [forge.quality.finding("low", args.depth, "captured")], args)
+        return [forge.quality.finding("low", depth, "analyzed")], {"depth_mode": depth}
 
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Scoring invoked a CLI output handler")
+
+    monkeypatch.setattr(forge.validation, "plan_analysis", analysis)
+    monkeypatch.setattr(forge.quality, "emit_payload", forbidden)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda depth: forge.scoring.lint_findings_for_score(handler, tmp_path, depth), ["lean", "deep"]))
+        results = list(pool.map(lambda depth: forge.scoring.plan_findings_for_score(tmp_path, depth), ["lean", "deep"]))
     assert [findings[0].code for findings, _ in results] == ["lean", "deep"]
-    assert forge.quality.emit_payload is original_emit
-    assert forge.session._QUALITY_CAPTURE.get() is None
-
-    def broken(_args):
-        raise RuntimeError("failed analysis")
-
-    with pytest.raises(RuntimeError, match="failed analysis"):
-        forge.scoring.lint_findings_for_score(broken, tmp_path, "lean")
-    with pytest.raises(KeyError, match="findings"):
-        forge.scoring.lint_findings_for_score(lambda _args: 0, tmp_path, "lean")
+    assert capsys.readouterr().out == ""
     assert forge.session._QUALITY_CAPTURE.get() is None
 
 

@@ -82,11 +82,13 @@ def local_gate_available(name: str, command: list[str]) -> bool:
     return True
 
 
-def run_local_gate(command: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+def run_local_gate(command: list[str], timeout_seconds: int) -> subprocess.CompletedProcess:
     context = _session._CLI_CONTEXT.get()
     assert context is not None
     stdout, stderr = io.StringIO(), io.StringIO()
     capture = _session._GATE_STREAMS.set((stdout, stderr))
+    payload: dict[str, Any] = {}
+    quality_capture = _session._QUALITY_CAPTURE.set(payload)
     previous_handler = signal.getsignal(signal.SIGALRM)
 
     def expire(_signum: int, _frame: Any) -> None:
@@ -105,11 +107,16 @@ def run_local_gate(command: list[str], timeout_seconds: int) -> subprocess.Compl
         except Exception as exc:
             returncode = 1
             stderr.write(f"{type(exc).__name__}: {exc}\n")
-        return subprocess.CompletedProcess(command, returncode, stdout.getvalue(), stderr.getvalue())
+        output = stdout.getvalue()
+        # Quality handlers return their payload directly; other CLI output stays bounded
+        # by the existing capture/error path. Mixing both outputs is invalid gate JSON.
+        output = (json.dumps(payload) + output if output else payload) if payload else output
+        return subprocess.CompletedProcess(command, returncode, output, stderr.getvalue())
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
         _session._GATE_STREAMS.reset(capture)
+        _session._QUALITY_CAPTURE.reset(quality_capture)
 
 
 def run_internal_gate(
@@ -149,7 +156,7 @@ def run_internal_gate(
     payload: dict[str, Any]
     valid_json_object = False
     try:
-        decoded = json.loads(result.stdout) if result.stdout.strip() else None
+        decoded = result.stdout if isinstance(result.stdout, dict) else (json.loads(result.stdout) if result.stdout.strip() else None)
     except json.JSONDecodeError:
         decoded = None
     if isinstance(decoded, dict):

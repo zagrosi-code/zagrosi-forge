@@ -135,15 +135,17 @@ def write_findings_export(payload: dict[str, Any], output_path: Path, export_for
 
 
 def emit_payload(payload: dict[str, Any], args: argparse.Namespace, exit_code: int | None = None) -> int:
+    if exit_code is None:
+        exit_code = 0 if payload.get("success", False) else 1
     captured = _session._QUALITY_CAPTURE.get()
     if captured is not None:
+        if captured:
+            raise ValueError("Gate emitted more than one quality payload")
         captured.update(payload)
-        return 0
+        return exit_code
     export_path = getattr(args, "export", None)
     if export_path:
         write_findings_export(payload, _storage.resolve_path(export_path), getattr(args, "export_format", "jsonl"))
-    if exit_code is None:
-        exit_code = 0 if payload.get("success", False) else 1
     return _output.print_json(payload, exit_code)
 
 

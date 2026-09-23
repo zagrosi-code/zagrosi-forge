@@ -9,7 +9,6 @@ from . import exact_handoff_cli_shape
 import argparse
 import sys
 
-from . import detached_contract as _detached_contract
 from . import output as _output
 from . import policy as _policy
 from . import session as _session
@@ -228,7 +227,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument(
         "--section",
         required=True,
-        choices=tuple(_detached_contract.HANDOFF_SECTION_CONTRACTS),
+        choices=("S26", "S28"),  # Matches the entrypoint's frozen wire selectors.
         action=SingleHandoffSectionAction,
     )
     p.set_defaults(func=invoke_command, handler=('handoff', 'detached_implement_evidence_handoff'))

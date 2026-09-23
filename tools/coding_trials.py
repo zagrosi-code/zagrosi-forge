@@ -20,12 +20,22 @@ from coding_trial_evidence import (
     cleanup_verdict, evaluator_files, files, plugin_files, plugin_provenance, review_template, semantic_files,
 )
 from coding_trial_process import execute
+from coding_trial_resume import prepare_resume, resume_verdict
 
 PACK = ROOT / "examples/evals/coding"
 CASES = json.loads((PACK / "cases.json").read_text())
 
 
-def code_metrics(workspace: Path) -> dict:
+def test_command(case: dict) -> list[str]:
+    return ["node", "--test", "tests/ledger.test.js"] if case.get("runtime") == "node" else [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"]
+
+
+def code_metrics(workspace: Path, runtime: str = "python") -> dict:
+    if runtime == "node":
+        paths = sorted(path for path in (workspace / "src").rglob("*") if path.suffix in {".js", ".cjs", ".mjs"})
+        return {"source_lines": sum(len(path.read_text().splitlines()) for path in paths), "modules": len(paths),
+                "largest_function_lines": None, "branches": None, "repeated_loops": None,
+                "external_imports": None, "limits": "JavaScript complexity and dependency metrics are unmeasured."}
     paths = sorted((workspace / "src").rglob("*.py"))
     functions, statements, imports, lines, branches = [], Counter(), set(), 0, 0
     for path in paths:
@@ -55,28 +65,23 @@ def prepare(trial: Path, case: str, depth: str | None = None) -> dict:
     fixture = PACK / CASES[case].get("fixture", "fixture")
     oracle = ROOT / CASES[case].get("oracle", "tools/coding_trial_checks.py")
     shutil.copytree(fixture, workspace, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    if case == "resume":
-        path = workspace / "src/ledger.py"
-        text = path.read_text().replace('    if action == "total":',
-            '    if action == "summary":\n        return json.loads(invoice("json", items, customer))\n    if action == "total":', 1)
-        path.write_text(text)
-        (workspace / ".planning").mkdir()
-        (workspace / ".planning/progress.md").write_text(
-            "# Interrupted summary feature\n\nExisting actions pass. Summary fields are implemented except item_count.\n"
-            "Remaining: quantity aggregation, regression coverage, review, final verification.\n")
-        with (workspace / "tests/test_ledger.py").open("a") as handle:
-            handle.write('\n    def test_summary_preserves_totals(self):\n        self.assertEqual(invoice("summary", [])["total"], 0)\n')
     selected = depth or CASES[case]["depth"]
+    tests = test_command(CASES[case])
+    checkpoint = prepare_resume(ROOT, workspace, selected, tests) if case == "resume" else None
+    displayed_command = "node --test tests/ledger.test.js" if CASES[case].get("runtime") == "node" else "python -m unittest discover -s tests"
+    protected = CASES[case].get("protected_paths", [])
     prompt = (f"Work only in {workspace}. Use Forge at {selected} depth.\n"
               f"Read {ROOT / 'skills/zagrosi-implement/references/engineering.md'} and the applicable Forge skills.\n\n"
               f"{CASES[case]['request']}\n\n"
               "Preserve public APIs. Standard library only. Keep .planning records compact.\n"
-              f"Set PYTHONPATH to src and run existing/added tests with `{sys.executable} -m unittest discover -s tests`.\n"
+              f"Run existing/added tests with `{displayed_command}`. Python trials require PYTHONPATH=src.\n"
+              + (f"Leave these unrelated files unchanged: {', '.join(protected)}.\n" if protected else "") +
               "Report tests, cleanup, remaining issues, and observed usage if available.\n")
     (trial / "prompt.md").write_text(prompt)
     record = {"case": case, "depth": selected, "baseline_files": files(workspace),
               "baseline_semantics": semantic_files(workspace), "provenance_version": 2,
-              "baseline_metrics": code_metrics(workspace), "oracle_sha256": hashlib.sha256(
+              "baseline_metrics": code_metrics(workspace, CASES[case].get("runtime", "python")),
+              "prepared_checkpoint": checkpoint, "oracle_sha256": hashlib.sha256(
                   oracle.read_bytes()).hexdigest(),
               "fixture_sha256": files(fixture),
               "evaluator_sha256": evaluator_files(ROOT, oracle, PACK / "cases.json"),
@@ -102,19 +107,23 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
     workspace = trial / "workspace"
     oracle_path = ROOT / CASES[record["case"]].get("oracle", "tools/coding_trial_checks.py")
     fixture = PACK / CASES[record["case"]].get("fixture", "fixture")
-    oracle = execute([sys.executable, "-B", str(oracle_path), str(workspace), record["case"]], workspace)
-    tests = execute([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"], workspace)
+    case = CASES[record["case"]]
+    oracle_runner = ["node"] if case.get("runtime") == "node" else [sys.executable, "-B"]
+    oracle = execute([*oracle_runner, str(oracle_path), str(workspace), record["case"]], workspace)
+    tests = execute(test_command(case), workspace)
     workflow = workflow_verdict(workspace, record["depth"])
+    resume = resume_verdict(record, workspace)
     actual = files(workspace)
     changed = sorted(name for name in actual.keys() | record["baseline_files"].keys()
                      if actual.get(name) != record["baseline_files"].get(name))
-    outside_scope = [name for name in changed if not name.startswith(("src/", "tests/", ".planning/"))]
+    protected_changes = sorted(set(changed).intersection(case.get("protected_paths", [])))
+    outside_scope = [name for name in changed if name in protected_changes or not name.startswith(("src/", "tests/", ".planning/"))]
     try:
         oracle_complete = json.loads(oracle.get("stdout", "")) == {"case": record["case"], "assertions": CASES[record["case"]]["assertions"]}
     except json.JSONDecodeError:
         oracle_complete = False
     try:
-        metrics = code_metrics(workspace)
+        metrics = code_metrics(workspace, case.get("runtime", "python"))
     except (SyntaxError, UnicodeError) as exc:
         metrics = {"error": str(exc)}
     reported = json.loads(telemetry.read_text()) if telemetry else None
@@ -127,16 +136,17 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
                and not evaluator_changed}
     cleanup = cleanup_verdict(record, workspace, CASES[record["case"]].get("cleanup_required", False), review)
     result = {"success": behavior["success"] and workflow["success"] and cleanup["success"] is not False
+              and resume["success"] is not False
               and provenance["success"] and not outside_scope and "error" not in metrics
               and not metrics.get("external_imports") and (record.get("runner") or {}).get("returncode", 0) == 0,
-              "case": record["case"], "depth": record["depth"], "changed_files": changed, "outside_scope": outside_scope,
-              "evaluator_changed": evaluator_changed,
-              "behavior": behavior, "workflow": workflow, "cleanup": cleanup,
+              "case": record["case"], "depth": record["depth"], "runtime": case.get("runtime", "python"), "changed_files": changed, "outside_scope": outside_scope,
+              "evaluator_changed": evaluator_changed, "protected_changes": protected_changes,
+              "behavior": behavior, "workflow": workflow, "cleanup": cleanup, "resume": resume,
               "plugin_provenance": provenance,
               "oracle_complete": oracle_complete,
               "before": record["baseline_metrics"], "after": metrics, "oracle": oracle, "tests": tests,
               "runner": record.get("runner"), "reported_telemetry": reported,
-              "limits": "Structural metrics and AST changes are review aids, not proof of useful cleanup. Independent review is an external attestation, not authenticated identity. Trials are not a security sandbox. POSIX timeout cleanup covers the process group; detached sessions may escape. Windows tree cleanup uses taskkill and is reported if unproven. Missing model usage is unknown. Resume uses a prepared interruption checkpoint."}
+              "limits": "Structural metrics and AST changes are review aids, not proof of useful cleanup. Independent review is an external attestation, not authenticated identity. Trials are not a security sandbox. POSIX timeout cleanup covers the process group; detached sessions may escape. Windows tree cleanup uses taskkill and is reported if unproven. Missing model usage is unknown. Resume starts from admitted planning, setup and an actual recorded failing test; it does not simulate killing an agent."}
     (trial / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
 

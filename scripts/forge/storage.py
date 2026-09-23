@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 import json
+import errno
 import os
+import stat
 import subprocess
+import tempfile
 import time
 
 from . import CLI_PATH
@@ -30,14 +34,34 @@ def read_text(path: Path) -> str:
     return cached[1]
 
 
-def file_signature(path: Path) -> tuple[int, int, int, int, int]:
-    current = path.stat()
-    return (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+def file_signature(path: Path, current=None) -> tuple:
+    current = current or path.stat()
+    signature = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+    if os.name == "nt" and stat.S_ISREG(current.st_mode):
+        # Windows ctime is creation time; restored mtime cannot establish freshness.
+        import hashlib
+
+        with path.open("rb") as handle:
+            return (*signature, hashlib.file_digest(handle, "sha256").digest())
+    return signature
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Publish complete bytes; a failed write leaves the previous state intact."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if path.exists():
+            temporary.chmod(path.stat().st_mode & 0o777)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -51,33 +75,52 @@ def absolute_path_no_follow(raw: str | os.PathLike[str]) -> Path:
     return Path(os.path.abspath(os.fspath(expanded)))
 
 
-def update_json_locked(path: Path, default_factory, mutator, timeout_seconds: float = 5.0) -> dict[str, Any]:
+@contextmanager
+def file_lock(path: Path, timeout_seconds: float = 5.0):
+    """Lock a stable sibling inode; the OS releases it when its owner exits."""
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(f"{path.name}.lock")
-    start = time.monotonic()
-    while True:
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    if os.name == "nt":
+        import msvcrt
+        def acquire(handle):
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        def release(handle):
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        def acquire(handle):
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        def release(handle):
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    with lock_path.open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = time.monotonic() + timeout_seconds
+        while True:
             try:
-                os.write(fd, f"{os.getpid()} {now_iso()}\n".encode("utf-8"))
-            finally:
-                os.close(fd)
-            break
-        except FileExistsError:
-            if time.monotonic() - start >= timeout_seconds:
-                raise TimeoutError(f"Timed out waiting for progress lock: {lock_path}")
-            time.sleep(0.01)
+                acquire(handle)
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Timed out waiting for state lock: {lock_path}") from exc
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            release(handle)
 
-    try:
+
+def update_json_locked(path: Path, default_factory, mutator, timeout_seconds: float = 5.0) -> dict[str, Any]:
+    with file_lock(path, timeout_seconds):
         state = load_json(path) if path.exists() else default_factory()
         mutator(state)
         write_json(path, state)
         return state
-    finally:
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def resolve_path(raw: str) -> Path:
