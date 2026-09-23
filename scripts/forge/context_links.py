@@ -39,11 +39,19 @@ def local_links(text: str) -> list[str]:
             if position < skip:
                 continue
             if token[0] == "<!--":
+                escape_start = position
+                while escape_start and text[escape_start - 1] == "\\":
+                    escape_start -= 1
+                if (position - escape_start) % 2:
+                    continue
                 close = text.find("-->", position + 4)
                 skip = len(text) if close < 0 else close + 3
             elif token[0].startswith("`"):
                 close = re.compile(rf"(?<!`){token[0]}(?!`)").search(text, start + token.end())
-                if close:
+                if close and not any(
+                    _markdown.markdown_fence_opening(following)
+                    for following in text[offset:close.end()].splitlines()
+                ):
                     skip = close.end()
             else:
                 link = LINK.match(text, position)

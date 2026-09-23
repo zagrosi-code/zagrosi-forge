@@ -117,5 +117,6 @@ establish local delivery separately from the implementation evidence above.
 found that hidden HTML-comment links could block packets and implementation setup.
 Seven regression cases reproduced the problem. Link discovery now processes code
 and comments in source order, preserving visible links, backtick labels and
-multiline destinations without following commented references. Focused context,
-resume, state, parsing and completion checks: 121 passed.
+multiline destinations without following commented references. Escaped comment
+openers retain visible contracts; inline code cannot consume fenced examples.
+Focused context, resume, state, parsing and completion checks: 128 passed.

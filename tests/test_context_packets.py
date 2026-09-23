@@ -402,7 +402,13 @@ def test_self_anchor_keeps_section_once_and_fenced_links_are_literal(forge, plan
     ("`<!--` [live](live.md)", ["live.md"]),
     ("`literal\n<!-- example\n` [live](\nlive.md\n)", ["live.md"]),
     ("```markdown\n<!-- [example](missing.md)\n```\n[live](live.md)", ["live.md"]),
+    ("Use ``` for a fenced example.\n\n```markdown\n[example](missing.md)\n```\n[live](live.md)", ["live.md"]),
+    ("Use ` for inline code.\n\n```markdown\n` [example](missing.md)\n```\n[live](live.md)", ["live.md"]),
+    ("Use ` for inline code.\n\n~~~markdown\n` [example](missing.md)\n~~~\n[live](live.md)", ["live.md"]),
     ("<!--\n[hidden](missing.md)", []),
+    (r"\<!-- [live](live.md) -->", ["live.md"]),
+    (r"\\<!-- [hidden](missing.md) --> [live](live.md)", ["live.md"]),
+    (r"\\\<!-- [live](live.md) -->", ["live.md"]),
 ])
 def test_link_scanning_respects_comment_and_code_boundaries(forge, body, expected):
     assert forge.context_links.local_links(body) == expected
