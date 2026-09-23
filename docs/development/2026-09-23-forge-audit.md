@@ -110,3 +110,13 @@ and three Windows-signature regressions, including directories/FIFOs never opene
 The compatibility CI selection includes these portable regressions. Pull request
 and exact merged-commit checks establish remote validation; installed-cache checks
 establish local delivery separately from the implementation evidence above.
+
+### PR #11 comment-link correction
+
+[Post-merge review](https://github.com/zagrosi-code/zagrosi-forge/pull/11#discussion_r4083283389)
+found that hidden HTML-comment links could block packets and implementation setup.
+Seven regression cases reproduced the problem. Link discovery now processes code
+and comments in source order, preserving visible links, backtick labels and
+multiline destinations without following commented references. Escaped comment
+openers retain visible contracts; inline code cannot consume fenced examples.
+Focused context, resume, state, parsing and completion checks: 128 passed.

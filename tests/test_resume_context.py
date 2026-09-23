@@ -143,6 +143,33 @@ def test_mutable_setup_exposes_selected_packet_and_resume(forge, workspace, caps
     assert result["next_action"] == f"review {SECTION}"
 
 
+def test_mutable_setup_ignores_commented_contract_links(forge, workspace, capsys):
+    root, planning = workspace
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\n<!-- [obsolete](../missing.md) -->\n")
+    code, result = invoke(forge, capsys, "implement-setup", "--sections-dir", str(planning / "sections"),
+                          "--target-dir", str(root), "--flight", "off")
+    assert code == 0, result
+    assert result["packet"]["success"]
+    save_progress(forge, capsys, planning)
+
+
+def test_escaped_comment_opener_keeps_tracked_contract(forge, workspace, capsys):
+    _, planning = workspace
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\n\\<!-- [decision](../decisions.md) -->\n")
+    decision = planning / "decisions.md"
+    decision.write_text("# Decision\n\nPreserve Unicode exactly.\n")
+    save_progress(forge, capsys, planning)
+    _, result = invoke(forge, capsys, "next-section", "--planning-dir", str(planning))
+    assert "Preserve Unicode exactly." in result["packet"]["content"]
+    assert result["resume"]["evidence_current"]
+    decision.write_text("# Decision\n\nReject non-ASCII input.\n")
+    _, result = invoke(forge, capsys, "next-section", "--planning-dir", str(planning))
+    assert not result["resume"]["evidence_current"]
+    assert result["resume"]["changed_inputs"]
+
+
 @pytest.mark.parametrize("saved_progress", [False, True])
 def test_pending_postflight_overrides_verified_stage_at_every_entry(forge, workspace, capsys, saved_progress):
     root, planning = workspace
