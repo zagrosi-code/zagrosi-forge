@@ -52,7 +52,7 @@ TEST_MANIFEST = {
     "test_interview.py": "8e32056374b22a4247f916c3da205ceebd084ce66da0d79a2edebf4f0df4198b",
     "test_mutable_state.py": "d6b1c1e74021625347517cd80af787d4317643e87b4d2dd2a4c70bdfce1dae02",
     "test_native_process.py": "5757b225cc4aac67c81fc61b0e5f498d3ab2364c9ef0c76d7a0760bbfc84c07f",
-    "test_parsed_plan_reuse.py": "a2d1d536651d4031611e9ba293051f565506e75fd429e37e019e6b741b2e427f",
+    "test_parsed_plan_reuse.py": "eb023236aa41d1d6d2308ad0c1d371701b574ad7e0f8470558fd1407c73117b6",
     "test_patch_scope.py": "82bd87e4c55bc14b72966437b3b1c223c976157b9048262f01663b6a8d0161f6",
     "test_pinner_reads.py": "ebaf66728c0dabbf4c47d0bb67e8d634b04cf8542bf0fead02227973690cd32b",
     "test_plan_modes.py": "d01941dac0c93fb6a96f26fa594ccf4055854151ad9c2fc156bcae931e95e33f",

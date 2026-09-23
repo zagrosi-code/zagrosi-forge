@@ -56,10 +56,11 @@ def cached_analysis(name, key, analyze):
 
 def _path_signature(path):
     """Include link identity and resolution, as well as target file contents."""
+    from . import storage
+
     try:
         target, entry = path.stat(), path.lstat()
-        return (str(path.resolve()), target.st_dev, target.st_ino, target.st_size,
-                target.st_mtime_ns, target.st_ctime_ns, entry.st_mode,
+        return (str(path.resolve()), *storage.file_signature(path, target), entry.st_mode,
                 entry.st_ino, entry.st_mtime_ns, entry.st_ctime_ns)
     except (OSError, RuntimeError):
         return None

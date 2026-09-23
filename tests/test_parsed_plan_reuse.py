@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections import Counter
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -89,6 +91,60 @@ def test_compact_cache_invalidates_all_selected_inputs(tmp_path, monkeypatch, ca
     monkeypatch.setattr(forge.status, "status", status)
     assert forge.entrypoint.main(["status", "--path", str(planning)]) == 0
     assert json.loads(capsys.readouterr().out)["success"]
+
+
+def test_windows_caches_detect_content_edits_with_restored_timestamps(tmp_path, monkeypatch):
+    forge = load_zagrosi_module()
+    planning = make_plan(tmp_path / "plan")
+    section = planning / "sections" / f"{SECTION}.md"
+    original_stat = Path.stat
+
+    def windows_stat(path, *, follow_symlinks=True):
+        value = original_stat(path, follow_symlinks=follow_symlinks)
+        attributes = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+        # Python 3.12 Windows ctime is creation time, unchanged by an in-place edit.
+        return SimpleNamespace(**(attributes | {"st_ctime": 0, "st_ctime_ns": 0}))
+
+    monkeypatch.setattr(Path, "stat", windows_stat)
+    monkeypatch.setattr(forge.storage, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+    original = forge.artifacts._compact_plan_descriptor
+    calls = []
+
+    def counted(*args):
+        calls.append(True)
+        return original(*args)
+
+    monkeypatch.setattr(forge.artifacts, "_compact_plan_descriptor", counted)
+    token = forge.session._CLI_CONTEXT.set({"texts": {}, "owned_paths": {}})
+    try:
+        before = forge.artifacts.compact_plan_descriptor(planning)
+        assert forge.artifacts.compact_plan_descriptor(planning) == before
+        assert len(calls) == 1
+        previous = section.stat()
+        section.write_text(section.read_text().replace("Verdict: pass", "Verdict: fail"))
+        os.utime(section, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+        after = forge.artifacts.compact_plan_descriptor(planning)
+        assert "Verdict: fail" in after["headings"]["review"]
+        assert "Verdict: fail" in forge.storage.read_text(section)
+        assert forge.artifacts.compact_plan_descriptor(planning) == after
+        assert len(calls) == 2
+    finally:
+        forge.session._CLI_CONTEXT.reset(token)
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_windows_signature_never_opens_nonregular_paths(tmp_path, monkeypatch, kind):
+    forge = load_zagrosi_module()
+    path = tmp_path / kind
+    if kind == "directory":
+        path.mkdir()
+    elif hasattr(os, "mkfifo"):
+        os.mkfifo(path)
+    else:
+        pytest.skip("Named pipes require POSIX")
+    monkeypatch.setattr(forge.storage, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: pytest.fail("Opened a nonregular path"))
+    assert forge.storage.file_signature(path)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Symlink creation needs POSIX permissions")

@@ -86,9 +86,9 @@ Local raw evidence: `/private/tmp/forge-summary-real-20260923/`.
 This one Python feature trial does not establish outcomes for every task or
 language. Model/token telemetry was unavailable.
 
-## Final validation
+## Implementation validation
 
-Local macOS, Python 3.12.13 and Node 24.18.0:
+At implementation commit `095fc6c`, local macOS, Python 3.12.13 and Node 24.18.0:
 
 - Full suite: **911 passed, 1 skipped** in 167.09 seconds.
 - Runtime/test manifest check: passed.
@@ -99,6 +99,14 @@ Local macOS, Python 3.12.13 and Node 24.18.0:
 - Independent runtime, context, installer, adapter and trial review: no remaining
   material findings after the reproduced defects were corrected.
 
-The compatibility CI selection includes the new portable regressions. Remote CI,
-merge and installation into the active user cache are separate delivery steps;
-these results establish the local development state only.
+### Portability follow-up
+
+Delivery review reproduced stale cached review content under Windows creation-time
+`ctime` semantics after a same-length edit with restored modification time. Shared
+file signatures now stream a content digest for Windows regular files; POSIX
+stat-based reuse is unchanged. Focused checks passed: 58 reuse/performance tests
+and three Windows-signature regressions, including directories/FIFOs never opened.
+
+The compatibility CI selection includes these portable regressions. Pull request
+and exact merged-commit checks establish remote validation; installed-cache checks
+establish local delivery separately from the implementation evidence above.

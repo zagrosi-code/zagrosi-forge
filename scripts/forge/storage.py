@@ -9,6 +9,7 @@ from typing import Any
 import json
 import errno
 import os
+import stat
 import subprocess
 import tempfile
 import time
@@ -33,9 +34,16 @@ def read_text(path: Path) -> str:
     return cached[1]
 
 
-def file_signature(path: Path) -> tuple[int, int, int, int, int]:
-    current = path.stat()
-    return (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+def file_signature(path: Path, current=None) -> tuple:
+    current = current or path.stat()
+    signature = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+    if os.name == "nt" and stat.S_ISREG(current.st_mode):
+        # Windows ctime is creation time; restored mtime cannot establish freshness.
+        import hashlib
+
+        with path.open("rb") as handle:
+            return (*signature, hashlib.file_digest(handle, "sha256").digest())
+    return signature
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
