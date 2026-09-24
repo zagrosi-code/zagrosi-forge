@@ -122,7 +122,7 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
     protected_changes = sorted(set(changed).intersection(case.get("protected_paths", [])))
     ignored_planning = workspace / ".gitignore"
     safe_ignore = (ignored_planning.is_file() and not ignored_planning.is_symlink()
-                   and all(line.strip() in {".planning/", "/.planning/"}
+                   and all(line.strip().strip("/") in {".planning", "__pycache__", ".pytest_cache", "*.pyc"}
                            for line in ignored_planning.read_text().splitlines()
                            if line.strip() and not line.lstrip().startswith("#")))
     outside_scope = [name for name in changed if name in protected_changes

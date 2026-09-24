@@ -123,7 +123,8 @@ latency, context size and modeled reference loads. See the scoped
 usage require separate measurements.
 
 [Coding trials](examples/evals/coding/README.md) cover features, cleanup, deep
-planning, and resume. Separate verdicts check behavior, workflow completion, and
+planning, resume, multi-module CSV imports and native JavaScript. Repeated task
+matrices retain failures, timings and available usage. Separate verdicts check behavior, workflow completion, and
 independently reviewed cleanup. Unchanged fixtures cannot pass cleanup. Reviews
 and provenance bind the candidate, baseline, plugin runtime, and evaluator.
 
@@ -135,6 +136,10 @@ reverify sources, ownership, locks and immutable inputs with process isolation.
 Checks reuse unchanged parsing and score components within one command; analyses
 return structured results. Mutable writes are serialized and atomic. Privileged
 project policy loads through a source-bound adapter with frozen checks.
+
+Installed files come from `.codex-plugin/package-files.json`; undeclared local
+files stay out. Configuration updates preserve unrelated values, publish
+atomically under a lock, and preview only Forge-owned settings.
 
 ## Compatibility
 
@@ -162,11 +167,14 @@ assets/                    icon and README visuals
 ## Validate
 
 After runtime/test edits, run `python3 tools/update_runtime_manifest.py`.
+After adding/removing packaged files, stage the intended files and run
+`python3 tools/update_package_manifest.py`.
 CI checks bindings and the full suite on Linux/Python 3.12; focused checks cover
 Python 3.11, macOS and Windows.
 
 ```bash
 python3 tools/update_runtime_manifest.py --check
+python3 tools/update_package_manifest.py --check
 uv run --with pytest python -m pytest
 python3 scripts/zagrosi_skills.py doctor --plugin-root . --strict --pretty
 python3 scripts/zagrosi_skills.py release-check --plugin-root . --pretty

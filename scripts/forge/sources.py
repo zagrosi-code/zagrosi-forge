@@ -25,7 +25,7 @@ TEST_MANIFEST = {
     "test_benchmark_forge.py": "1436b31c5fc07824a903fb4a2f5bccf565059dbffa67151da7819b932c2383eb",
     "test_cache_publication.py": "cd079922997778da4c97c4a3c66964268e2deb08afdab160ff29ffd7d00f4448",
     "test_capabilities.py": "e579ca105e8dd4c08f476e407f4fe6ebaccd4df8ba7c2b2126ed4f5489e63b88",
-    "test_coding_trials.py": "c13823568d107d89c23afc8ab24e2b8dea8f077beb0f2ac3c21a1160b791ee7a",
+    "test_coding_trials.py": "a98905cb273a0d8a1db79d43fdd128149a272c717107c45094cbc6ea9ab2bddb",
     "test_compact_evaluations.py": "0b6c8c448711a03e7a6586fece8c99f18fd4ff902c6399af6977511f7346f9d1",
     "test_compact_helpers.py": "cd01296d153b48d035cc31b4a95b9ca5536f963abe8e9e8cdbdd5438e214d1a8",
     "test_compact_plan.py": "bcdc03a4016c7ba2aaee540c7fc1aa3338c3fd9dea2f825d5efa274e5e7780e9",

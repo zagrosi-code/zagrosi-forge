@@ -203,7 +203,7 @@ RUNTIME_MANIFEST = {
     "forge/sections.py": "f3875f1d448afc383bae5077b010d4914534238e2d354c5ff013ab083d07f32d",
     "forge/secure_io.py": "2c529854508436ff083d3a01c1ad97de4b5e5a532c1365b28a173c0cd0401108",
     "forge/session.py": "389b3b22ec27e1411340858aeda58dc67a605bda2853e85a7cbd7a683e93c8fa",
-    "forge/sources.py": "8fa0ee596dfec87c29ece2d99c513b0f8019cab38f81a449348d6515f2985c27",
+    "forge/sources.py": "e71e3b0c762acb5c07401cb37ad49164ee62d25ea228efa962dbac140b85feb6",
     "forge/state.py": "f6f0260c9479a94a3b7c06091f931a4ca1b1c33a6bea53b6da4db02f2b5d0c7b",
     "forge/status.py": "58ac9783533ca62d732235fe5107af715671319b18d5bec16eb010b0f3f3313f",
     "forge/storage.py": "f8a39c5e2d827b176a51713094845b070f300ba0864526b57ffefeafc989ff4e",

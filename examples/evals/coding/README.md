@@ -131,3 +131,5 @@ source/review edits, then regenerate the matrix report. Optional per-trial
 unknown. Timing summaries include unsuccessful timed attempts. External review
 time is excluded from runner time. Two repetitions give observations, not a
 statistically established speedup.
+
+Scope permits `.gitignore` entries only for local planning and generated Python/pytest caches; ignoring source or tests fails the trial.
