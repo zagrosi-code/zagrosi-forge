@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import shutil
+
+import pytest
 
 from forge_test_helpers import (
     PLUGIN_VERSION,
     ROOT,
     run_cmd,
+    run_script_raw,
 )
 
 
@@ -84,6 +89,54 @@ def test_update_check_reports_cache_and_config_status(tmp_path: Path) -> None:
     assert status["restart_required"] is True
     assert any("self-update" in item for item in status["next_steps"])
     assert not config.exists()
+
+
+@pytest.mark.parametrize("manifest_text", [
+    None,
+    "{",
+    "{}",
+    '[".codex-plugin/package-files.json", "../escape.txt"]',
+    '[".codex-plugin/package-files.json", {}]',
+    '[".codex-plugin/package-files.json", "missing.txt"]',
+], ids=["missing", "invalid-json", "wrong-shape", "unsafe-entry", "non-string-entry", "missing-member"])
+@pytest.mark.parametrize("existing_setup", [False, True], ids=["absent-setup", "existing-setup"])
+def test_update_check_invalid_package_returns_json_without_mutation(tmp_path, manifest_text, existing_setup):
+    plugin = tmp_path / "plugin"
+    manifest_name = ".codex-plugin/package-files.json"
+    for name in json.loads((ROOT / manifest_name).read_text()):
+        destination = plugin / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, destination)
+    manifest = plugin / manifest_name
+    if manifest_text is None:
+        manifest.unlink()
+    else:
+        manifest.write_text(manifest_text)
+
+    codex_dir = tmp_path / "codex"
+    cache = codex_dir / "plugins/cache/zagrosi/zagrosi-forge" / PLUGIN_VERSION
+    config = codex_dir / "config.toml"
+    if existing_setup:
+        cache.mkdir(parents=True)
+        (cache / "keep.txt").write_bytes(b"existing cached plugin\n")
+        config.write_bytes(b'# preserve config bytes\r\n[plugins."other@example"]\r\nenabled = true\r\n')
+
+    def snapshot():
+        return codex_dir.exists(), {
+            path.relative_to(codex_dir): path.read_bytes() if path.is_file() else None
+            for path in codex_dir.rglob("*")
+        }
+
+    before = snapshot()
+    result = run_script_raw(plugin / "scripts/zagrosi_skills.py", "update-check",
+                            "--plugin-root", str(plugin), "--config", str(config))
+    assert snapshot() == before
+    assert result.returncode == 1
+    assert "Traceback" not in result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["success"] is False
+    assert payload["operation"] == "update-check"
+    assert isinstance(payload["error"], str) and payload["error"]
 
 
 def test_self_update_materializes_cache_and_update_check_passes(tmp_path: Path) -> None:

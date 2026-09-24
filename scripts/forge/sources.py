@@ -51,7 +51,7 @@ TEST_MANIFEST = {
     "test_implementation_drift.py": "12f4cb0977c8557718015851ff1ae1a8bd7d305957d8b8e205942e453ba1fe7a",
     "test_implementation_phase_reuse.py": "e7c4f02b85a0e6cefa7b36b6584b337533b7a4e1efaef3b4ab42f57bc05e5002",
     "test_install_config_safety.py": "4fb7c61851dd4fea53f08c6e6a3feff53372d023c68526bb318d16d4ab8663a5",
-    "test_installation.py": "691c59f3de9930b21d257798e1b505c73d1ff9ad59116de03a56808ef3c614bd",
+    "test_installation.py": "159c62a94871576af98ca74e40d748633b650ef6d42685c991de2aadeb13d986",
     "test_interview.py": "8e32056374b22a4247f916c3da205ceebd084ce66da0d79a2edebf4f0df4198b",
     "test_mutable_state.py": "d6b1c1e74021625347517cd80af787d4317643e87b4d2dd2a4c70bdfce1dae02",
     "test_native_process.py": "5757b225cc4aac67c81fc61b0e5f498d3ab2364c9ef0c76d7a0760bbfc84c07f",
