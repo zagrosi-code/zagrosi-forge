@@ -269,28 +269,102 @@ def test_names(text: str) -> list[str]:
     return sorted(found)
 
 
+def visible_markdown(text: str) -> str:
+    """Remove HTML comments without treating code or escaped openers as comments."""
+    if "<!--" not in text:
+        return text
+    offset = skip = 0
+    fence = None
+    removed: list[tuple[int, int]] = []
+    for line in text.splitlines(keepends=True):
+        start, offset = offset, offset + len(line)
+        if fence:
+            if markdown_fence_closes(line, *fence):
+                fence = None
+            continue
+        if skip >= offset:
+            continue
+        opening = markdown_fence_opening(line) if skip <= start else None
+        if opening:
+            fence = opening[:2]
+            continue
+        for token in re.finditer(r"<!--|`+", line):
+            position = start + token.start()
+            if position < skip:
+                continue
+            escape_start = position
+            while escape_start and text[escape_start - 1] == "\\":
+                escape_start -= 1
+            if (position - escape_start) % 2:
+                continue
+            if token[0] == "<!--":
+                close = text.find("-->", position + 4)
+                skip = len(text) if close < 0 else close + 3
+                removed.append((position, skip))
+            else:
+                close = re.compile(rf"(?<!`){token[0]}(?!`)").search(text, start + token.end())
+                if close and not any(markdown_fence_opening(row) for row in text[offset:close.end()].splitlines()):
+                    skip = close.end()
+    parts = []
+    previous = 0
+    for start, end in removed:
+        parts.extend((text[previous:start], re.sub(r"[^\r\n]", " ", text[start:end])))
+        previous = end
+    return "".join(parts) + text[previous:]
+
+
 def has_verification(text: str) -> bool:
-    """Accept executable regression cases or explicitly justified inspection."""
-    _, plain_lines = split_markdown_fences_with_closure(text)
-    fields = {}
+    """Read visible regression/inspection contracts once for every quality gate."""
+    blocks, plain_lines = split_markdown_fences_with_closure(visible_markdown(text))
+    if any(not closed for _, _, closed in blocks):
+        return False
+    fields: dict[str, str] = {}
+    cases: list[dict[str, str]] = []
+    body = []
+    aliases = {"test_case": "case", "behavior": "case", "test_command": "command"}
     for line in plain_lines:
-        match = re.fullmatch(r"\s*(?:[-*]\s+)?([\w ]+):[ \t]*(\S.*)", line)
-        if match:
-            key, value = match.groups()
-            value = value.strip().strip("`* ")
-            if value.lower().rstrip(".") not in {"none", "n/a", "tbd", "todo", "pending"}:
-                fields[key.lower().replace(" ", "_")] = value
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line).replace("**", "")
+        match = re.fullmatch(r"\s*([\w ]+):[ \t]*(.*)", line)
+        if not match:
+            body.append(line)
+            continue
+        key, value = match.groups()
+        key = re.sub(r"\s+", "_", key.strip().lower())
+        key = aliases.get(key, key)
+        if key not in {"case", "expected", "command", "verification_mode", "inspection", "test_rationale"}:
+            body.append(line)
+            continue
+        value = value.strip().strip("`* ")
+        if key == "case" and (not cases or cases[-1].get("case") != value):
+            cases.append({})
+        record = cases[-1] if cases and key in {"case", "expected", "command"} else fields
+        if value.lower().rstrip(".") in {"", "none", "n/a", "tbd", "todo", "pending"} or key in record and record[key] != value:
+            return False
+        record[key] = value
     if fields.get("verification_mode", "").lower() == "inspection":
         rationale = fields.get("test_rationale", "")
         scope = re.search(r"\b(?:docs?|documentation|cosmetic|formatting)[ -]only\b", rationale, re.I)
         return bool(scope and fields.get("inspection") and fields.get("expected"))
-
-    command = fields.get("command") or fields.get("test_command") or re.search(
-        r"\b(?:pytest|vitest|jest|ctest|rspec)\b|"
-        r"\b(?:go|cargo|dotnet|swift|mix|mvn|gradle|gradlew|npm|pnpm|yarn|bun|make)\s+(?:run\s+)?test\b",
-        text,
+    if fields.get("verification_mode", "").lower() not in {"", "test", "automated"}:
+        return False
+    plain = "\n".join(body)
+    code = "\n".join("\n".join(lines) for language, lines, _ in blocks if language not in {"", "text", "txt", "plain", "plaintext", "markdown", "md"})
+    commands = re.findall(r"`([^`\n]+)`", plain) + code.splitlines() + re.findall(r"(?im)^\s*run\s+(.+)$", plain)
+    command = fields.get("command") or any(re.match(
+        r"(?:uv\s+run\s+|npx\s+)?(?:python[\d.]*\s+-m\s+)?"
+        r"(?:(?:pytest|unittest|vitest|jest|ctest|rspec)\b|node\s+--test\b|"
+        r"(?:go|cargo|dotnet|swift|mix|mvn|gradle|gradlew|npm|pnpm|yarn|bun|make)\s+(?:run\s+)?test\b)",
+        item.strip(),
+    ) for item in commands)
+    if cases:
+        return all(case.get("expected") and (case.get("command") or command) for case in cases)
+    case = re.search(
+        r"\b(?:test_[A-Za-z0-9_]+|Test[A-Z][A-Za-z0-9_]*)\b(?![.:])|"
+        r"\b(?:it|test)\(\s*[\"'][^\"']+[\"']|"
+        r"`[a-z][a-z0-9_]*_[a-z0-9_]+`\s+(?:expects|verifies|asserts)\b|"
+        r"(?i:write\s+(?:red|failing)\b[^\n]*|(?:test\s+)?cases?\s*:)\s*`[a-z][a-z0-9_]*_[a-z0-9_]+`",
+        plain + "\n" + code,
     )
-    case = test_names(text) or ((fields.get("case") or fields.get("behavior")) and fields.get("expected"))
     return bool(command and case)
 
 

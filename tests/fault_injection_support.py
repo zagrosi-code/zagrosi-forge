@@ -194,9 +194,9 @@ def instrument_record_crashpoints(plugin_root: Path) -> Path:
             '    os.fsync(transaction_fd)\n'
             '    _test_record_crashpoint("pinner-rename-dir-fsync")\n'
         ),
-        '            install_staged_section_pinner(root_fd, transaction_fd, pinner_path, pinner_raw)\n': (
+        '            install_staged_section_pinner(root_fd, transaction_fd, pinner_path, record.pinner_raw)\n': (
         '            _test_precreate_adopted_pinner(root_fd, transaction_fd, pinner_path)\n'
-        '            install_staged_section_pinner(root_fd, transaction_fd, pinner_path, pinner_raw)\n'
+        '            install_staged_section_pinner(root_fd, transaction_fd, pinner_path, record.pinner_raw)\n'
         '            _test_record_crashpoint("final-link-fsync")\n'
         ),
         '            created = True\n'
@@ -205,14 +205,14 @@ def instrument_record_crashpoints(plugin_root: Path) -> Path:
             '            _test_record_crashpoint("final-link-before-dir-fsync")\n'
             '            os.fsync(pinners_fd)\n'
         ),
-        '            replace_state_from_transaction(root_fd, transaction_fd, base_state_raw, candidate_state)\n': (
-            '            replace_state_from_transaction(root_fd, transaction_fd, base_state_raw, candidate_state)\n'
+        '            replace_state_from_transaction(root_fd, transaction_fd, record.base_raw, record.candidate_state)\n': (
+            '            replace_state_from_transaction(root_fd, transaction_fd, record.base_raw, record.candidate_state)\n'
             '            _test_record_crashpoint("state-cas-fsync")\n'
         ),
-        '                candidate_state_raw,\n                require_lock_authority,\n            )\n            require_lock_authority()\n': (
-            '                candidate_state_raw,\n                require_lock_authority,\n            )\n'
-            '            _test_record_crashpoint("post-state-validation")\n'
-            '            require_lock_authority()\n'
+        '        verify_artifacts(record.candidate_raw)\n        context.require_lock_authority()\n': (
+            '        verify_artifacts(record.candidate_raw)\n'
+            '        _test_record_crashpoint("post-state-validation")\n'
+            '        context.require_lock_authority()\n'
         ),
         '        os.fsync(transaction_fd)\n    except OSError:\n        if not journal_removed:\n': (
             '        os.fsync(transaction_fd)\n'

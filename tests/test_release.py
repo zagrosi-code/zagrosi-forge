@@ -14,19 +14,19 @@ from forge_test_helpers import (
 )
 
 
+def package_without_examples(path):
+    manifest_path = Path(".codex-plugin/package-files.json")
+    members = [name for name in json.loads((ROOT / manifest_path).read_text()) if not name.startswith("examples/")]
+    for name in members:
+        target = path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
+    (path / manifest_path).write_text(json.dumps(members, indent=2) + "\n")
+    return path
+
+
 def test_release_check_skips_example_gates_when_examples_are_absent(tmp_path: Path) -> None:
-    package = tmp_path / "bundle"
-    for relative in [
-        ".agents",
-        ".codex-plugin",
-        "assets",
-        "scripts",
-        "skills",
-        "tools",
-    ]:
-        shutil.copytree(ROOT / relative, package / relative)
-    for filename in [".codexignore", "LICENSE", "NOTICE.md", "README.md", "pyproject.toml"]:
-        shutil.copy2(ROOT / filename, package / filename)
+    package = package_without_examples(tmp_path / "bundle")
 
     release = run_cmd("release-check", "--plugin-root", str(package), "--verbose")
 
@@ -39,11 +39,7 @@ def test_release_check_skips_example_gates_when_examples_are_absent(tmp_path: Pa
 
 
 def test_release_check_success_is_byte_bounded_and_verbose_is_explicit(tmp_path: Path) -> None:
-    package = tmp_path / "bundle"
-    for relative in [".agents", ".codex-plugin", "assets", "scripts", "skills", "tools"]:
-        shutil.copytree(ROOT / relative, package / relative)
-    for filename in [".codexignore", "LICENSE", "NOTICE.md", "README.md", "pyproject.toml"]:
-        shutil.copy2(ROOT / filename, package / filename)
+    package = package_without_examples(tmp_path / "bundle")
 
     compact = run_raw("release-check", "--plugin-root", str(package))
 

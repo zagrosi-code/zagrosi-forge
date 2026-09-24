@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 import argparse
 import json
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -17,6 +16,8 @@ import sys
 import tempfile
 import time
 
+from . import codex_config as _codex_config
+from .codex_config import expected_codex_config
 from . import gates as _gates
 from . import output as _output
 from .plugin_cache import materialize_plugin_cache, plugin_cache_status
@@ -110,63 +111,6 @@ def default_codex_config_path() -> Path:
     return Path.home() / ".codex" / "config.toml"
 
 
-def toml_string(value: str) -> str:
-    return json.dumps(value)
-
-
-def toml_header_token(line: str) -> str | None:
-    match = re.match(r"^\s*(\[\[?.*?\]\]?)\s*(?:#.*)?$", line)
-    return match.group(1) if match else None
-
-
-def find_toml_section(lines: list[str], header: str) -> tuple[int, int] | None:
-    start: int | None = None
-    for index, line in enumerate(lines):
-        token = toml_header_token(line)
-        if token is None:
-            continue
-        if token == header:
-            start = index
-            continue
-        if start is not None:
-            return start, index
-    if start is None:
-        return None
-    return start, len(lines)
-
-
-def upsert_toml_section(text: str, header: str, entries: dict[str, str]) -> tuple[str, list[str]]:
-    lines = text.splitlines()
-    changes: list[str] = []
-    section = find_toml_section(lines, header)
-    if section is None:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.append(header)
-        for key, value in entries.items():
-            lines.append(f"{key} = {value}")
-        changes.append(f"added {header}")
-        return "\n".join(lines).rstrip() + "\n", changes
-
-    start, end = section
-    for key, value in entries.items():
-        replacement = f"{key} = {value}"
-        key_re = re.compile(rf"^\s*{re.escape(key)}\s*=.*$")
-        found = False
-        for index in range(start + 1, end):
-            if key_re.match(lines[index]):
-                found = True
-                if lines[index].strip() != replacement:
-                    lines[index] = replacement
-                    changes.append(f"updated {header}.{key}")
-                break
-        if not found:
-            lines.insert(end, replacement)
-            end += 1
-            changes.append(f"added {header}.{key}")
-    return "\n".join(lines).rstrip() + "\n", changes
-
-
 def codex_home_for_config(config_path: Path, explicit_config: bool) -> Path:
     if explicit_config:
         return config_path.expanduser().resolve().parent
@@ -187,26 +131,9 @@ def plugin_cache_path(codex_home: Path, marketplace: str, plugin_name: str, vers
     return codex_home / "plugins" / "cache" / marketplace / plugin_name / version
 
 
-def expected_codex_config(existing: str, plugin_root: Path) -> tuple[str, list[str]]:
-    updated, marketplace_changes = upsert_toml_section(
-        existing,
-        "[marketplaces.zagrosi]",
-        {
-            "source_type": toml_string("local"),
-            "source": toml_string(str(plugin_root)),
-        },
-    )
-    updated, plugin_changes = upsert_toml_section(
-        updated,
-        '[plugins."zagrosi-forge@zagrosi"]',
-        {"enabled": "true"},
-    )
-    return updated, marketplace_changes + plugin_changes
-
-
 def update_check(args: argparse.Namespace) -> int:
     plugin_root = _storage.resolve_path(args.plugin_root)
-    config_path = _storage.resolve_path(args.config) if args.config else default_codex_config_path()
+    config_path = _storage.absolute_path_no_follow(args.config) if args.config else default_codex_config_path()
     codex_home = codex_home_for_config(config_path, bool(args.config))
     try:
         manifest = package_manifest(plugin_root)
@@ -229,8 +156,11 @@ def update_check(args: argparse.Namespace) -> int:
     cache_exists = cache_path.exists()
     cache_current = cache_exists and not cache["changed"]
 
-    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    expected_config, config_changes = expected_codex_config(existing, plugin_root)
+    try:
+        existing = _codex_config.config_text(_codex_config.read_config(config_path)[0])
+        expected_config, config_changes = expected_codex_config(existing, plugin_root)
+    except (OSError, ValueError):
+        return _output.print_json({"success": False, "operation": "update-check", "error": _codex_config.CONFIG_ERROR}, 1)
     config_current = expected_config == existing
     restart_required = not cache_current or not config_current
     next_steps: list[str] = []
@@ -318,14 +248,12 @@ def verify_codex_install(codex_home: Path, require_codex: bool) -> dict[str, Any
         "returncode": result.returncode,
         "missing": missing,
         "required_skills": required,
-        "stdout_tail": result.stdout[-1000:],
-        "stderr_tail": result.stderr[-1000:],
     }
 
 
 def install_codex(args: argparse.Namespace) -> int:
     plugin_root = _storage.resolve_path(args.plugin_root)
-    config_path = _storage.resolve_path(args.config) if args.config else default_codex_config_path()
+    config_path = _storage.absolute_path_no_follow(args.config) if args.config else default_codex_config_path()
     codex_home = codex_home_for_config(config_path, bool(args.config))
     plugin_id = "zagrosi-forge@zagrosi"
     operation = "self-update" if getattr(args, "command", "") == "self-update" else "install-codex"
@@ -405,24 +333,23 @@ def install_codex(args: argparse.Namespace) -> int:
     plugin_version = str(manifest.get("version") or "0.0.0")
     cache_path = plugin_cache_path(codex_home, "zagrosi", plugin_name, plugin_version)
     try:
-        cache = materialize_plugin_cache(plugin_root, cache_path, args.dry_run)
-    except (OSError, ValueError) as exc:
-        return _output.print_json({"success": False, "operation": operation, "error": str(exc),
-                                   "cache_path": str(cache_path)}, 1)
-
-    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    updated, changes = expected_codex_config(existing, plugin_root)
-    changed = updated != existing or bool(cache.get("changed"))
-    backup_path: Path | None = None
-
-    config_changed = updated != existing
-    if config_changed and not args.dry_run:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        if config_path.exists() and not args.no_backup:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-            backup_path = config_path.with_name(f"{config_path.name}.bak-{stamp}")
-            backup_path.write_text(existing, encoding="utf-8")
-        config_path.write_text(updated, encoding="utf-8")
+        with nullcontext() if args.dry_run else _storage.file_lock(config_path):
+            original = _codex_config.read_config(config_path)
+            existing = _codex_config.config_text(original[0])
+            updated, changes = expected_codex_config(existing, plugin_root)
+            try:
+                cache = materialize_plugin_cache(plugin_root, cache_path, args.dry_run)
+            except (OSError, ValueError) as exc:
+                return _output.print_json({"success": False, "operation": operation,
+                                          "error": str(exc), "cache_path": str(cache_path)}, 1)
+            config_changed = updated != existing
+            backup_path = None
+            if config_changed and not args.dry_run:
+                backup_path = _codex_config.publish_config(config_path, original, updated, no_backup=args.no_backup)
+    except (OSError, ValueError):
+        return _output.print_json({"success": False, "operation": operation,
+                                  "error": _codex_config.CONFIG_ERROR, "config_path": str(config_path)}, 1)
+    changed = config_changed or bool(cache.get("changed"))
 
     verification: dict[str, Any]
     if args.dry_run or args.no_verify_codex:
@@ -501,5 +428,5 @@ def install_codex(args: argparse.Namespace) -> int:
         "next_steps": next_steps,
     }
     if args.dry_run:
-        payload["config_preview"] = updated
+        payload["config_preview"] = expected_codex_config("", plugin_root)[0]
     return _output.print_json(payload)

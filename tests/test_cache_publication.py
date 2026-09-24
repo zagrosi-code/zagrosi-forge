@@ -1,5 +1,6 @@
 """Installed caches stay clean and retain a working copy on failed updates."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ def trees(tmp_path):
     source, cache = tmp_path / "source", tmp_path / "cache"
     for root in (source, cache):
         root.mkdir()
+        (root / ".codex-plugin").mkdir()
+        (root / ".codex-plugin/package-files.json").write_text(json.dumps([".codex-plugin/package-files.json", "runtime.py"]))
         (root / "runtime.py").write_text("old\n", encoding="utf-8")
     return source, cache
 
@@ -142,4 +145,59 @@ def test_source_inside_recovery_paths_is_never_removed(installer, tmp_path, rese
     with pytest.raises(ValueError, match="overlap"):
         installer.materialize_plugin_cache(reserved_source, cache, False)
     assert (reserved_source / "runtime.py").read_text() == "old\n"
+    assert (cache / "runtime.py").read_text() == "old\n"
+
+
+def test_only_declared_members_are_published(installer, tmp_path):
+    source, cache = trees(tmp_path)
+    before = installer.plugin_tree_fingerprint(source)
+    for root in (source, cache):
+        for name in (".env", "credentials.txt", "unknown/nested/token.txt", ".codex-plugin/local-settings.json"):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("SYNTHETIC_SECRET_CANARY", encoding="utf-8")
+    assert installer.plugin_tree_fingerprint(source) == before
+    installer.materialize_plugin_cache(source, cache, False)
+    assert not (cache / ".env").exists()
+    assert not (cache / "unknown").exists()
+    assert not (cache / ".codex-plugin/local-settings.json").exists()
+    assert all(b"SYNTHETIC_SECRET_CANARY" not in path.read_bytes() for path in cache.rglob("*") if path.is_file())
+
+
+def test_missing_declared_source_file_preserves_installed_copy(installer, tmp_path):
+    source, cache = trees(tmp_path)
+    (source / "runtime.py").unlink()
+    with pytest.raises(ValueError, match="missing"):
+        installer.materialize_plugin_cache(source, cache, False)
+    assert (cache / "runtime.py").read_text() == "old\n"
+
+
+def test_cache_without_manifest_is_repaired_using_source_members(installer, tmp_path):
+    source, cache = trees(tmp_path)
+    (cache / ".codex-plugin/package-files.json").unlink()
+    assert installer.materialize_plugin_cache(source, cache, False)["changed"]
+    assert installer.plugin_tree_fingerprint(cache) == installer.plugin_tree_fingerprint(source)
+
+
+@pytest.mark.parametrize("name", ["../outside", "/absolute", "folder/../outside", ".env", ".env.local", "x\\y"])
+def test_unsafe_declared_member_fails_before_publication(installer, tmp_path, name):
+    source, cache = trees(tmp_path)
+    path = source / ".codex-plugin/package-files.json"
+    path.write_text(json.dumps([".codex-plugin/package-files.json", "runtime.py", name]))
+    with pytest.raises(ValueError, match="safe relative"):
+        installer.materialize_plugin_cache(source, cache, False)
+    assert (cache / "runtime.py").read_text() == "old\n"
+
+
+@pytest.mark.parametrize("member", ["runtime.py", ".codex-plugin/package-files.json"])
+def test_declared_hardlinks_preserve_installed_copy(installer, tmp_path, member):
+    source, cache = trees(tmp_path)
+    original = source / member
+    linked = tmp_path / "external-canary"
+    try:
+        linked.hardlink_to(original)
+    except OSError:
+        pytest.skip("Hardlinks are unavailable")
+    with pytest.raises(ValueError, match="regular"):
+        installer.materialize_plugin_cache(source, cache, False)
     assert (cache / "runtime.py").read_text() == "old\n"

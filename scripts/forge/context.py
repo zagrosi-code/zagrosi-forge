@@ -313,9 +313,12 @@ def implementation_packet(args: argparse.Namespace) -> int:
             section_text = _storage.read_text(section_path)
             artifacts = _artifacts.planning_artifacts(planning_dir)
             artifacts["spec"] = _artifacts.requirement_source_spec(planning_dir) or artifacts["plan"]
-            ids = {name: context_requirement_ids(_artifacts.planning_artifact_text(planning_dir, name, path)) if (path := artifacts.get(name)) else set()
-                   for name in ("spec", "plan", "tdd")}
-            section_tests = _markdown.contains_any(section_text, ["tests first", "expected failure", "test_", "pytest", "vitest", "cargo test", "go test"])
+            texts = {name: _artifacts.planning_artifact_text(planning_dir, name, path) if (path := artifacts.get(name)) else ""
+                     for name in ("spec", "plan", "tdd")}
+            ids = {name: context_requirement_ids(_markdown.visible_markdown(text)) for name, text in texts.items()}
+            if not _markdown.has_verification(texts["tdd"]):
+                ids["tdd"] = set()
+            section_tests = _markdown.has_verification(section_text)
             gaps = {req: [name for name in ("spec", "plan", "tdd") if req not in ids[name] and not (name == "tdd" and section_tests)]
                     for req in packet["requirements"]}
             gaps = {req: missing for req, missing in gaps.items() if missing}

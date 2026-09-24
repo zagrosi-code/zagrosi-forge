@@ -296,6 +296,55 @@ def _setup_payload(args, config, root_fd, guard, progress, source_records):
     return payload
 
 
+def _setup_documents(inputs, progress):
+    """Derive pending slots and final config from the same authenticated identity."""
+    pending_by_path = {
+        relative: _detached_state.detached_setup_prefix_payload(slot, **inputs)
+        for relative, slot in (
+            ("zagrosi_implement_config.json", "config"),
+            ("zagrosi_implement_state.json", "state"),
+            ("forge-progress.json", "progress"),
+        )
+    }
+    common = {
+        key: value for key, value in pending_by_path["zagrosi_implement_config.json"].items()
+        if key in _detached_contract.DETACHED_CONFIG_FIELDS
+    }
+    root = inputs["implementation_root"]
+    config = {
+        **common,
+        "schema": _detached_contract.DETACHED_CONFIG_SCHEMA,
+        "mode": "detached-frozen",
+        "state_path": str(root / "zagrosi_implement_state.json"),
+        "progress_path": str(root / "forge-progress.json"),
+        "reviews_dir": str(root / "code_review"),
+        "evidence_dir": str(root / "evidence"),
+        "pinners_dir": str(root / "pinners"),
+        **_sources.implementation_source_config_fields(inputs["source_records"]),
+        "test_command": progress.get("project_config", {}).get("test_command"),
+        "runtime": progress.get("project_config", {}).get("runtime"),
+    }
+
+    def setup_config_payload(root_identity_digest):
+        payload = {**config, "detached_implementation_root_identity_digest": root_identity_digest}
+        _handoff_wire.require_exact_fields(payload, _detached_contract.DETACHED_CONFIG_FIELDS, "Detached implementation config")
+        return payload
+
+    return pending_by_path, setup_config_payload
+
+
+def _require_setup_target(target_dir, identity, digest):
+    reopened_fd = _secure_io.open_directory_chain_no_follow(target_dir)
+    try:
+        if _secure_io._fd_identity(reopened_fd) != identity or _authority.target_root_identity_digest(reopened_fd) != digest:
+            raise _models.DetachedImplementationError(
+                "target-root-replaced",
+                "Protected target root changed during detached implement-setup.",
+            )
+    finally:
+        os.close(reopened_fd)
+
+
 def detached_implement_setup(args: argparse.Namespace) -> int:
     sections_dir = _storage.absolute_path_no_follow(args.sections_dir)
     planning_dir = sections_dir.parent
@@ -388,18 +437,7 @@ def detached_implement_setup(args: argparse.Namespace) -> int:
         _authority.require_planning_implementation_disjoint(planning_dir, guard.root_fd, implementation_root, root_fd)
         _authority.require_planning_target_disjoint(planning_dir, guard.root_fd, target_dir, target_fd)
         _authority.require_open_roots_disjoint(implementation_root, root_fd, target_dir, target_fd)
-        reopened_target_fd = _secure_io.open_directory_chain_no_follow(target_dir)
-        try:
-            if (
-                _secure_io._fd_identity(reopened_target_fd) != setup_target_identity
-                or _authority.target_root_identity_digest(reopened_target_fd) != setup_target_identity_digest
-            ):
-                raise _models.DetachedImplementationError(
-                    "target-root-replaced",
-                    "Protected target root changed during detached implement-setup.",
-                )
-        finally:
-            os.close(reopened_target_fd)
+        _require_setup_target(target_dir, setup_target_identity, setup_target_identity_digest)
         admission_path, admission_sha256, admission_size, admission_state_sha256 = _authority.reopen_admission_pinner(
             planning_dir,
             implementation_root,
@@ -409,66 +447,25 @@ def detached_implement_setup(args: argparse.Namespace) -> int:
             implementation_root_fd=root_fd,
         )
         guard.verify_unchanged()
-        _sources.verify_implementation_sources(
-            {
-                **_sources.implementation_source_config_fields(source_records),
-            }
-        )
+        _sources.verify_implementation_sources(_sources.implementation_source_config_fields(source_records))
         _detached_state.detached_implementation_root_identity_digest(
             root_fd,
             require_fixed_children=False,
             allow_recoverable_temps=True,
         )
-        pending_by_path: dict[str, dict[str, Any]] = {}
-        for relative, slot in (
-            ("zagrosi_implement_config.json", "config"),
-            ("zagrosi_implement_state.json", "state"),
-            ("forge-progress.json", "progress"),
-        ):
-            pending = _detached_state.detached_setup_prefix_payload(
-                slot,
-                planning_dir=planning_dir,
-                sections_dir=sections_dir,
-                target_dir=target_dir,
-                target_root_identity_digest=setup_target_identity_digest,
-                implementation_root=implementation_root,
-                guard=guard,
-                admission_path=admission_path,
-                admission_sha256=admission_sha256,
-                admission_size=admission_size,
-                admission_state_sha256=admission_state_sha256,
-                source_records=source_records,
-            )
-            pending_by_path[relative] = pending
-
-        def setup_config_payload(root_identity_digest: str) -> dict[str, Any]:
-            payload = {
-                "schema": _detached_contract.DETACHED_CONFIG_SCHEMA,
-                "mode": "detached-frozen",
-                "planning_dir": str(planning_dir),
-                "sections_dir": str(sections_dir),
-                "target_dir": str(target_dir),
-                "target_root_identity_digest": setup_target_identity_digest,
-                "implementation_root": str(implementation_root),
-                "state_path": str(implementation_root / "zagrosi_implement_state.json"),
-                "progress_path": str(implementation_root / "forge-progress.json"),
-                "reviews_dir": str(implementation_root / "code_review"),
-                "evidence_dir": str(implementation_root / "evidence"),
-                "pinners_dir": str(implementation_root / "pinners"),
-                "planning_tree_sha256": guard.digest,
-                "planning_file_count": guard.file_count,
-                "planning_total_bytes": guard.total_bytes,
-                "admission_pinner_path": str(admission_path),
-                "admission_pinner_sha256": admission_sha256,
-                "admission_pinner_size": admission_size,
-                "admission_state_sha256": admission_state_sha256,
-                "detached_implementation_root_identity_digest": root_identity_digest,
-                **_sources.implementation_source_config_fields(source_records),
-                "test_command": progress.get("project_config", {}).get("test_command"),
-                "runtime": progress.get("project_config", {}).get("runtime"),
-            }
-            _handoff_wire.require_exact_fields(payload, _detached_contract.DETACHED_CONFIG_FIELDS, "Detached implementation config")
-            return payload
+        pending_by_path, setup_config_payload = _setup_documents({
+            "planning_dir": planning_dir,
+            "sections_dir": sections_dir,
+            "target_dir": target_dir,
+            "target_root_identity_digest": setup_target_identity_digest,
+            "implementation_root": implementation_root,
+            "guard": guard,
+            "admission_path": admission_path,
+            "admission_sha256": admission_sha256,
+            "admission_size": admission_size,
+            "admission_state_sha256": admission_state_sha256,
+            "source_records": source_records,
+        }, progress)
 
         complete = _validate_setup_replay(root_fd, pending_by_path, setup_config_payload, require_lock_authority)
         config, root_identity_digest = _publish_setup(
@@ -492,19 +489,10 @@ def detached_implement_setup(args: argparse.Namespace) -> int:
         _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
         require_lock_authority()
         return _output.print_json(payload, 0 if payload["success"] else 1)
-    except _models.DetachedImplementationError as exc:
+    except (_models.DetachedImplementationError, OSError) as exc:
+        error_payload = _models.detached_error_payload if isinstance(exc, _models.DetachedImplementationError) else _models.detached_io_error_payload
         return _output.print_json(
-            _models.detached_error_payload(
-                exc,
-                mode="detached-frozen",
-                planning_dir=str(planning_dir),
-                implementation_root=str(implementation_root or _storage.absolute_path_no_follow(args.implementation_root)),
-            ),
-            1,
-        )
-    except OSError as exc:
-        return _output.print_json(
-            _models.detached_io_error_payload(
+            error_payload(
                 exc,
                 mode="detached-frozen",
                 planning_dir=str(planning_dir),

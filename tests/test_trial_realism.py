@@ -40,6 +40,15 @@ def test_ordinary_summary_requires_independently_reviewed_incidental_cleanup(tmp
     assert not result["success"]
 
 
+def add_node_summary(path):
+    path.write_text(path.read_text().replace("  if (action === 'total')", """  if (action === 'summary') {
+    const summary = JSON.parse(invoice('json', items, customer));
+    summary.item_count = items.reduce((n, item) => n + item.quantity, 0);
+    return summary;
+  }
+  if (action === 'total')""", 1))
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is unavailable")
 def test_node_case_runs_native_tests_and_independent_oracle(tmp_path):
     trial = tmp_path / "trial"
@@ -48,15 +57,10 @@ def test_node_case_runs_native_tests_and_independent_oracle(tmp_path):
     assert baseline["tests"]["returncode"] == 0
     assert not baseline["behavior"]["success"]
     path = trial / "workspace/src/ledger.js"
-    path.write_text(path.read_text().replace("  if (action === 'total')", """  if (action === 'summary') {
-    const summary = JSON.parse(invoice('json', items, customer));
-    summary.item_count = items.reduce((n, item) => n + item.quantity, 0);
-    return summary;
-  }
-  if (action === 'total')""", 1))
+    add_node_summary(path)
     result = trials.check(trial)
     assert result["behavior"]["success"]
-    assert json.loads(result["oracle"]["stdout"])["assertions"] == 1266
+    assert json.loads(result["oracle"]["stdout"])["assertions"] == 1267
     assert result["after"]["largest_function_lines"] is None
     assert result["reported_telemetry"] is None
     workspace = trial / "workspace"
@@ -83,13 +87,29 @@ def test_node_case_runs_native_tests_and_independent_oracle(tmp_path):
         ["implement-setup", "--sections-dir", str(planning / "sections"), "--target-dir", str(workspace)],
         ["implement-record-section", "--sections-dir", str(planning / "sections"), "--target-dir", str(workspace),
          "--section", "section-01-invoice-summary", "--file", "src/ledger.js", "--test-file", "tests/ledger.test.js",
-         "--review-status", "pass", "--verification", "node --test tests/ledger.test.js: passed; independent oracle:1266 assertions"],
+         "--review-status", "pass", "--verification", "node --test tests/ledger.test.js: passed; independent oracle:1267 assertions"],
     ):
         process = trials.execute(cli + command, workspace)
         assert process["returncode"] == 0, process
     assert trials.check(trial)["success"]
     (trial / "workspace/tests/ledger.test.js").write_text("// Candidate tests are not the independent oracle.\n")
     path.write_text(path.read_text().replace("n + item.quantity", "n + 1"))
+    result = trials.check(trial)
+    assert result["tests"]["returncode"] == 0
+    assert not result["behavior"]["success"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is unavailable")
+@pytest.mark.parametrize("mutation", ["exports", "error-type"])
+def test_node_oracle_pins_public_exports_and_error_types(tmp_path, mutation):
+    trial = tmp_path / "trial"
+    trials.prepare(trial, "node-summary")
+    path = trial / "workspace/src/ledger.js"
+    add_node_summary(path)
+    if mutation == "exports":
+        path.write_text(path.read_text() + "\nmodule.exports.unrequested = true;\n")
+    else:
+        path.write_text(path.read_text().replace("throw new Error(", "throw new TypeError("))
     result = trials.check(trial)
     assert result["tests"]["returncode"] == 0
     assert not result["behavior"]["success"]
@@ -196,3 +216,94 @@ def test_resume_preserves_original_test_and_history_while_allowing_progress(tmp_
     result = trials.check(trial)
     assert result["workflow"]["success"] and result["behavior"]["success"]
     assert result["success"] is (change == "append")
+
+
+def complete_import_preview(workspace):
+    """Known-good candidate for testing the evaluator, not a model-trial result."""
+    with (workspace / "src/orders.py").open("a") as handle:
+        handle.write('''
+
+def preview_import(text, catalog):
+    rows = import_orders(text, catalog)
+    quantities = {}
+    for row in rows:
+        quantities[row["sku"]] = quantities.get(row["sku"], 0) + row["quantity"]
+    return {"order_count": len({row["order_id"] for row in rows}),
+            "item_count": sum(row["quantity"] for row in rows),
+            **{key: sum(row[key] for row in rows) for key in ("subtotal", "tax", "total")},
+            "sku_quantities": dict(sorted(quantities.items()))}
+''')
+    (workspace / "src/receipts.py").write_text('''import json
+from orders import import_orders
+
+
+def export_receipts(text, catalog, format="json"):
+    if format not in ("json", "text"):
+        raise ValueError("Unknown format: " + str(format))
+    records = import_orders(text, catalog)
+    if format == "json":
+        return json.dumps(records, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return "\\n".join(row["order_id"] + ": " + row["sku"] + " x" + str(row["quantity"])
+                     + " = " + str(row["total"]) for row in records)
+''')
+
+
+def test_import_preview_requires_feature_review_and_protected_scope(tmp_path):
+    trial = tmp_path / "trial"
+    trials.prepare(trial, "import-preview")
+    workspace = trial / "workspace"
+    request = trials.CASES["import-preview"]["request"] + (workspace / "prompt.md").read_text()
+    assert "cleanup" not in request and "refactor" not in request
+    baseline = trials.check(trial)
+    assert baseline["tests"]["returncode"] == 0
+    assert not baseline["behavior"]["success"]
+    complete_import_preview(workspace)
+    unreviewed = trials.check(trial)
+    assert unreviewed["behavior"]["success"], unreviewed["oracle"]
+    assert not unreviewed["cleanup"]["success"]
+    assert unreviewed["after"]["repeated_loops"] < unreviewed["before"]["repeated_loops"]
+    review = trials.review_template(trial)
+    review.update(reviewer="independent-test-reviewer", independent=True, verdict="pass")
+    review["cleanup"].update(meaningful=True, changed_files=["src/receipts.py"],
+        rationale="Receipts share validated imports; duplicate CSV validation and pricing loops are removed.",
+        regression_evidence="Original tests and 638 independent assertions preserve imports, exports and errors.")
+    review_path = trial / "review.json"
+    review_path.write_text(json.dumps(review))
+    reviewed = trials.check(trial, review=review_path)
+    assert reviewed["cleanup"]["success"]
+    assert not reviewed["success"]  # A real admitted/completed workflow is still required.
+    protected = workspace / "src/customer_reports.py"
+    protected.write_text(protected.read_text() + "\n# Unrelated change.\n")
+    result = trials.check(trial, review=review_path)
+    assert result["behavior"]["success"]
+    assert result["outside_scope"] == ["src/customer_reports.py"]
+    assert not result["success"]
+
+
+@pytest.mark.parametrize("mutation", ["count", "rounding", "aggregate-tax", "mutation", "export", "error", "duplicate"])
+def test_import_preview_oracle_rejects_regressions_with_vacuous_candidate_tests(tmp_path, mutation):
+    trial = tmp_path / "trial"
+    trials.prepare(trial, "import-preview")
+    workspace = trial / "workspace"
+    complete_import_preview(workspace)
+    (workspace / "tests/test_orders.py").write_text(
+        "import unittest\nclass VacuousTest(unittest.TestCase):\n    def test_nothing(self):\n        self.assertTrue(True)\n")
+    files = {"count": "orders", "rounding": "pricing", "mutation": "orders",
+             "aggregate-tax": "orders", "export": "receipts", "error": "pricing", "duplicate": "orders"}
+    path = workspace / "src" / (files[mutation] + ".py")
+    before, after = {
+        "count": ('len({row["order_id"] for row in rows})', 'len(rows)'),
+        "rounding": ('subtotal * 20 // 100', 'round(subtotal * 20 / 100)'),
+        "aggregate-tax": ('"sku_quantities": dict(sorted(quantities.items()))',
+                          '"tax": sum(row["subtotal"] for row in rows) * 20 // 100, "sku_quantities": dict(sorted(quantities.items()))'),
+        "mutation": ('    rows = import_orders(text, catalog)', '    rows = import_orders(text, catalog)\n    catalog.clear()'),
+        "export": ('separators=(",", ":")', 'separators=(", ", ": ")'),
+        "error": ('raise KeyError("Unknown SKU: " + sku)', 'raise ValueError("Unknown SKU: " + sku)'),
+        "duplicate": ('if (order_id, sku) in seen:', 'if False:'),
+    }[mutation]
+    source = path.read_text()
+    assert before in source
+    path.write_text(source.replace(before, after))
+    result = trials.check(trial)
+    assert result["tests"]["returncode"] == 0
+    assert not result["behavior"]["success"]

@@ -32,12 +32,21 @@
     "request": "Resume the interrupted summary feature using Forge status, its admitted plan and the persisted implement-progress checkpoint. Complete invoice('summary', items, customer) with customer, subtotal, tax, total, and item_count (sum of quantities). Preserve existing exports/errors and previously added tests. Record remaining verification and completion.",
     "assertions": 1266
   },
+  "import-preview": {
+    "depth": "standard",
+    "fixture": "imports",
+    "oracle": "tools/import_trial_checks.py",
+    "assertions": 638,
+    "cleanup_required": true,
+    "protected_paths": ["src/customer_reports.py"],
+    "request": "Read prompt.md and add the CSV import preview while preserving existing imports, pricing and receipt behavior."
+  },
   "node-summary": {
     "depth": "lean",
     "runtime": "node",
     "fixture": "node",
     "oracle": "tools/node_trial_checks.cjs",
-    "assertions": 1266,
+    "assertions": 1267,
     "request": "Add invoice('summary', items, customer) returning customer, subtotal, tax, total, and item_count (sum of quantities). Preserve existing exports, error messages and InvoiceManager. Use Node standard-library tests without adding a framework or dependencies."
   }
 }

@@ -86,7 +86,7 @@ def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) 
     (tmp_path / "codex-spec.md").write_text("# Spec\n\nREQ-001: Implement status.\nREQ-002: Document status.\n")
     (tmp_path / "codex-plan.md").write_text("# Plan\n\nREQ-001 in `scripts/tool.py`.\nREQ-002 in `README.md`.\n")
     (tmp_path / "codex-plan-tdd.md").write_text(
-        "# TDD\n\nREQ-001: `test_status_flow`.\nREQ-002: `test_readme_status_docs`.\n"
+        "# TDD\n\nREQ-001: `test_status_flow`.\nREQ-002: `test_readme_status_docs`.\nRun `pytest -q`.\n"
     )
     (sections / "index.md").write_text(
         "<!-- PROJECT_CONFIG\n"
@@ -497,7 +497,7 @@ def test_implement_preflight_preserves_readiness_findings_and_metrics(tmp_path: 
         "## Tests First\n\nAdd `test_missing_ownership`; expected failure comes first.\n\n"
         "## Implementation\n\nModify the runtime. Contract: explicit deep remains explicit.\n\n"
         "## Risks And Rollback\n\nRisk: missing coverage. Rollback: revert the change.\n\n"
-        "## Acceptance And Verification\n\nREQ-001 is done when pytest passes.\n"
+        "## Acceptance And Verification\n\nREQ-001 is done when `pytest -q` passes.\n"
     )
 
     readiness_result = run_raw(
