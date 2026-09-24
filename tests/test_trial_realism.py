@@ -280,7 +280,7 @@ def test_import_preview_requires_feature_review_and_protected_scope(tmp_path):
     assert not result["success"]
 
 
-@pytest.mark.parametrize("mutation", ["count", "rounding", "aggregate-tax", "mutation", "export", "error", "duplicate"])
+@pytest.mark.parametrize("mutation", ["count", "float-count", "bool-count", "rounding", "aggregate-tax", "mutation", "export", "error", "duplicate"])
 def test_import_preview_oracle_rejects_regressions_with_vacuous_candidate_tests(tmp_path, mutation):
     trial = tmp_path / "trial"
     trials.prepare(trial, "import-preview")
@@ -288,11 +288,13 @@ def test_import_preview_oracle_rejects_regressions_with_vacuous_candidate_tests(
     complete_import_preview(workspace)
     (workspace / "tests/test_orders.py").write_text(
         "import unittest\nclass VacuousTest(unittest.TestCase):\n    def test_nothing(self):\n        self.assertTrue(True)\n")
-    files = {"count": "orders", "rounding": "pricing", "mutation": "orders",
+    files = {"count": "orders", "float-count": "orders", "bool-count": "orders", "rounding": "pricing", "mutation": "orders",
              "aggregate-tax": "orders", "export": "receipts", "error": "pricing", "duplicate": "orders"}
     path = workspace / "src" / (files[mutation] + ".py")
     before, after = {
         "count": ('len({row["order_id"] for row in rows})', 'len(rows)'),
+        "float-count": ('len({row["order_id"] for row in rows})', 'float(len({row["order_id"] for row in rows}))'),
+        "bool-count": ('len({row["order_id"] for row in rows})', 'len({row["order_id"] for row in rows}) or False'),
         "rounding": ('subtotal * 20 // 100', 'round(subtotal * 20 / 100)'),
         "aggregate-tax": ('"sku_quantities": dict(sorted(quantities.items()))',
                           '"tax": sum(row["subtotal"] for row in rows) * 20 // 100, "sku_quantities": dict(sorted(quantities.items()))'),

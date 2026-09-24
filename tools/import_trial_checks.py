@@ -32,6 +32,16 @@ def csv_text(rows):
     return stream.getvalue()
 
 
+def same(actual, expected):
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(same(actual[key], value) for key, value in expected.items())
+    if isinstance(expected, (list, tuple)):
+        return len(actual) == len(expected) and all(same(a, b) for a, b in zip(actual, expected))
+    return actual == expected
+
+
 def verify(workspace: Path, compatibility_only: bool = False) -> int:
     source = (workspace / "src").resolve()
     sys.path.insert(0, str(REFERENCE))
@@ -44,7 +54,7 @@ def verify(workspace: Path, compatibility_only: bool = False) -> int:
 
     def equal(actual, expected):
         nonlocal assertions
-        assert actual == expected, f"Expected {expected!r}; got {actual!r}"
+        assert same(actual, expected), f"Expected {expected!r}; got {actual!r}"
         assertions += 1
 
     def compatible(module, name, arguments):

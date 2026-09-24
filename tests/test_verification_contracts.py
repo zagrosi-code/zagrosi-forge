@@ -12,8 +12,9 @@ from test_compact_plan import SECTION, make_plan
 def modules():
     root = Path(__file__).resolve().parents[1]
     from runtime_support import load_entrypoint
-    package = load_entrypoint(root / "scripts/zagrosi_skills.py").load_runtime()
-    return SimpleNamespace(**{name: importlib.import_module(f"{package.__name__}.{name}") for name in ("markdown", "artifacts", "scoring", "validation", "quality", "traceability")})
+    entrypoint = load_entrypoint(root / "scripts/zagrosi_skills.py")
+    package = entrypoint.load_runtime()
+    return SimpleNamespace(entrypoint=entrypoint, **{name: importlib.import_module(f"{package.__name__}.{name}") for name in ("markdown", "artifacts", "scoring", "validation", "quality", "traceability")})
 
 
 INSPECTION = (
@@ -104,8 +105,10 @@ REGRESSION = "REQ-001\nCase: trim label edges\nExpected: internal spaces remain.
     REGRESSION.replace("Case:", "- **Case**:").replace("Expected:", "- **Expected**:").replace("Command:", "- **Command**:"),
     INSPECTION.replace("verification_mode:", "**verification_mode:**").replace("Inspection:", "**Inspection:**")
     .replace("Expected:", "**Expected:**").replace("test_rationale:", "**test_rationale:**"),
+    "REQ-001: `test_trim_edges` removes edge whitespace. Run `PYTHONPATH=src pytest -q`.",
+    "REQ-001: `test_trim_edges` removes edge whitespace. Run `./gradlew test`.",
 ])
-def test_equivalent_labels_share_all_verification_gates(modules, tmp_path, depth, verification):
+def test_equivalent_labels_share_all_verification_gates(modules, tmp_path, capsys, depth, verification):
     planning = make_plan(tmp_path / "planning", depth)
     replace_verification(planning, verification)
     assert modules.markdown.has_verification(verification)
@@ -115,6 +118,8 @@ def test_equivalent_labels_share_all_verification_gates(modules, tmp_path, depth
     findings, trace = modules.traceability.traceability_analysis(planning)
     assert not findings
     assert trace["coverage"]["REQ-001"]["section_tests"] == [f"{SECTION}.md"]
+    assert modules.entrypoint.main(["implementation-packet", "--planning-dir", str(planning), "--section", SECTION]) == 0
+    capsys.readouterr()
 
 
 @pytest.mark.parametrize("verification", [
@@ -241,3 +246,48 @@ def test_hidden_requirement_cannot_disagree_between_traceability_and_packet(tmp_
     assert not trace["coverage"].get("REQ-001", {}).get("covered", False)
     assert runtime.entrypoint.main(["implementation-packet", "--planning-dir", str(planning), "--section", SECTION]) == 1
     assert '"coverage_gaps"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", [
+    "PYTHONPATH=src pytest -q",
+    'PYTHONPATH="src packages" LABEL="a=b" pytest -q',
+    "env PYTHONPATH=src pytest -q",
+    "./gradlew test",
+    "/usr/local/bin/pytest -q",
+    '"/path with spaces/python3.12" -B -m unittest discover -s tests',
+    "PYTHONPATH=src /venv/bin/python -X dev -m pytest -q",
+    "./tools/uv run pytest -q",
+    "uv run --with pytest python -m pytest",
+    "uv run --with=pytest python -m pytest",
+    "uv run --with 'pytest>=8' --with=hypothesis python -m pytest -q",
+    "poetry run pytest -q",
+    "npx vitest run",
+    "./node_modules/.bin/vitest run",
+])
+def test_shell_command_prefixes_preserve_regression_contracts(modules, command):
+    assert modules.markdown.has_verification(f"`test_trim_edges` removes edge whitespace. Run `{command}`.")
+
+
+@pytest.mark.parametrize("command", [
+    "PYTHONPATH=src",
+    'PYTHONPATH="src pytest -q',
+    "PYTHONPATH = src pytest -q",
+    "echo PYTHONPATH=src pytest -q",
+    "./gradlew build",
+    "env PYTHONPATH=src",
+    "python -c 'print(\"pytest\")'",
+    "python scripts/check.py -m pytest",
+    "python -m ./pytest",
+    "python -m env pytest",
+    "uv run --with",
+    "uv run --with= python -m pytest",
+    "uv run --with --help python -m pytest",
+    "uv run --with pytest python -m pip",
+    "This project uses pytest",
+])
+def test_command_prefix_support_does_not_accept_non_test_commands(modules, command):
+    assert not modules.markdown.has_verification(f"`test_trim_edges` removes edge whitespace. Run `{command}`.")
+
+
+def test_prefixed_commands_in_hidden_evidence_do_not_count(modules):
+    assert not modules.markdown.has_verification("<!-- `test_trim_edges` removes edges. Run `PYTHONPATH=src pytest -q`. -->")

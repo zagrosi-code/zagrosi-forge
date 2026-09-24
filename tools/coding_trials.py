@@ -77,6 +77,7 @@ def prepare(trial: Path, case: str, depth: str | None = None) -> dict:
               f"Read {ROOT / 'skills/zagrosi-implement/references/engineering.md'} and the applicable Forge skills.\n\n"
               f"{CASES[case]['request']}\n\n"
               "Preserve public APIs. Standard library only. Keep .planning records compact.\n"
+              "Edit only src/, tests/, and .planning/. .gitignore may list .planning/, __pycache__/, .pytest_cache/, and *.pyc.\n"
               f"Run existing/added tests with `{displayed_command}`. Python trials require PYTHONPATH=src.\n"
               + (f"Leave these unrelated files unchanged: {', '.join(protected)}.\n" if protected else "") +
               "Report tests, cleanup, remaining issues, and observed usage if available.\n")

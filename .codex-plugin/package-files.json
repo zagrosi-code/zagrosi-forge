@@ -27,6 +27,8 @@
   "examples/evals/coding/imports/tests/test_orders.py",
   "examples/evals/coding/node/src/ledger.js",
   "examples/evals/coding/node/tests/ledger.test.js",
+  "examples/evals/coding/results-2026-09-24.json",
+  "examples/evals/coding/results-2026-09-24.md",
   "examples/evals/coding/resume-plan/sections/index.md",
   "examples/evals/coding/resume-plan/sections/section-01-invoice-summary.md",
   "examples/evals/coding/resume-plan/spec.md",

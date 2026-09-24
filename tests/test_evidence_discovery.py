@@ -132,3 +132,62 @@ def test_discovered_commands_satisfy_evidence_command_gate(evidence, tmp_path, c
     capsys.readouterr()
     result = json.loads(run_raw("lint-evidence", "--planning-dir", str(tmp_path)).stdout)
     assert "missing-command-evidence" not in {finding["code"] for finding in result["findings"]}
+
+
+DISCOVERY = (
+    "Test discovery: tests/test_ledger.py uses unittest.TestCase; test_total and test_receipt "
+    "are the only discovered cases. The exact discovery command above ran 2 tests successfully "
+    "before edits; no other test runners/configuration exist."
+)
+
+
+def discovery_findings(text):
+    runtime = load_zagrosi_module()
+    findings = []
+    runtime.quality.add_term_findings(
+        findings, text, {"test-discovery": runtime.policy.EVIDENCE_TERMS["test-discovery"]}, "plan.md", "medium",
+    )
+    return findings
+
+
+@pytest.mark.parametrize("text", [
+    DISCOVERY,
+    DISCOVERY.replace("Test discovery:", "**Test discovery:**"),
+    DISCOVERY.replace("Test discovery:", "- **Test discovery**:"),
+    "Test discovery: `test_total` and `test_receipt` pass under unittest.",
+    "Test discovery: `src/ledger.test.ts` contains the current Vitest cases.",
+    "Existing tests: tests/test_ledger.py; test command recorded in Tests first. Tests discovered: 2, both passed.",
+])
+def test_equivalent_named_discovery_evidence_is_accepted(text):
+    assert not discovery_findings(text)
+
+
+@pytest.mark.parametrize("text", [
+    "<!--\n" + DISCOVERY + "\n-->",
+    "```text\n" + DISCOVERY + "\n```",
+    "```text\n" + DISCOVERY,
+    "Test discovery: pending",
+    "Test discovery: tests/test_ledger.py; pending",
+    "Test discovery: fixtures pending",
+    "Test discovery:",
+    "Test discovery tests/test_ledger.py",
+    "Test discovery: complete",
+    "Test discovery: src/ledger.py",
+])
+def test_hidden_malformed_or_placeholder_discovery_is_rejected(text):
+    assert {finding.code for finding in discovery_findings(text)} == {"missing-test-discovery"}
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+def test_named_discovery_is_shared_by_lint_and_score(tmp_path, capsys, depth):
+    from argparse import Namespace
+    from test_compact_plan import SECTION, make_plan
+
+    runtime = load_zagrosi_module()
+    planning = make_plan(tmp_path / "planning", depth)
+    section = planning / "sections" / f"{SECTION}.md"
+    text = section.read_text().replace("existing tests in", "inspected")
+    section.write_text(text + "\n" + DISCOVERY + "\n")
+    assert runtime.validation.lint_evidence(Namespace(planning_dir=str(planning), min_files=3, profile="solo", strict=True)) == 0
+    assert not json.loads(capsys.readouterr().out)["findings"]
+    assert not runtime.scoring.evidence_findings_for_score(planning, 3)

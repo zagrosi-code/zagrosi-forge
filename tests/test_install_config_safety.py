@@ -104,22 +104,23 @@ def test_atomic_failure_preserves_config_and_restrictive_backup(installer, tmp_p
     assert not list(tmp_path.glob(".config.toml.*"))
 
 
-def test_atomic_publication_preserves_permissions_and_refuses_drift(installer, tmp_path):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_atomic_publication_preserves_permissions_and_refuses_drift(installer, tmp_path, newline):
     owner = installer._codex_config
     config = tmp_path / "config.toml"
-    config.write_text("# original\n")
+    config.write_bytes(("# original" + newline).encode())
     config.chmod(0o640)
     snapshot = owner.read_config(config)
     updated, _ = installer.expected_codex_config(snapshot[0].decode(), tmp_path)
-    config.write_text("# concurrent edit\n")
+    config.write_bytes(("# concurrent edit" + newline).encode())
     with pytest.raises(ValueError, match="native plugin installer"):
         owner.publish_config(config, snapshot, updated)
-    assert config.read_text() == "# concurrent edit\n"
+    assert config.read_bytes() == ("# concurrent edit" + newline).encode()
     assert not list(tmp_path.glob("config.toml.bak-*"))
     snapshot = owner.read_config(config)
     updated, _ = installer.expected_codex_config(snapshot[0].decode(), tmp_path)
     owner.publish_config(config, snapshot, updated)
-    assert config.read_text() == updated
+    assert config.read_bytes() == updated.encode()
     if os.name != "nt":
         assert config.stat().st_mode & 0o777 == 0o640
 

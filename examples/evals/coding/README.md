@@ -133,3 +133,6 @@ time is excluded from runner time. Two repetitions give observations, not a
 statistically established speedup.
 
 Scope permits `.gitignore` entries only for local planning and generated Python/pytest caches; ignoring source or tests fails the trial.
+
+See the [2026-09-24 observations](results-2026-09-24.md) for repeated tasks across
+all three depths, including failed and cancelled attempts and comparison limits.

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 import json
 import re
+import shlex
 
 from . import policy as _policy
 
@@ -313,6 +314,53 @@ def visible_markdown(text: str) -> str:
     return "".join(parts) + text[previous:]
 
 
+def is_test_command(command: str) -> bool:
+    """Recognize runner invocations without executing shell input."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return False
+    while words:
+        executable, *words = words
+        if re.fullmatch(r"[A-Za-z_]\w*=.*", executable):
+            continue
+        name = executable.replace("\\", "/").rsplit("/", 1)[-1]
+        name = re.sub(r"\.(?:exe|cmd|bat)$", "", name)
+        if name in {"env", "npx"}:
+            continue
+        if name in {"uv", "poetry", "pipenv", "hatch"} and words[:1] == ["run"]:
+            words = words[1:]
+            while name == "uv" and words and (words[0] == "--with" or words[0].startswith("--with=")):
+                option, *words = words
+                if option == "--with":
+                    if not words or not words[0] or words[0].startswith("-"):
+                        return False
+                    words = words[1:]
+                elif not option.removeprefix("--with="):
+                    return False
+            continue
+        if re.fullmatch(r"python[\d.]*", name):
+            while words and words[0] != "-m":
+                option, *words = words
+                if option in {"-W", "-X"} and words:
+                    words = words[1:]
+                elif not re.fullmatch(r"-(?:[BEIOPqsSuvx]+|W.+|X.+)", option):
+                    return False
+            if words[:1] != ["-m"]:
+                return False
+            return len(words) > 1 and words[1] in {"pytest", "unittest"}
+        if name in {"pytest", "unittest", "vitest", "jest", "ctest", "rspec"}:
+            return True
+        if name == "node":
+            return words[:1] == ["--test"]
+        if name in {"go", "cargo", "dotnet", "swift", "mix", "mvn", "gradle", "gradlew", "npm", "pnpm", "yarn", "bun", "make"}:
+            if words[:1] == ["run"]:
+                words = words[1:]
+            return bool(words and re.match(r"test\b", words[0]))
+        return False
+    return False
+
+
 def has_verification(text: str) -> bool:
     """Read visible regression/inspection contracts once for every quality gate."""
     blocks, plain_lines = split_markdown_fences_with_closure(visible_markdown(text))
@@ -350,12 +398,7 @@ def has_verification(text: str) -> bool:
     plain = "\n".join(body)
     code = "\n".join("\n".join(lines) for language, lines, _ in blocks if language not in {"", "text", "txt", "plain", "plaintext", "markdown", "md"})
     commands = re.findall(r"`([^`\n]+)`", plain) + code.splitlines() + re.findall(r"(?im)^\s*run\s+(.+)$", plain)
-    command = fields.get("command") or any(re.match(
-        r"(?:uv\s+run\s+|npx\s+)?(?:python[\d.]*\s+-m\s+)?"
-        r"(?:(?:pytest|unittest|vitest|jest|ctest|rspec)\b|node\s+--test\b|"
-        r"(?:go|cargo|dotnet|swift|mix|mvn|gradle|gradlew|npm|pnpm|yarn|bun|make)\s+(?:run\s+)?test\b)",
-        item.strip(),
-    ) for item in commands)
+    command = fields.get("command") or any(is_test_command(item) for item in commands)
     if cases:
         return all(case.get("expected") and (case.get("command") or command) for case in cases)
     case = re.search(

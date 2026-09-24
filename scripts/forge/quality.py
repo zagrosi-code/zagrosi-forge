@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 import argparse
 import json
+import re
 
 from . import markdown as _markdown
 from . import models as _models
@@ -214,9 +215,30 @@ def require_terms(
             )
 
 
+def test_discovery_evidence(text: str, terms: list[str]) -> bool:
+    blocks, lines = _markdown.split_markdown_fences_with_closure(_markdown.visible_markdown(text))
+    if any(not closed for _, _, closed in blocks):
+        return False
+    legacy = []
+    for raw in lines:
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", raw).strip().replace("**", "")
+        if not re.match(r"(?i)^test discovery\b", line):
+            legacy.append(line)
+            continue
+        match = re.fullmatch(r"(?i)test discovery:\s*(\S.*)", line)
+        if not match or re.search(r"(?i)\b(?:pending|tbd|todo)\b", match[1]):
+            continue
+        if any(_markdown.is_test_path(path.strip("`")) for path in _policy.FILE_PATH_RE.findall(match[1])) or re.search(
+            r"\b(?:test_[A-Za-z0-9_]+|Test[A-Z][A-Za-z0-9_]*)\b(?![.:])", match[1],
+        ):
+            return True
+    return _markdown.contains_any("\n".join(legacy), terms)
+
+
 def add_term_findings(findings: list[_models.Finding], text: str, groups: dict[str, list[str]], path: Path, severity: str) -> None:
     for label, terms in groups.items():
-        if not _markdown.contains_any(text, terms):
+        covered = test_discovery_evidence(text, terms) if label == "test-discovery" else _markdown.contains_any(text, terms)
+        if not covered:
             findings.append(
                 finding(
                     severity,
