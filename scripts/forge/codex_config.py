@@ -138,7 +138,10 @@ def read_config(path):
     with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as handle:
         opened = os.fstat(handle.fileno())
         raw = handle.read()
-    if _signature(before) != _signature(opened) or _signature(path.lstat()) != _signature(before):
+        if _signature(opened) != _signature(os.fstat(handle.fileno())):
+            raise ValueError(CONFIG_ERROR)
+    # Windows lstat/fstat expose different ctime meanings; compare each view to itself.
+    if not os.path.samestat(before, opened) or _signature(path.lstat()) != _signature(before):
         raise ValueError(CONFIG_ERROR)
     return raw, before
 

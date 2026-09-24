@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 import json
 import os
@@ -21,9 +21,9 @@ def package_members(root: Path) -> set[str]:
         raise ValueError("Plugin package needs a regular package-files.json manifest")
     members = json.loads(path.read_text(encoding="utf-8"))
     if (not isinstance(members, list) or not members or PACKAGE_MANIFEST not in members
-            or any(not isinstance(name, str) or not name or "\\" in name
-                   or Path(name).is_absolute() or ".." in Path(name).parts
-                   or Path(name).as_posix() != name or should_skip_cache_path(Path(name)) for name in members)
+            or any(not isinstance(name, str) or not name or "\\" in name or ":" in name
+                   or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts
+                   or PurePosixPath(name).as_posix() != name or should_skip_cache_path(Path(name)) for name in members)
             or len(set(members)) != len(members)):
         raise ValueError("Plugin package manifest must list unique, safe relative file paths")
     return set(members)

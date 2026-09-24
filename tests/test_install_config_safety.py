@@ -191,3 +191,68 @@ def test_verification_never_echoes_config_values(installer, tmp_path, monkeypatc
     verification = installer.verify_codex_install(tmp_path, True)
     assert verification["success"] is False
     assert "SYNTHETIC_CONFIG_CANARY" not in json.dumps(verification)
+
+
+def stat_with(observed, **changes):
+    from types import SimpleNamespace
+    fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+    return SimpleNamespace(**{**{name: getattr(observed, name) for name in fields}, **changes})
+
+
+@pytest.mark.parametrize("different_file", [False, True])
+def test_config_read_distinguishes_windows_ctime_views_from_file_replacement(installer, tmp_path, monkeypatch, different_file):
+    owner = installer._codex_config
+    config = tmp_path / "config.toml"
+    config.write_bytes(b"# unchanged\n")
+    fstat = owner.os.fstat
+
+    def windows_descriptor(fd):
+        observed = fstat(fd)
+        # CPython 3.12 lstat reports birthtime; fstat reports metadata-change time.
+        return stat_with(observed, st_ctime_ns=observed.st_ctime_ns + 1_000_000_000,
+                         st_ino=observed.st_ino + different_file)
+
+    monkeypatch.setattr(owner.os, "fstat", windows_descriptor)
+    if different_file:
+        with pytest.raises(ValueError, match="native plugin installer"):
+            owner.read_config(config)
+    else:
+        raw, observed = owner.read_config(config)
+        assert raw == b"# unchanged\n"
+        assert observed.st_ino == config.lstat().st_ino
+
+
+@pytest.mark.parametrize("field", ["st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"])
+def test_config_read_rejects_descriptor_drift_during_read(installer, tmp_path, monkeypatch, field):
+    owner = installer._codex_config
+    config = tmp_path / "config.toml"
+    config.write_bytes(b"# unchanged\n")
+    fstat = owner.os.fstat
+    calls = 0
+
+    def drifting_descriptor(fd):
+        nonlocal calls
+        calls += 1
+        observed = fstat(fd)
+        return stat_with(observed, **{field: getattr(observed, field) + (calls > 1)})
+
+    monkeypatch.setattr(owner.os, "fstat", drifting_descriptor)
+    with pytest.raises(ValueError, match="native plugin installer"):
+        owner.read_config(config)
+
+
+def test_publication_rejects_same_size_rewrite_with_restored_timestamps(installer, tmp_path, monkeypatch):
+    owner = installer._codex_config
+    config = tmp_path / "config.toml"
+    config.write_bytes(b'model = "alpha"\n')
+    # Hold the path metadata constant to prove that content itself remains bound.
+    original_stat = config.lstat()
+    monkeypatch.setattr(type(config), "lstat", lambda *_: original_stat)
+    original = owner.read_config(config)
+    config.write_bytes(b'model = "bravo"\n')
+    os.utime(config, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    updated, _ = owner.expected_codex_config(original[0].decode(), tmp_path)
+    with pytest.raises(ValueError, match="native plugin installer"):
+        owner.publish_config(config, original, updated)
+    assert config.read_bytes() == b'model = "bravo"\n'
+    assert not list(tmp_path.glob("config.toml.bak-*"))

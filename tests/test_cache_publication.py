@@ -179,7 +179,8 @@ def test_cache_without_manifest_is_repaired_using_source_members(installer, tmp_
     assert installer.plugin_tree_fingerprint(cache) == installer.plugin_tree_fingerprint(source)
 
 
-@pytest.mark.parametrize("name", ["../outside", "/absolute", "folder/../outside", ".env", ".env.local", "x\\y"])
+@pytest.mark.parametrize("name", ["../outside", "/absolute", "C:/absolute", "C:relative", "runtime.py:stream",
+                                 "folder/../outside", ".env", ".env.local", "x\\y"])
 def test_unsafe_declared_member_fails_before_publication(installer, tmp_path, name):
     source, cache = trees(tmp_path)
     path = source / ".codex-plugin/package-files.json"
