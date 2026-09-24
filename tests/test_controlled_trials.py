@@ -49,9 +49,9 @@ def test_plugin_under_test_cannot_replace_evaluator_or_fixture(tmp_path):
 def test_matrix_invokes_its_own_evaluator(tmp_path, monkeypatch):
     evaluator = tmp_path / "evaluator"
     (evaluator / "tools").mkdir(parents=True)
-    (evaluator / "tools/coding_trials.py").write_text('''import pathlib, sys
+    (evaluator / "tools/coding_trials.py").write_text('''import json, pathlib, sys
 trial = pathlib.Path(sys.argv[2]); trial.mkdir()
-(trial / 'argv.txt').write_text(repr(sys.argv))
+(trial / 'argv.json').write_text(json.dumps(sys.argv))
 raise SystemExit(7)
 ''')
     previous = tmp_path / "previous"
@@ -59,7 +59,8 @@ raise SystemExit(7)
     monkeypatch.setattr(matrix, "ROOT", evaluator)
     matrix.run_trial(tmp_path, previous, {"id": "one", "case": "godfile", "depth": "deep", "arm": "previous"}, ["unused"], 20)
     assert json.loads((tmp_path / "one/attempt.json").read_text())["returncode"] == 7
-    assert str(previous) in (tmp_path / "one/argv.txt").read_text()
+    arguments = json.loads((tmp_path / "one/argv.json").read_text())
+    assert arguments[arguments.index("--plugin-root") + 1] == str(previous)
 
 
 def test_comparison_rotates_arms_and_preserves_every_case_depth_repeat():

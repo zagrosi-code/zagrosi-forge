@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
+from types import ModuleType
 
 import pytest
 
@@ -208,7 +210,11 @@ def test_detached_profile_default_remains_solo(forge, workspace, monkeypatch, op
         profiles.append(args.profile)
         return 0
 
-    monkeypatch.setattr(getattr(forge, module), handler, dispatch)
+    # Exercise real profile dispatch without importing the Unix-only implementation.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    detached = ModuleType(forge.package.MODULE_NAMES[f"forge/{module}.py"])
+    setattr(detached, handler, dispatch)
+    monkeypatch.setitem(sys.modules, detached.__name__, detached)
     arguments = [operation, "--sections-dir", str(planning / "sections"), "--implementation-root", str(root / "detached")]
     if operation == "implement-record-section":
         arguments += ["--section", SECTION]
