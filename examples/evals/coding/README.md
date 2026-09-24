@@ -136,3 +136,78 @@ Scope permits `.gitignore` entries only for local planning and generated Python/
 
 See the [2026-09-24 observations](results-2026-09-24.md) for repeated tasks across
 all three depths, including failed and cancelled attempts and comparison limits.
+
+## Controlled previous/current/plain comparison
+
+Use **one frozen evaluator checkout** for the entire experiment. `--plugin-root`
+selects only Forge's source under test; its evaluator, cases and fixtures are never
+executed. The fixed evaluator's Forge runtime judges both Forge arms by the same
+admission/completion rules. Plain agents receive the same functional task, scope,
+regression checks and independent cleanup review; Forge records are inapplicable.
+Task fixtures contain no arm-specific workflow instruction. Forge's prepared
+`resume` checkpoint is excluded from this comparison because it has no equivalent
+plain-agent starting state.
+
+The default comparative cases are the 251-line order-dispatch module with state,
+serialization and extraction requirements, and the multi-module CSV import preview
+with weak initial coverage. No artificial padding or arbitrary line-count gate is
+used. Each case/depth/repetition runs previous Forge, current Forge and plain agent
+in a rotating order. Comparisons run serially to avoid concurrent workload bias.
+All arms use the checked-in adapter, the same explicit model/effort, a fresh
+workspace/session, ignored user config/rules and identical sandbox settings.
+Confirm the chosen model works with the same Codex binary before scheduling.
+
+```bash
+# Run this script from the frozen evaluator, which includes the new harness.
+python /path/to/evaluator/tools/trial_matrix.py compare /tmp/forge-controlled \
+  --plugin-root /path/to/current --previous-root /path/to/previous \
+  --model gpt-5.5 --effort medium --codex /opt/homebrew/bin/codex \
+  --cases godfile import-preview --depths standard --repeats 2
+# Twelve fresh attempts; cleanup results remain pending independent review.
+python /path/to/evaluator/tools/trial_matrix.py blind /tmp/forge-controlled
+```
+
+Give an independent reviewer each directory under `blind/`, **without**
+`blind-key.json`, parent logs, arm names, timing or usage. Packets contain original
+source/tests, three shuffled labeled candidates, behavior/scope check results and
+`review.json`. Reviewers explain readability, cohesive boundaries, removed
+redundancy and regression protection using concrete files/functions. They select
+preferred labels (ties allowed), explain the choice, and complete the ordinary
+cleanup evidence for each candidate. Code may reveal workflow fingerprints, so
+blinding is partial; there is no automatic quality score from line counts.
+
+```bash
+# After independent reviewers complete every blind/*/review.json:
+python /path/to/evaluator/tools/trial_matrix.py apply-reviews /tmp/forge-controlled
+python /path/to/evaluator/tools/trial_matrix.py report /tmp/forge-controlled
+```
+
+Applying reviews validates baseline/candidate hashes against both the original
+workspace and review packet, writes the existing per-trial cleanup evidence,
+rechecks candidates with the fixed evaluator, and retains comparative judgments
+in `summary.json`. Source/test changes invalidate review; stale checker output
+cannot create a blind packet. Templates grant no passing verdict.
+
+The adapter saves raw `agent-events.jsonl` plus atomic partial `telemetry.json`,
+including CLI version, requested model/effort, total input/output tokens and
+cached/uncached input tokens where reported. Missing fields remain unknown.
+`commands_by_phase` labels observed planning, implementation, verification and
+other commands with counts, failed commands, event-receipt durations and emitted
+output bytes. These are **not** exact phase wall time or phase token usage;
+commands may combine phases, overlap, or have truncated output. Identical commands
+repeated after failure are observed command retries; API retry counts remain
+unknown. Requested model names do not attest the backend revision. Ignore-rules
+and the plain prompt reduce workflow contamination, but do not prove the agent
+has never learned or encountered Forge. Two repetitions are a controlled pilot,
+not statistical evidence of improvement across all depths or tasks.
+
+A controlled report is complete only after every scheduled comparison block has
+a valid independent review, even if ordinary trial checks already pass. Missing
+or deleted reviews remain in the expected denominator. A failed runner with
+checked output can still be reviewed; an attempt without `result.json` or source
+cannot be ranked. Packet preparation checks every attempt before creating
+`blind/`. Preserve those failures, run the fixed `check` for existing workspaces,
+and then retry packet creation. If preparation never produced a workspace,
+retain the incomplete block and schedule any replacement as a new attempt;
+never erase the original failure. An empty preferred-label list is allowed when
+no candidate is acceptable.

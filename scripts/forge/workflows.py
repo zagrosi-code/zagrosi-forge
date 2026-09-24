@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 
+from . import actions as _actions
 from . import artifacts as _artifacts
 from . import flights as _flights
 from . import gates as _gates
@@ -131,6 +132,8 @@ def deep_project_create_dirs(args: argparse.Namespace) -> int:
 
 
 def deep_plan_setup(args: argparse.Namespace) -> int:
+    from .planning_contract import create_plan_scaffold
+
     spec_file = _storage.resolve_path(args.file)
     ok, error = _projects.ensure_markdown_file(spec_file, "spec file")
     if not ok:
@@ -156,6 +159,8 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
         }
         _storage.write_json(config_path, config)
 
+    scaffold = create_plan_scaffold(spec_file, config.get("depth_mode", args.depth),
+                                    detached=getattr(args, "for_detached", False))
     artifacts = _artifacts.plan_artifact_state(planning_dir)
     files = {name: artifacts[name] for name in ("research", "interview", "spec", "plan", "integration_notes")}
     files["plan_tdd"] = artifacts["tdd"]
@@ -163,7 +168,10 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
     reviews = sorted(str(p) for p in reviews_dir.glob("*.md")) if reviews_dir.exists() else []
     section_progress = _sections.check_section_progress(planning_dir)
 
-    if section_progress["state"] == "complete":
+    if scaffold["unfinished"]:
+        resume_step = 11
+        resume_label = "write_plan"
+    elif section_progress["state"] == "complete":
         resume_step = None
         resume_label = "complete"
     elif section_progress["state"] in {"has_index", "partial"}:
@@ -196,10 +204,15 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
         "files_found": {k: str(v) for k, v in files.items() if v},
         "reviews": reviews,
         "section_progress": section_progress,
+        "scaffold": scaffold,
         "warnings": warnings,
     }
     if _gates.effective_flight_mode(args) != "off":
         payload["preflight"] = _flights.plan_preflight_report(spec_file, args)
+    payload["commands"] = _actions.plan_commands(
+        planning_dir, config.get("depth_mode", args.depth), _storage.resolve_path(args.target_dir or os.getcwd()),
+        detached=getattr(args, "for_detached", False),
+    )
     return _output.print_json(payload)
 
 
@@ -207,6 +220,7 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
     if getattr(args, "implementation_root", None):
         from . import detached_setup as _detached_setup
 
+        args.profile = args.profile or "solo"
         return _detached_setup.detached_implement_setup(args)
     return _mutable_lifecycle(args, _mutable_implement_setup)
 
@@ -215,6 +229,7 @@ def _mutable_lifecycle(args: argparse.Namespace, operation) -> int:
     planning_dir = _storage.resolve_path(args.sections_dir).parent
     try:
         with _storage.file_lock(planning_dir / "implementation" / ".mutable-state"):
+            args.profile = _actions.implementation_profile(planning_dir, args.profile)
             return operation(args)
     except (OSError, ValueError) as exc:
         return _output.print_json({"success": False, "error": str(exc), "planning_dir": str(planning_dir)}, 1)
@@ -261,6 +276,7 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         "planning_dir": str(planning_dir),
         "test_command": progress.get("project_config", {}).get("test_command"),
         "runtime": progress.get("project_config", {}).get("runtime"),
+        "profile": args.profile,
     }
     _storage.write_json(config_path, config)
 
@@ -303,6 +319,8 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
 
         entry = section_entry(planning_dir, readiness["next_section"], target_dir=target_dir)
         payload.update(entry)
+    elif payload["success"] and not readiness["remaining_sections"]:
+        payload.update(_actions.implementation_commands(planning_dir, target_dir=target_dir))
     return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
@@ -310,6 +328,7 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
     if getattr(args, "implementation_root", None):
         from . import detached_record as _detached_record
 
+        args.profile = args.profile or "solo"
         return _detached_record.detached_implement_record_section(args)
     return _mutable_lifecycle(args, _mutable_record_section)
 
@@ -436,4 +455,19 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
     }
     if postflight is not None:
         payload["postflight"] = postflight
+    payload["recorded"] = payload["success"]
+    if payload["recorded"]:
+        # The record is committed. A broken successor packet must not invite a duplicate record.
+        try:
+            if readiness["next_section"]:
+                from .resume import section_entry
+
+                payload["entry"] = section_entry(planning_dir, readiness["next_section"],
+                                                  target_dir=getattr(args, "target_dir", None), profile=args.profile)
+            elif not readiness["remaining_sections"]:
+                payload.update(_actions.implementation_commands(planning_dir, target_dir=getattr(args, "target_dir", None), profile=args.profile))
+        except (OSError, ValueError) as exc:
+            payload["entry"] = {"success": False, "error": str(exc),
+                                "next_action": "repair next-section context; the preceding record is already saved",
+                                "commands": {"retry_context": _actions.command("next-section", "--planning-dir", str(planning_dir))}}
     return _output.print_json(payload, 0 if payload["success"] else 1)

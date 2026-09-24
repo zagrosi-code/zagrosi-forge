@@ -152,7 +152,7 @@ def test_unsafe_or_explicit_gate_calls_keep_process_semantics(forge, monkeypatch
         gate = call_gate(forge, monkeypatch, capsys, tmp_path, command, **kwargs)
         assert gate["success"]
         assert len(calls) == 1
-        assert calls[0][0][2:] == command
+        assert calls[0][0][2:] == [*command, "--full-output"]
         assert calls[0][1]["timeout"] == (9 if kind == "timeout" else 120)
         if kind == "custom-cwd":
             assert calls[0][1]["cwd"] == tmp_path

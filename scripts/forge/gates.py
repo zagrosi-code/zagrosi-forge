@@ -18,25 +18,14 @@ from . import policy as _policy
 from . import session as _session
 from . import storage as _storage
 
-def sanitize_gate_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    cleaned = dict(payload)
-    for key in ("content", "stdout_tail", "stderr_tail"):
-        if key in cleaned and isinstance(cleaned[key], str) and len(cleaned[key]) > 500:
-            cleaned[key] = cleaned[key][:500] + "...[truncated]"
-    if "findings" in cleaned and isinstance(cleaned["findings"], list) and len(cleaned["findings"]) > 12:
-        cleaned["findings"] = cleaned["findings"][:12]
-        cleaned["findings_truncated"] = True
-    return cleaned
-
-
-def bounded_output_tail(value: Any, limit: int = 1000) -> str:
+def bounded_output_tail(value: Any, limit: int | None = 1000) -> str:
     if isinstance(value, bytes):
         text = value.decode("utf-8", errors="replace")
     elif value is None:
         text = ""
     else:
         text = str(value)
-    return text[-limit:]
+    return text[-limit:] if limit is not None else text
 
 
 def compact_gate_record(gate: dict[str, Any]) -> dict[str, Any]:
@@ -133,7 +122,7 @@ def run_internal_gate(
             result = run_local_gate(command, timeout_seconds)
         else:
             result = subprocess.run(
-                [sys.executable, str(Path(str(CLI_PATH)).resolve()), *command],
+                [sys.executable, str(Path(str(CLI_PATH)).resolve()), *command, "--full-output"],
                 cwd=cwd or _storage.current_plugin_root(),
                 capture_output=True,
                 text=True,
@@ -149,9 +138,9 @@ def run_internal_gate(
             "payload": {
                 "error_code": "gate-timeout",
                 "timeout_seconds": timeout_seconds,
-                "stdout": bounded_output_tail(exc.stdout),
+                "stdout": bounded_output_tail(exc.stdout, None),
             },
-            "stderr_tail": bounded_output_tail(exc.stderr),
+            "stderr_tail": bounded_output_tail(exc.stderr, None),
         }
     payload: dict[str, Any]
     valid_json_object = False
@@ -163,7 +152,7 @@ def run_internal_gate(
         payload = decoded
         valid_json_object = True
     else:
-        payload = {"error_code": "invalid-gate-json", "stdout": result.stdout[-1000:]}
+        payload = {"error_code": "invalid-gate-json", "stdout": result.stdout}
     context = _session._CLI_CONTEXT.get()
     if (
         local and result.returncode == (0 if payload.get("success") is True else 1)
@@ -171,7 +160,6 @@ def run_internal_gate(
     ):
         inputs.record(name, payload)
     command_success = result.returncode == 0 and valid_json_object and payload.get("success", True) is not False
-    cleaned_payload = sanitize_gate_payload(payload)
     return compact_gate_record(
         {
             "name": name,
@@ -179,8 +167,8 @@ def run_internal_gate(
             "success": command_success,
             "returncode": result.returncode,
             "command": " ".join(command),
-            "payload": cleaned_payload,
-            "stderr_tail": result.stderr[-1000:],
+            "payload": payload,
+            "stderr_tail": result.stderr,
         }
     )
 
@@ -211,7 +199,7 @@ def direct_gate(name: str, success: bool, payload: dict[str, Any], *, required: 
             "success": success,
             "returncode": 0 if success else 1,
             "command": "internal",
-            "payload": sanitize_gate_payload(payload),
+            "payload": payload,
             "stderr_tail": "",
         }
     )

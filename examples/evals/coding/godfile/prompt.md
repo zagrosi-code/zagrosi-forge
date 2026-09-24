@@ -1,4 +1,4 @@
-Use Forge at deep depth. Work only in the provided disposable workspace.
+Work only in the provided disposable workspace.
 
 Add `summarize_orders(orders)` and `OrderBook.summary()` to the order-dispatch API.
 Return a JSON-compatible dictionary with these exact keys:
@@ -22,8 +22,7 @@ transition rule, and copy-isolation behavior compatible. Extract cohesive implem
 into focused modules; do not simply move the entire file behind a wrapper or add speculative layers.
 
 Add regression coverage for the existing responsibilities before refactoring. Use only
-the standard library. Include a compact deep plan with evidence, alternatives, ownership,
-risks, review, and tests. Run existing and added tests with
+the standard library. Run existing and added tests with
 `PYTHONPATH=src python3 -m unittest discover -s tests`. Report changes, tests, cleanup,
 remaining issues, and observed usage if available. Do not inspect external trial checkers,
 other trial outputs, or modify plugin/source infrastructure.

@@ -24,6 +24,7 @@ def postflight(forge, capsys, plan, *, depth="standard", profile="solo"):
     rc = forge.entrypoint.main([
         "postflight", "--phase", "plan", "--planning-dir", str(plan),
         "--depth", depth, "--profile", profile, "--flight", "strict",
+        "--full-output",
     ])
     return rc, json.loads(capsys.readouterr().out)
 

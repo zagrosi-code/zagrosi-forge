@@ -16,7 +16,7 @@
   },
   "discount": {
     "depth": "deep",
-    "request": "Add optional discount_percent=0 to invoice. Accept only integers 0..100 (reject bool and other types with ValueError). Reduce aggregate subtotal by floor(subtotal * percent / 100), then compute existing tax and exports from that subtotal. Zero discount preserves existing behavior. Include a compact deep plan with evidence, alternatives, risks, review, and tests.",
+    "request": "Add optional discount_percent=0 to invoice. Accept only integers 0..100 (reject bool and other types with ValueError). Reduce aggregate subtotal by floor(subtotal * percent / 100), then compute existing tax and exports from that subtotal. Zero discount preserves existing behavior.",
     "assertions": 4806
   },
   "godfile": {

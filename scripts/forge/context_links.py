@@ -9,6 +9,7 @@ from urllib.parse import unquote, urlsplit
 
 from . import markdown as _markdown
 from . import storage as _storage
+from . import session as _session
 
 
 LINK = re.compile(r'(?<!!)\[[^\]\n]+\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+["\'][^\n]*?["\'])?\s*\)')
@@ -103,7 +104,7 @@ def linked_contracts(
                 continue
             if not name and not anchor:
                 continue
-            path = (origin.parent / name).resolve() if name else origin.resolve()
+            path = _session.observe_path(origin.parent / name if name else origin).resolve()
             if not path.is_relative_to(root) and path not in allowed:
                 raise ValueError(f"Contract link leaves the planning directory: {origin}: {link}")
             key = path, anchor

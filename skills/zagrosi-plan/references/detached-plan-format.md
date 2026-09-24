@@ -1,7 +1,8 @@
 # Authoring for Detached Execution
 
 Choose this route before writing when implementation must preserve a frozen
-planning tree. Use physical `codex-plan.md`, `reviews/codex.md`, and sections;
+planning tree. Add `--for-detached` to `plan-setup` to skip its compact scaffold.
+Use physical `codex-plan.md`, `reviews/codex.md`, and sections;
 omit `compact_plan` metadata everywhere. Keep shared evidence/decisions in the
 plan and link them from sections. Use the requested depth in plan metadata;
 the example below uses `lean`. Replace its requirements and evidence with the

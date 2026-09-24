@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import tomllib
 
 from . import markdown as _markdown
@@ -28,6 +29,27 @@ def evidence_path_ignored(relative_path: Path) -> bool:
 
 
 def evidence_files(target_dir: Path) -> list[Path]:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
+            cwd=target_dir, capture_output=True, timeout=10,
+        )
+        if result.returncode == 0:
+            paths = {Path(os.fsdecode(name)) for name in result.stdout.split(b"\0") if name}
+            files = set()
+            for path in paths:
+                if not path.parts or path.is_absolute() or ".." in path.parts or evidence_path_ignored(path):
+                    continue
+                child = target_dir / path
+                if child.is_file():
+                    files.add(path)
+                elif child.is_dir() and not any((target_dir / parent).is_symlink()
+                                               for parent in (path, *path.parents) if parent.parts):
+                    # Git lists nested repositories/submodules as directory boundaries.
+                    files.update(path / nested for nested in evidence_files(child))
+            return sorted(files, key=lambda path: path.as_posix())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(target_dir):
         directory = Path(dirpath)

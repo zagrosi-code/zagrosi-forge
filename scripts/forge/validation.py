@@ -11,6 +11,7 @@ from . import markdown as _markdown
 from . import models as _models
 from . import ownership as _ownership
 from . import policy as _policy
+from . import planning_contract as _contract
 from . import projects as _projects
 from . import quality as _quality
 from . import sections as _sections
@@ -50,7 +51,9 @@ def plan_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list[_m
 
     plan_words = _markdown.word_count(plan_text)
     _quality.add_budget_finding(findings, plan_words, budgets["plan"], "Implementation plan", "plan-too-large", plan_path)
-    _quality.require_terms(findings, plan_text, _policy.LEAN_PLAN_TERMS, plan_path, "medium")
+    mapped = bool(descriptor and descriptor["headings"].get("contract"))
+    terms = {key: value for key, value in _policy.LEAN_PLAN_TERMS.items() if not mapped or key not in {"goal", "design-contract", "testing", "acceptance"}}
+    _quality.require_terms(findings, plan_text, terms, plan_path, "medium")
     if not compact:
         _quality.require_terms(
             findings,
@@ -87,12 +90,10 @@ def plan_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list[_m
             and (configured_source is None or normalized_spec.resolve() != configured_source.resolve())
         ):
             _quality.add_budget_finding(findings, spec_words, budgets["spec"], "Normalized spec", "spec-too-large", spec_path)
-        spec_ids = _markdown.requirement_ids(spec_text)
+        spec_ids, _ = _contract.requirements(planning_dir)
         if not spec_ids:
-            spec_ids = _markdown.requirement_ids(plan_text)
-            if not compact:
-                findings.append(_quality.finding("medium", "no-requirement-ids", "Spec has no REQ-* identifiers.", spec_path))
-        plan_ids = set(_markdown.requirement_ids(plan_text))
+            findings.append(_quality.finding("medium", "no-requirement-ids", "Brief needs explicit requirements or a source-linked canonical contract.", spec_path))
+        plan_ids = set(_markdown.requirement_ids(_markdown.visible_markdown(plan_text)))
         missing_in_plan = [req_id for req_id in spec_ids if req_id not in plan_ids]
         if missing_in_plan:
             findings.append(
@@ -112,7 +113,7 @@ def plan_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list[_m
         _quality.add_budget_finding(findings, tdd_words, budgets["tdd"], "TDD plan", "tdd-plan-too-large", tdd_path)
         if not _markdown.has_verification(tdd_text):
             findings.append(_quality.finding("medium", "thin-tdd-plan", "TDD plan needs a regression case and command, or justified inspection with an expected result.", tdd_path))
-        tdd_ids = set(_markdown.requirement_ids(tdd_text))
+        tdd_ids = set(_markdown.requirement_ids(_markdown.visible_markdown(tdd_text)))
         missing_in_tdd = [req_id for req_id in spec_ids if req_id not in tdd_ids]
         if missing_in_tdd:
             severity = "low" if compact else "medium"
@@ -211,8 +212,7 @@ def section_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list
         index_path,
     )
 
-    spec_path = _artifacts.requirement_source_spec(planning_dir)
-    spec_ids = _markdown.requirement_ids(_storage.read_text(spec_path)) if spec_path else []
+    spec_ids, _ = _contract.requirements(planning_dir)
     all_section_text = ""
     estimates: list[dict[str, Any]] = []
     section_texts: dict[str, str] = {}
@@ -300,7 +300,9 @@ def section_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list
                     section_path,
                 )
             )
-        _quality.require_terms(findings, text, _policy.LEAN_SECTION_TERMS, section_path, "medium")
+        mapped = section_path == canonical_path and canonical["headings"].get("contract")
+        terms = {key: value for key, value in _policy.LEAN_SECTION_TERMS.items() if not mapped or key == "risks"}
+        _quality.require_terms(findings, text, terms, section_path, "medium")
         if not _policy.FILE_PATH_RE.search(text):
             findings.append(_quality.finding("medium", "section-no-file-paths", f"{section} does not name concrete files.", section_path))
         allowed_owners = predecessor_closure[section] | {section}
@@ -330,7 +332,7 @@ def section_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list
                 )
             )
 
-    section_ids = set(_markdown.requirement_ids(all_section_text))
+    section_ids = set(_markdown.requirement_ids(_markdown.visible_markdown(all_section_text)))
     missing_requirements = [req_id for req_id in spec_ids if req_id not in section_ids]
     if missing_requirements:
         findings.append(

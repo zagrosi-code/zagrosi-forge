@@ -20,20 +20,39 @@ For detached execution, omit it and follow [physical authoring](detached-plan-fo
 For multiple sections, use `| Section | Depends on | REQ | Owns | Tests |`;
 record execution order/shared sequencing once.
 
-Canonical section H2 headings:
+For a canonical section, use four headings and bind each requirement once:
 
 ```markdown
-## Goal
-## Dependencies
+## Contract
+### REQ-001
+Source: spec.md#L1-L3
+Behavior: Trim label edges in the existing helper; preserve case, internal spaces and errors.
+Expected: test_trim_edges maps " Ada Lovelace " to "Ada Lovelace"; current code preserves edges.
+Command: uv run pytest tests/test_labels.py
+
 ## Owned files
-## Tests first
-## Implementation contract
+- src/labels.py
+- tests/test_labels.py
+
 ## Evidence
-## Decisions
-## Risks
+Inspected callers, runtime and existing tests; record actual evidence here.
+Record relevant assumptions, rationale, compatibility/security risks and rollback.
+
 ## Review
-## Acceptance
+Verdict: pass
+Reviewed: the actual contract, source coverage, edge cases, ownership and regression evidence; record findings.
 ```
+
+Replace the example with inspected facts; unfinished fields or a blocked review
+cannot pass. Keep source IDs exactly; for a brief without IDs, source links must
+cover its visible content. Do not hide mappings in comments or fences.
+
+The Contract supplies implementation, tests and acceptance without repeating them
+under separate headings. Dependencies/order stay in the index. Add `## Decisions`
+or `## Risks` only for material detail; short evidence can hold those facts.
+Depth still controls investigation and review, including compatibility, security,
+alternatives and consequential failure modes. Legacy Goal/Tests first/Implementation
+contract/Acceptance sections remain supported; detached plans use their physical route.
 
 Bind `REQ-*` to observable acceptance and tests: path/case, expected RED, command.
 Any language can use `Case:`/`Behavior:`, `Expected:`, and `Command:` labels.

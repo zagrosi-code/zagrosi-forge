@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from contextlib import contextmanager
 from typing import Any
 import io
 
@@ -16,6 +17,29 @@ _GATE_STREAMS: ContextVar[tuple[io.StringIO, io.StringIO] | None] = ContextVar("
 
 
 _QUALITY_CAPTURE: ContextVar[dict[str, Any] | None] = ContextVar("forge_quality_capture", default=None)
+
+
+def observe_path(path):
+    context = _CLI_CONTEXT.get()
+    observations = context.get("analysis_observations") if context is not None else None
+    if observations is not None and path not in observations:
+        observations[path] = _path_signature(path)
+    return path
+
+
+@contextmanager
+def read_phase():
+    """Share pure analyses inside one mutable verification phase, never across writes."""
+    context = _CLI_CONTEXT.get()
+    if context is None:
+        yield
+        return
+    token = _CLI_CONTEXT.set({**context, "texts": {}, "owned_paths": {}, "analyses": {},
+                              "analysis_observations": None, "score_inputs": None, "local_gates": True})
+    try:
+        yield
+    finally:
+        _CLI_CONTEXT.reset(token)
 
 
 def cached_analysis(name, key, analyze):

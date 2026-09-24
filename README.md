@@ -70,40 +70,45 @@ Output stays small at every depth:
 | Multi-section plan | One shared plan and ordered sections that link shared contracts |
 | Implement | Tests, code, and compact machine-readable section records |
 
-Each phase runs setup, performs the work, then runs strict postflight:
+Each phase uses setup and strict postflight:
 
 ```bash
 python3 scripts/zagrosi_skills.py plan-setup \
   --file planning/01-auth/spec.md --plugin-root . --depth lean
-# Write and review the plan and sections.
+# Complete the generated draft and review it; the source brief stays unchanged.
 python3 scripts/zagrosi_skills.py postflight \
   --phase plan --planning-dir planning/01-auth --depth lean --strict
 ```
 
 Project uses `project-setup`; implementation uses `implement-setup`.
-`commands --pretty` lists commands; `status --path PATH --pretty` resumes work.
+Setup returns applicable command arguments. Replace evidence placeholders with
+actual results; `status --path PATH --pretty` resumes work.
+`commands --pretty` lists all commands.
 
 Use the explicit [compact-plan format](skills/zagrosi-plan/references/plan-format.md).
-Legacy plans and reviews remain supported. Detached frozen runs retain physical
-contracts and separate operational records.
+Map source, behavior, expected results and verification once per requirement.
+Legacy plans and reviews remain supported. Use `plan-setup --for-detached` for
+detached frozen runs, which retain physical contracts and separate records.
 
 ## Context and Performance
 
 Context preserves complete sections and linked decisions/risks, selects relevant
 requirements, and identifies omissions. `context-brief` and `implementation-packet`
 default to 2,000 words; adjust `--max-words` when necessary. Broken links and
-oversized contracts fail explicitly. Setup and `next-section` include the packet.
+oversized contracts fail explicitly. Setup and successful section recording
+include the next packet. A saved record remains saved if its successor needs repair.
 
-Saved progress supplies the resume stage and next action; changed inputs require
-fresh checks. New completion records bind requirements and dependencies. Contract
-edits reopen completion; code drift is reported for final integration because
-later sections can edit shared files. Legacy records remain readable, labeled unbound.
+Failed flights return unique diagnostics and a path to the complete report.
+Use `--full-output` for the nested machine payload; no findings are discarded.
+
+Saved progress identifies the next action; changed inputs require fresh checks.
+Records bind requirements and dependencies. Contract edits reopen completion;
+code drift requires integration checks. Legacy records remain readable, labeled unbound.
 
 The shared [engineering standard](skills/zagrosi-implement/references/engineering.md)
 draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse
-existing code and standard libraries, prefer clear names and direct flow. Repair
-encountered duplication, oversized modules and mixed responsibilities; update
-ownership before broader edits. Characterize weak coverage before refactoring,
+code, prefer clear names and direct flow. Repair encountered duplication and mixed
+responsibilities; update ownership before broader edits. Characterize weak coverage,
 run targeted regression checks, then the full suite at integration.
 
 On macOS/Linux, known read-only gates avoid repeated process startup; other gates
@@ -118,20 +123,17 @@ Benchmarks measure helper latency, context size and modeled reference loads on
 identical fixtures across depths. See the
 [recorded comparison](examples/evals/performance.json).
 
-[Coding trials](examples/evals/coding/README.md) measure complete tasks across
-depths: features, cleanup, resume, CSV imports and JavaScript. Repeated runs retain
+[Coding trials](examples/evals/coding/README.md) compare complete tasks, retaining
 failures, timings and available usage. Verdicts separate behavior, workflow and
-independently reviewed cleanup; unchanged fixtures fail cleanup. Reviews bind
-candidate, baseline, plugin and evaluator.
+independent cleanup review, bound to candidate, baseline, plugin and evaluator.
 
 ## Runtime
 
 The CLI imports modules on demand. SHA-256 manifests bind runtime/test sources;
 verification compiles those exact bytes without bytecode caches. Detached runs
-reverify sources, ownership, locks and immutable inputs with process isolation.
-Checks reuse unchanged parsing and score components within one command; analyses
-return structured results. Mutable writes are serialized and atomic. Privileged
-project policy loads through a source-bound adapter with frozen checks.
+reverify sources, ownership, locks and immutable inputs in isolated processes.
+Checks reuse unchanged analysis within one command. Mutable writes are serialized
+and atomic. Privileged policy uses a source-bound adapter with frozen checks.
 
 Installed files come from `.codex-plugin/package-files.json`; undeclared local
 files stay out. Configuration updates preserve unrelated values, publish

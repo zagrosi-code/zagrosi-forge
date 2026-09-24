@@ -617,12 +617,14 @@ Use `{plan_path}` for shared contracts when it is another existing file.
 Clarify only from `{source_path}` when required.
 
 {max_words} words max. Do not copy plan context. Reference REQ/DEC/RISK IDs.
-Use H2 headings: ## Goal, ## Dependencies, ## Owned files, ## Tests first,
-## Implementation contract, ## Evidence, ## Decisions, ## Risks, ## Review,
-## Acceptance. Keep inputs/outputs/errors, exact owned paths, expected test failure
-and command, and rollback explicit. If the index selects this canonical compact
-section, store its evidence, decisions, and review here once; otherwise link shared
-records. Review needs literal `Verdict: pass` or `Verdict: fixed`, plus
+For a canonical compact section use ## Contract, ## Owned files, ## Evidence,
+and ## Review. Contract maps each ### REQ-* to Source, Behavior, Expected, Command
+using the section format. Preserve source IDs; never edit the brief to add IDs.
+Keep inputs/outputs/errors, exact ownership, expected test failure, verification,
+and rollback explicit. Add ## Decisions or ## Risks only for material detail;
+otherwise keep those facts in evidence. Other sections link shared contracts and
+record local deltas; detached mode uses its physical format. Review needs literal
+`Verdict: pass` or `Verdict: fixed`, plus
 `Reviewed: <concrete scope and result>`.
 No production implementation. Every sentence must change an implementation decision.
 """

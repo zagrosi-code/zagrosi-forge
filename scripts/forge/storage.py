@@ -26,6 +26,7 @@ def read_text(path: Path) -> str:
     if context is None or context["texts"] is None:
         return path.read_text(encoding="utf-8")
     path = path.absolute()
+    _session.observe_path(path)
     signature = file_signature(path)
     cached = context["texts"].get(path)
     if cached is None or cached[0] != signature:

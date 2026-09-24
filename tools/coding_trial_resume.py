@@ -80,7 +80,7 @@ def run_prepared_test(workspace: Path) -> int:
     return 0 if success else 1
 
 
-def prepare_resume(root: Path, workspace: Path, depth: str, test_argv: list[str]) -> dict:
+def prepare_resume(root: Path, workspace: Path, depth: str, test_argv: list[str], *, plugin_root: Path | None = None) -> dict:
     source = workspace / "src/ledger.py"
     source.write_text(source.read_text().replace('    if action == "total":',
         '    if action == "summary":\n        return json.loads(invoice("json", items, customer))\n    if action == "total":', 1))
@@ -94,7 +94,7 @@ def prepare_resume(root: Path, workspace: Path, depth: str, test_argv: list[str]
     shutil.copytree(root / "examples/evals/coding/resume-plan", planning)
     index = planning / "sections/index.md"
     index.write_text(index.read_text().replace('"depth_mode":"standard"', '"depth_mode":' + json.dumps(depth)))
-    cli = [sys.executable, "-B", str(root / "scripts/zagrosi_skills.py")]
+    cli = [sys.executable, "-B", str((plugin_root or root) / "scripts/zagrosi_skills.py")]
     for name, args in (
         ("admission", ["postflight", "--phase", "plan", "--planning-dir", str(planning), "--depth", depth, "--strict"]),
         ("setup", ["implement-setup", "--sections-dir", str(planning / "sections"), "--target-dir", str(workspace), "--depth", depth]),
