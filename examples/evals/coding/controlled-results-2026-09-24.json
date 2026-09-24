@@ -1,0 +1,995 @@
+{
+  "schema": "forge-controlled-pilot-v1",
+  "date": "2026-09-24",
+  "settings": {
+    "model": "gpt-5.5",
+    "effort": "medium",
+    "jobs": 1,
+    "codex_version": "codex-cli 0.154.0",
+    "depths": [
+      "standard"
+    ],
+    "repeats": 2,
+    "timeout_seconds": 900,
+    "arm_order": "serial, rotated by block",
+    "scheduled": 12
+  },
+  "identities": {
+    "previous_commit": "16cc91791be5713fdc96d3ff4c77f5c39cb74efb",
+    "current_commit": "f60efdc7d76d65edb1dfc860d27d4fa225ac69e3",
+    "evaluator_commit": "f60efdc7d76d65edb1dfc860d27d4fa225ac69e3",
+    "plugin_fingerprints": {
+      "previous": "f75b04f44111e4a6754e765dd4f773ab757a5131a98872af6bf83d72170ebab7",
+      "current": "47f13ebb211bfea4104711a912698058c2224f538715cf4541b3940a06733b7c"
+    },
+    "fixture_fingerprints": {
+      "godfile": "1744a55aa9e3f8777cce6545c5f4c9da3ac315c5d9e012850d491029f2dc9c7b",
+      "import-preview": "f61ad7ee63bea7af5d7401173b32e32390b9b5a0d47b30cf48341d18ee2579af"
+    },
+    "evaluator_fingerprints": {
+      "godfile": "d0207be6b2354c87db4bfffbb7337a797f3e5c9d46f4ac6bd98c0e7a74d8f6bd",
+      "import-preview": "35330ee0b180e214b54ef2a1acb0d54ee0089887e2be239bf7a3b9d469d1b248"
+    }
+  },
+  "review_blocks": {
+    "expected": 4,
+    "completed": 4,
+    "complete": true
+  },
+  "groups": [
+    {
+      "case": "godfile",
+      "arm": "previous",
+      "scheduled": 2,
+      "automatic_behavior_passed": 2,
+      "manual_review_passed": 0,
+      "workflow_passed": 0,
+      "meaningful_cleanup": 2,
+      "cleanup_approved": 0,
+      "complete": 0,
+      "medians": {
+        "seconds": 440.8365,
+        "input_tokens": 1530925.5,
+        "cached_input_tokens": 1443968.0,
+        "uncached_input_tokens": 86957.5,
+        "output_tokens": 20550.5,
+        "commands": 39.0,
+        "observed_output_bytes": 134942.0,
+        "planning_words": 771.0
+      }
+    },
+    {
+      "case": "godfile",
+      "arm": "current",
+      "scheduled": 2,
+      "automatic_behavior_passed": 2,
+      "manual_review_passed": 0,
+      "workflow_passed": 2,
+      "meaningful_cleanup": 2,
+      "cleanup_approved": 0,
+      "complete": 0,
+      "medians": {
+        "seconds": 424.4765,
+        "input_tokens": 1111304.5,
+        "cached_input_tokens": 1049920.0,
+        "uncached_input_tokens": 61384.5,
+        "output_tokens": 21003.0,
+        "commands": 37.5,
+        "observed_output_bytes": 66421.0,
+        "planning_words": 1058.0
+      }
+    },
+    {
+      "case": "godfile",
+      "arm": "plain",
+      "scheduled": 2,
+      "automatic_behavior_passed": 2,
+      "manual_review_passed": 2,
+      "workflow_passed": null,
+      "meaningful_cleanup": 2,
+      "cleanup_approved": 2,
+      "complete": 2,
+      "medians": {
+        "seconds": 270.3135,
+        "input_tokens": 368205.5,
+        "cached_input_tokens": 334976.0,
+        "uncached_input_tokens": 33229.5,
+        "output_tokens": 13683.5,
+        "commands": 14.0,
+        "observed_output_bytes": 21938.5,
+        "planning_words": 34.0
+      }
+    },
+    {
+      "case": "import-preview",
+      "arm": "previous",
+      "scheduled": 2,
+      "automatic_behavior_passed": 2,
+      "manual_review_passed": 2,
+      "workflow_passed": 2,
+      "meaningful_cleanup": 0,
+      "cleanup_approved": 0,
+      "complete": 0,
+      "medians": {
+        "seconds": 339.508,
+        "input_tokens": 1428925.0,
+        "cached_input_tokens": 1363456.0,
+        "uncached_input_tokens": 65469.0,
+        "output_tokens": 16266.0,
+        "commands": 41.5,
+        "observed_output_bytes": 111195.0,
+        "planning_words": 1270.5
+      }
+    },
+    {
+      "case": "import-preview",
+      "arm": "current",
+      "scheduled": 2,
+      "automatic_behavior_passed": 2,
+      "manual_review_passed": 2,
+      "workflow_passed": 1,
+      "meaningful_cleanup": 1,
+      "cleanup_approved": 1,
+      "complete": 0,
+      "medians": {
+        "seconds": 181.74,
+        "input_tokens": 670365.5,
+        "cached_input_tokens": 625280.0,
+        "uncached_input_tokens": 45085.5,
+        "output_tokens": 8009.0,
+        "commands": 36.0,
+        "observed_output_bytes": 71460.0,
+        "planning_words": 321.0
+      }
+    },
+    {
+      "case": "import-preview",
+      "arm": "plain",
+      "scheduled": 2,
+      "automatic_behavior_passed": 2,
+      "manual_review_passed": 2,
+      "workflow_passed": null,
+      "meaningful_cleanup": 0,
+      "cleanup_approved": 0,
+      "complete": 0,
+      "medians": {
+        "seconds": 74.85849999999999,
+        "input_tokens": 165131.5,
+        "cached_input_tokens": 148032.0,
+        "uncached_input_tokens": 17099.5,
+        "output_tokens": 3203.0,
+        "commands": 14.0,
+        "observed_output_bytes": 17907.0,
+        "planning_words": 0.0
+      }
+    }
+  ],
+  "comparative_reviews": [
+    {
+      "block": "godfile-standard-1",
+      "preferred": [
+        "godfile-standard-1-plain"
+      ],
+      "rationale": "B preserves the complete existing dispatch import surface and gives validation, pricing, rendering, serialization, filesystem access and workflow coherent implementations. A and C perform meaningful extraction and pass the supplied behavioral checks, but remove six existing public imports (Path, csv, date, deepcopy, io, json), violating the explicit compatibility request. All three passed independent summary and baseline behavior probes. B is preferred on compatibility and cohesion, not line count; its standalone summary also avoids constructing and copying an entire temporary OrderBook. No arm identities, performance data, logs or private key were inspected.",
+      "independent": true,
+      "reviewer": "Codex independent reviewer /root/next_gate_audit"
+    },
+    {
+      "block": "godfile-standard-2",
+      "preferred": [
+        "godfile-standard-2-plain"
+      ],
+      "rationale": "A is the only acceptable candidate under the explicit requirement to preserve every existing public import from dispatch. Independent enumeration found 24 non-underscore baseline names. A retains all 24 and a direct import of the full set succeeds. B and C each drop Path, csv, date, deepcopy, io and json; every corresponding from-dispatch import raises ImportError. Their module boundaries and summary reuse remain useful cleanup, but that structural quality cannot outweigh this supported compatibility failure. Existing supplied behavior checks and candidate tests missed the import-surface regression; the original preference for B considered only domain operations and has been corrected after checking the full stated contract.",
+      "independent": true,
+      "reviewer": "verification_reader: independent blind review of godfile-standard-2"
+    },
+    {
+      "block": "import-preview-standard-1",
+      "preferred": [
+        "import-preview-standard-1-plain"
+      ],
+      "rationale": "All three implementations are behaviorally correct in the supplied checks and independent probes. B is the relative code-quality preference because preview_import aggregates import_orders results directly: validation and priced-record construction have one existing path. A and C repeat the parse_orders/quote orchestration. C has broader candidate-owned error tests than B. No candidate performs meaningful incidental cleanup: every receipts.py is byte-identical to baseline, including its duplicate CSV validator and pricing loop. Preference is relative maintainability, not a claim that the cleanup objective was achieved.",
+      "independent": true,
+      "reviewer": "/root/workflow_simplification (independent blind reviewer)"
+    },
+    {
+      "block": "import-preview-standard-2",
+      "preferred": [
+        "import-preview-standard-2-current"
+      ],
+      "rationale": "All three candidates preserve behavior in the supplied checks and independent probes. C is preferred because receipts.export_receipts now calls orders.parse_orders, removing the existing duplicated CSV validator while preserving format-first checks and parse-all-before-pricing order. Its exact Unicode JSON receipt regression protects a changed boundary. This is meaningful, bounded cleanup; the import/receipt priced-record loops still duplicate one another, so consolidation is partial. A and B implement the feature without cleaning existing duplication.",
+      "independent": true,
+      "reviewer": "/root/workflow_simplification (independent blind reviewer)"
+    }
+  ],
+  "attempts": [
+    {
+      "id": "godfile-standard-1-previous",
+      "arm": "previous",
+      "case": "godfile",
+      "block": "godfile-standard-1",
+      "seconds": 483.707,
+      "input_tokens": 1853990,
+      "cached_input_tokens": 1751040,
+      "uncached_input_tokens": 102950,
+      "output_tokens": 23068,
+      "reasoning_output_tokens": 2814,
+      "behavior": true,
+      "workflow": false,
+      "workflow_reasons": [
+        "Plan depth 'lean' does not match trial depth 'standard'."
+      ],
+      "scope": true,
+      "provenance": "verified",
+      "candidate_sha256": "504ed6289ed905696bef9759ec43573fc4a39a7e40514d02386300be1ea26ef1",
+      "commands": 43,
+      "observed_output_bytes": 162105,
+      "commands_by_phase": {
+        "other": {
+          "commands": 24,
+          "observed_output_bytes": 44226,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 5,
+          "observed_output_bytes": 2588,
+          "failed_commands": 2
+        },
+        "forge_planning": {
+          "commands": 8,
+          "observed_output_bytes": 97303,
+          "failed_commands": 6
+        },
+        "forge_implementation": {
+          "commands": 6,
+          "observed_output_bytes": 17988,
+          "failed_commands": 1
+        }
+      },
+      "observed_command_retries": 8,
+      "api_retries": null,
+      "planning_words": 1035,
+      "after": {
+        "source_lines": 367,
+        "modules": 7,
+        "largest_function_lines": 33,
+        "branches": 41,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "fail",
+      "meaningful_cleanup": true,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "complete": false,
+      "review_sha256": "6fb558efefa298f224b93fde88abc5500e103c4641d4912222d007d8ae958bdc",
+      "review_note": "Removed promised dispatch imports: Path, csv, date, deepcopy, io, json."
+    },
+    {
+      "id": "godfile-standard-1-current",
+      "arm": "current",
+      "case": "godfile",
+      "block": "godfile-standard-1",
+      "seconds": 488.118,
+      "input_tokens": 1116426,
+      "cached_input_tokens": 1051904,
+      "uncached_input_tokens": 64522,
+      "output_tokens": 24365,
+      "reasoning_output_tokens": 3086,
+      "behavior": true,
+      "workflow": true,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "verified",
+      "candidate_sha256": "0dd334b22e37e853334dd50bf6f54c51d2d6a5414d09e6813cf656a55705f924",
+      "commands": 39,
+      "observed_output_bytes": 53301,
+      "commands_by_phase": {
+        "other": {
+          "commands": 27,
+          "observed_output_bytes": 39293,
+          "failed_commands": 2
+        },
+        "verification": {
+          "commands": 4,
+          "observed_output_bytes": 1461,
+          "failed_commands": 1
+        },
+        "forge_planning": {
+          "commands": 5,
+          "observed_output_bytes": 11090,
+          "failed_commands": 3
+        },
+        "forge_implementation": {
+          "commands": 3,
+          "observed_output_bytes": 1457
+        }
+      },
+      "observed_command_retries": 5,
+      "api_retries": null,
+      "planning_words": 1577,
+      "after": {
+        "source_lines": 370,
+        "modules": 7,
+        "largest_function_lines": 33,
+        "branches": 41,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "fail",
+      "meaningful_cleanup": true,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "complete": false,
+      "review_sha256": "e01c9742148204c2f8221b27cbc889c3b14b192d54cd94de57f473650becb632",
+      "review_note": "Removed promised dispatch imports: Path, csv, date, deepcopy, io, json."
+    },
+    {
+      "id": "godfile-standard-1-plain",
+      "arm": "plain",
+      "case": "godfile",
+      "block": "godfile-standard-1",
+      "seconds": 287.658,
+      "input_tokens": 384738,
+      "cached_input_tokens": 348800,
+      "uncached_input_tokens": 35938,
+      "output_tokens": 14792,
+      "reasoning_output_tokens": 1437,
+      "behavior": true,
+      "workflow": null,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "not_applicable",
+      "candidate_sha256": "5e7c04d57d44b4903ea43e8c030f2d840bacd1874b33a9392a6d8bf72665b9c7",
+      "commands": 12,
+      "observed_output_bytes": 14303,
+      "commands_by_phase": {
+        "other": {
+          "commands": 9,
+          "observed_output_bytes": 12403,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 3,
+          "observed_output_bytes": 1900,
+          "failed_commands": 1
+        }
+      },
+      "observed_command_retries": 1,
+      "api_retries": null,
+      "planning_words": 0,
+      "after": {
+        "source_lines": 373,
+        "modules": 9,
+        "largest_function_lines": 33,
+        "branches": 42,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "pass",
+      "meaningful_cleanup": true,
+      "cleanup_approved": true,
+      "cleanup_reasons": [],
+      "complete": true,
+      "review_sha256": "23699c98e1549f55e930209d9f0ea6cc4798ea8aefdb6461223666a30111dbcf",
+      "review_note": "Preserves public imports; cohesive module extraction."
+    },
+    {
+      "id": "import-preview-standard-1-current",
+      "arm": "current",
+      "case": "import-preview",
+      "block": "import-preview-standard-1",
+      "seconds": 195.759,
+      "input_tokens": 671900,
+      "cached_input_tokens": 627072,
+      "uncached_input_tokens": 44828,
+      "output_tokens": 8472,
+      "reasoning_output_tokens": 1201,
+      "behavior": true,
+      "workflow": true,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "verified",
+      "candidate_sha256": "1a4d0c4f83a5e981409fa7eb2e0ffed0af125a2b1b5784443b433c251cfc2cf2",
+      "commands": 35,
+      "observed_output_bytes": 54695,
+      "commands_by_phase": {
+        "other": {
+          "commands": 24,
+          "observed_output_bytes": 32307
+        },
+        "forge_planning": {
+          "commands": 3,
+          "observed_output_bytes": 8539,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 5,
+          "observed_output_bytes": 1580,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 3,
+          "observed_output_bytes": 12269
+        }
+      },
+      "observed_command_retries": 2,
+      "api_retries": null,
+      "planning_words": 418,
+      "after": {
+        "source_lines": 132,
+        "modules": 4,
+        "largest_function_lines": 33,
+        "branches": 24,
+        "repeated_loops": 1,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "pass",
+      "meaningful_cleanup": false,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "review must confirm meaningful cleanup"
+      ],
+      "complete": false,
+      "review_sha256": "354fffa290ee6652f1618f51c49facaae7cb75c189fa15bb4b3950e502f4973d",
+      "review_note": "Feature works; receipt parsing/pricing duplication remains unchanged."
+    },
+    {
+      "id": "import-preview-standard-1-plain",
+      "arm": "plain",
+      "case": "import-preview",
+      "block": "import-preview-standard-1",
+      "seconds": 68.968,
+      "input_tokens": 152695,
+      "cached_input_tokens": 137600,
+      "uncached_input_tokens": 15095,
+      "output_tokens": 3021,
+      "reasoning_output_tokens": 397,
+      "behavior": true,
+      "workflow": null,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "not_applicable",
+      "candidate_sha256": "4895be66081880345250d5590d97dadab3b02801da48ec78e5a0bd2d4f4e4fed",
+      "commands": 14,
+      "observed_output_bytes": 11269,
+      "commands_by_phase": {
+        "other": {
+          "commands": 12,
+          "observed_output_bytes": 10131,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 2,
+          "observed_output_bytes": 1138,
+          "failed_commands": 1
+        }
+      },
+      "observed_command_retries": 1,
+      "api_retries": null,
+      "planning_words": 0,
+      "after": {
+        "source_lines": 127,
+        "modules": 4,
+        "largest_function_lines": 33,
+        "branches": 24,
+        "repeated_loops": 1,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "pass",
+      "meaningful_cleanup": false,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "review must confirm meaningful cleanup"
+      ],
+      "complete": false,
+      "review_sha256": "e307f91148c2d78b93e5a593dd2e176ef63a8134de489ca3b27d4043ed429c71",
+      "review_note": "Feature works; receipt parsing/pricing duplication remains unchanged."
+    },
+    {
+      "id": "import-preview-standard-1-previous",
+      "arm": "previous",
+      "case": "import-preview",
+      "block": "import-preview-standard-1",
+      "seconds": 267.015,
+      "input_tokens": 820271,
+      "cached_input_tokens": 768128,
+      "uncached_input_tokens": 52143,
+      "output_tokens": 12883,
+      "reasoning_output_tokens": 1180,
+      "behavior": true,
+      "workflow": true,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "verified",
+      "candidate_sha256": "7f2bea362be24755058f1d2b45475c6828da8eecd587ca5a8cc601c8665f55ce",
+      "commands": 38,
+      "observed_output_bytes": 85573,
+      "commands_by_phase": {
+        "other": {
+          "commands": 26,
+          "observed_output_bytes": 25276,
+          "failed_commands": 1
+        },
+        "forge_planning": {
+          "commands": 4,
+          "observed_output_bytes": 43235,
+          "failed_commands": 2
+        },
+        "verification": {
+          "commands": 4,
+          "observed_output_bytes": 1478,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 4,
+          "observed_output_bytes": 15584,
+          "failed_commands": 1
+        }
+      },
+      "observed_command_retries": 4,
+      "api_retries": null,
+      "planning_words": 1255,
+      "after": {
+        "source_lines": 135,
+        "modules": 4,
+        "largest_function_lines": 33,
+        "branches": 24,
+        "repeated_loops": 1,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "pass",
+      "meaningful_cleanup": false,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "review must confirm meaningful cleanup"
+      ],
+      "complete": false,
+      "review_sha256": "d5b4e94398239bb2c3cee49846720c3e01408659b825869d65124065371525d7",
+      "review_note": "Feature works; receipt parsing/pricing duplication remains unchanged."
+    },
+    {
+      "id": "godfile-standard-2-plain",
+      "arm": "plain",
+      "case": "godfile",
+      "block": "godfile-standard-2",
+      "seconds": 252.969,
+      "input_tokens": 351673,
+      "cached_input_tokens": 321152,
+      "uncached_input_tokens": 30521,
+      "output_tokens": 12575,
+      "reasoning_output_tokens": 1006,
+      "behavior": true,
+      "workflow": null,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "not_applicable",
+      "candidate_sha256": "87a04d3740f2b1a4cde54833a30053529fef5b493442a0c28254572bd376aa69",
+      "commands": 16,
+      "observed_output_bytes": 29574,
+      "commands_by_phase": {
+        "other": {
+          "commands": 14,
+          "observed_output_bytes": 29346,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 2,
+          "observed_output_bytes": 228
+        }
+      },
+      "observed_command_retries": 0,
+      "api_retries": null,
+      "planning_words": 68,
+      "after": {
+        "source_lines": 343,
+        "modules": 7,
+        "largest_function_lines": 33,
+        "branches": 42,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "pass",
+      "meaningful_cleanup": true,
+      "cleanup_approved": true,
+      "cleanup_reasons": [],
+      "complete": true,
+      "review_sha256": "b3177b5f3da2e208b35400a633070fb6fd173b0ee33834df8f43645acb2394a4",
+      "review_note": "Preserves public imports; cohesive module extraction."
+    },
+    {
+      "id": "godfile-standard-2-previous",
+      "arm": "previous",
+      "case": "godfile",
+      "block": "godfile-standard-2",
+      "seconds": 397.966,
+      "input_tokens": 1207861,
+      "cached_input_tokens": 1136896,
+      "uncached_input_tokens": 70965,
+      "output_tokens": 18033,
+      "reasoning_output_tokens": 1099,
+      "behavior": true,
+      "workflow": false,
+      "workflow_reasons": [
+        "Plan depth 'lean' does not match trial depth 'standard'."
+      ],
+      "scope": true,
+      "provenance": "verified",
+      "candidate_sha256": "cbc120f0cde5baed7057de72247ebf73e90fe202524d54e698f4d875597c1a29",
+      "commands": 35,
+      "observed_output_bytes": 107779,
+      "commands_by_phase": {
+        "other": {
+          "commands": 22,
+          "observed_output_bytes": 89321,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 5,
+          "observed_output_bytes": 2675,
+          "failed_commands": 2
+        },
+        "forge_implementation": {
+          "commands": 8,
+          "observed_output_bytes": 15783,
+          "failed_commands": 3
+        }
+      },
+      "observed_command_retries": 5,
+      "api_retries": null,
+      "planning_words": 507,
+      "after": {
+        "source_lines": 367,
+        "modules": 7,
+        "largest_function_lines": 33,
+        "branches": 41,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "fail",
+      "meaningful_cleanup": true,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "complete": false,
+      "review_sha256": "4009679c14e346960274d20cde254cbf7091ffbc5d468591eb8f10405d6bf403",
+      "review_note": "Removed promised dispatch imports: Path, csv, date, deepcopy, io, json."
+    },
+    {
+      "id": "godfile-standard-2-current",
+      "arm": "current",
+      "case": "godfile",
+      "block": "godfile-standard-2",
+      "seconds": 360.835,
+      "input_tokens": 1106183,
+      "cached_input_tokens": 1047936,
+      "uncached_input_tokens": 58247,
+      "output_tokens": 17641,
+      "reasoning_output_tokens": 1855,
+      "behavior": true,
+      "workflow": true,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "verified",
+      "candidate_sha256": "83b4b98aef3906b2f1b98c48dc1201ea58a68e8822d479a667278a272abdd383",
+      "commands": 36,
+      "observed_output_bytes": 79541,
+      "commands_by_phase": {
+        "other": {
+          "commands": 24,
+          "observed_output_bytes": 47201
+        },
+        "forge_planning": {
+          "commands": 5,
+          "observed_output_bytes": 17047,
+          "failed_commands": 2
+        },
+        "verification": {
+          "commands": 4,
+          "observed_output_bytes": 1457,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 3,
+          "observed_output_bytes": 13836
+        }
+      },
+      "observed_command_retries": 3,
+      "api_retries": null,
+      "planning_words": 539,
+      "after": {
+        "source_lines": 352,
+        "modules": 6,
+        "largest_function_lines": 33,
+        "branches": 41,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "fail",
+      "meaningful_cleanup": true,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "complete": false,
+      "review_sha256": "39d5b73b2778624144a28e428f15a53d1540d990cff8ceb25b51298eedcfca85",
+      "review_note": "Removed promised dispatch imports: Path, csv, date, deepcopy, io, json."
+    },
+    {
+      "id": "import-preview-standard-2-previous",
+      "arm": "previous",
+      "case": "import-preview",
+      "block": "import-preview-standard-2",
+      "seconds": 412.001,
+      "input_tokens": 2037579,
+      "cached_input_tokens": 1958784,
+      "uncached_input_tokens": 78795,
+      "output_tokens": 19649,
+      "reasoning_output_tokens": 1791,
+      "behavior": true,
+      "workflow": true,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "verified",
+      "candidate_sha256": "0f4460cb33a8c921d7e1728abb5c5e1c3f3a0d5ddfc3cce367abeb043154f97c",
+      "commands": 45,
+      "observed_output_bytes": 136817,
+      "commands_by_phase": {
+        "other": {
+          "commands": 27,
+          "observed_output_bytes": 40641,
+          "failed_commands": 1
+        },
+        "forge_planning": {
+          "commands": 9,
+          "observed_output_bytes": 74138,
+          "failed_commands": 7
+        },
+        "forge_implementation": {
+          "commands": 5,
+          "observed_output_bytes": 20556
+        },
+        "verification": {
+          "commands": 4,
+          "observed_output_bytes": 1482,
+          "failed_commands": 1
+        }
+      },
+      "observed_command_retries": 8,
+      "api_retries": null,
+      "planning_words": 1286,
+      "after": {
+        "source_lines": 135,
+        "modules": 4,
+        "largest_function_lines": 33,
+        "branches": 24,
+        "repeated_loops": 1,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "pass",
+      "meaningful_cleanup": false,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "review must confirm meaningful cleanup"
+      ],
+      "complete": false,
+      "review_sha256": "e0c2bb01e12db40690cd3dfa4884d72c2a4dd613b7ac906189e13047d9692faf",
+      "review_note": "Feature works; receipt parsing/pricing duplication remains unchanged."
+    },
+    {
+      "id": "import-preview-standard-2-current",
+      "arm": "current",
+      "case": "import-preview",
+      "block": "import-preview-standard-2",
+      "seconds": 167.721,
+      "input_tokens": 668831,
+      "cached_input_tokens": 623488,
+      "uncached_input_tokens": 45343,
+      "output_tokens": 7546,
+      "reasoning_output_tokens": 885,
+      "behavior": true,
+      "workflow": false,
+      "workflow_reasons": [
+        "lint-plan: missing-risk Missing coverage for risk.",
+        "lint-plan: missing-rationale Missing coverage for rationale.",
+        "lint-plan: missing-security-privacy Missing coverage for security privacy.",
+        "lint-evidence: missing-test-discovery Missing test discovery evidence.",
+        "lint-evidence: missing-runtime-detection Missing runtime detection evidence.",
+        "lint-implementation-readiness: missing-ownership Missing ownership evidence."
+      ],
+      "scope": true,
+      "provenance": "verified",
+      "candidate_sha256": "c5875f3ad7c7d81f3696422aa4b25497f2c912f089b54b3a878d5c69de12a8ae",
+      "commands": 37,
+      "observed_output_bytes": 88225,
+      "commands_by_phase": {
+        "other": {
+          "commands": 26,
+          "observed_output_bytes": 51085,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 5,
+          "observed_output_bytes": 2584,
+          "failed_commands": 2
+        },
+        "forge_implementation": {
+          "commands": 6,
+          "observed_output_bytes": 34556
+        }
+      },
+      "observed_command_retries": 2,
+      "api_retries": null,
+      "planning_words": 224,
+      "after": {
+        "source_lines": 112,
+        "modules": 4,
+        "largest_function_lines": 26,
+        "branches": 17,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "pass",
+      "meaningful_cleanup": true,
+      "cleanup_approved": true,
+      "cleanup_reasons": [],
+      "complete": false,
+      "review_sha256": "08c35b56ac2a5d21b60835126f2a05252520f388f08d26506e4928a1d2c61bb5",
+      "review_note": "Shares receipt CSV parsing via parse_orders; pricing assembly still duplicated."
+    },
+    {
+      "id": "import-preview-standard-2-plain",
+      "arm": "plain",
+      "case": "import-preview",
+      "block": "import-preview-standard-2",
+      "seconds": 80.749,
+      "input_tokens": 177568,
+      "cached_input_tokens": 158464,
+      "uncached_input_tokens": 19104,
+      "output_tokens": 3385,
+      "reasoning_output_tokens": 506,
+      "behavior": true,
+      "workflow": null,
+      "workflow_reasons": [],
+      "scope": true,
+      "provenance": "not_applicable",
+      "candidate_sha256": "b73da7e57c2086a4562b30ebb28a9360241f346d80f5c27fb173175ae25e74ff",
+      "commands": 14,
+      "observed_output_bytes": 24545,
+      "commands_by_phase": {
+        "other": {
+          "commands": 12,
+          "observed_output_bytes": 23389,
+          "failed_commands": 2
+        },
+        "verification": {
+          "commands": 2,
+          "observed_output_bytes": 1156,
+          "failed_commands": 1
+        }
+      },
+      "observed_command_retries": 1,
+      "api_retries": null,
+      "planning_words": 0,
+      "after": {
+        "source_lines": 134,
+        "modules": 4,
+        "largest_function_lines": 33,
+        "branches": 24,
+        "repeated_loops": 1,
+        "external_imports": []
+      },
+      "timed_out": false,
+      "runner_returncode": 0,
+      "manual_review": "pass",
+      "meaningful_cleanup": false,
+      "cleanup_approved": false,
+      "cleanup_reasons": [
+        "review must confirm meaningful cleanup"
+      ],
+      "complete": false,
+      "review_sha256": "42af93ae8ea23069f015d7ec292466f11134fe2f721102705c23b907af1a06a0",
+      "review_note": "Feature works; receipt parsing/pricing duplication remains unchanged."
+    }
+  ],
+  "limits": [
+    "Two synthetic Python tasks, two repetitions per arm, standard depth only; no broad or causal speed/quality claim.",
+    "All scheduled attempts retained. Timing includes agent planning/coding/verification; independent evaluator and review time are separate.",
+    "Plain agent has no Forge workflow requirement. Compare behavior, workflow, review, cleanup and completion separately.",
+    "Frozen oracle reported behavior pass for all 12 but missed six required public imports. Blind review found four compatibility failures. Original results remain unchanged.",
+    "Requested model and effort are pinned; exact backend revision is not attested. Usage is runner-reported. API retries and phase-specific model tokens are unknown.",
+    "Command output counts may reflect Codex truncation; command classification is heuristic. Event receipt intervals are not used as phase duration estimates.",
+    "Anonymous labels and withheld metrics provide partial blinding only; code may expose workflow fingerprints. Review independence is operator-attested.",
+    "After this pilot, the live oracle gained 12 regression tests for missing/replaced public imports (81 godfile assertions versus the frozen 75), and engineering guidance clarified public exports. Read-only supplemental checks of the six saved godfile candidates reproduced all four manual failures; original results remain unchanged. No new model trials were run for these follow-ups."
+  ],
+  "supplemental_public_import_check": [
+    {
+      "id": "godfile-standard-1-previous",
+      "passed": false,
+      "returncode": 1,
+      "stdout": "",
+      "failure": "AssertionError: Public import changed or missing: Path"
+    },
+    {
+      "id": "godfile-standard-1-current",
+      "passed": false,
+      "returncode": 1,
+      "stdout": "",
+      "failure": "AssertionError: Public import changed or missing: Path"
+    },
+    {
+      "id": "godfile-standard-1-plain",
+      "passed": true,
+      "returncode": 0,
+      "stdout": "{\"assertions\": 81, \"case\": \"godfile\"}",
+      "failure": null
+    },
+    {
+      "id": "godfile-standard-2-plain",
+      "passed": true,
+      "returncode": 0,
+      "stdout": "{\"assertions\": 81, \"case\": \"godfile\"}",
+      "failure": null
+    },
+    {
+      "id": "godfile-standard-2-previous",
+      "passed": false,
+      "returncode": 1,
+      "stdout": "",
+      "failure": "AssertionError: Public import changed or missing: Path"
+    },
+    {
+      "id": "godfile-standard-2-current",
+      "passed": false,
+      "returncode": 1,
+      "stdout": "",
+      "failure": "AssertionError: Public import changed or missing: Path"
+    }
+  ],
+  "baseline_metrics": {
+    "godfile": {
+      "source_lines": 251,
+      "modules": 1,
+      "largest_function_lines": 33,
+      "branches": 37,
+      "repeated_loops": 0,
+      "external_imports": []
+    },
+    "import-preview": {
+      "source_lines": 108,
+      "modules": 4,
+      "largest_function_lines": 33,
+      "branches": 23,
+      "repeated_loops": 1,
+      "external_imports": []
+    }
+  },
+  "raw_evidence": "Full events, workspaces, bound reviews, and frozen source trees are archived locally under ignored docs/development/trials/2026-09-24-controlled; this report retains fingerprints and compact measurements."
+}

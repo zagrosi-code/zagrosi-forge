@@ -13,6 +13,8 @@
   "examples/evals/README.md",
   "examples/evals/coding/README.md",
   "examples/evals/coding/cases.json",
+  "examples/evals/coding/controlled-results-2026-09-24.json",
+  "examples/evals/coding/controlled-results-2026-09-24.md",
   "examples/evals/coding/fixture/src/ledger.py",
   "examples/evals/coding/fixture/src/legacy_reports.py",
   "examples/evals/coding/fixture/tests/test_ledger.py",

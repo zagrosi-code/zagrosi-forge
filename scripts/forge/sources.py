@@ -75,7 +75,7 @@ TEST_MANIFEST = {
     "test_transaction_publication.py": "fc44fe564cc1641b4bbfd53e2c5bb95dbb637d1e27bc115ada4b634cf28b64f9",
     "test_transaction_rollback.py": "cdab79a27436bf25551a604b61d3fda77d0290de80f41214e0b5faa13e5f86f5",
     "test_trial_matrix.py": "8059a36d0fbcb9364a43959b219c8705598f780de47e3347acc98f629844f262",
-    "test_trial_realism.py": "178cc1b10d2568905ead122e29b8ecf2cdffa0a5fa75f7a96f119a84e90f9928",
+    "test_trial_realism.py": "1f0bca0d998ab54b9b39166f015b924ea9d442c1a9f3e56736bf62fc6cba91ee",
     "test_verification_contracts.py": "76bb8151b2e64010f25b1d7cc60a96f4b4acba65cb7da1c257140546e5977314",
     "test_workflow_admission.py": "743f728364eaa57a70b0db9b4c3bd525b45a76845e8df4f889af265434c173d7",
     "test_workflow_efficiency.py": "b48fd05bf0dca666881f7d9b69e459549805f7e1a80ba695b767df304f10595c",

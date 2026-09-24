@@ -139,6 +139,8 @@ all three depths, including failed and cancelled attempts and comparison limits.
 
 ## Controlled previous/current/plain comparison
 
+[24 September controlled pilot](controlled-results-2026-09-24.md): lower observed input use, incomplete Forge outcomes, and independent review failures.
+
 Use **one frozen evaluator checkout** for the entire experiment. `--plugin-root`
 selects only Forge's source under test; its evaluator, cases and fixtures are never
 executed. The fixed evaluator's Forge runtime judges both Forge arms by the same

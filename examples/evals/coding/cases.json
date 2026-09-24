@@ -23,7 +23,7 @@
     "cleanup_required": true,
     "fixture": "godfile",
     "oracle": "tools/godfile_trial_checks.py",
-    "assertions": 75,
+    "assertions": 81,
     "depth": "deep",
     "request": "Read prompt.md and complete its order-summary and module-boundary requirements."
   },

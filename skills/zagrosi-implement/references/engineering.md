@@ -16,6 +16,8 @@ or refactor unrelated systems. Planning-only requests still stop before coding.
 Preserve observable behavior and safety invariants. When existing coverage is
 weak, add characterization tests before refactoring. Run targeted regression
 checks before/after meaningful changes and one full suite at final integration.
+Include public exports promised by the compatibility contract. An exported name
+can have external callers even when it is unused internally.
 Tests should expose behavioral failures, not mirror lines, private structure,
 or cosmetic choices. Record material deviations and measured verification.
 
