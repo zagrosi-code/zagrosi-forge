@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 import argparse
 import json
 import os
@@ -287,6 +287,95 @@ def _record_payload(planning_dir, context, args, progress, dependencies, candida
     return payload
 
 
+class _RecordTransaction(NamedTuple):
+    journal: dict[str, Any]
+    journal_raw: bytes
+    pinner_raw: bytes
+    base_state: dict[str, Any]
+    base_raw: bytes
+    candidate_state: dict[str, Any]
+    candidate_raw: bytes
+
+
+def _rollback_failed_record(context, record, transaction_fd, validate_base) -> bool:
+    """Consume the transaction descriptor; retain unprovable state for recovery."""
+    root_fd = context.root_fd
+    try:
+        _, observed = _secure_io.load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
+        if observed not in {record.base_raw, record.candidate_raw}:
+            return False
+        context.require_lock_authority()
+        journal_present = _transaction_io.section_record_entry_stat(transaction_fd, "transaction.json") is not None
+        rollback_present = _transaction_io.section_record_entry_stat(transaction_fd, "rollback.json") is not None
+        if not (journal_present or rollback_present):
+            cleanup_safe = _transaction_io.abort_section_record_transaction(root_fd, transaction_fd)
+        else:
+            if _transaction_io.section_record_entry_stat(transaction_fd, "state.json") is not None:
+                staged_state = _secure_io.read_single_link_regular_at(
+                    transaction_fd, "state.json", cap=_detached_contract.DETACHED_JSON_CAP, require_mode=0o600,
+                )
+                expected = record.candidate_raw if journal_present and observed == record.base_raw else record.base_raw
+                if staged_state != expected:
+                    raise _models.DetachedImplementationError(
+                        "section-record-recovery-required",
+                        "Section-record state temp was not reachable from the failed transaction state.",
+                    )
+            cleanup_safe = _transaction_io.execute_section_record_rollback(
+                root_fd, transaction_fd, record.journal_raw, record.journal["pinner_path"], record.pinner_raw,
+                record.candidate_raw, record.base_state, record.base_raw, validate_base,
+            )
+        transaction_fd = None
+        return cleanup_safe
+    except Exception:
+        return False
+    finally:
+        if transaction_fd is not None:
+            os.close(transaction_fd)
+
+
+def _publish_record(context, record, verify_artifacts, validate_authority, validate_base) -> bool:
+    """Publish the pinner and state with closure checks around every durable step."""
+    root_fd = context.root_fd
+    pinner_path = record.journal["pinner_path"]
+    transaction_fd = None
+    verify_artifacts(record.base_raw)
+    try:
+        transaction_fd = _transaction_io.section_record_transaction_dir(root_fd, create=True)
+        assert transaction_fd is not None
+        if _transaction_state.section_record_transaction_inventory(transaction_fd):
+            raise _models.DetachedImplementationError(
+                "section-record-recovery-required",
+                "Section-record transaction directory was not empty after locked recovery.",
+            )
+        _transaction_io.publish_section_record_staged_pinner(transaction_fd, record.pinner_raw)
+        if _transaction_io.publish_section_record_transaction(
+            root_fd, transaction_fd, record.journal, record.base_raw,
+        ) != record.journal_raw:
+            raise _models.DetachedImplementationError(
+                "section-record-recovery-required",
+                "Published section-record transaction bytes changed before use.",
+            )
+        _transaction_io.install_staged_section_pinner(root_fd, transaction_fd, pinner_path, record.pinner_raw)
+        _transaction_io.section_record_pinner_relation(root_fd, transaction_fd, pinner_path, record.pinner_raw)
+        verify_artifacts(record.base_raw)
+        _transaction_io.replace_state_from_transaction(root_fd, transaction_fd, record.base_raw, record.candidate_state)
+        verify_artifacts(record.candidate_raw)
+        context.require_lock_authority()
+        validate_authority()
+        _transaction_io.verify_section_record_commit_closure(
+            root_fd, transaction_fd, record.journal_raw, pinner_path, record.pinner_raw, record.candidate_raw,
+        )
+        context.require_lock_authority()
+        return not _transaction_io.commit_section_record_transaction(root_fd, transaction_fd)
+    except Exception as record_exc:
+        if transaction_fd is not None and not _rollback_failed_record(context, record, transaction_fd, validate_base):
+            raise _models.DetachedImplementationError(
+                "section-record-recovery-required",
+                "Section recording failed and exact rollback/transaction cleanup could not be proven; artefacts were retained.",
+            ) from record_exc
+        raise
+
+
 def detached_implement_record_section(args: argparse.Namespace) -> int:
     sections_dir = _storage.absolute_path_no_follow(args.sections_dir)
     planning_dir = sections_dir.parent
@@ -347,172 +436,35 @@ def detached_implement_record_section(args: argparse.Namespace) -> int:
             _handoff_wire.require_exact_fields(transaction, _detached_contract.SECTION_RECORD_TRANSACTION_FIELDS, "Section-record transaction")
             transaction_raw = _handoff_wire.canonical_json_bytes(transaction)
             _pinners.verify_section_pinner_bytes(root_fd, config, section, state_record, pinner, pinner_raw)
-            _transaction_state.verify_section_record_artifact_closure(
-                planning_dir,
-                implementation_root,
-                root_fd,
-                config,
-                guard,
-                progress,
-                section,
-                pinner,
-                pinner_raw,
-                base_state_raw,
-                require_lock_authority,
+            record = _RecordTransaction(
+                transaction, transaction_raw, pinner_raw, base_state, base_state_raw, candidate_state, candidate_state_raw,
             )
 
-            transaction_fd: int | None = None
-            committed = False
-            cleanup_pending = False
-            try:
-                transaction_fd = _transaction_io.section_record_transaction_dir(root_fd, create=True)
-                assert transaction_fd is not None
-                if _transaction_state.section_record_transaction_inventory(transaction_fd):
-                    raise _models.DetachedImplementationError(
-                        "section-record-recovery-required",
-                        "Section-record transaction directory was not empty after locked recovery.",
-                    )
-                _transaction_io.publish_section_record_staged_pinner(transaction_fd, pinner_raw)
-                if _transaction_io.publish_section_record_transaction(
-                    root_fd,
-                    transaction_fd,
-                    transaction,
-                    base_state_raw,
-                ) != transaction_raw:
-                    raise _models.DetachedImplementationError(
-                        "section-record-recovery-required",
-                        "Published section-record transaction bytes changed before use.",
-                    )
-                _transaction_io.install_staged_section_pinner(root_fd, transaction_fd, pinner_path, pinner_raw)
-                _transaction_io.section_record_pinner_relation(root_fd, transaction_fd, pinner_path, pinner_raw)
+            def verify_artifacts(expected_state_raw):
                 _transaction_state.verify_section_record_artifact_closure(
-                    planning_dir,
-                    implementation_root,
-                    root_fd,
-                    config,
-                    guard,
-                    progress,
-                    section,
-                    pinner,
-                    pinner_raw,
-                    base_state_raw,
-                    require_lock_authority,
+                    planning_dir, implementation_root, root_fd, config, guard, progress,
+                    section, pinner, pinner_raw, expected_state_raw, require_lock_authority,
                 )
-                _transaction_io.replace_state_from_transaction(root_fd, transaction_fd, base_state_raw, candidate_state)
-                _transaction_state.verify_section_record_artifact_closure(
-                    planning_dir,
-                    implementation_root,
-                    root_fd,
-                    config,
-                    guard,
-                    progress,
-                    section,
-                    pinner,
-                    pinner_raw,
-                    candidate_state_raw,
-                    require_lock_authority,
-                )
-                require_lock_authority()
+
+            def validate_authority():
                 _detached_authority.verify_detached_authorities(planning_dir, implementation_root, root_fd, config, guard)
-                _transaction_io.verify_section_record_commit_closure(
-                    root_fd,
-                    transaction_fd,
-                    transaction_raw,
-                    pinner_path,
-                    pinner_raw,
-                    candidate_state_raw,
-                )
+
+            def validate_base():
                 require_lock_authority()
-                cleanup_pending = not _transaction_io.commit_section_record_transaction(root_fd, transaction_fd)
-                transaction_fd = None
-                committed = True
-            except Exception as record_exc:
-                if committed:
-                    raise
-                cleanup_safe = True
-                if transaction_fd is not None:
-                    try:
-                        _, observed_state_raw = _secure_io.load_canonical_json_at(root_fd, "zagrosi_implement_state.json")
-                        if observed_state_raw not in {base_state_raw, candidate_state_raw}:
-                            cleanup_safe = False
-                        if cleanup_safe:
-                            require_lock_authority()
-                        if cleanup_safe:
-                            journal_present = _transaction_io.section_record_entry_stat(transaction_fd, "transaction.json") is not None
-                            rollback_present = _transaction_io.section_record_entry_stat(transaction_fd, "rollback.json") is not None
-                            if journal_present or rollback_present:
-                                if _transaction_io.section_record_entry_stat(transaction_fd, "state.json") is not None:
-                                    staged_state = _secure_io.read_single_link_regular_at(
-                                        transaction_fd,
-                                        "state.json",
-                                        cap=_detached_contract.DETACHED_JSON_CAP,
-                                        require_mode=0o600,
-                                    )
-                                    expected_staged = (
-                                        candidate_state_raw
-                                        if journal_present and observed_state_raw == base_state_raw
-                                        else base_state_raw
-                                    )
-                                    if staged_state != expected_staged:
-                                        raise _models.DetachedImplementationError(
-                                            "section-record-recovery-required",
-                                            "Section-record state temp was not reachable from the failed transaction state.",
-                                        )
+                validate_authority()
+                _pinners.detached_completed_records(root_fd, config, progress)
+                require_lock_authority()
 
-                                def validate_failed_record_rollback_base() -> None:
-                                    require_lock_authority()
-                                    _detached_authority.verify_detached_authorities(
-                                        planning_dir,
-                                        implementation_root,
-                                        root_fd,
-                                        config,
-                                        guard,
-                                    )
-                                    _pinners.detached_completed_records(root_fd, config, progress)
-                                    require_lock_authority()
-
-                                cleanup_safe = _transaction_io.execute_section_record_rollback(
-                                    root_fd,
-                                    transaction_fd,
-                                    transaction_raw,
-                                    pinner_path,
-                                    pinner_raw,
-                                    candidate_state_raw,
-                                    base_state,
-                                    base_state_raw,
-                                    validate_failed_record_rollback_base,
-                                )
-                            else:
-                                cleanup_safe = _transaction_io.abort_section_record_transaction(root_fd, transaction_fd)
-                            transaction_fd = None
-                    except Exception:
-                        cleanup_safe = False
-                if transaction_fd is not None:
-                    os.close(transaction_fd)
-                if not cleanup_safe:
-                    raise _models.DetachedImplementationError(
-                        "section-record-recovery-required",
-                        "Section recording failed and exact rollback/transaction cleanup could not be proven; artefacts were retained.",
-                    ) from record_exc
-                raise
+            cleanup_pending = _publish_record(context, record, verify_artifacts, validate_authority, validate_base)
             payload["transaction_cleanup_pending"] = cleanup_pending
             payload["transaction_status"] = (
                 "committed-cleanup-pending" if cleanup_pending else "committed-clean"
             )
             return _output.print_json(payload)
-    except _models.DetachedImplementationError as exc:
+    except (_models.DetachedImplementationError, OSError) as exc:
+        error_payload = _models.detached_error_payload if isinstance(exc, _models.DetachedImplementationError) else _models.detached_io_error_payload
         return _output.print_json(
-            _models.detached_error_payload(
-                exc,
-                mode="detached-frozen",
-                planning_dir=str(planning_dir),
-                implementation_root=str(implementation_root or _storage.absolute_path_no_follow(args.implementation_root)),
-            ),
-            1,
-        )
-    except OSError as exc:
-        return _output.print_json(
-            _models.detached_io_error_payload(
+            error_payload(
                 exc,
                 mode="detached-frozen",
                 planning_dir=str(planning_dir),

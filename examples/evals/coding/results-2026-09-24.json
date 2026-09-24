@@ -1,0 +1,228 @@
+{
+  "date": "2026-09-24",
+  "kind": "operator-recorded complete-task observations",
+  "protocol": {
+    "supported_cohort_runner": "codex exec --ignore-user-config --ephemeral --json --sandbox workspace-write --skip-git-repo-check -c approval_policy=\"never\" -",
+    "model": "CLI built-in default; exact model identity unavailable",
+    "unsupported_cohort_model": "Configured gpt-6-sol rejected before coding; user configuration unchanged",
+    "timeout_seconds": 900,
+    "jobs": {
+      "baseline": 2,
+      "candidate": 2,
+      "broader": 1
+    },
+    "case_order": "repeat, then depth (lean/standard/deep), then case",
+    "usage_source": "Codex exec JSONL turn.completed.usage, runner-reported; retries unknown",
+    "hashes": "SHA-256; map digests use UTF-8 JSON sorted keys and compact separators",
+    "cleanup_review": "Independent agent reviewed baseline/candidate and reran tests; JSON attests rather than authenticates identity"
+  },
+  "limits": [
+    "Small fixtures and two repetitions do not establish a causal speedup or general code-quality guarantee.",
+    "Concurrent local work, unknown exact model identity and changed harness prompts/rules prevent a controlled speed comparison.",
+    "Baseline rejects .gitignore; frozen candidate permits planning ignores but rejects generated-cache ignores. Original failures remain recorded.",
+    "Candidate prompts name the actual Python interpreter. The baseline prompt used generic python.",
+    "Candidate source is the reviewed 5e23339 snapshot. Later cache-ignore, Windows portability and command/discovery fixes are regression-tested separately.",
+    "A later exact-type CSV oracle rejected new float/bool mutations and separately passed 638 assertions on each of the three completed import candidates; original verdicts are unchanged.",
+    "Seconds include agent planning, coding and verification; external oracle/review time is excluded. Timings include unsuccessful attempts.",
+    "Source/function sizes are descriptive, not a readability score. JavaScript function complexity remains unknown.",
+    "Raw logs, workspaces and reviews remain local; result/review digests bind this summary to those records."
+  ],
+  "cohorts": [
+    {
+      "name": "baseline",
+      "source_commit": "204fcb493d56c3c9bb7947ecb2c4faa51d53f053",
+      "repetitions": 2,
+      "scheduled": 18,
+      "outcomes": {
+        "failed": 15,
+        "passed": 3
+      },
+      "plugin_map_sha256": [
+        "682d1d3d2f376ecfc2f522433b87c4581a1fafb9b350ea5cd0667127b640933d"
+      ],
+      "evaluator_map_sha256": {
+        "summary": [
+          "6d8d31cfd88ab68cbb191a9cef2a9ee6f09008812ee6f7c3ae5228371988fb5a"
+        ],
+        "cleanup": [
+          "6d8d31cfd88ab68cbb191a9cef2a9ee6f09008812ee6f7c3ae5228371988fb5a"
+        ],
+        "resume": [
+          "6d8d31cfd88ab68cbb191a9cef2a9ee6f09008812ee6f7c3ae5228371988fb5a"
+        ]
+      },
+      "cancelled": null,
+      "attempts": [
+        {"id":"summary-lean-1","status":"failed","seconds":165.686,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,51],"function_lines":[26,27],"tokens":{"input_tokens":346859,"cached_input_tokens":323072,"output_tokens":4175,"reasoning_output_tokens":150},"result_sha256":"beed6236a0918d070a43eb952caebe466a9f23eff2b402d861ed8e5f598d8070","review_sha256":"a60734535d151ca52e0c7342e990f9271787936d8339c2b7f7e1e59523c32446"},
+        {"id":"cleanup-lean-1","status":"failed","seconds":187.591,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,53],"function_lines":[26,10],"tokens":{"input_tokens":283297,"cached_input_tokens":261376,"output_tokens":4891,"reasoning_output_tokens":178},"result_sha256":"106d670bc30cc189527782f174a5aef33ad16dccf76261318ba28ae02ca1088c","review_sha256":"ca96105c10eeb5622b1fa9485a6bb1fbfc9627fcbbdfe3fbdd4d7cac686f3346"},
+        {"id":"resume-lean-1","status":"failed","seconds":161.06,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[".gitignore"],"provenance":"verified","lines":[52,52],"function_lines":[28,28],"tokens":{"input_tokens":330780,"cached_input_tokens":290688,"output_tokens":4022,"reasoning_output_tokens":103},"result_sha256":"fce8a21a1ab2ff61069d0570e79c4d57e4d494c261d2f731cb17ab93dc4a8dd8"},
+        {"id":"summary-standard-1","status":"failed","seconds":193.8,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,58],"function_lines":[26,34],"tokens":{"input_tokens":427272,"cached_input_tokens":399616,"output_tokens":5036,"reasoning_output_tokens":249},"result_sha256":"bcba330e90e709d885549dd11d20ecac22397aa4a39b9d2face1b6a02e756360","review_sha256":"649b06f2d91cb519b9df6fe4d9f32f8a6c996b7c376795e01323078ac154f5e2"},
+        {"id":"cleanup-standard-1","status":"failed","seconds":210.089,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,50],"function_lines":[26,13],"tokens":{"input_tokens":433631,"cached_input_tokens":382208,"output_tokens":5705,"reasoning_output_tokens":137},"result_sha256":"d72ecc84e48e3a05c9e068d2fd7b81179c116574fc4fa585002b8d5e29285f58","review_sha256":"8c90eda06fc87f9289bfab4e686e8e50296d32affc3bfd8f6adc774181b7b9d6"},
+        {"id":"resume-standard-1","status":"failed","seconds":170.655,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[".gitignore"],"provenance":"verified","lines":[52,50],"function_lines":[28,26],"tokens":{"input_tokens":340912,"cached_input_tokens":289664,"output_tokens":4465,"reasoning_output_tokens":219},"result_sha256":"4a569185ce25a89aad0dee9cbb85ad7f36af205324c2a4fb84bc91be22498949"},
+        {"id":"summary-deep-1","status":"failed","seconds":237.568,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,57],"function_lines":[26,33],"tokens":{"input_tokens":480114,"cached_input_tokens":451840,"output_tokens":6151,"reasoning_output_tokens":323},"result_sha256":"c85e48f5a4df4dbde0372c566ba79c6c14672b76b778e9c21c0f4b76922869b5","review_sha256":"91fc9465085bda1e93eec65e14a9026668cc553df88021f38fbf50b20e4e7135"},
+        {"id":"cleanup-deep-1","status":"failed","seconds":261.16,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,55],"function_lines":[26,10],"tokens":{"input_tokens":488673,"cached_input_tokens":453248,"output_tokens":6824,"reasoning_output_tokens":594},"result_sha256":"8131d6ade75ed37d6d157ed0736b58a88ce25c58dca0582d26db871ba2a77514","review_sha256":"dfe5ea33dd0f1a6dfe5b9de199e9d397bd51e63c82bd5f759ab2306fa69d599a"},
+        {"id":"resume-deep-1","status":"passed","seconds":189.819,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,51],"function_lines":[28,27],"tokens":{"input_tokens":330631,"cached_input_tokens":288512,"output_tokens":4793,"reasoning_output_tokens":91},"result_sha256":"d16196d04135d8bfd2fbf41642d32e48ff62aff70b6d91ac604c5d1cf6fc8a3f"},
+        {"id":"summary-lean-2","status":"failed","seconds":166.551,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,49],"function_lines":[26,25],"tokens":{"input_tokens":358800,"cached_input_tokens":304896,"output_tokens":4210,"reasoning_output_tokens":101},"result_sha256":"41bb21edd5a07146aac226bfca1065d7e7a9c92e978e9fbf26cd95b9cd815ad2","review_sha256":"21bc04edfa3c0271c9eed766df77dc01cbe21c5935ab0cc5142e5485e741f0f1"},
+        {"id":"cleanup-lean-2","status":"failed","seconds":188.014,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,52],"function_lines":[26,13],"tokens":{"input_tokens":385920,"cached_input_tokens":344192,"output_tokens":4540,"reasoning_output_tokens":149},"result_sha256":"3f2a10dcea5a7062c7a7679c6f54502270bf0ce00e6259e024a909c682497b56","review_sha256":"e3c008ba133ba27aab208c0209bde75b78b0e08c2a2b6b46ce28acda1c4001df"},
+        {"id":"resume-lean-2","status":"failed","seconds":133.147,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[".gitignore"],"provenance":"verified","lines":[52,51],"function_lines":[28,27],"tokens":{"input_tokens":287328,"cached_input_tokens":254336,"output_tokens":3360,"reasoning_output_tokens":75},"result_sha256":"a3d2b32684f3734655fd1ab87221ef1b1f58caaf4be51296665a315ce103d26d"},
+        {"id":"summary-standard-2","status":"failed","seconds":174.149,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,58],"function_lines":[26,34],"tokens":{"input_tokens":285606,"cached_input_tokens":263424,"output_tokens":4629,"reasoning_output_tokens":70},"result_sha256":"a723784a75215a408c2f481b553613aa5f90c72be437e5fdfaa237becb7e8ba4","review_sha256":"38c45940428e397f0a3a5d43902df71b0e04b2dd91bb783f9c581c1478a3bc00"},
+        {"id":"cleanup-standard-2","status":"failed","seconds":204.028,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,50],"function_lines":[26,13],"tokens":{"input_tokens":324759,"cached_input_tokens":297088,"output_tokens":5240,"reasoning_output_tokens":196},"result_sha256":"ed516b6c2c7f3955748a21fd023e7c79652416eec42f48047c00ea3f99e0afd0","review_sha256":"d52b1ff8fa32bbf97dbb34a7e25f9c755fe5a69a46359a69b5290f7f086d11c7"},
+        {"id":"resume-standard-2","status":"passed","seconds":120.277,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,51],"function_lines":[28,27],"tokens":{"input_tokens":267751,"cached_input_tokens":241792,"output_tokens":2991,"reasoning_output_tokens":85},"result_sha256":"8c2574b171292f7883da658f484ffb0fb5dc8428d403a9294612408f5dbaecac"},
+        {"id":"summary-deep-2","status":"failed","seconds":176.799,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,60],"function_lines":[26,36],"tokens":{"input_tokens":294566,"cached_input_tokens":274432,"output_tokens":4639,"reasoning_output_tokens":224},"result_sha256":"dd1e307d69af1cee0c12c126a5b93febee1732eac85b932cab1c6f30f4642b15","review_sha256":"070e12b127fb436bb5b9344a9c7e89a2f4bef7deae31bd11234c2a2d513e7bdf"},
+        {"id":"cleanup-deep-2","status":"failed","seconds":266.602,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,51],"function_lines":[26,13],"tokens":{"input_tokens":477535,"cached_input_tokens":434432,"output_tokens":7024,"reasoning_output_tokens":274},"result_sha256":"854d2c808c204100be60ba7d096c412395282705f623832617270efcfcdf3b51","review_sha256":"a83236d564b39d0d2666146ba3655ff0ad25aff315326d30cf61da4a9041d4b7"},
+        {"id":"resume-deep-2","status":"passed","seconds":128.491,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,51],"function_lines":[28,27],"tokens":{"input_tokens":267763,"cached_input_tokens":246400,"output_tokens":3175,"reasoning_output_tokens":106},"result_sha256":"7da1eb13c0fdd18529323474d00dfa99470191ada1d8e1ba3515c97ad90a3c90"}
+      ]
+    },
+    {
+      "name": "candidate",
+      "source_commit": "5e233393129cc514dded2876a5c4f4a84de99463",
+      "repetitions": 2,
+      "scheduled": 18,
+      "outcomes": {
+        "passed": 13,
+        "failed": 5
+      },
+      "plugin_map_sha256": [
+        "9ecc66cdc1fa150ae3828d4e39d95ccd3be8633b23f7a3813bd4d40e591c6eb6"
+      ],
+      "evaluator_map_sha256": {
+        "summary": [
+          "77aabba69f153bf9b8cc8d0e3316eda94f944afe273d063c6db5280d1477ceb3"
+        ],
+        "cleanup": [
+          "77aabba69f153bf9b8cc8d0e3316eda94f944afe273d063c6db5280d1477ceb3"
+        ],
+        "resume": [
+          "77aabba69f153bf9b8cc8d0e3316eda94f944afe273d063c6db5280d1477ceb3"
+        ]
+      },
+      "cancelled": null,
+      "attempts": [
+        {"id":"summary-lean-1","status":"passed","seconds":176.087,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,49],"function_lines":[26,25],"tokens":{"input_tokens":417762,"cached_input_tokens":362112,"output_tokens":4471,"reasoning_output_tokens":181},"result_sha256":"ea898612463b62de395646a2c5e6b577165e73f81640ef2c81ce7bdb10a73e68","review_sha256":"0988cd19057e823af25d27ba77242af40c62b60d135c83565ba365de4b297104"},
+        {"id":"cleanup-lean-1","status":"failed","seconds":219.922,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,48],"function_lines":[26,16],"tokens":{"input_tokens":356152,"cached_input_tokens":289280,"output_tokens":5650,"reasoning_output_tokens":726},"result_sha256":"e5252bf4a776afacc213d5bf32d72874fe76ed6062cb066106db85890918df8e","review_sha256":"a12a6fc1e19a8b1f9362fc0d227397ed8372c79a4ac0dc22f5712d597d5a1b2f"},
+        {"id":"resume-lean-1","status":"passed","seconds":165.068,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,51],"function_lines":[28,27],"tokens":{"input_tokens":309196,"cached_input_tokens":242176,"output_tokens":4492,"reasoning_output_tokens":285},"result_sha256":"a38765e9770acedd1162fe08ac898baf02669459dd54fc713cc893d85631dc17"},
+        {"id":"summary-standard-1","status":"passed","seconds":203.519,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,57],"function_lines":[26,33],"tokens":{"input_tokens":403840,"cached_input_tokens":378752,"output_tokens":5047,"reasoning_output_tokens":156},"result_sha256":"3a4e82dacd753401078c76da20008e32175be5b8419bd331085f1069595d15b6","review_sha256":"1f7584ea6eb13accd838a7fa907e9707e86fc5ba5d506279cf36aa1d1acc56ec"},
+        {"id":"cleanup-standard-1","status":"failed","seconds":242.829,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,53],"function_lines":[26,13],"tokens":{"input_tokens":520769,"cached_input_tokens":492160,"output_tokens":6382,"reasoning_output_tokens":522},"result_sha256":"e400f11bddffca6779fcacecac964ad7b500a17b0a7d5eefc3b07d3c97e4274c","review_sha256":"bb8bd3e528f2dcdd6fb061c5d1d6189072ad2ad874f562461b489b75f5a2ec98"},
+        {"id":"resume-standard-1","status":"failed","seconds":175.4,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[".gitignore"],"provenance":"verified","lines":[52,51],"function_lines":[28,27],"tokens":{"input_tokens":309856,"cached_input_tokens":267648,"output_tokens":4827,"reasoning_output_tokens":219},"result_sha256":"add3948b488206aa74968e9e9fcfb9a1384931d8481e9f017ab0ec53f597575e"},
+        {"id":"summary-deep-1","status":"passed","seconds":244.757,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,58],"function_lines":[26,34],"tokens":{"input_tokens":529563,"cached_input_tokens":462464,"output_tokens":6478,"reasoning_output_tokens":201},"result_sha256":"0fa6d0871119096b469ece53c4e8f437c23faf1efbaa7bcee463e43c37e0b8b2","review_sha256":"142ce6ad71524e593017a2c36874d30a3c10cb00c7af70adde97719e2207d506"},
+        {"id":"cleanup-deep-1","status":"passed","seconds":211.262,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,46],"function_lines":[26,16],"tokens":{"input_tokens":319728,"cached_input_tokens":296576,"output_tokens":5719,"reasoning_output_tokens":255},"result_sha256":"091114b2843914c8f2f765195f649901828fa644eaa35ecedcba7b7b46a68788","review_sha256":"604a0d9e8aead397a017a199654cb3b32a49c05e28b614b3fa06b0d802b420c5"},
+        {"id":"resume-deep-1","status":"passed","seconds":148.077,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,51],"function_lines":[28,27],"tokens":{"input_tokens":272442,"cached_input_tokens":249216,"output_tokens":3704,"reasoning_output_tokens":59},"result_sha256":"215dad0f7f3c4e0e9c0c09600f30e5beefe0b47924793b8825b255b565ea505b"},
+        {"id":"summary-lean-2","status":"failed","seconds":187.259,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[50,51],"function_lines":[26,27],"tokens":{"input_tokens":434813,"cached_input_tokens":409984,"output_tokens":4664,"reasoning_output_tokens":215},"result_sha256":"e75ae593e2c753c3d84d645f7e651b948c90fa753334f010b55fa4802f563794","review_sha256":"7374871ba15cd17e0056fe6bb12e706c3b591e6c664d1d36e8dd1630ce0e5e24"},
+        {"id":"cleanup-lean-2","status":"passed","seconds":214.331,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,51],"function_lines":[26,13],"tokens":{"input_tokens":412737,"cached_input_tokens":387328,"output_tokens":5474,"reasoning_output_tokens":166},"result_sha256":"82b7e0ee9bb271d1feb6c90bb900820fc0f38eaf3683acb589f3c5c00482cf38","review_sha256":"10c695148c86eaa63437619d6dcb712b5f11fbe937a9162e2cd69e182ac3218d"},
+        {"id":"resume-lean-2","status":"passed","seconds":129.132,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,49],"function_lines":[28,25],"tokens":{"input_tokens":227330,"cached_input_tokens":196480,"output_tokens":3255,"reasoning_output_tokens":71},"result_sha256":"359abdaa492675d0c894df73781c45691575607735713c4b6e12d512c9ab6583"},
+        {"id":"summary-standard-2","status":"passed","seconds":180.059,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,56],"function_lines":[26,32],"tokens":{"input_tokens":327573,"cached_input_tokens":283392,"output_tokens":4845,"reasoning_output_tokens":135},"result_sha256":"ba31e66918436ac37c210e91c99ee48ce21b516444afc4c93e77b2489efa6742","review_sha256":"a9dd2952c66d39eb4a9800223b114d2ce45f5c6622db165a6b8757d399e8c595"},
+        {"id":"cleanup-standard-2","status":"passed","seconds":190.781,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,16],"tokens":{"input_tokens":401567,"cached_input_tokens":372224,"output_tokens":5016,"reasoning_output_tokens":276},"result_sha256":"6ccd4dd93f2bbe3ab2d4c5bcdc258a0e7838f9526e13a2d28538a37e9543dbbe","review_sha256":"34f67abbd4eeb01d8fbe3162ab6ae865ca959e957fcda2b4899f58af50293dc5"},
+        {"id":"resume-standard-2","status":"passed","seconds":139.735,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,50],"function_lines":[28,26],"tokens":{"input_tokens":261977,"cached_input_tokens":233472,"output_tokens":3561,"reasoning_output_tokens":132},"result_sha256":"94bcc949621be6e9bb688064660dd53a513deefc6e9cb496c7351a3e28d57166"},
+        {"id":"summary-deep-2","status":"passed","seconds":225.075,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,56],"function_lines":[26,21],"tokens":{"input_tokens":452338,"cached_input_tokens":411520,"output_tokens":5642,"reasoning_output_tokens":250},"result_sha256":"cbdf6dc7e3289984dafc72b782b5f145f2066fb9a80a9ab3e36e9ee26b620f07","review_sha256":"718941257105a13138a17fe43b26957e26fd800bdaaa0fd36717ff4a7c602a27"},
+        {"id":"cleanup-deep-2","status":"passed","seconds":286.838,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[50,52],"function_lines":[26,13],"tokens":{"input_tokens":476551,"cached_input_tokens":440960,"output_tokens":7915,"reasoning_output_tokens":316},"result_sha256":"369e5c88120db77e9e1c8c745f487ac4dee5c385b2c428249f8693bec0b1da85","review_sha256":"e3dff68c7fb081b3ac90aeebd7cd3398a533d41d25597e5ef1186d0b40405adc"},
+        {"id":"resume-deep-2","status":"failed","seconds":170.803,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[".gitignore"],"provenance":"verified","lines":[52,50],"function_lines":[28,26],"tokens":{"input_tokens":316936,"cached_input_tokens":283008,"output_tokens":4209,"reasoning_output_tokens":116},"result_sha256":"e28a945ebd034762c6b1f004ba4f58c6993cd660ad26d3551d7736c64bc49384"}
+      ]
+    },
+    {
+      "name": "broader",
+      "source_commit": "5e233393129cc514dded2876a5c4f4a84de99463",
+      "repetitions": 1,
+      "scheduled": 6,
+      "outcomes": {
+        "failed": 2,
+        "passed": 4
+      },
+      "plugin_map_sha256": [
+        "9ecc66cdc1fa150ae3828d4e39d95ccd3be8633b23f7a3813bd4d40e591c6eb6"
+      ],
+      "evaluator_map_sha256": {
+        "import-preview": [
+          "2e8b4526cdc112117999f280fc2f5875c464db21df8ec3e2c796567ceb4acfd5"
+        ],
+        "node-summary": [
+          "595f7e9b6e1cc07dc772fab4caf4408d05d6f1b693f76ca03b385381a47c81b6"
+        ]
+      },
+      "cancelled": null,
+      "attempts": [
+        {"id":"import-preview-lean-1","status":"failed","seconds":201.101,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[108,100],"function_lines":[33,24],"tokens":{"input_tokens":409030,"cached_input_tokens":380544,"output_tokens":5596,"reasoning_output_tokens":239},"result_sha256":"fd00abe26346c2f2516b189a939ff662ba719e9f8e7509899b3f78e66f30dbc2","review_sha256":"4e21320a2a5a4d340e8cd6ba745da28b65cc58a7cb176d180e7665127eb0ef9e"},
+        {"id":"node-summary-lean-1","status":"passed","seconds":172.849,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[29,31],"function_lines":[null,null],"tokens":{"input_tokens":395867,"cached_input_tokens":372352,"output_tokens":3885,"reasoning_output_tokens":66},"result_sha256":"4f7acce5509fbdc827fd1dc620ef1f9a0ae96128fa64f55efbd369c756fa21f4"},
+        {"id":"import-preview-standard-1","status":"passed","seconds":252.199,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[],"provenance":"verified","lines":[108,97],"function_lines":[33,24],"tokens":{"input_tokens":577180,"cached_input_tokens":543616,"output_tokens":6700,"reasoning_output_tokens":229},"result_sha256":"de2757fcb84060d5f59e1c19015100c9465c2bc5657f875d9976bfffcb02e6fd","review_sha256":"a36621650984d8223496f1630f35c1bcc542acb3fc269fc84cd4174d0f203178"},
+        {"id":"node-summary-standard-1","status":"passed","seconds":197.483,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[29,30],"function_lines":[null,null],"tokens":{"input_tokens":435730,"cached_input_tokens":406400,"output_tokens":5148,"reasoning_output_tokens":141},"result_sha256":"0d87732fbcf6e11b3abe866389d1976786ea489499370e5986a29428e79b7792"},
+        {"id":"import-preview-deep-1","status":"failed","seconds":289.235,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"pass","scope":[".gitignore"],"provenance":"verified","lines":[108,103],"function_lines":[33,24],"tokens":{"input_tokens":619958,"cached_input_tokens":581376,"output_tokens":7803,"reasoning_output_tokens":303},"result_sha256":"e6f6e3f32621e304e5fc4afc6debb3033c674ed7230959df07ccb06eea97a63a","review_sha256":"80406d261490216ba5b579a67cf7995d1d2c3cc748812a19f5e6278e394ba59b"},
+        {"id":"node-summary-deep-1","status":"passed","seconds":170.671,"timed_out":false,"runner_exit":0,"behavior":true,"workflow":true,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[29,35],"function_lines":[null,null],"tokens":{"input_tokens":289157,"cached_input_tokens":260992,"output_tokens":4461,"reasoning_output_tokens":156},"result_sha256":"7015e5950073f9ebe07597c00990f07e318ec76550b5a60746e5440ef8af86c1"}
+      ]
+    },
+    {
+      "name": "unsupported-model",
+      "source_commit": "204fcb493d56c3c9bb7947ecb2c4faa51d53f053",
+      "repetitions": 2,
+      "scheduled": 18,
+      "outcomes": {
+        "failed": 18
+      },
+      "plugin_map_sha256": [
+        "682d1d3d2f376ecfc2f522433b87c4581a1fafb9b350ea5cd0667127b640933d"
+      ],
+      "evaluator_map_sha256": {
+        "summary": [
+          "6d8d31cfd88ab68cbb191a9cef2a9ee6f09008812ee6f7c3ae5228371988fb5a"
+        ],
+        "cleanup": [
+          "6d8d31cfd88ab68cbb191a9cef2a9ee6f09008812ee6f7c3ae5228371988fb5a"
+        ],
+        "resume": [
+          "6d8d31cfd88ab68cbb191a9cef2a9ee6f09008812ee6f7c3ae5228371988fb5a"
+        ]
+      },
+      "cancelled": null,
+      "attempts": [
+        {"id":"summary-lean-1","status":"failed","seconds":10.92,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"ad9de1c8f3d7cf3c9fab41db4d01d3609e2c76849c7547d018bf39ce99bb15f4"},
+        {"id":"cleanup-lean-1","status":"failed","seconds":6.612,"timed_out":false,"runner_exit":1,"behavior":true,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"09e87de9e8d7f8217c6a53b991688e438dcf94ce9b03cd50e090d0a2a70abd1b"},
+        {"id":"resume-lean-1","status":"failed","seconds":6.886,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,52],"function_lines":[28,28],"tokens":null,"result_sha256":"0b3d2fdc22133b186a56560eb89cf83088bda2b45e32355d7de891e399d727dc"},
+        {"id":"summary-standard-1","status":"failed","seconds":6.45,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"22663456307d48b0905cc499028ffeb0b1e5bac550fb20ae429f3607e4b919d6"},
+        {"id":"cleanup-standard-1","status":"failed","seconds":5.929,"timed_out":false,"runner_exit":1,"behavior":true,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"2bb269aa8b7561d99fe3693d1c7c1261b8e29bec7a837c30e7e431415fefc00b"},
+        {"id":"resume-standard-1","status":"failed","seconds":10.377,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,52],"function_lines":[28,28],"tokens":null,"result_sha256":"95a04932ac9ad637bb10f728edc3fc58194889f6c2579ec710fc01fee89f9463"},
+        {"id":"summary-deep-1","status":"failed","seconds":8.077,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"e5e05f707cf33ed052a69c604b325723d9aad7c0f1ea516f20285173a8bd18cc"},
+        {"id":"cleanup-deep-1","status":"failed","seconds":5.928,"timed_out":false,"runner_exit":1,"behavior":true,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"53e3ac86bc2eeedf5c60f8cafed12ae99ed58f7bcac401c9cd3fceb22ffbb5d2"},
+        {"id":"resume-deep-1","status":"failed","seconds":8.078,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,52],"function_lines":[28,28],"tokens":null,"result_sha256":"c22507111d5f8a1c910f47ed595728ee1241bd9b04eb28a190665d337f2f987b"},
+        {"id":"summary-lean-2","status":"failed","seconds":6.329,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"879100cc1918db088e5d01741ee1d79efead656f35c27157801fba2981086f65"},
+        {"id":"cleanup-lean-2","status":"failed","seconds":6.996,"timed_out":false,"runner_exit":1,"behavior":true,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"92e26737ff755147e66dca82099f55c41bb824244010f5d6b4f8b12b8261702b"},
+        {"id":"resume-lean-2","status":"failed","seconds":6.374,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,52],"function_lines":[28,28],"tokens":null,"result_sha256":"bb03d556227290ccd095e61996b4e461837dcbcd40b574a960cc952913d86d85"},
+        {"id":"summary-standard-2","status":"failed","seconds":7.843,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"490c67d86e59d11e341d32a830d9c2f5fc972d7d413983d5846b3e72554a8275"},
+        {"id":"cleanup-standard-2","status":"failed","seconds":4.851,"timed_out":false,"runner_exit":1,"behavior":true,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"ab2858ccf5732c04759e28dffb4963b7db6af476bb47292b2069dea3e4660d82"},
+        {"id":"resume-standard-2","status":"failed","seconds":5.448,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,52],"function_lines":[28,28],"tokens":null,"result_sha256":"6e3cae1975b00bdb939c5aa550d7f55bdd468dd30356419e19820d5d1b65504c"},
+        {"id":"summary-deep-2","status":"failed","seconds":5.612,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"30bba654d674db3969ff1b177dacff2ec9e31bf205058df97d96465fdb5f1fe7"},
+        {"id":"cleanup-deep-2","status":"failed","seconds":5.097,"timed_out":false,"runner_exit":1,"behavior":true,"workflow":false,"cleanup":"fail","scope":[],"provenance":"verified","lines":[50,50],"function_lines":[26,26],"tokens":null,"result_sha256":"aba71265b63d4c4518e53c79c708ca52dd8f63c4b5551acbf0ffb90f4a35b46c"},
+        {"id":"resume-deep-2","status":"failed","seconds":5.709,"timed_out":false,"runner_exit":1,"behavior":false,"workflow":false,"cleanup":"not_required","scope":[],"provenance":"verified","lines":[52,52],"function_lines":[28,28],"tokens":null,"result_sha256":"1e7faec404c8df8b19374d40f2692b25d79f0b788f4572dfd44d919cbe6dddbe"}
+      ]
+    },
+    {
+      "name": "superseded-candidate",
+      "source_commit": null,
+      "repetitions": 2,
+      "scheduled": 18,
+      "outcomes": {
+        "cancelled": 18
+      },
+      "plugin_map_sha256": [],
+      "evaluator_map_sha256": {},
+      "cancelled": "Superseded before review completion: escaped-backtick and hidden requirement fixes pending.",
+      "attempts": [
+        {"id":"summary-lean-1","status":"cancelled"},
+        {"id":"cleanup-lean-1","status":"cancelled"},
+        {"id":"resume-lean-1","status":"cancelled"},
+        {"id":"summary-standard-1","status":"cancelled"},
+        {"id":"cleanup-standard-1","status":"cancelled"},
+        {"id":"resume-standard-1","status":"cancelled"},
+        {"id":"summary-deep-1","status":"cancelled"},
+        {"id":"cleanup-deep-1","status":"cancelled"},
+        {"id":"resume-deep-1","status":"cancelled"},
+        {"id":"summary-lean-2","status":"cancelled"},
+        {"id":"cleanup-lean-2","status":"cancelled"},
+        {"id":"resume-lean-2","status":"cancelled"},
+        {"id":"summary-standard-2","status":"cancelled"},
+        {"id":"cleanup-standard-2","status":"cancelled"},
+        {"id":"resume-standard-2","status":"cancelled"},
+        {"id":"summary-deep-2","status":"cancelled"},
+        {"id":"cleanup-deep-2","status":"cancelled"},
+        {"id":"resume-deep-2","status":"cancelled"}
+      ]
+    }
+  ]
+}

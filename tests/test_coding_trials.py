@@ -43,6 +43,16 @@ def test_behavior_preservation_checks_exact_exports_and_public_wrapper(tmp_path)
     assert result["after"]["source_lines"] == result["before"]["source_lines"]
 
 
+def test_only_planning_ignore_rules_are_within_trial_scope(tmp_path):
+    trial = tmp_path / "trial"
+    trials.prepare(trial, "cleanup")
+    ignore = trial / "workspace/.gitignore"
+    ignore.write_text("# Local Forge records and generated test caches\n.planning\n__pycache__/\n.pytest_cache/\n*.pyc\n")
+    assert not trials.check(trial)["outside_scope"]
+    ignore.write_text(".planning/\n/tests/\n")
+    assert trials.check(trial)["outside_scope"] == [".gitignore"]
+
+
 def test_independent_oracle_survives_replaced_candidate_tests(tmp_path):
     trial = tmp_path / "trial"
     trials.prepare(trial, "summary")

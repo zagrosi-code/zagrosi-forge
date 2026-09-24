@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
+import json
 import os
 import shutil
 import tempfile
@@ -11,13 +12,35 @@ import tempfile
 from . import policy as _policy
 from . import storage as _storage
 
+PACKAGE_MANIFEST = ".codex-plugin/package-files.json"
+
+
+def package_members(root: Path) -> set[str]:
+    path = root / PACKAGE_MANIFEST
+    if root.is_symlink() or path.parent.is_symlink() or path.is_symlink() or not path.is_file() or path.stat().st_nlink != 1:
+        raise ValueError("Plugin package needs a regular package-files.json manifest")
+    members = json.loads(path.read_text(encoding="utf-8"))
+    if (not isinstance(members, list) or not members or PACKAGE_MANIFEST not in members
+            or any(not isinstance(name, str) or not name or "\\" in name or ":" in name
+                   or PurePosixPath(name).is_absolute() or ".." in PurePosixPath(name).parts
+                   or PurePosixPath(name).as_posix() != name or should_skip_cache_path(Path(name)) for name in members)
+            or len(set(members)) != len(members)):
+        raise ValueError("Plugin package manifest must list unique, safe relative file paths")
+    return set(members)
+
+
+def package_paths(members: set[str]) -> set[str]:
+    return members | {parent.as_posix() for name in members for parent in Path(name).parents}
+
+
 def should_skip_cache_path(path: Path) -> bool:
     return (any(part in _policy.PLUGIN_CACHE_IGNORE_DIRS for part in path.parts)
-            or path.name in _policy.PLUGIN_CACHE_IGNORE_FILES or path.suffix in {".pyc", ".pyo"})
+            or path.name in _policy.PLUGIN_CACHE_IGNORE_FILES or path.suffix in {".pyc", ".pyo"}
+            or any(part == ".env" or part.startswith(".env.") for part in path.parts))
 
 
-def plugin_tree_inventory(root: Path) -> tuple[str, list[str]]:
-    """Hash package files without traversing development directories."""
+def plugin_tree_inventory(root: Path, members: set[str] | None = None) -> tuple[str, list[str]]:
+    """Hash declared members without traversing undeclared directories."""
     import hashlib
 
     digest = hashlib.sha256()
@@ -29,6 +52,7 @@ def plugin_tree_inventory(root: Path) -> tuple[str, list[str]]:
         return "", []
     if not root.is_dir():
         raise ValueError(f"Plugin tree must be a directory: {root}")
+    allowed = package_paths(package_members(root) if members is None else members)
 
     def fail(error: OSError) -> None:
         raise error
@@ -38,14 +62,14 @@ def plugin_tree_inventory(root: Path) -> tuple[str, list[str]]:
         for name in [*dirs, *names]:
             path = parent / name
             relative = path.relative_to(root)
-            if should_skip_cache_path(relative):
+            if relative.as_posix() not in allowed or should_skip_cache_path(relative):
                 excluded.append(relative.as_posix())
                 if name in dirs:
                     dirs.remove(name)
             elif path.is_symlink():
                 raise ValueError(f"Plugin package contains a symbolic link: {relative}")
             elif name in names:
-                if not path.is_file():
+                if not path.is_file() or path.stat().st_nlink != 1:
                     raise ValueError(f"Plugin package contains a non-regular file: {relative}")
                 files.append(path)
     for path in sorted(files):
@@ -61,13 +85,14 @@ def plugin_tree_fingerprint(root: Path) -> str:
     return plugin_tree_inventory(root)[0]
 
 
-def copy_ignore(_: str, names: list[str]) -> set[str]:
-    return {name for name in names if should_skip_cache_path(Path(name))}
-
-
 def plugin_cache_status(plugin_root: Path, cache_path: Path) -> dict[str, Any]:
-    source_fingerprint = plugin_tree_fingerprint(plugin_root)
-    cached_fingerprint, excluded = plugin_tree_inventory(cache_path)
+    members = package_members(plugin_root)
+    for name in members:
+        path = plugin_root / name
+        if not path.is_file() or path.is_symlink() or path.stat().st_nlink != 1:
+            raise ValueError(f"Plugin package member is missing or not a regular file: {name}")
+    source_fingerprint = plugin_tree_inventory(plugin_root, members)[0]
+    cached_fingerprint, excluded = plugin_tree_inventory(cache_path, members)
     return {
         "path": str(cache_path),
         "changed": source_fingerprint != cached_fingerprint or bool(excluded),
@@ -105,7 +130,14 @@ def materialize_plugin_cache(plugin_root: Path, cache_path: Path, dry_run: bool)
             return payload
         with tempfile.TemporaryDirectory(prefix=f".{cache_path.name}.tmp-", dir=cache_path.parent) as directory:
             temporary = Path(directory)
-            shutil.copytree(plugin_root, temporary, ignore=copy_ignore, dirs_exist_ok=True, symlinks=True)
+            allowed = package_paths(package_members(plugin_root))
+
+            def ignore(directory: str, names: list[str]) -> set[str]:
+                parent = Path(directory).relative_to(plugin_root)
+                return {name for name in names if (parent / name).as_posix() not in allowed
+                        or should_skip_cache_path(parent / name)}
+
+            shutil.copytree(plugin_root, temporary, ignore=ignore, dirs_exist_ok=True, symlinks=True)
             if plugin_tree_fingerprint(temporary) != payload["source_fingerprint"]:
                 raise ValueError("Plugin source changed while preparing the cache; retry the update.")
             if cache_path.exists():

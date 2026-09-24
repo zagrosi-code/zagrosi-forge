@@ -7,8 +7,11 @@ import ast
 from collections import Counter
 import hashlib
 import json
+import os
 from pathlib import Path
+import shlex
 import shutil
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,12 +71,13 @@ def prepare(trial: Path, case: str, depth: str | None = None) -> dict:
     selected = depth or CASES[case]["depth"]
     tests = test_command(CASES[case])
     checkpoint = prepare_resume(ROOT, workspace, selected, tests) if case == "resume" else None
-    displayed_command = "node --test tests/ledger.test.js" if CASES[case].get("runtime") == "node" else "python -m unittest discover -s tests"
+    displayed_command = subprocess.list2cmdline(tests) if os.name == "nt" else shlex.join(tests)
     protected = CASES[case].get("protected_paths", [])
     prompt = (f"Work only in {workspace}. Use Forge at {selected} depth.\n"
               f"Read {ROOT / 'skills/zagrosi-implement/references/engineering.md'} and the applicable Forge skills.\n\n"
               f"{CASES[case]['request']}\n\n"
               "Preserve public APIs. Standard library only. Keep .planning records compact.\n"
+              "Edit only src/, tests/, and .planning/. .gitignore may list .planning/, __pycache__/, .pytest_cache/, and *.pyc.\n"
               f"Run existing/added tests with `{displayed_command}`. Python trials require PYTHONPATH=src.\n"
               + (f"Leave these unrelated files unchanged: {', '.join(protected)}.\n" if protected else "") +
               "Report tests, cleanup, remaining issues, and observed usage if available.\n")
@@ -117,7 +121,14 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
     changed = sorted(name for name in actual.keys() | record["baseline_files"].keys()
                      if actual.get(name) != record["baseline_files"].get(name))
     protected_changes = sorted(set(changed).intersection(case.get("protected_paths", [])))
-    outside_scope = [name for name in changed if name in protected_changes or not name.startswith(("src/", "tests/", ".planning/"))]
+    ignored_planning = workspace / ".gitignore"
+    safe_ignore = (ignored_planning.is_file() and not ignored_planning.is_symlink()
+                   and all(line.strip().strip("/") in {".planning", "__pycache__", ".pytest_cache", "*.pyc"}
+                           for line in ignored_planning.read_text().splitlines()
+                           if line.strip() and not line.lstrip().startswith("#")))
+    outside_scope = [name for name in changed if name in protected_changes
+                     or not name.startswith(("src/", "tests/", ".planning/"))
+                     and not (name == ".gitignore" and safe_ignore)]
     try:
         oracle_complete = json.loads(oracle.get("stdout", "")) == {"case": record["case"], "assertions": CASES[record["case"]]["assertions"]}
     except json.JSONDecodeError:

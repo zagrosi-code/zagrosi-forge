@@ -12,8 +12,9 @@ from test_compact_plan import SECTION, make_plan
 def modules():
     root = Path(__file__).resolve().parents[1]
     from runtime_support import load_entrypoint
-    package = load_entrypoint(root / "scripts/zagrosi_skills.py").load_runtime()
-    return SimpleNamespace(**{name: importlib.import_module(f"{package.__name__}.{name}") for name in ("markdown", "artifacts", "scoring", "validation", "quality")})
+    entrypoint = load_entrypoint(root / "scripts/zagrosi_skills.py")
+    package = entrypoint.load_runtime()
+    return SimpleNamespace(entrypoint=entrypoint, **{name: importlib.import_module(f"{package.__name__}.{name}") for name in ("markdown", "artifacts", "scoring", "validation", "quality", "traceability")})
 
 
 INSPECTION = (
@@ -92,3 +93,201 @@ def test_display_names_expand_without_changing_exact_owned_test_metadata(modules
     text = "`TestTrimEdges`, `trims_edges`, `test_trim_edges`, `go test ./labels`."
     assert {"TestTrimEdges", "trims_edges", "test_trim_edges"}.issubset(modules.markdown.test_names(text))
     assert modules.markdown.section_owned_test_names(text) == ["test_trim_edges"]
+
+
+REGRESSION = "REQ-001\nCase: trim label edges\nExpected: internal spaces remain.\nCommand: ./scripts/check-labels\n"
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+@pytest.mark.parametrize("verification", [
+    REGRESSION.replace("Case:", "Test case:"),
+    REGRESSION.replace("Case:", "**Case:**").replace("Expected:", "**Expected:**").replace("Command:", "**Command:**"),
+    REGRESSION.replace("Case:", "- **Case**:").replace("Expected:", "- **Expected**:").replace("Command:", "- **Command**:"),
+    INSPECTION.replace("verification_mode:", "**verification_mode:**").replace("Inspection:", "**Inspection:**")
+    .replace("Expected:", "**Expected:**").replace("test_rationale:", "**test_rationale:**"),
+    "REQ-001: `test_trim_edges` removes edge whitespace. Run `PYTHONPATH=src pytest -q`.",
+    "REQ-001: `test_trim_edges` removes edge whitespace. Run `./gradlew test`.",
+])
+def test_equivalent_labels_share_all_verification_gates(modules, tmp_path, capsys, depth, verification):
+    planning = make_plan(tmp_path / "planning", depth)
+    replace_verification(planning, verification)
+    assert modules.markdown.has_verification(verification)
+    assert not modules.artifacts.compact_plan_findings(planning)
+    assert not modules.scoring.implementation_readiness_analysis(planning, 12)[0]
+    assert not modules.validation.plan_analysis(planning)[0]
+    findings, trace = modules.traceability.traceability_analysis(planning)
+    assert not findings
+    assert trace["coverage"]["REQ-001"]["section_tests"] == [f"{SECTION}.md"]
+    assert modules.entrypoint.main(["implementation-packet", "--planning-dir", str(planning), "--section", SECTION]) == 0
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("verification", [
+    "<!--\nREQ-001: `test_trim_edges`. Run `pytest -q`.\n-->",
+    "<!--\n" + REGRESSION + "\n-->",
+    "<!--\n" + INSPECTION + "\n-->",
+    "<!--\n" + REGRESSION,
+    "```markdown\n" + REGRESSION + "```",
+    "```text\nREQ-001: `test_trim_edges`. Run `pytest -q`.\n```",
+    "```python\ndef test_trim_edges():\n    assert trim(' a ') == 'a'\nRun `pytest -q`.\n",
+    "REQ-001: `test_trim_edges`. This project uses pytest, but no command is selected.",
+    "REQ-001: `business_logic`. Run `pytest -q`.",
+    "REQ-001: `tests/test_labels.py`. Run `pytest -q`.",
+    "REQ-001\ntest_command: pytest -q\n",
+    REGRESSION + "Command: pending\n",
+    REGRESSION + "test_command: ./scripts/different-check\n",
+    INSPECTION + "verification_mode: automated\n",
+    INSPECTION + "Expected: pending\n",
+])
+def test_hidden_incomplete_or_conflicting_evidence_is_not_verification(modules, tmp_path, verification):
+    planning = make_plan(tmp_path / "planning")
+    replace_verification(planning, verification)
+    assert not modules.markdown.has_verification(verification)
+    assert "compact-plan-no-tests" in {finding.code for finding in modules.artifacts.compact_plan_findings(planning)}
+    assert "missing-verification" in {finding.code for finding in modules.scoring.implementation_readiness_analysis(planning, 12)[0]}
+    findings, trace = modules.traceability.traceability_analysis(planning)
+    assert "traceability-gap" in {finding.code for finding in findings}
+    assert trace["coverage"]["REQ-001"]["section_tests"] == []
+
+
+@pytest.mark.parametrize("verification", [
+    "REQ-001: `test_trim_edges` preserves inner spaces. Run `pytest -q`.\n<!-- obsolete `test_other`: run jest -->",
+    "<!--\n```python\n-->\n" + REGRESSION,
+    "REQ-001: `test_html_comment` returns literal `<!--`. Run `pytest -q`.",
+    "REQ-001\n```python\ndef test_trim_edges():\n    assert trim(' a ') == 'a'\n```\nRun `pytest -q`.",
+    "REQ-001: `test_trim_edges` removes edges.\n```bash\npytest -q\n```",
+    "REQ-001: Write red Vitest cases: `valid_callback_creates_session`. Run `npm test`.",
+    "REQ-001: Write red `unauthenticated_user_cannot_update`. Run `npm test`.",
+    REGRESSION + "test_command: ./scripts/check-labels\n",
+])
+def test_visible_and_executable_contracts_remain_valid(modules, verification):
+    assert modules.markdown.has_verification(verification)
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+@pytest.mark.parametrize("verification", ["REQ-001\n## Tests first\npytest is installed.\n", "<!--\n" + REGRESSION + "-->\n"])
+def test_physical_traceability_requires_real_section_or_tdd_verification(modules, tmp_path, depth, verification):
+    planning = make_plan(tmp_path / "planning", depth)
+    (planning / "codex-plan.md").write_text("REQ-001: trim label edges.\n")
+    (planning / "codex-plan-tdd.md").write_text(verification)
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text("REQ-001: trim label edges.\n" + verification)
+    findings, trace = modules.traceability.traceability_analysis(planning)
+    assert "traceability-gap" in {finding.code for finding in findings}
+    assert not trace["coverage"]["REQ-001"]["covered"]
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+def test_packet_cannot_use_a_tests_heading_as_verification(tmp_path, capsys, depth):
+    from runtime_support import load_runtime
+    runtime = load_runtime(Path(__file__).resolve().parents[1] / "scripts/zagrosi_skills.py")
+    planning = make_plan(tmp_path / "planning", depth)
+    (planning / "codex-plan.md").write_text("REQ-001: trim label edges.\n")
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text("REQ-001: trim label edges.\n## Tests first\npytest is installed.\n")
+    assert runtime.entrypoint.main(["implementation-packet", "--planning-dir", str(planning), "--section", SECTION]) == 1
+    assert '"tdd"' in capsys.readouterr().out
+    assert not (planning / ".forge/packets").exists()
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+@pytest.mark.parametrize("separator", ["", "\n", "\n### Empty labels\n\n"])
+def test_multiple_complete_cases_remain_valid(modules, tmp_path, depth, separator):
+    verification = REGRESSION + separator + "Case: empty label\nExpected: empty string.\nCommand: ./scripts/check-empty\n"
+    planning = make_plan(tmp_path / "planning", depth)
+    replace_verification(planning, verification)
+    assert modules.markdown.has_verification(verification)
+    assert not modules.artifacts.compact_plan_findings(planning)
+    assert not modules.scoring.implementation_readiness_analysis(planning, 12)[0]
+    assert not modules.traceability.traceability_analysis(planning)[0]
+
+
+@pytest.mark.parametrize("suffix", [
+    "Case: empty label\nCommand: ./scripts/check-empty\n",
+    "Case: empty label\nExpected: empty string.\n",
+    "Case: empty label\nExpected: empty string.\nCommand: ./scripts/check-empty\nExpected: pending\n",
+])
+def test_complete_case_does_not_hide_an_incomplete_or_conflicting_case(modules, suffix):
+    assert not modules.markdown.has_verification(REGRESSION + "\n### Empty labels\n" + suffix)
+
+
+def test_multiple_cases_can_share_a_command(modules):
+    assert modules.markdown.has_verification(
+        "Command: ./scripts/check-labels\nCase: trim edges\nExpected: interior spaces remain.\n"
+        "Case: empty labels\nExpected: empty string.\n"
+    )
+
+
+@pytest.mark.parametrize("prefix", ["\\`", "\\\\\\`", "`literal\\`"])
+def test_literal_or_closed_backtick_cannot_hide_a_comment_opener(modules, prefix):
+    verification = prefix + "<!--\nCase: hidden\nExpected: hidden result\nCommand: ./hidden-test\n` -->\n"
+    assert "Case: hidden" not in modules.markdown.visible_markdown(verification)
+    assert not modules.markdown.has_verification(verification)
+
+
+@pytest.mark.parametrize("slashes", [1, 2, 3, 4])
+def test_opening_backtick_respects_prose_escape_parity(modules, slashes):
+    source = "\\" * slashes + "`<!-- literal -->`"
+    visible = modules.markdown.visible_markdown(source)
+    assert ("<!-- literal -->" in visible) is (slashes % 2 == 0)
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+@pytest.mark.parametrize("hidden_artifact", ["spec.md", "codex-plan.md"])
+def test_hidden_requirement_cannot_disagree_between_traceability_and_packet(tmp_path, capsys, depth, hidden_artifact):
+    from runtime_support import load_runtime
+    runtime = load_runtime(Path(__file__).resolve().parents[1] / "scripts/zagrosi_skills.py")
+    planning = make_plan(tmp_path / "planning", depth)
+    (planning / "codex-plan.md").write_text("REQ-001: trim label edges.\n")
+    (planning / "codex-plan-tdd.md").write_text(REGRESSION)
+    (planning / hidden_artifact).write_text("<!-- REQ-001: hidden requirement -->\n")
+    findings, trace = runtime.traceability.traceability_analysis(planning)
+    assert findings
+    assert not trace["coverage"].get("REQ-001", {}).get("covered", False)
+    assert runtime.entrypoint.main(["implementation-packet", "--planning-dir", str(planning), "--section", SECTION]) == 1
+    assert '"coverage_gaps"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", [
+    "PYTHONPATH=src pytest -q",
+    'PYTHONPATH="src packages" LABEL="a=b" pytest -q',
+    "env PYTHONPATH=src pytest -q",
+    "./gradlew test",
+    "/usr/local/bin/pytest -q",
+    '"/path with spaces/python3.12" -B -m unittest discover -s tests',
+    "PYTHONPATH=src /venv/bin/python -X dev -m pytest -q",
+    "./tools/uv run pytest -q",
+    "uv run --with pytest python -m pytest",
+    "uv run --with=pytest python -m pytest",
+    "uv run --with 'pytest>=8' --with=hypothesis python -m pytest -q",
+    "poetry run pytest -q",
+    "npx vitest run",
+    "./node_modules/.bin/vitest run",
+])
+def test_shell_command_prefixes_preserve_regression_contracts(modules, command):
+    assert modules.markdown.has_verification(f"`test_trim_edges` removes edge whitespace. Run `{command}`.")
+
+
+@pytest.mark.parametrize("command", [
+    "PYTHONPATH=src",
+    'PYTHONPATH="src pytest -q',
+    "PYTHONPATH = src pytest -q",
+    "echo PYTHONPATH=src pytest -q",
+    "./gradlew build",
+    "env PYTHONPATH=src",
+    "python -c 'print(\"pytest\")'",
+    "python scripts/check.py -m pytest",
+    "python -m ./pytest",
+    "python -m env pytest",
+    "uv run --with",
+    "uv run --with= python -m pytest",
+    "uv run --with --help python -m pytest",
+    "uv run --with pytest python -m pip",
+    "This project uses pytest",
+])
+def test_command_prefix_support_does_not_accept_non_test_commands(modules, command):
+    assert not modules.markdown.has_verification(f"`test_trim_edges` removes edge whitespace. Run `{command}`.")
+
+
+def test_prefixed_commands_in_hidden_evidence_do_not_count(modules):
+    assert not modules.markdown.has_verification("<!-- `test_trim_edges` removes edges. Run `PYTHONPATH=src pytest -q`. -->")

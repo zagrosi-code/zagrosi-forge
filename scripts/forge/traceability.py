@@ -20,25 +20,26 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[_models.Finding], di
     tdd_path = _artifacts.planning_artifacts(planning_dir)["tdd"]
     sections_dir = planning_dir / "sections"
 
-    spec_text = _storage.read_text(spec_path) if spec_path else ""
-    plan_text = _storage.read_text(plan_path) if plan_path else ""
+    spec_text = _markdown.visible_markdown(_storage.read_text(spec_path)) if spec_path else ""
+    plan_text = _markdown.visible_markdown(_storage.read_text(plan_path)) if plan_path else ""
     tdd_text = _artifacts.planning_artifact_text(planning_dir, "tdd", tdd_path)
     section_files = sorted(sections_dir.glob("section-*.md")) if sections_dir.exists() else []
     section_text_by_file = {path.name: _storage.read_text(path) for path in section_files}
-    req_ids = _markdown.requirement_ids(spec_text) or _markdown.requirement_ids(plan_text)
+    req_ids = _markdown.requirement_ids(spec_text if spec_path else plan_text)
 
     plan_ids = set(_markdown.requirement_ids(plan_text))
-    tdd_ids = set(_markdown.requirement_ids(tdd_text))
-    section_ids = {name: set(_markdown.requirement_ids(text)) for name, text in section_text_by_file.items()}
+    tdd_ids = set(_markdown.requirement_ids(_markdown.visible_markdown(tdd_text)))
+    verified_tdd = _markdown.has_verification(tdd_text)
+    section_ids = {name: set(_markdown.requirement_ids(_markdown.visible_markdown(text))) for name, text in section_text_by_file.items()}
     tested_sections = {
         name for name, text in section_text_by_file.items()
-        if _markdown.contains_any(text, ["tests first", "expected failure", "test_", "pytest", "vitest", "cargo test", "go test"])
+        if _markdown.has_verification(text)
     }
     coverage: dict[str, Any] = {}
     for req_id in req_ids:
         sections = [name for name, ids in section_ids.items() if req_id in ids]
         section_tests = [name for name in sections if name in tested_sections]
-        in_tdd = req_id in tdd_ids or bool(section_tests)
+        in_tdd = req_id in tdd_ids and verified_tdd or bool(section_tests)
         coverage[req_id] = {
             "in_plan": req_id in plan_ids,
             "in_tdd": in_tdd,

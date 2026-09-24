@@ -10,9 +10,8 @@
   <img src="assets/readme-hero.svg" alt="Zagrosi Forge workflow hero" width="100%" />
 </div>
 
-Forge turns a broad request into bounded specs, an implementation-ready plan,
-and tested code. Lean mode is default: fewer files, shorter prompts, one setup,
-one final gate.
+Forge turns requests into bounded specs, plans, and tested code.
+Lean mode is default: fewer files, shorter prompts, one setup, one final gate.
 
 ## Lean By Default
 
@@ -22,10 +21,9 @@ one final gate.
 | `standard` | Explicit opt-in for wider research, traceability, or coordination. |
 | `deep` | Explicit opt-in for high-risk or architecture-heavy work. |
 
-Depth changes investigation and review rigor. Every mode uses compact, canonical
-contracts with stable requirement IDs, exact file ownership, observable acceptance,
-and verification. No minimum prose quotas or duplicate research, TDD, decision,
-and review files. Extra artifacts serve independent ownership or a material need.
+Depth changes investigation and review rigor. Every mode uses compact contracts
+with stable requirement IDs, file ownership, acceptance, and verification.
+No minimum prose quotas or duplicate research, TDD, decision, and review files.
 
 ## Install
 
@@ -41,8 +39,8 @@ Restart Codex after success. Preview with `install --dry-run --pretty`; compare
 the installed cache with `update-check --pretty`; refresh it with
 `self-update --pretty`.
 
-Updates prune development artifacts before scanning and preserve a recoverable
-installation during replacement. Cache cleanup does not shrink the repository.
+Updates exclude development artifacts and preserve a recoverable installation.
+Cache cleanup does not shrink the repository.
 
 Codex marketplace install is also supported:
 
@@ -53,7 +51,7 @@ codex plugin add zagrosi-forge@zagrosi
 
 ## Use
 
-Invoke the three skills in order, or start at the phase you need:
+Start at the phase you need:
 
 ```text
 Use $zagrosi-forge:zagrosi-project on @planning/requirements.md
@@ -82,9 +80,8 @@ python3 scripts/zagrosi_skills.py postflight \
   --phase plan --planning-dir planning/01-auth --depth lean --strict
 ```
 
-Project uses `project-setup`; implementation uses `implement-setup`. Run
-`commands --pretty` for the compact command catalog and
-`status --path PATH --pretty` to resume.
+Project uses `project-setup`; implementation uses `implement-setup`.
+`commands --pretty` lists commands; `status --path PATH --pretty` resumes work.
 
 Use the explicit [compact-plan format](skills/zagrosi-plan/references/plan-format.md).
 Legacy plans and reviews remain supported. Detached frozen runs retain physical
@@ -117,15 +114,15 @@ python3 tools/benchmark_forge.py \
   --original-root /path/to/main --baseline-root /path/to/earlier-snapshot --runs 5
 ```
 
-Benchmarks use identical fixtures across depths: source hashes, median helper
-latency, context size and modeled reference loads. See the scoped
-[recorded comparison](examples/evals/performance.json). Whole-task speed and model
-usage require separate measurements.
+Benchmarks measure helper latency, context size and modeled reference loads on
+identical fixtures across depths. See the
+[recorded comparison](examples/evals/performance.json).
 
-[Coding trials](examples/evals/coding/README.md) cover features, cleanup, deep
-planning, and resume. Separate verdicts check behavior, workflow completion, and
-independently reviewed cleanup. Unchanged fixtures cannot pass cleanup. Reviews
-and provenance bind the candidate, baseline, plugin runtime, and evaluator.
+[Coding trials](examples/evals/coding/README.md) measure complete tasks across
+depths: features, cleanup, resume, CSV imports and JavaScript. Repeated runs retain
+failures, timings and available usage. Verdicts separate behavior, workflow and
+independently reviewed cleanup; unchanged fixtures fail cleanup. Reviews bind
+candidate, baseline, plugin and evaluator.
 
 ## Runtime
 
@@ -135,6 +132,10 @@ reverify sources, ownership, locks and immutable inputs with process isolation.
 Checks reuse unchanged parsing and score components within one command; analyses
 return structured results. Mutable writes are serialized and atomic. Privileged
 project policy loads through a source-bound adapter with frozen checks.
+
+Installed files come from `.codex-plugin/package-files.json`; undeclared local
+files stay out. Configuration updates preserve unrelated values, publish
+atomically under a lock, and preview only Forge-owned settings.
 
 ## Compatibility
 
@@ -162,11 +163,14 @@ assets/                    icon and README visuals
 ## Validate
 
 After runtime/test edits, run `python3 tools/update_runtime_manifest.py`.
+After adding/removing packaged files, stage the intended files and run
+`python3 tools/update_package_manifest.py`.
 CI checks bindings and the full suite on Linux/Python 3.12; focused checks cover
 Python 3.11, macOS and Windows.
 
 ```bash
 python3 tools/update_runtime_manifest.py --check
+python3 tools/update_package_manifest.py --check
 uv run --with pytest python -m pytest
 python3 scripts/zagrosi_skills.py doctor --plugin-root . --strict --pretty
 python3 scripts/zagrosi_skills.py release-check --plugin-root . --pretty

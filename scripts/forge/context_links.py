@@ -12,13 +12,14 @@ from . import storage as _storage
 
 
 LINK = re.compile(r'(?<!!)\[[^\]\n]+\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+["\'][^\n]*?["\'])?\s*\)')
-INLINE_TOKEN = re.compile(r"<!--|`+|(?<!!)\[")
+INLINE_TOKEN = re.compile(r"`+|(?<!!)\[")
 MAX_CONTRACTS = 64
 MAX_SOURCE_BYTES = 1_048_576
 
 
 def local_links(text: str) -> list[str]:
     """Scan in source order so comments and code cannot activate each other."""
+    text = _markdown.visible_markdown(text)
     links = []
     offset = skip = 0
     fence = None
@@ -38,15 +39,7 @@ def local_links(text: str) -> list[str]:
             position = start + token.start()
             if position < skip:
                 continue
-            if token[0] == "<!--":
-                escape_start = position
-                while escape_start and text[escape_start - 1] == "\\":
-                    escape_start -= 1
-                if (position - escape_start) % 2:
-                    continue
-                close = text.find("-->", position + 4)
-                skip = len(text) if close < 0 else close + 3
-            elif token[0].startswith("`"):
+            if token[0].startswith("`"):
                 close = re.compile(rf"(?<!`){token[0]}(?!`)").search(text, start + token.end())
                 if close and not any(
                     _markdown.markdown_fence_opening(following)

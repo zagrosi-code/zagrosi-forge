@@ -14,6 +14,8 @@ for (let n = 0; n < 40; n++) {
   carts.push(Array.from({ length: random(6) }, () => ({ price: random(10000), quantity: random(5) })));
 }
 let assertions = 0;
+assert.deepEqual(Object.keys(candidate).sort(), Object.keys(baseline).sort(), 'Public exports changed');
+assertions++;
 function compare(call, expected, items) {
   const copy = structuredClone(items);
   assert.deepEqual(call(copy), expected);
@@ -34,7 +36,7 @@ for (const items of carts) {
 }
 for (const action of ['missing', null, 42]) {
   const items = [];
-  assert.throws(() => candidate.invoice(action, items), { message: 'Unknown action: ' + String(action) });
+  assert.throws(() => candidate.invoice(action, items), { constructor: Error, message: 'Unknown action: ' + String(action) });
   assert.deepEqual(items, [], 'Candidate mutated rejected inputs');
   assertions += 2;
 }

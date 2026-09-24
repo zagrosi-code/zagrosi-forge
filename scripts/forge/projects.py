@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 import argparse
 import json
 import re
@@ -315,11 +315,173 @@ def normalized_boundary(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("`", "").strip().lower()).removeprefix("owns ")
 
 
+class _ProjectOwnership(NamedTuple):
+    requirements: dict[str, set[str]]
+    owners: dict[str, set[str]]
+    dependencies: dict[str, list[str]]
+    boundaries: dict[str, str]
+
+
+def _manifest_ownership(rows, splits, manifest_path, findings) -> _ProjectOwnership:
+    """Validate row ownership once and retain its indexes for spec checks."""
+    owned_requirements: dict[str, set[str]] = {split: set() for split in splits}
+    requirement_owners: dict[str, set[str]] = {}
+    dependencies: dict[str, list[str]] = {split: [] for split in splits}
+    boundaries: dict[str, str] = {}
+    boundary_owners: dict[str, set[str]] = {}
+    if rows is None:
+        return _ProjectOwnership(owned_requirements, requirement_owners, dependencies, boundaries)
+    seen_rows: set[str] = set()
+    for row in rows:
+        row_splits = _policy.SPLIT_TOKEN_RE.findall(row["split"])
+        if not row_splits:
+            findings.append(_quality.finding("high", "invalid-split-row", "Manifest table row has no valid split.", manifest_path))
+            continue
+        split = row_splits[0]
+        if split not in owned_requirements:
+            findings.append(_quality.finding("high", "unknown-split-row", f"Manifest table names unknown split: {split}.", manifest_path))
+            continue
+        if split in seen_rows:
+            findings.append(_quality.finding("high", "duplicate-split-row", f"Manifest table repeats split: {split}.", manifest_path))
+        seen_rows.add(split)
+
+        reqs = set(_markdown.requirement_ids(row["requirements"]))
+        if not reqs:
+            findings.append(_quality.finding("medium", "split-without-requirements", f"{split} owns no REQ-* IDs.", manifest_path))
+        owned_requirements[split].update(reqs)
+        for req_id in reqs:
+            requirement_owners.setdefault(req_id, set()).add(split)
+
+        deps = _policy.SPLIT_TOKEN_RE.findall(row["dependencies"])
+        dependencies[split] = deps
+        boundaries[split] = row["boundary"]
+        unknown = sorted(set(deps) - owned_requirements.keys())
+        if unknown:
+            findings.append(
+                _quality.finding(
+                    "high",
+                    "unknown-split-dependency",
+                    f"{split} depends on unknown split(s): {', '.join(unknown)}.",
+                    manifest_path,
+                )
+            )
+
+        for path in _ownership.extract_file_paths(row["boundary"]):
+            boundary_owners.setdefault(path, set()).add(split)
+        if "zagrosi-plan" not in row["command"].lower() or split not in row["command"] or "spec.md" not in row["command"]:
+            findings.append(
+                _quality.finding(
+                    "medium",
+                    "invalid-next-command",
+                    f"{split} lacks its exact Zagrosi Plan spec command.",
+                    manifest_path,
+                )
+            )
+
+    for split in sorted(set(splits) - seen_rows):
+        findings.append(_quality.finding("high", "missing-split-row", f"Manifest table omits split: {split}.", manifest_path))
+    for owners_by_item, code, description in (
+        (requirement_owners, "duplicate-requirement-owner", "has multiple split owners"),
+        (boundary_owners, "cross-split-path-collision", "is owned by multiple splits"),
+    ):
+        for item, owners in sorted(owners_by_item.items()):
+            if len(owners) > 1:
+                findings.append(_quality.finding(
+                    "high", code, f"{item} {description}: {', '.join(sorted(owners))}.", manifest_path,
+                ))
+    if cycle := graph_cycle(dependencies):
+        findings.append(
+            _quality.finding(
+                "high",
+                "split-dependency-cycle",
+                f"Split dependency cycle: {' -> '.join(cycle)}.",
+                manifest_path,
+            )
+        )
+    return _ProjectOwnership(owned_requirements, requirement_owners, dependencies, boundaries)
+
+
+def _lint_spec_declarations(text, path, split, ownership, findings):
+    dependencies, boundaries = split_spec_declarations(text)
+    for label, declarations in (("Dependencies", dependencies), ("Boundary", boundaries)):
+        code = label.lower()
+        if not declarations:
+            findings.append(_quality.finding("high", f"missing-spec-{code}", f"{split}/spec.md lacks a {label}: declaration.", path))
+        elif len(declarations) != 1:
+            findings.append(_quality.finding("high", f"duplicate-spec-{code}", f"{split}/spec.md must contain exactly one {label}: declaration.", path))
+        elif label == "Dependencies":
+            actual = set(_policy.SPLIT_TOKEN_RE.findall(declarations[0]))
+            expected = set(ownership.dependencies[split])
+            if actual != expected:
+                findings.append(_quality.finding(
+                    "high", "split-spec-dependency-mismatch",
+                    f"{split}/spec.md dependencies differ from manifest: expected {sorted(expected)}, got {sorted(actual)}.", path,
+                ))
+        elif normalized_boundary(declarations[0]) != normalized_boundary(ownership.boundaries.get(split, "")):
+            findings.append(_quality.finding(
+                "high", "split-spec-boundary-mismatch", f"{split}/spec.md boundary differs from the manifest.", path,
+            ))
+
+
+def _lint_split_spec(planning_dir, split, ownership, has_table, modern_contract, budgets, findings):
+    split_dir = planning_dir / split
+    spec_path = split_dir / "spec.md"
+    if not split_dir.exists():
+        findings.append(_quality.finding("medium", "missing-split-dir", f"Split directory is missing: {split}", split_dir))
+        return
+    spec_text = _storage.read_text(spec_path) if spec_path.exists() else ""
+    if not spec_text.strip():
+        findings.append(_quality.finding("medium", "missing-split-spec", f"Split spec is missing or empty: {split}/spec.md", spec_path))
+        return
+    if modern_contract:
+        _quality.add_budget_finding(findings, _markdown.word_count(spec_text), budgets["spec"], f"{split}/spec.md", "split-spec-too-large", spec_path)
+    spec_ids = set(_markdown.requirement_ids(spec_text))
+    missing_owned = sorted(ownership.requirements[split] - spec_ids)
+    if missing_owned:
+        findings.append(
+            _quality.finding(
+                "high",
+                "split-spec-missing-requirements",
+                f"{split}/spec.md omits owned IDs: {', '.join(missing_owned)}.",
+                spec_path,
+            )
+        )
+    foreign = sorted(
+        req_id
+        for req_id in spec_ids - ownership.requirements[split]
+        if req_id in ownership.owners
+    )
+    if foreign:
+        findings.append(
+            _quality.finding(
+                "high",
+                "split-spec-foreign-requirements",
+                f"{split}/spec.md claims IDs owned elsewhere: {', '.join(foreign)}.",
+                spec_path,
+            )
+        )
+    if has_table:
+        _lint_spec_declarations(spec_text, spec_path, split, ownership, findings)
+    _quality.require_terms(
+        findings,
+        spec_text,
+        {
+            "acceptance-criteria": ["acceptance criteria", "done when", "success criteria"],
+            "scope": ["in scope", "out of scope", "non-goals"],
+            "testing": ["test", "tests", "verification"],
+            "dependencies": ["dependency", "dependencies", "depends on", "input", "output"],
+            "boundary": ["boundary", "owns", "ownership"],
+            "risks-or-stops": ["risk", "open question", "unknown", "assumption", "stop"],
+        },
+        spec_path,
+        "low",
+    )
+
+
 def lint_project_manifest(args: argparse.Namespace) -> int:
     planning_dir = _storage.resolve_path(args.planning_dir)
     manifest_path = planning_dir / "project-manifest.md"
     findings: list[_models.Finding] = []
-    splits: list[str] = []
 
     if not manifest_path.exists():
         findings.append(_quality.finding("critical", "missing-manifest", "project-manifest.md is missing.", manifest_path))
@@ -344,109 +506,26 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
         findings.append(_quality.finding("critical", "manifest-format", error, manifest_path))
 
     rows = project_manifest_rows(text)
-    modern_contract = rows is not None or compact_project_session(planning_dir)
+    compact_session = compact_project_session(planning_dir)
+    modern_contract = rows is not None or compact_session
     depth = project_artifact_depth(planning_dir, meta)
     budgets = _policy.PROJECT_WORD_BUDGETS[depth]
     if modern_contract:
         _quality.add_budget_finding(findings, _markdown.word_count(text), budgets["manifest"], "Project manifest", "project-manifest-too-large", manifest_path)
-    owned_requirements: dict[str, set[str]] = {split: set() for split in splits}
-    requirement_owners: dict[str, set[str]] = {}
-    dependencies: dict[str, list[str]] = {split: [] for split in splits}
-    boundaries: dict[str, str] = {}
-    boundary_owners: dict[str, set[str]] = {}
-    if rows is None:
-        if compact_project_session(planning_dir):
-            findings.append(
-                _quality.finding(
-                    "high",
-                    "missing-ownership-table",
-                    "Manifest lacks the compact Split/REQ/Depends on/Owns boundary/Next command table.",
-                    manifest_path,
-                )
+    if rows is None and compact_session:
+        findings.append(
+            _quality.finding(
+                "high",
+                "missing-ownership-table",
+                "Manifest lacks the compact Split/REQ/Depends on/Owns boundary/Next command table.",
+                manifest_path,
             )
-    else:
-        seen_rows: set[str] = set()
-        for row in rows:
-            row_splits = _policy.SPLIT_TOKEN_RE.findall(row["split"])
-            if not row_splits:
-                findings.append(_quality.finding("high", "invalid-split-row", "Manifest table row has no valid split.", manifest_path))
-                continue
-            split = row_splits[0]
-            if split not in owned_requirements:
-                findings.append(_quality.finding("high", "unknown-split-row", f"Manifest table names unknown split: {split}.", manifest_path))
-                continue
-            if split in seen_rows:
-                findings.append(_quality.finding("high", "duplicate-split-row", f"Manifest table repeats split: {split}.", manifest_path))
-            seen_rows.add(split)
-
-            reqs = set(_markdown.requirement_ids(row["requirements"]))
-            if not reqs:
-                findings.append(_quality.finding("medium", "split-without-requirements", f"{split} owns no REQ-* IDs.", manifest_path))
-            owned_requirements[split].update(reqs)
-            for req_id in reqs:
-                requirement_owners.setdefault(req_id, set()).add(split)
-
-            deps = _policy.SPLIT_TOKEN_RE.findall(row["dependencies"])
-            dependencies[split] = deps
-            boundaries[split] = row["boundary"]
-            unknown = sorted(set(deps) - set(splits))
-            if unknown:
-                findings.append(
-                    _quality.finding(
-                        "high",
-                        "unknown-split-dependency",
-                        f"{split} depends on unknown split(s): {', '.join(unknown)}.",
-                        manifest_path,
-                    )
-                )
-
-            for path in _ownership.extract_file_paths(row["boundary"]):
-                boundary_owners.setdefault(path, set()).add(split)
-            if "zagrosi-plan" not in row["command"].lower() or split not in row["command"] or "spec.md" not in row["command"]:
-                findings.append(
-                    _quality.finding(
-                        "medium",
-                        "invalid-next-command",
-                        f"{split} lacks its exact Zagrosi Plan spec command.",
-                        manifest_path,
-                    )
-                )
-
-        for split in sorted(set(splits) - seen_rows):
-            findings.append(_quality.finding("high", "missing-split-row", f"Manifest table omits split: {split}.", manifest_path))
-        for req_id, owners in sorted(requirement_owners.items()):
-            if len(owners) > 1:
-                findings.append(
-                    _quality.finding(
-                        "high",
-                        "duplicate-requirement-owner",
-                        f"{req_id} has multiple split owners: {', '.join(sorted(owners))}.",
-                        manifest_path,
-                    )
-                )
-        for path, owners in sorted(boundary_owners.items()):
-            if len(owners) > 1:
-                findings.append(
-                    _quality.finding(
-                        "high",
-                        "cross-split-path-collision",
-                        f"{path} is owned by multiple splits: {', '.join(sorted(owners))}.",
-                        manifest_path,
-                    )
-                )
-        if cycle := graph_cycle(dependencies):
-            findings.append(
-                _quality.finding(
-                    "high",
-                    "split-dependency-cycle",
-                    f"Split dependency cycle: {' -> '.join(cycle)}.",
-                    manifest_path,
-                )
-            )
+        )
+    ownership = _manifest_ownership(rows, splits, manifest_path, findings)
 
     source_path = project_requirement_source(planning_dir, meta)
     source_ids = _markdown.requirement_ids(_storage.read_text(source_path)) if source_path else []
-    missing_source_ids = sorted(set(source_ids) - set(requirement_owners)) if rows is not None else []
+    missing_source_ids = sorted(set(source_ids) - ownership.owners.keys()) if rows is not None else []
     if missing_source_ids:
         findings.append(
             _quality.finding(
@@ -471,92 +550,7 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
     )
 
     for split in splits:
-        split_dir = planning_dir / split
-        spec_path = split_dir / "spec.md"
-        if not split_dir.exists():
-            findings.append(_quality.finding("medium", "missing-split-dir", f"Split directory is missing: {split}", split_dir))
-            continue
-        if not spec_path.exists() or not _storage.read_text(spec_path).strip():
-            findings.append(_quality.finding("medium", "missing-split-spec", f"Split spec is missing or empty: {split}/spec.md", spec_path))
-            continue
-        spec_text = _storage.read_text(spec_path)
-        if modern_contract:
-            _quality.add_budget_finding(findings, _markdown.word_count(spec_text), budgets["spec"], f"{split}/spec.md", "split-spec-too-large", spec_path)
-        spec_ids = set(_markdown.requirement_ids(spec_text))
-        missing_owned = sorted(owned_requirements.get(split, set()) - spec_ids)
-        if missing_owned:
-            findings.append(
-                _quality.finding(
-                    "high",
-                    "split-spec-missing-requirements",
-                    f"{split}/spec.md omits owned IDs: {', '.join(missing_owned)}.",
-                    spec_path,
-                )
-            )
-        foreign = sorted(
-            req_id
-            for req_id in spec_ids - owned_requirements.get(split, set())
-            if req_id in requirement_owners
-        )
-        if foreign:
-            findings.append(
-                _quality.finding(
-                    "high",
-                    "split-spec-foreign-requirements",
-                    f"{split}/spec.md claims IDs owned elsewhere: {', '.join(foreign)}.",
-                    spec_path,
-                )
-            )
-        if rows is not None:
-            dependency_declarations, boundary_declarations = split_spec_declarations(spec_text)
-            if not dependency_declarations:
-                findings.append(_quality.finding("high", "missing-spec-dependencies", f"{split}/spec.md lacks a Dependencies: declaration.", spec_path))
-            elif len(dependency_declarations) != 1:
-                findings.append(_quality.finding("high", "duplicate-spec-dependencies", f"{split}/spec.md must contain exactly one Dependencies: declaration.", spec_path))
-            else:
-                dependency_declaration = dependency_declarations[0]
-                actual_dependencies = set(_policy.SPLIT_TOKEN_RE.findall(dependency_declaration))
-                expected_dependencies = set(dependencies.get(split, []))
-                if actual_dependencies != expected_dependencies:
-                    findings.append(
-                        _quality.finding(
-                            "high",
-                            "split-spec-dependency-mismatch",
-                            f"{split}/spec.md dependencies differ from manifest: expected {sorted(expected_dependencies)}, got {sorted(actual_dependencies)}.",
-                            spec_path,
-                        )
-                    )
-            if not boundary_declarations:
-                findings.append(_quality.finding("high", "missing-spec-boundary", f"{split}/spec.md lacks a Boundary: declaration.", spec_path))
-            elif len(boundary_declarations) != 1:
-                findings.append(_quality.finding("high", "duplicate-spec-boundary", f"{split}/spec.md must contain exactly one Boundary: declaration.", spec_path))
-            else:
-                boundary_declaration = boundary_declarations[0]
-                expected_boundary = boundaries.get(split, "")
-                boundary_matches = normalized_boundary(boundary_declaration) == normalized_boundary(expected_boundary)
-                if not boundary_matches:
-                    findings.append(
-                        _quality.finding(
-                            "high",
-                            "split-spec-boundary-mismatch",
-                            f"{split}/spec.md boundary differs from the manifest.",
-                            spec_path,
-                        )
-                    )
-        _quality.require_terms(
-            findings,
-            spec_text,
-            {
-                "acceptance-criteria": ["acceptance criteria", "done when", "success criteria"],
-                "scope": ["in scope", "out of scope", "non-goals"],
-                "testing": ["test", "tests", "verification"],
-                "dependencies": ["dependency", "dependencies", "depends on", "input", "output"],
-                "boundary": ["boundary", "owns", "ownership"],
-                "risks-or-stops": ["risk", "open question", "unknown", "assumption", "stop"],
-            },
-            spec_path,
-            "low",
-        )
+        _lint_split_spec(planning_dir, split, ownership, rows is not None, modern_contract, budgets, findings)
 
     payload = _quality.quality_from_args(
         "project-manifest",
@@ -567,8 +561,8 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
             "manifest": str(manifest_path),
             "source": str(source_path) if source_path else None,
             "splits": splits,
-            "requirement_owners": {req_id: sorted(owners) for req_id, owners in sorted(requirement_owners.items())},
-            "dependencies": dependencies,
+            "requirement_owners": {req_id: sorted(owners) for req_id, owners in sorted(ownership.owners.items())},
+            "dependencies": ownership.dependencies,
             "depth_mode": depth,
             "word_budgets": budgets,
             "interview": interview_extras,

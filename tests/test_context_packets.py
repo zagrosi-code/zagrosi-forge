@@ -26,7 +26,7 @@ def plan(tmp_path):
     (sections / f"{SECTION}.md").write_text(
         "# Authentication\n\nREQ-001: Implement sign-in.\n\n"
         "## Owned files\n\n- `src/auth.py`\n\n"
-        "## Tests\n\n`test_local_auth` verifies sign-in.\n"
+        "## Tests\n\n`test_local_auth` verifies sign-in. Run `pytest -q`.\n"
     )
     (sections / "section-02-billing.md").write_text("# Billing\n\nREQ-002: Bill users.\n")
     (tmp_path / "codex-spec.md").write_text(
