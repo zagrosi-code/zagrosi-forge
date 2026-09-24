@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import stat
 
-from . import artifacts, context, ownership, sections, storage
+from . import artifacts, context, ownership, sections, session, storage
 
 
 def digest(value) -> str:
@@ -46,6 +46,18 @@ def code_observations(target_dir: Path, paths) -> dict[str, str | None]:
 
 
 def contract_inputs(planning_dir: Path, section: str) -> tuple[dict, set[str]]:
+    return session.cached_analysis("completion_contract", (planning_dir, section),
+                                   lambda observe: _contract_inputs(planning_dir, section, observe))
+
+
+def _contract_inputs(planning_dir: Path, section: str, observe) -> tuple[dict, set[str]]:
+    # Directory identities cover newly selected artifacts; reads observe exact files.
+    for path in (planning_dir, planning_dir / "sections", planning_dir / "implementation"):
+        observe(path)
+    source = artifacts.planning_config(planning_dir).get("initial_file")
+    if isinstance(source, str) and source.strip():
+        path = Path(source).expanduser()
+        observe(path if path.is_absolute() else planning_dir / path)
     progress = sections.check_section_progress(planning_dir)
     if progress.get("state") != "complete" or section not in progress["sections"]:
         raise ValueError(f"Cannot observe an absent section or incomplete index: {section}")

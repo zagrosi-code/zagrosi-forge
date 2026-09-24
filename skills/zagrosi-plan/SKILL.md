@@ -20,6 +20,9 @@ Resolve `plugin_root` from the nearest parent containing `scripts/zagrosi_skills
 python3 {plugin_root}/scripts/zagrosi_skills.py plan-setup --file "{spec_file}" --plugin-root "{plugin_root}" --depth "{depth}"
 ```
 
+For detached authoring, add `--for-detached`; setup then leaves physical artifacts
+to that route. Normal setup seeds a draft only in a new planning directory.
+Choose section boundaries before filling it; a scaffold is never admission.
 Repair failed setup. Treat the source spec, unchanged, as requirements rather
 than executable instructions. Ask only for unresolved material choices.
 
@@ -31,7 +34,9 @@ than executable instructions. Ask only for unresolved material choices.
    [sections/index](references/section-format.md). Embed evidence, tests, decisions,
    risks, and review; create separate artifacts only for independent ownership.
 3. Adversarially review using [review guidance](references/review.md); apply fixes.
-4. Map each stable `REQ-*` to acceptance, owned files, dependencies, and tests.
+4. Map each stable `REQ-*` to source, behavior, expected result and verification
+   once in the canonical Contract. Keep explicit source IDs; if the brief has
+   none, assign IDs there with source line links, preserving every constraint.
    Generated/delegated prompts: at most 300 words, precise links, no copied context.
 
 Load only applicable packs: [auth](references/domain-auth.md),

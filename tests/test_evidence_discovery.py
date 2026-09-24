@@ -1,6 +1,9 @@
 """Repository evidence follows actual packages and test configuration."""
 
 import json
+from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 from forge_test_helpers import load_zagrosi_module, run_raw
@@ -19,6 +22,93 @@ def write(root, name, text):
 
 def commands(evidence, root):
     return evidence.repository_commands(root, evidence.evidence_files(root))
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is unavailable")
+def test_git_discovery_prunes_ignored_archives_and_keeps_tracked_ignored_files(evidence, tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    write(tmp_path, ".gitignore", "docs/development/\n*.local.py\n")
+    write(tmp_path, "scripts/runtime.py", "")
+    write(tmp_path, "src/tracked.local.py", "")
+    write(tmp_path, "src/new.py", "")
+    write(tmp_path, "src/deleted.py", "")
+    write(tmp_path, "src/private.local.py", "")
+    write(tmp_path, "node_modules/vendor.js", "")
+    write(tmp_path, "docs/development/trials/workspace/pyproject.toml", "[tool.pytest.ini_options]\n")
+    for index in range(90):
+        write(tmp_path, f"docs/development/trials/workspace/src/fixture{index}.py", "")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "src/tracked.local.py", "src/deleted.py"], check=True)
+    (tmp_path / "src/deleted.py").unlink()
+    monkeypatch.setattr(evidence.os, "walk", lambda *_: pytest.fail("Git inventory must not walk ignored archives"))
+    names = {path.as_posix() for path in evidence.evidence_files(tmp_path)}
+    assert names == {".gitignore", "scripts/runtime.py", "src/tracked.local.py", "src/new.py"}
+    assert commands(evidence, tmp_path) == []
+    assert evidence.evidence_files(tmp_path / "src") == [Path("new.py"), Path("tracked.local.py")]
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is unavailable")
+@pytest.mark.parametrize("boundary", ["nested-repository", "submodule"])
+def test_git_discovery_includes_repository_boundaries(evidence, tmp_path, monkeypatch, boundary):
+    root = tmp_path / "root"
+    source = tmp_path / "source" if boundary == "submodule" else root / "services/billing"
+    for path in (root, source):
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+    write(source, ".gitignore", "archives/\n*.local.py\n")
+    write(source, "pyproject.toml", "[project]\nname='billing'\n")
+    write(source, "app.py", "")
+    write(source, "tests/test_app.py", "from unittest import TestCase\n")
+    subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(source), "-c", "user.name=Forge", "-c", "user.email=forge@example.invalid",
+                    "-c", "commit.gpgsign=false", "commit", "-qm", "fixture"], check=True)
+    if boundary == "submodule":
+        subprocess.run(["git", "-C", str(root), "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                        str(source), "services/billing"], check=True)
+    nested = root / "services/billing"
+    write(nested, "archives/snapshot/app.py", "")
+    write(nested, "private.local.py", "")
+    write(nested, "node_modules/vendor.js", "")
+    monkeypatch.setattr(evidence.os, "walk", lambda *_: pytest.fail("Repository inventories must prune ignored trees"))
+    expected = {Path("services/billing") / name for name in (".gitignore", "app.py", "pyproject.toml", "tests/test_app.py")}
+    if boundary == "submodule":
+        expected.add(Path(".gitmodules"))
+    assert set(evidence.evidence_files(root)) == expected
+    assert commands(evidence, root) == ["cd services/billing && python -m unittest discover -s tests"]
+    if boundary == "submodule":
+        subprocess.run(["git", "-C", str(root), "submodule", "--quiet", "deinit", "-f", "--", "services/billing"], check=True)
+        assert evidence.evidence_files(root) == [Path(".gitmodules")]
+
+
+def test_git_discovery_rejects_self_parent_and_symlink_boundaries(evidence, tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    write(root, "service/app.py", "")
+    try:
+        (root / "alias").symlink_to(root, target_is_directory=True)
+        (root / "external").symlink_to(tmp_path, target_is_directory=True)
+    except OSError:
+        pytest.skip("Directory symlinks unavailable")
+    calls = []
+
+    def inventory(argv, *, cwd, **kwargs):
+        calls.append(cwd)
+        assert len(calls) <= 2, "Self/parent/symlink entries must not recurse"
+        names = b".\0..\0alias\0external/root/service\0service\0" if cwd == root else b"app.py\0"
+        return subprocess.CompletedProcess(argv, 0, names)
+
+    monkeypatch.setattr(evidence.subprocess, "run", inventory)
+    assert evidence.evidence_files(root) == [Path("service/app.py")]
+    assert calls == [root, root / "service"]
+
+
+@pytest.mark.parametrize("failure", [FileNotFoundError, subprocess.TimeoutExpired])
+def test_git_unavailable_or_timed_out_keeps_filtered_filesystem_fallback(evidence, tmp_path, monkeypatch, failure):
+    write(tmp_path, "src/runtime.py", "")
+    write(tmp_path, "node_modules/vendor.js", "")
+
+    def unavailable(*args, **kwargs):
+        raise failure("git", 10) if failure is subprocess.TimeoutExpired else failure("git")
+
+    monkeypatch.setattr(evidence.subprocess, "run", unavailable)
+    assert evidence.evidence_files(tmp_path) == [Path("src/runtime.py")]
 
 
 @pytest.mark.parametrize("manager,lock", [("pnpm", "pnpm-lock.yaml"), ("yarn", "yarn.lock"), ("bun", "bun.lock")])

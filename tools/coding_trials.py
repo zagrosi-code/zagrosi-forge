@@ -20,7 +20,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from coding_trial_evidence import (
-    cleanup_verdict, evaluator_files, files, plugin_files, plugin_provenance, review_template, semantic_files,
+    cleanup_verdict, code_fingerprint, evaluator_files, files, plugin_files, plugin_provenance, review_template, semantic_files,
 )
 from coding_trial_process import execute
 from coding_trial_resume import prepare_resume, resume_verdict
@@ -62,7 +62,11 @@ def code_metrics(workspace: Path, runtime: str = "python") -> dict:
             "external_imports": sorted(imports - sys.stdlib_module_names - local)}
 
 
-def prepare(trial: Path, case: str, depth: str | None = None) -> dict:
+def prepare(trial: Path, case: str, depth: str | None = None, *,
+            plugin_root: Path | None = None, plain_agent: bool = False) -> dict:
+    plugin_root = (plugin_root or ROOT).resolve()
+    if plain_agent and case == "resume":
+        raise ValueError("The Forge resume checkpoint has no comparable plain-agent arm")
     trial.mkdir(parents=True, exist_ok=False)
     workspace = trial / "workspace"
     fixture = PACK / CASES[case].get("fixture", "fixture")
@@ -70,16 +74,22 @@ def prepare(trial: Path, case: str, depth: str | None = None) -> dict:
     shutil.copytree(fixture, workspace, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     selected = depth or CASES[case]["depth"]
     tests = test_command(CASES[case])
-    checkpoint = prepare_resume(ROOT, workspace, selected, tests) if case == "resume" else None
+    checkpoint = prepare_resume(ROOT, workspace, selected, tests, plugin_root=plugin_root) if case == "resume" else None
     displayed_command = subprocess.list2cmdline(tests) if os.name == "nt" else shlex.join(tests)
     protected = CASES[case].get("protected_paths", [])
-    prompt = (f"Work only in {workspace}. Use Forge at {selected} depth.\n"
-              f"Read {ROOT / 'skills/zagrosi-implement/references/engineering.md'} and the applicable Forge skills.\n\n"
+    workflow = ("Use your normal engineering workflow. Do not read or invoke Forge skills/tools.\n"
+                if plain_agent else
+                f"Use Forge at {selected} depth from {plugin_root}; use this exact tree for skills and CLI commands.\n"
+                f"Read {plugin_root / 'skills/zagrosi-implement/references/engineering.md'} and applicable Forge skills.\n"
+                "Complete admitted planning, implementation, regression checks and completion recording.\n")
+    prompt = (f"Work only in {workspace}.\n{workflow}\n"
               f"{CASES[case]['request']}\n\n"
-              "Preserve public APIs. Standard library only. Keep .planning records compact.\n"
+              "Preserve public APIs. Standard library only. If you create planning records, keep them compact under .planning/.\n"
               "Edit only src/, tests/, and .planning/. .gitignore may list .planning/, __pycache__/, .pytest_cache/, and *.pyc.\n"
               f"Run existing/added tests with `{displayed_command}`. Python trials require PYTHONPATH=src.\n"
               + (f"Leave these unrelated files unchanged: {', '.join(protected)}.\n" if protected else "") +
+              "Operator choices are settled: local .planning artifacts; manual Git, no commits, pushes or deployment.\n"
+              "Do not read external trial checkers, other candidates, or edit plugin/evaluator infrastructure.\n"
               "Report tests, cleanup, remaining issues, and observed usage if available.\n")
     (trial / "prompt.md").write_text(prompt)
     record = {"case": case, "depth": selected, "baseline_files": files(workspace),
@@ -89,7 +99,8 @@ def prepare(trial: Path, case: str, depth: str | None = None) -> dict:
                   oracle.read_bytes()).hexdigest(),
               "fixture_sha256": files(fixture),
               "evaluator_sha256": evaluator_files(ROOT, oracle, PACK / "cases.json"),
-              "plugin_sha256": plugin_files(ROOT)}
+              "plugin_root": str(plugin_root) if not plain_agent else None, "plain_agent": plain_agent,
+              "plugin_sha256": plugin_files(plugin_root) if not plain_agent else {}}
     (trial / "trial.json").write_text(json.dumps(record, indent=2) + "\n")
     return {"workspace": str(workspace), "prompt": str(trial / "prompt.md"), "case": case, "depth": selected}
 
@@ -115,7 +126,9 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
     oracle_runner = ["node"] if case.get("runtime") == "node" else [sys.executable, "-B"]
     oracle = execute([*oracle_runner, str(oracle_path), str(workspace), record["case"]], workspace)
     tests = execute(test_command(case), workspace)
-    workflow = workflow_verdict(workspace, record["depth"])
+    plain_agent = record.get("plain_agent", False)
+    workflow = ({"success": None, "status": "not_applicable"} if plain_agent
+                else workflow_verdict(workspace, record["depth"]))
     resume = resume_verdict(record, workspace)
     actual = files(workspace)
     changed = sorted(name for name in actual.keys() | record["baseline_files"].keys()
@@ -137,23 +150,27 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
         metrics = code_metrics(workspace, case.get("runtime", "python"))
     except (SyntaxError, UnicodeError) as exc:
         metrics = {"error": str(exc)}
+    telemetry = telemetry or (trial / "telemetry.json" if (trial / "telemetry.json").is_file() else None)
     reported = json.loads(telemetry.read_text()) if telemetry else None
     evaluator_changed = record["oracle_sha256"] != hashlib.sha256(oracle_path.read_bytes()).hexdigest()
     evaluator_changed |= record["fixture_sha256"] != files(fixture)
     if record.get("evaluator_sha256") is not None:
         evaluator_changed |= record["evaluator_sha256"] != evaluator_files(ROOT, oracle_path, PACK / "cases.json")
-    provenance = plugin_provenance(record, ROOT)
+    provenance = ({"success": True, "status": "not_applicable"} if plain_agent
+                  else plugin_provenance(record, Path(record.get("plugin_root") or ROOT)))
     behavior = {"success": oracle["returncode"] == tests["returncode"] == 0 and oracle_complete
                and not evaluator_changed}
     cleanup = cleanup_verdict(record, workspace, CASES[record["case"]].get("cleanup_required", False), review)
-    result = {"success": behavior["success"] and workflow["success"] and cleanup["success"] is not False
+    result = {"success": behavior["success"] and (plain_agent or workflow["success"]) and cleanup["success"] is not False
               and resume["success"] is not False
               and provenance["success"] and not outside_scope and "error" not in metrics
               and not metrics.get("external_imports") and (record.get("runner") or {}).get("returncode", 0) == 0,
-              "case": record["case"], "depth": record["depth"], "runtime": case.get("runtime", "python"), "changed_files": changed, "outside_scope": outside_scope,
+              "case": record["case"], "depth": record["depth"], "plain_agent": plain_agent,
+              "runtime": case.get("runtime", "python"), "changed_files": changed, "outside_scope": outside_scope,
               "evaluator_changed": evaluator_changed, "protected_changes": protected_changes,
               "behavior": behavior, "workflow": workflow, "cleanup": cleanup, "resume": resume,
               "plugin_provenance": provenance,
+              "candidate_sha256": code_fingerprint(actual),
               "oracle_complete": oracle_complete,
               "before": record["baseline_metrics"], "after": metrics, "oracle": oracle, "tests": tests,
               "runner": record.get("runner"), "reported_telemetry": reported,
@@ -168,6 +185,8 @@ def main() -> int:
     parser.add_argument("trial", type=Path)
     parser.add_argument("--case", choices=CASES, default="summary")
     parser.add_argument("--depth", choices=("lean", "standard", "deep"))
+    parser.add_argument("--plugin-root", type=Path, default=ROOT, help="Source under test; evaluator stays in this checkout")
+    parser.add_argument("--plain-agent", action="store_true", help="No Forge prompt or workflow requirement")
     parser.add_argument("--telemetry", type=Path)
     parser.add_argument("--review", type=Path, help="Independent review JSON outside the candidate workspace")
     parser.add_argument("--timeout", type=int, default=600)
@@ -181,7 +200,7 @@ def main() -> int:
     else:
         if args.operation == "run" and not args.runner:
             parser.error("run requires --runner followed by an agent executable and arguments")
-        result = prepare(trial, args.case, args.depth)
+        result = prepare(trial, args.case, args.depth, plugin_root=args.plugin_root, plain_agent=args.plain_agent)
         if args.operation == "run":
             runner = execute(args.runner, trial / "workspace", prompt=(trial / "prompt.md").read_text(), timeout=args.timeout)
             record = json.loads((trial / "trial.json").read_text())

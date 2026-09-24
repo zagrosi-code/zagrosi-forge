@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
+from types import ModuleType
 
 import pytest
 
@@ -143,6 +145,115 @@ def test_mutable_setup_exposes_selected_packet_and_resume(forge, workspace, caps
     assert result["next_action"] == f"review {SECTION}"
 
 
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+@pytest.mark.parametrize("profile", ["solo", "enterprise"])
+def test_returned_record_command_preserves_paths_depth_and_evidence(forge, tmp_path, capsys, depth, profile):
+    root = tmp_path / "repo with spaces"
+    planning = make_plan(root / ".planning", depth)
+    code, result = invoke(forge, capsys, "implement-setup", "--sections-dir", str(planning / "sections"),
+                          "--target-dir", str(root), "--depth", depth, "--profile", profile, "--flight", "off")
+    assert code == 0, result
+    command = result["commands"]["record"]
+    values = {"<review-status>": "pass", "<verification>": "pytest tests/test_labels.py",
+              "<changed-file>": "src/labels.py"}
+    args = forge.cli.build_parser().parse_args([values.get(arg, arg) for arg in command[2:]])
+    assert args.sections_dir == str(planning / "sections")
+    assert args.target_dir == str(root)
+    assert args.depth == depth
+    assert args.profile == profile
+    assert args.files_changed == ["src/labels.py"]
+    assert args.verification == ["pytest tests/test_labels.py"]
+    assert result["record_options"]["--test-file"]
+    _, resumed = invoke(forge, capsys, "next-section", "--planning-dir", str(planning))
+    assert forge.cli.build_parser().parse_args([values.get(arg, arg) for arg in resumed["commands"]["record"][2:]]).profile == profile
+
+
+@pytest.mark.parametrize("operation", ["implement-setup", "implement-record-section"])
+@pytest.mark.parametrize("override", [None, "solo"])
+def test_mutable_profile_resume_preserves_saved_value_and_allows_override(forge, workspace, capsys, monkeypatch, operation, override):
+    root, planning = workspace
+    common = ["--sections-dir", str(planning / "sections"), "--target-dir", str(root), "--flight", "off"]
+    code, result = invoke(forge, capsys, "implement-setup", *common, "--profile", "enterprise")
+    assert code == 0, result
+    checked_profiles = []
+    validate = forge.validation.plan_artifacts_payload
+
+    def checked(path, args):
+        checked_profiles.append(args.profile)
+        return validate(path, args)
+
+    monkeypatch.setattr(forge.validation, "plan_artifacts_payload", checked)
+    arguments = ["--profile", override] if override else []
+    if operation == "implement-record-section":
+        arguments += ["--section", SECTION, "--review-status", "pass", "--verification", "pytest passed"]
+    code, result = invoke(forge, capsys, operation, *common, *arguments)
+    assert code == 0, result
+    expected = override or "enterprise"
+    assert checked_profiles and all(profile == expected for profile in checked_profiles)
+    command = result["commands"]["postflight"]
+    assert command[command.index("--profile") + 1] == expected
+    if operation == "implement-setup":
+        assert json.loads((planning / "implementation/zagrosi_implement_config.json").read_text())["profile"] == expected
+
+
+@pytest.mark.parametrize(("operation", "module", "handler"), [
+    ("implement-setup", "detached_setup", "detached_implement_setup"),
+    ("implement-record-section", "detached_record", "detached_implement_record_section"),
+])
+@pytest.mark.parametrize("override", [None, "enterprise"])
+def test_detached_profile_default_remains_solo(forge, workspace, monkeypatch, operation, module, handler, override):
+    root, planning = workspace
+    (planning / "implementation/zagrosi_implement_config.json").write_text('{"profile":"enterprise"}')
+    profiles = []
+
+    def dispatch(args):
+        profiles.append(args.profile)
+        return 0
+
+    # Exercise real profile dispatch without importing the Unix-only implementation.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    detached = ModuleType(forge.package.MODULE_NAMES[f"forge/{module}.py"])
+    setattr(detached, handler, dispatch)
+    monkeypatch.setitem(sys.modules, detached.__name__, detached)
+    arguments = [operation, "--sections-dir", str(planning / "sections"), "--implementation-root", str(root / "detached")]
+    if operation == "implement-record-section":
+        arguments += ["--section", SECTION]
+    if override:
+        arguments += ["--profile", override]
+    assert forge.entrypoint.main(arguments) == 0
+    assert profiles == [override or "solo"]
+
+
+def test_record_returns_next_packet_after_publication(forge, tmp_path, capsys):
+    from test_workflow_admission import two_sections
+    planning = two_sections(tmp_path / "plan")
+    code, result = invoke(forge, capsys, "implement-record-section", "--sections-dir", str(planning / "sections"),
+                          "--section", SECTION, "--review-status", "pass", "--verification", "pytest -q", "--flight", "off")
+    assert code == 0, result
+    assert result["recorded"] is True
+    assert result["next_section"] == "section-02-consumer"
+    assert result["entry"]["success"] is True
+    assert "section-02-consumer" in result["entry"]["commands"]["record"]
+    assert result["entry"]["packet"]["success"] is True
+
+
+def test_next_packet_failure_does_not_report_record_failure(forge, tmp_path, capsys, monkeypatch):
+    from test_workflow_admission import two_sections
+    planning = two_sections(tmp_path / "plan")
+
+    def fail_entry(*args, **kwargs):
+        raise OSError("Cannot read next contract")
+
+    monkeypatch.setattr(forge.resume, "section_entry", fail_entry)
+    code, result = invoke(forge, capsys, "implement-record-section", "--sections-dir", str(planning / "sections"),
+                          "--section", SECTION, "--review-status", "pass", "--verification", "pytest -q", "--flight", "off")
+    assert code == 0, result
+    assert result["success"] and result["recorded"]
+    assert not result["entry"]["success"]
+    assert result["entry"]["error"] == "Cannot read next contract"
+    assert SECTION in forge.state.load_implementation_state(planning)["completed_sections"]
+
+
 def test_mutable_setup_ignores_commented_contract_links(forge, workspace, capsys):
     root, planning = workspace
     section = planning / "sections" / f"{SECTION}.md"
@@ -192,3 +303,45 @@ def test_pending_postflight_overrides_verified_stage_at_every_entry(forge, works
         assert result["resume"]["verification_pending"] is True
         assert result["resume"]["evidence_current"] is False
         assert result["resume"]["blocking_gates"] == ["implementation-drift"]
+        if "commands" in result:
+            command = result["commands"]["record"]
+            assert command[command.index("--flight") + 1] == "strict"
+
+
+def test_final_record_returns_verification_without_repeating_tests(forge, workspace, capsys):
+    root, planning = workspace
+    code, result = invoke(forge, capsys, "implement-record-section", "--sections-dir", str(planning / "sections"),
+                          "--target-dir", str(root), "--section", SECTION, "--review-status", "pass",
+                          "--verification", "pytest tests/test_labels.py", "--flight", "off")
+    assert code == 0, result
+    assert result["recorded"]
+    assert result["next_section"] is None
+    assert result["test_command"] == "uv run pytest tests/test_labels.py"
+    assert "--run-tests" not in result["commands"]["postflight"]
+    assert "record" not in result["commands"]
+
+
+def test_plan_setup_returns_valid_next_command_arguments(forge, tmp_path, capsys):
+    (tmp_path / "spec.md").write_text("Keep existing invoice amounts correct.\n")
+    code, result = invoke(forge, capsys, "plan-setup", "--file", str(tmp_path / "spec.md"),
+                          "--target-dir", str(tmp_path), "--depth", "deep", "--flight", "off")
+    assert code == 0, result
+    parser = forge.cli.build_parser()
+    verify = parser.parse_args(result["commands"]["verify_plan"][2:])
+    implement = parser.parse_args(result["commands"]["implement_after_pass"][2:])
+    assert verify.phase == "plan" and verify.depth == "deep"
+    assert implement.sections_dir == str(tmp_path / "sections")
+    assert implement.target_dir == str(tmp_path)
+
+
+def test_returned_plan_gate_enforces_strict_admission(forge, tmp_path, capsys):
+    from test_planning_contract import contract_plan
+    planning = contract_plan(tmp_path / "plan", "standard")
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text().replace("existing tests/test_labels.py", "callers"))
+    code, setup = invoke(forge, capsys, "plan-setup", "--file", str(planning / "spec.md"),
+                         "--target-dir", str(tmp_path), "--depth", "standard", "--flight", "off")
+    assert code == 0, setup
+    code, result = invoke(forge, capsys, *setup["commands"]["verify_plan"][2:])
+    assert code == 1, result
+    assert not result["success"]

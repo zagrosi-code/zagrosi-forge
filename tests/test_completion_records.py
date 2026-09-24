@@ -524,7 +524,9 @@ def test_implement_preflight_preserves_readiness_findings_and_metrics(tmp_path: 
     preflight = json.loads(preflight_result.stdout)
     gate = next(gate for gate in preflight["gates"] if gate["name"] == "lint-implementation-readiness")
     assert gate["success"] is False
-    assert gate["payload"] == readiness
+    assert [preflight["diagnostics"][index] for index in gate["payload"]["finding_refs"]] == readiness["findings"]
+    full_report = json.loads(Path(preflight["full_report"]).read_text())
+    assert next(gate for gate in full_report["gates"] if gate["name"] == "lint-implementation-readiness")["payload"] == readiness
     assert {item["code"] for item in readiness["findings"]} == {"no-file-ownership"}
     assert readiness["sections"][0]["section"] == "section-01-lean-default"
     assert readiness["sections"][0]["file_count"] == 0

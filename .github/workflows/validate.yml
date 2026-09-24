@@ -61,7 +61,7 @@ jobs:
       - run: python -m pip install "pytest>=8"
       - run: python tools/update_runtime_manifest.py --check
       - name: Check portable workflows and runtime loading
-        run: python -m pytest -q tests/test_compact_plan.py tests/test_completion_contracts.py tests/test_context_packets.py tests/test_coding_trials.py tests/test_trial_realism.py tests/test_runtime_loading.py tests/test_workflow_admission.py tests/test_runtime_reuse.py tests/test_evidence_discovery.py tests/test_mutable_state.py tests/test_resume_context.py tests/test_parsed_plan_reuse.py tests/test_cache_publication.py tests/test_adapter_loading.py tests/test_install_config_safety.py tests/test_verification_contracts.py tests/test_trial_matrix.py
+        run: python -m pytest -q tests/test_compact_plan.py tests/test_completion_contracts.py tests/test_context_packets.py tests/test_coding_trials.py tests/test_trial_realism.py tests/test_runtime_loading.py tests/test_workflow_admission.py tests/test_runtime_reuse.py tests/test_evidence_discovery.py tests/test_mutable_state.py tests/test_resume_context.py tests/test_parsed_plan_reuse.py tests/test_cache_publication.py tests/test_adapter_loading.py tests/test_install_config_safety.py tests/test_verification_contracts.py tests/test_trial_matrix.py tests/test_controlled_trials.py tests/test_planning_contract.py tests/test_implementation_phase_reuse.py tests/test_installation.py::test_update_check_invalid_package_returns_json_without_mutation
       - name: Check native processes on macOS
         if: runner.os == 'macOS'
         run: python -m pytest -q tests/test_native_process.py

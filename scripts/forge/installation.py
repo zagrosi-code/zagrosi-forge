@@ -152,7 +152,11 @@ def update_check(args: argparse.Namespace) -> int:
     plugin_name = str(manifest.get("name") or "zagrosi-forge")
     plugin_version = str(manifest.get("version") or "0.0.0")
     cache_path = plugin_cache_path(codex_home, "zagrosi", plugin_name, plugin_version)
-    cache = plugin_cache_status(plugin_root, cache_path)
+    try:
+        cache = plugin_cache_status(plugin_root, cache_path)
+    except (OSError, ValueError) as exc:
+        return _output.print_json({"success": False, "operation": "update-check",
+                                  "error": str(exc), "cache_path": str(cache_path)}, 1)
     cache_exists = cache_path.exists()
     cache_current = cache_exists and not cache["changed"]
 

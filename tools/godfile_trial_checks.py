@@ -83,6 +83,9 @@ def check_workspace(workspace: Path, compatibility_only: bool = False) -> int:
         assert actual == expected, f"Expected {expected!r}; got {actual!r}"
         assertions += 1
 
+    for name in ("Path", "csv", "date", "deepcopy", "io", "json"):
+        assert getattr(candidate, name, None) is getattr(reference, name), f"Public import changed or missing: {name}"
+        assertions += 1
     for name in ("STATUSES", "TRANSITIONS", "SHIPPING_RATES", "CSV_FIELDS"):
         equal(getattr(candidate, name), getattr(reference, name))
     for name in FUNCTIONS:

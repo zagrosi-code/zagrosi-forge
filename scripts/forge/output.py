@@ -35,12 +35,15 @@ def summarize_gate(gate: dict[str, Any]) -> str:
     return f"  [{plain_status(gate.get('success'))}] {gate.get('name', 'gate')}{detail_text}"
 
 
-def pretty_findings(findings: list[dict[str, Any]], limit: int = 8) -> list[str]:
+def pretty_findings(findings: list[dict[str, Any]], limit: int | None = 8) -> list[str]:
     lines: list[str] = []
     for item in findings[:limit]:
         location = f" - {item['path']}" if item.get("path") else ""
         lines.append(f"  - {item.get('severity', 'unknown')}: {item.get('code', 'finding')}: {item.get('message', '')}{location}")
-    if len(findings) > limit:
+        for key in ("recommendation", "next_action", "next_command", "commands"):
+            if item.get(key):
+                lines.append(f"    {key}: {item[key]}")
+    if limit is not None and len(findings) > limit:
         lines.append(f"  - ... {len(findings) - limit} more finding(s)")
     return lines
 
@@ -230,13 +233,103 @@ def format_pretty(payload: dict[str, Any]) -> str:
         for key in ("planning_dir", "output", "state_path", "path", "error"):
             if payload.get(key):
                 lines.append(f"{key.replace('_', ' ').title()}: {payload[key]}")
+    if "diagnostics" in payload:
+        lines.append("Diagnostics:")
+        lines.extend(pretty_findings(payload["diagnostics"], limit=None))
+    if payload.get("full_report"):
+        lines.append(f"Full report: {payload['full_report']}")
+    if payload.get("full_report_error"):
+        lines.append(payload["full_report_error"])
     return "\n".join(lines)
+
+
+def failure_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate findings only after saving the complete machine report."""
+    import os
+    import tempfile
+
+    report = None
+    try:
+        descriptor, name = tempfile.mkstemp(prefix="forge-report-", suffix=".json")
+        report = Path(name)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+    except OSError:
+        if report is not None:
+            try:
+                report.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return {**payload, "full_report_error": "Could not save the full report; all evidence is included inline."}
+    diagnostics, indexes = [], {}
+
+    def remember(finding):
+        key = json.dumps(finding, sort_keys=True)
+        if key not in indexes:
+            indexes[key] = len(diagnostics)
+            diagnostics.append(finding)
+        return indexes[key]
+
+    def gate_summary(gate):
+        if gate.get("success") is not False or not isinstance(gate.get("payload"), dict):
+            return gate
+        body = gate["payload"]
+        # Keep actions and operative scope inline; derived metrics remain in the report.
+        keep = {"error", "error_code", "errors", "message", "recommendation", "path", "files", "owned_paths",
+                "content", "next_action", "next_command", "commands", "pending_sections", "unknown_predecessors",
+                "incomplete_predecessors", "score", "forge_score", "finding_count", "finding_refs", "output"}
+        summary = {key: value for key, value in body.items() if key in keep}
+        pending, refs = [body], []
+        while pending:
+            item = pending.pop()
+            if isinstance(item, dict):
+                refs.extend(item.get("finding_refs", []))
+                pending.extend(item.values())
+            elif isinstance(item, list):
+                pending.extend(item)
+        if refs:
+            summary["finding_refs"] = sorted(set(refs))
+        # Unknown non-quality failures retain their payload instead of guessing its schema.
+        return {**gate, "payload": summary if refs else body}
+
+    def compact(value):
+        if isinstance(value, list):
+            return [compact(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {key: compact(item) for key, item in value.items() if key != "findings"}
+        if isinstance(value.get("findings"), list):
+            result["finding_refs"] = list(dict.fromkeys(remember(finding) for finding in value["findings"]))
+        elif "findings" in value:
+            result["findings"] = value["findings"]
+        errors = value.get("errors", [])
+        errors = errors if isinstance(errors, list) else [errors]
+        errors = [*errors, value.get("error")]
+        if value.get("success") is False:
+            errors.append(value.get("message"))
+        for error in errors:
+            if not isinstance(error, str) or not error.strip():
+                continue
+            context = {key: value[key] for key in ("path", "recommendation", "next_action", "next_command", "commands") if key in value}
+            reference = remember({"severity": "high", "code": value.get("error_code", "gate-error"), "message": error, **context})
+            result.setdefault("finding_refs", []).append(reference)
+        if isinstance(result.get("gates"), list):
+            result["gates"] = [gate_summary(gate) for gate in result["gates"]]
+        return result
+
+    return {**compact(payload), "diagnostics": diagnostics, "full_report": str(report),
+            "output_schema": "forge-flight-summary-v1"}
 
 
 def print_json(payload: dict[str, Any], exit_code: int = 0) -> int:
     streams = _session._GATE_STREAMS.get()
     context = _session._CLI_CONTEXT.get()
     pretty = context["pretty"] if context is not None else _session.PRETTY_OUTPUT
+    flights = [payload, payload.get("preflight"), payload.get("postflight")]
+    if (streams is None and not (context or {}).get("full_output")
+            and any(isinstance(item, dict) and item.get("success") is False and "gates" in item for item in flights)):
+        payload = failure_summary(payload)
     if streams is None and pretty:
         print(format_pretty(payload))
     else:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -194,3 +195,73 @@ def test_gate_compaction_preserves_full_failure_diagnostics(monkeypatch: pytest.
         "stderr_tail": "",
     }
     assert legacy_flight["gates"] == [{"name": "ready", "required": True, "success": True}]
+
+
+def test_failure_summary_deduplicates_without_losing_findings_or_evidence(capsys):
+    forge = load_zagrosi_module()
+    findings = [{"severity": "high", "code": f"ownership-{index}", "message": "Required " + "雪" * 600,
+                 "path": f"src/file{index}.py", "recommendation": "Repair the ownership contract."}
+                for index in range(23)]
+    gate = forge.gates.direct_gate("ownership", False, {"findings": findings, "finding_count": len(findings),
+                                                       "owned_paths": ["src/auth.py"], "content": "contract" * 500})
+    payload = forge.gates.flight_payload(phase="plan", stage="postflight", mode="strict", gates=[
+        gate, forge.gates.direct_gate("nested", False, {"admission": gate["payload"]}),
+    ])
+    assert forge.output.print_json(payload, 1) == 1
+    compact = json.loads(capsys.readouterr().out)
+    report = Path(compact["full_report"])
+    try:
+        assert compact["diagnostics"] == findings
+        assert compact["gates"][0]["payload"]["finding_refs"] == list(range(23))
+        assert compact["gates"][1]["payload"]["finding_refs"] == list(range(23))
+        assert compact["gates"][0]["payload"]["owned_paths"] == ["src/auth.py"]
+        assert compact["gates"][0]["payload"]["content"] == "contract" * 500
+        assert json.loads(report.read_text()) == payload
+        assert json.loads(report.read_text())["gates"][0]["payload"]["findings"] == findings
+        if os.name == "posix":
+            assert report.stat().st_mode & 0o777 == 0o600
+        pretty = forge.output.format_pretty(compact)
+        assert "ownership-22" in pretty and str(report) in pretty
+    finally:
+        report.unlink(missing_ok=True)
+
+
+def test_failed_report_save_preserves_full_inline_evidence(monkeypatch, capsys):
+    forge = load_zagrosi_module()
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "mkstemp", lambda **_: (_ for _ in ()).throw(OSError("no storage")))
+    payload = {"success": False, "phase": "plan", "stage": "postflight", "gates": [
+        {"success": False, "payload": {"findings": [{"code": "important", "message": "Keep this evidence"}]}}]}
+    assert forge.output.print_json(payload, 1) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["gates"] == payload["gates"]
+    assert "full_report_error" in result
+
+
+def test_full_output_preserves_machine_gate_payloads(tmp_path):
+    planning = write_lean_plan_fixture(tmp_path / "plan")
+    (planning / "codex-plan-tdd.md").write_text("No verification supplied.\n")
+    result = run_raw("postflight", "--phase", "plan", "--planning-dir", str(planning), "--strict", "--full-output")
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert "full_report" not in payload and "diagnostics" not in payload
+    assert any(gate.get("payload", {}).get("findings") for gate in payload["gates"])
+
+
+@pytest.mark.parametrize("error", [{"error": "Restore the missing authorization evidence."},
+                                  {"errors": ["Restore the missing authorization evidence."]},
+                                  {"success": False, "message": "Restore the missing authorization evidence."}])
+def test_failure_summary_preserves_nested_plain_errors(error):
+    forge = load_zagrosi_module()
+    payload = {"success": False, "gates": [{"name": "admission", "success": False, "payload": {
+        "findings": [{"code": "review", "message": "Review the contract", "severity": "high"}],
+        "nested": {**error, "path": "src/auth.py", "next_command": "check-auth --strict"},
+    }}]}
+    result = forge.output.failure_summary(payload)
+    try:
+        diagnostic = next(item for item in result["diagnostics"] if item["message"] == error.get("error", error.get("message", error.get("errors", [None])[0])))
+        assert diagnostic["path"] == "src/auth.py"
+        assert diagnostic["next_command"] == "check-auth --strict"
+    finally:
+        Path(result["full_report"]).unlink()

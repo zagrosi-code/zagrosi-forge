@@ -107,6 +107,7 @@ def add_plan_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--plugin-root")
     p.add_argument("--target-dir")
     p.add_argument("--write-evidence", action="store_true")
+    p.add_argument("--for-detached", action="store_true", help="Prepare physical artifacts for detached implementation.")
     p.add_argument("--review-mode", choices=["codex_review", "external_llm", "skip"], default="codex_review")
     p.add_argument("--depth", choices=sorted(_policy.DEPTH_MODES), default=_policy.DEFAULT_DEPTH)
     add_flight_args(p)
@@ -218,7 +219,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--expected-implement-skill-sha256", help="Exact complete-file sha256 of skills/zagrosi-implement/SKILL.md required in detached mode.")
     p.add_argument("--expected-implement-test-sha256", help="Exact complete-file sha256 of tests/test_zagrosi_skills.py required in detached mode.")
     p.add_argument("--depth", choices=sorted(_policy.DEPTH_MODES), default=_policy.DEFAULT_DEPTH)
-    p.add_argument("--profile", choices=sorted(_policy.QUALITY_PROFILES), default="solo")
+    p.add_argument("--profile", choices=sorted(_policy.QUALITY_PROFILES), help="Use the saved mutable profile when omitted; new and detached workflows default to solo.")
     add_flight_args(p)
     p.set_defaults(func=invoke_command, handler=('workflows', 'deep_implement_setup'))
 
@@ -250,7 +251,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--commit-status")
     p.add_argument("--target-dir")
     p.add_argument("--depth", choices=sorted(_policy.DEPTH_MODES), default=_policy.DEFAULT_DEPTH)
-    p.add_argument("--profile", choices=sorted(_policy.QUALITY_PROFILES), default="solo")
+    p.add_argument("--profile", choices=sorted(_policy.QUALITY_PROFILES), help="Use the saved mutable profile when omitted; new and detached workflows default to solo.")
     p.add_argument("--write-report", action="store_true")
     p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
     add_flight_args(p)
@@ -528,7 +529,8 @@ def main(argv: list[str] | None = None) -> int:
     if "implement-evidence-handoff" in raw_args and not exact_handoff_cli_shape(raw_args):
         return 2
     pretty = "--pretty" in raw_args
-    raw_args = [item for item in raw_args if item != "--pretty"]
+    full_output = "--full-output" in raw_args
+    raw_args = [item for item in raw_args if item not in {"--pretty", "--full-output"}]
     parser = build_parser()
     args = parser.parse_args(raw_args)
     local_gates = (
@@ -539,6 +541,7 @@ def main(argv: list[str] | None = None) -> int:
     read_cache = local_gates or (args.command == "preflight" and args.phase == "implement")
     token = _session._CLI_CONTEXT.set({
         "parser": parser, "pretty": pretty or getattr(args, "pretty", False),
+        "full_output": full_output,
         "local_gates": local_gates, "texts": {} if read_cache else None,
         "owned_paths": {} if read_cache else None,
     })

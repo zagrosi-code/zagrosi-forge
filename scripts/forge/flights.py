@@ -242,6 +242,13 @@ def implement_preflight_report(
 def implement_postflight_report(
     planning_dir: Path, args: argparse.Namespace, *, candidate_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    with _session.read_phase():
+        return _implement_postflight_report(planning_dir, args, candidate_state=candidate_state)
+
+
+def _implement_postflight_report(
+    planning_dir: Path, args: argparse.Namespace, *, candidate_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     mode = _gates.effective_flight_mode(args)
     if mode == "off":
         return _gates.flight_payload(phase="implement", stage="postflight", mode=mode, gates=[])

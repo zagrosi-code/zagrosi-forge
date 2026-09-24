@@ -51,20 +51,10 @@ def test_cancelled_schedule_is_retained_without_inventing_failures(tmp_path):
 
 
 def test_matrix_runs_fresh_attempts_and_retains_nonzero_exits(tmp_path):
-    root = tmp_path / "plugin"
-    (root / "tools").mkdir(parents=True)
-    (root / "examples/evals/coding").mkdir(parents=True)
-    (root / "examples/evals/coding/cases.json").write_text('{"summary": {}}')
-    (root / "tools/coding_trials.py").write_text('''import json, pathlib, sys
-trial = pathlib.Path(sys.argv[2])
-trial.mkdir()
-(trial / 'result.json').write_text(json.dumps({'success': False, 'runner': {'seconds': 1, 'returncode': 7}}))
-raise SystemExit(7)
-''')
     destination = tmp_path / "experiment"
     command = [sys.executable, str(ROOT / "tools/trial_matrix.py"), "run", str(destination),
-               "--plugin-root", str(root), "--cases", "summary", "--depths", "lean", "deep",
-               "--repeats", "2", "--jobs", "2", "--runner", "unused"]
+               "--plugin-root", str(ROOT), "--cases", "summary", "--depths", "lean", "deep",
+               "--repeats", "2", "--jobs", "2", "--runner", sys.executable, "-c", "raise SystemExit(7)"]
     completed = subprocess.run(command, capture_output=True, text=True)
     result = json.loads(completed.stdout)
     assert completed.returncode == 1

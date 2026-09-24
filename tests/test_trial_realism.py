@@ -115,6 +115,34 @@ def test_node_oracle_pins_public_exports_and_error_types(tmp_path, mutation):
     assert not result["behavior"]["success"]
 
 
+@pytest.mark.parametrize(("name", "binding", "use"), [
+    ("Path", "from pathlib import Path", "Path("),
+    ("csv", "import csv", "csv."),
+    ("date", "from datetime import date", "date."),
+    ("deepcopy", "from copy import deepcopy", "deepcopy("),
+    ("io", "import io", "io."),
+    ("json", "import json", "json."),
+])
+@pytest.mark.parametrize("rebound", [False, True])
+def test_godfile_public_imports_are_checked_even_when_existing_behavior_passes(tmp_path, name, binding, use, rebound):
+    workspace = tmp_path / "workspace"
+    shutil.copytree(trials.PACK / "godfile", workspace)
+    command = [sys.executable, "-B", str(trials.ROOT / "tools/godfile_trial_checks.py"),
+               str(workspace), "godfile", "--compatibility-only"]
+    original = trials.execute(command, workspace)
+    assert original["returncode"] == 0, original
+    assert json.loads(original["stdout"])["assertions"] == 69
+    path = workspace / "src/dispatch.py"
+    # Keep every implementation reference valid while removing the public binding.
+    text = path.read_text().replace(binding + "\n", binding + f" as _{name}\n").replace(use, "_" + use)
+    path.write_text(text + (f"\n{name} = object()\n" if rebound else ""))
+    tests = trials.execute([sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"], workspace)
+    assert tests["returncode"] == 0, tests
+    rejected = trials.execute(command, workspace)
+    assert rejected["returncode"] != 0
+    assert f"Public import changed or missing: {name}" in rejected["stderr"]
+
+
 @pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
 def test_resume_prepares_admitted_state_and_a_real_red_checkpoint(tmp_path, depth):
     trial = tmp_path / "trial"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import actions as _actions
 from . import context as _context
 from . import state as _state
 from . import storage as _storage
@@ -58,10 +59,17 @@ def resume_brief(planning_dir: Path, section: str, *, target_dir: Path | None = 
                 "next_action": f"repair saved progress and revalidate {section}", "path": str(path)}
 
 
-def section_entry(planning_dir: Path, section: str, *, target_dir: Path | None = None) -> dict:
+def section_entry(planning_dir: Path, section: str, *, target_dir: Path | None = None, profile: str | None = None) -> dict:
     packet = _context.build_context(planning_dir, section, 2000)
     brief = resume_brief(planning_dir, section, target_dir=target_dir)
     action = brief["next_action"] if brief else f"implement {section}"
     if not packet["success"]:
         action = f"repair context for {section}: {packet['error']}"
-    return {"success": packet["success"], "packet": packet, "resume": brief, "next_action": action}
+    payload = {"success": packet["success"], "packet": packet, "resume": brief, "next_action": action}
+    if packet["success"]:
+        payload.update(_actions.implementation_commands(planning_dir, section, target_dir=target_dir,
+                                                       profile=profile,
+                                                       pending=bool(brief and brief.get("verification_pending"))))
+    else:
+        payload["commands"] = {"retry_context": _actions.command("next-section", "--planning-dir", str(planning_dir))}
+    return payload

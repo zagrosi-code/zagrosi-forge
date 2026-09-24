@@ -9,6 +9,7 @@ import shlex
 import sys
 
 from . import artifacts as _artifacts
+from . import planning_contract as _planning_contract
 from . import output as _output
 from . import resume as _resume
 from . import sections as _sections
@@ -84,7 +85,10 @@ def status(args: argparse.Namespace) -> int:
     details: dict[str, Any] = {}
     if has_plan:
         next_action = _artifacts.next_plan_action(plan_artifacts or {}, section_progress, plan_config_payload)
-        if section_progress["state"] == "complete":
+        if _planning_contract.scaffold_unfinished(planning_dir):
+            details["scaffold_unfinished"] = True
+            next_action = "complete the draft plan: choose section boundaries, fill the contract, and record review"
+        elif section_progress["state"] == "complete":
             readiness = _state.mutable_admitted_readiness(planning_dir)
             details.update({key: value for key, value in readiness.items() if key != "success"})
             if not readiness["admission"]["success"]:

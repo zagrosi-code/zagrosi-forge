@@ -52,11 +52,16 @@ def test_preflight_only_launches_requested_writer(tmp_path, monkeypatch, capsys,
     config = json.loads(config_path.read_text())
     config["depth_mode"] = depth
     config_path.write_text(json.dumps(config))
-    calls = []
+    calls, inventories = [], []
     process = subprocess.run
 
     def tracked(argv, **kwargs):
-        calls.append(argv[2:])
+        if argv[0] == sys.executable:
+            calls.append(argv[2:])
+        else:
+            assert argv[:2] == ["git", "ls-files"]
+            assert kwargs["timeout"] == 10
+            inventories.append(argv)
         return process(argv, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", tracked)
@@ -69,6 +74,7 @@ def test_preflight_only_launches_requested_writer(tmp_path, monkeypatch, capsys,
     evidence_expected = write_evidence or depth in {"standard", "deep"}
     assert [gate["name"] for gate in payload["gates"]] == ["spec-file", "doctor", *(["codebase-evidence"] if evidence_expected else []), "status"]
     assert len(calls) == int(write_evidence)
+    assert len(inventories) == int(evidence_expected and not write_evidence)
     if calls:
         assert calls[0][0] == "codebase-evidence" and "--write" in calls[0]
     assert (plan / "codex-evidence.md").exists() is write_evidence

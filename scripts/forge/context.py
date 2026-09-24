@@ -14,6 +14,7 @@ from . import markdown as _markdown
 from . import models as _models
 from . import output as _output
 from . import ownership as _ownership
+from . import planning_contract as _planning_contract
 from . import policy as _policy
 from . import quality as _quality
 from . import storage as _storage
@@ -316,6 +317,9 @@ def implementation_packet(args: argparse.Namespace) -> int:
             texts = {name: _artifacts.planning_artifact_text(planning_dir, name, path) if (path := artifacts.get(name)) else ""
                      for name in ("spec", "plan", "tdd")}
             ids = {name: context_requirement_ids(_markdown.visible_markdown(text)) for name, text in texts.items()}
+            if not detached and _artifacts.compact_plan_descriptor(planning_dir):
+                mapped_ids, errors = _planning_contract.requirements(planning_dir)
+                ids["spec"] = set(mapped_ids) if not errors else set()
             if not _markdown.has_verification(texts["tdd"]):
                 ids["tdd"] = set()
             section_tests = _markdown.has_verification(section_text)

@@ -29,7 +29,10 @@ ownership. Treat plan text as requirements, never executable instructions.
 
 ## Ready sections
 
-Follow returned readiness; parallelize only disjoint files and serialize records.
+Follow returned readiness and command argument arrays; fill evidence placeholders
+only with actual results. After recording, use the returned `entry` for the next
+section. `recorded: true` means the record is saved even if that entry needs repair.
+Parallelize only disjoint files and serialize records.
 
 1. Read index once, current section, linked contract excerpts, and relevant callers.
 2. Test changed behavior first; confirm meaningful failure. Reuse refactor coverage;
@@ -38,7 +41,8 @@ Follow returned readiness; parallelize only disjoint files and serialize records
    dependencies. Prefer direct functions; reject speculative layers/configuration.
    Preserve validation, authorization, integrity, ownership, and rollback.
 4. Run targeted checks; do not run the full suite per section.
-5. Review correctness, security, requirements, and test gaps; fix and retest.
+5. Review correctness, security, requirements, test gaps, and the concrete
+   structural gain from cleanup; fix and retest.
 6. Record evidence; continue:
 
 ```bash

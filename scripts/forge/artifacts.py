@@ -11,6 +11,7 @@ from . import markdown as _markdown
 from . import models as _models
 from . import ownership as _ownership
 from . import policy as _policy
+from . import planning_contract as _contract
 from . import quality as _quality
 from . import sections as _sections
 from . import session as _session
@@ -93,7 +94,7 @@ def _compact_plan_descriptor(planning_dir: Path, observe) -> dict[str, Any] | No
             errors.append("Compact plan source cannot be resolved safely.")
     headings: dict[str, str] = {}
     if path and observe(path).is_file():
-        for title, body in _markdown.markdown_h2_sections(_storage.read_text(path)):
+        for title, body in _markdown.markdown_h2_sections(_markdown.visible_markdown(_storage.read_text(path))):
             key = title.casefold()
             if key in headings:
                 errors.append(f"Compact plan repeats the heading: {title}.")
@@ -115,6 +116,8 @@ def planning_artifact_text(planning_dir: Path, name: str, path: Path | None = No
         return ""
     compact = compact_plan_descriptor(planning_dir)
     if compact and path == compact["path"] and name in _policy.COMPACT_PLAN_HEADINGS:
+        if name == "tdd" and compact["headings"].get("contract"):
+            return compact["headings"]["contract"]
         return compact["headings"].get(_policy.COMPACT_PLAN_HEADINGS[name], "")
     return _storage.read_text(path)
 
@@ -132,13 +135,16 @@ def compact_plan_findings(planning_dir: Path, *, depth: str | None = None, allow
     if compact["errors"]:
         return findings
     headings = compact["headings"]
-    for title in ("review", "tests first", "implementation contract"):
+    text = _storage.read_text(path)
+    contract = _contract.analyze_contract(compact["source"], text, planning_dir)
+    for error in contract["errors"] if contract else []:
+        findings.append(_quality.finding("high", "invalid-requirement-contract", error, path))
+    for title in ("review",) if contract else ("review", "tests first", "implementation contract"):
         if not headings.get(title):
             findings.append(_quality.finding("high", "incomplete-compact-plan", f"Compact plan needs a substantive {title} heading.", path))
-    text = _storage.read_text(path)
     if not headings.get("owned files") or not _ownership.extract_section_owned_paths(text):
         findings.append(_quality.finding("high", "compact-plan-no-ownership", "Compact plan has no explicit owned files.", path))
-    if not _markdown.has_verification(headings.get("tests first", "")):
+    if not _markdown.has_verification(headings.get("contract" if contract else "tests first", "")):
         findings.append(_quality.finding("high", "compact-plan-no-tests", "Tests first needs a regression case and command, or justified inspection with an expected result.", path))
     if not _markdown.passing_review(headings.get("review", "")):
         findings.append(_quality.finding("high", "compact-review-incomplete", "Embedded review needs pass/fixed plus concrete Reviewed scope; blocked findings must be resolved.", path))
@@ -328,6 +334,8 @@ def planning_artifacts(planning_dir: Path) -> dict[str, Path | None]:
         for name, heading in _policy.COMPACT_PLAN_HEADINGS.items():
             if compact["headings"].get(heading) and not (paths.get(name) and paths[name].exists()):
                 paths[name] = compact["path"]
+        if compact["headings"].get("contract") and not paths["tdd"]:
+            paths["tdd"] = compact["path"]
     return paths
 
 

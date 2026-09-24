@@ -74,7 +74,7 @@ def test_plan_setup_sections_and_prompts(tmp_path: Path) -> None:
     spec = tmp_path / "spec.md"
     spec.write_text("# Auth\n\nAdd OAuth login.\n")
 
-    setup = run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT))
+    setup = run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--for-detached")
     assert setup["success"] is True
     assert setup["depth_mode"] == "lean"
     assert setup["resume_step"] == 11
@@ -178,7 +178,7 @@ def test_parallel_plan_reports_unknown_dependency_tokens(tmp_path: Path) -> None
 def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
     spec = tmp_path / "spec.md"
     spec.write_text("# Improve Forge\n\nMake operator workflows clearer.\n")
-    run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
+    run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off", "--for-detached")
 
     status = run_cmd("status", "--path", str(tmp_path))
     assert status["next_action"] == "write the canonical implementation plan"
@@ -224,7 +224,7 @@ def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
 def test_status_exposes_plan_artifact_state(tmp_path: Path) -> None:
     spec = tmp_path / "spec.md"
     spec.write_text("# Improve Forge\n\nExpose plan artifact state.\n")
-    run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
+    run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off", "--for-detached")
     (tmp_path / "codex-research.md").write_text("# Research\n\nVerified current state.\n")
     (tmp_path / "codex-plan.md").write_text("   ")
 
@@ -236,6 +236,22 @@ def test_status_exposes_plan_artifact_state(tmp_path: Path) -> None:
     assert status["plan_artifacts"]["plan"] is None
     assert status["plan_artifacts"]["section_index"] is None
     assert status["section_progress"]["state"] == "no_index"
+
+
+def test_status_directs_unfinished_scaffold_to_draft_completion(tmp_path: Path) -> None:
+    spec = tmp_path / "spec.md"
+    spec.write_text("Preserve existing errors while adding preview.\n")
+    setup = run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
+    before = {path: path.read_bytes() for path in (tmp_path / "sections").iterdir()}
+    assert setup["scaffold"]["unfinished"] is True
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert status["scaffold_unfinished"] is True
+    assert status["next_action"] == "complete the draft plan: choose section boundaries, fill the contract, and record review"
+    assert "admission" not in status
+    assert {path: path.read_bytes() for path in before} == before
+    resumed = run_cmd("plan-setup", "--file", str(spec), "--plugin-root", str(ROOT), "--flight", "off")
+    assert resumed["scaffold"] == {"created": [], "unfinished": True}
+    assert resumed["resume_label"] == "write_plan"
 
 
 def test_commands_catalog_outputs_grouped_json_and_pretty_text() -> None:

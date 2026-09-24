@@ -10,6 +10,7 @@ import re
 from . import artifacts as _artifacts
 from . import markdown as _markdown
 from . import models as _models
+from . import planning_contract as _contract
 from . import quality as _quality
 from . import state as _state
 from . import storage as _storage
@@ -20,12 +21,11 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[_models.Finding], di
     tdd_path = _artifacts.planning_artifacts(planning_dir)["tdd"]
     sections_dir = planning_dir / "sections"
 
-    spec_text = _markdown.visible_markdown(_storage.read_text(spec_path)) if spec_path else ""
     plan_text = _markdown.visible_markdown(_storage.read_text(plan_path)) if plan_path else ""
     tdd_text = _artifacts.planning_artifact_text(planning_dir, "tdd", tdd_path)
     section_files = sorted(sections_dir.glob("section-*.md")) if sections_dir.exists() else []
     section_text_by_file = {path.name: _storage.read_text(path) for path in section_files}
-    req_ids = _markdown.requirement_ids(spec_text if spec_path else plan_text)
+    req_ids, _ = _contract.requirements(planning_dir)
 
     plan_ids = set(_markdown.requirement_ids(plan_text))
     tdd_ids = set(_markdown.requirement_ids(_markdown.visible_markdown(tdd_text)))
@@ -54,7 +54,7 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[_models.Finding], di
         for req_id in uncovered
     ]
     if not req_ids:
-        findings.append(_quality.finding("medium", "no-requirement-ids", "No REQ-* IDs found in source spec.", spec_path or planning_dir))
+        findings.append(_quality.finding("medium", "no-requirement-ids", "No visible source requirements or source-linked canonical contract found.", spec_path or planning_dir))
 
     section_orphans = [
         name
