@@ -25,17 +25,15 @@ def deep_project_setup(args: argparse.Namespace) -> int:
 
     input_file = project_input.input_file
     planning_dir = project_input.planning_dir
-    state_dir = planning_dir / ".zagrosi-project"
-    state_path = state_dir / "session.json"
-    legacy_state_path = planning_dir / ".deep-project" / "session.json"
-    if not state_path.exists() and legacy_state_path.exists():
-        state_path = legacy_state_path
-        state_dir = legacy_state_path.parent
-    mode = "resume" if state_path.exists() else "new"
+    try:
+        sessions = _artifacts.project_sessions(planning_dir)
+    except ValueError as exc:
+        return _output.print_json({"success": False, "error": str(exc)}, 1)
+    state_path, state = sessions[0] if sessions else (planning_dir / ".zagrosi-project" / "session.json", {})
+    state_dir = state_path.parent
+    mode = "resume" if sessions else "new"
 
-    if state_path.exists():
-        state = _storage.load_json(state_path)
-    else:
+    if not sessions:
         state = {
             "initial_file": str(input_file) if input_file else None,
             "initial_source": project_input.input_mode,
@@ -97,6 +95,10 @@ def deep_project_setup(args: argparse.Namespace) -> int:
 
 def deep_project_create_dirs(args: argparse.Namespace) -> int:
     planning_dir = _storage.resolve_path(args.planning_dir)
+    try:
+        _artifacts.project_sessions(planning_dir)
+    except ValueError as exc:
+        return _output.print_json({"success": False, "error": str(exc)}, 1)
     manifest_path = planning_dir / "project-manifest.md"
     if not manifest_path.exists():
         return _output.print_json({"success": False, "error": f"Missing manifest: {manifest_path}"}, 1)
