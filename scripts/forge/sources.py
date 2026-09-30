@@ -90,6 +90,7 @@ TEST_MANIFEST = {
     "test_trial_realism.py": "0e1ac97be61f9281083521a65cb445e9c2d7080e5089c434b27e6de35e72ac13",
     "test_verification_contracts.py": "76bb8151b2e64010f25b1d7cc60a96f4b4acba65cb7da1c257140546e5977314",
     "test_verification_receipts.py": "db7cedc292d431ea18323d9da502c6d7adb9041159b9ad85289726de132acd0b",
+    "test_verification_repositories.py": "7659faddc95d81f633dd4d6265217f0d4ea9f18c590e27961a5c7ab2ae1b5b93",
     "test_verification_symlinks.py": "c722812b7b97b365765a0e33789d3c0c767ae6d2faf9785741fce66dbbb0a3a2",
     "test_workflow_admission.py": "a02a13a709a13c8553891a8431a0b7c11063cf72d9bb321f397d5e121b111cba",
     "test_workflow_efficiency.py": "2027dd50adac459168ae9d18334e2121b136a1d8addc8dc84c8884abd3411f48",

@@ -11,7 +11,7 @@ Forge turns requests into compact plans, clear code, and verified changes.
 One entry point handles features, fixes, and cleanup in Codex and Claude Code.
 Lean mode is default: focused context, targeted checks, one final integration result.
 
-[Install](#install) · [Use](#use) · [Workflows](#workflows) · [Engineering](#engineering) · [Contribute](#contribute)
+[Install](#install) · [Use](#use) · [Workflows](#workflows) · [Engineering](#engineering) · [Releases](docs/releases.md) · [Contribute](#contribute)
 
 ## Install
 
@@ -67,7 +67,7 @@ The installer preserves unrelated settings and excludes development artifacts.
 
 ## Use
 
-Open your target repository and describe the task; ask for `standard` or `deep`
+Open your repository and describe the task; request `standard` or `deep`
 when needed. Try the [runnable first task](examples/first-task/README.md).
 
 **Claude Code**

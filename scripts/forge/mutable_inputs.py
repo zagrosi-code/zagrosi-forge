@@ -112,6 +112,50 @@ def contract_snapshot(planning_dir: Path, section: str, *, target_dir=None, file
             "code": code_observations(target, owned | set(files))}
 
 
+def filesystem_paths(target_dir: Path) -> list[Path]:
+    ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+    paths = []
+    for directory, directories, files in os.walk(target_dir):
+        directories[:] = [name for name in directories if name not in ignored]
+        paths.extend(Path(directory) / name for name in directories if (Path(directory) / name).is_symlink())
+        paths.extend(Path(directory) / name for name in files if not name.endswith((".pyc", ".pyo")))
+    return paths
+
+
+def source_paths(target_dir: Path) -> list[Path]:
+    """Include nested Git inventories and their boundaries, never follow directory links."""
+    try:
+        result = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
+                                cwd=target_dir, capture_output=True, timeout=10)
+        if result.returncode == 0 and not (target_dir / ".git").exists():
+            # An ignored nested workspace can return success with no source paths.
+            # Check its parent so the target's own ignore rules remain authoritative.
+            ignored_target = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", target_dir.name],
+                                            cwd=target_dir.parent, capture_output=True, timeout=10)
+            if ignored_target.returncode == 0:
+                result = None
+    except FileNotFoundError:
+        result = None
+    if result is not None and result.returncode == 0:
+        paths = []
+        for name in filter(None, result.stdout.split(b"\0")):
+            relative = Path(os.fsdecode(name))
+            if not relative.parts or relative.anchor or ".." in relative.parts or any(
+                (target_dir / parent).is_symlink() for parent in relative.parents if parent.parts
+            ):
+                raise ValueError(f"Observed repository boundary must stay within the target directory: {relative}")
+            path = target_dir / relative
+            paths.append(path)
+            if not path.is_symlink() and path.is_dir():
+                resolved = path.resolve()
+                if resolved == target_dir or not resolved.is_relative_to(target_dir):
+                    raise ValueError(f"Observed repository boundary must stay within the target directory: {relative}")
+                paths.extend(source_paths(path) if (path / ".git").exists() else filesystem_paths(path))
+    else:
+        paths = filesystem_paths(target_dir)
+    return paths
+
+
 def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | None = None) -> dict:
     """Bind verification to source files and link identities, without traversing linked directories."""
     names = sections.check_section_progress(planning_dir).get("sections", [])
@@ -137,27 +181,7 @@ def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | N
     excluded.update(planning_dir / name for name in (
         "zagrosi_plan_config.json", "deep_plan_config.json", "traceability.md", "forge-report.md",
     ))
-    try:
-        result = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
-                                cwd=target_dir, capture_output=True, timeout=10)
-        if result.returncode == 0 and not (target_dir / ".git").exists():
-            # An ignored nested workspace can return success with no source paths.
-            # Check its parent so the target's own ignore rules remain authoritative.
-            ignored_target = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", target_dir.name],
-                                            cwd=target_dir.parent, capture_output=True, timeout=10)
-            if ignored_target.returncode == 0:
-                result = None
-    except FileNotFoundError:
-        result = None
-    if result is not None and result.returncode == 0:
-        paths = [target_dir / os.fsdecode(name) for name in result.stdout.split(b"\0") if name]
-    else:
-        ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
-        paths = []
-        for directory, directories, files in os.walk(target_dir):
-            directories[:] = [name for name in directories if name not in ignored]
-            paths.extend(Path(directory) / name for name in directories if (Path(directory) / name).is_symlink())
-            paths.extend(Path(directory) / name for name in files if not name.endswith((".pyc", ".pyo")))
+    paths = source_paths(target_dir)
     observed = [path.relative_to(target_dir).as_posix() for path in paths
                 if not any(path == excluded_path or path.is_relative_to(excluded_path) for excluded_path in excluded)]
     identities, files = {}, []
@@ -175,6 +199,9 @@ def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | N
                 identities[name] = {"content": None, "mode": stat.S_IMODE(path.lstat().st_mode),
                                     "link": os.readlink(path), "target_type": "directory" if linked_mode else "missing"}
                 continue
+        elif path.is_dir():
+            identities[name] = {"content": None, "mode": stat.S_IMODE(path.stat().st_mode), "target_type": "directory"}
+            continue
         files.append(name)
     for name, content in code_observations(target_dir, files).items():
         path = target_dir / name
