@@ -1,5 +1,10 @@
 # Releases
 
+## 0.3.1 — nested repository verification
+
+- Capture verification in repositories containing submodules or embedded Git repositories.
+- Bind nested source changes, staged submodule revisions and repository boundaries while preserving ignored-file and symlink handling.
+
 ## 0.3.0 — shared quality workflows
 
 - One entry skill and a dedicated cleanup skill, shared by Codex and Claude Code.

@@ -256,6 +256,7 @@
   "tests/test_trial_realism.py",
   "tests/test_verification_contracts.py",
   "tests/test_verification_receipts.py",
+  "tests/test_verification_repositories.py",
   "tests/test_verification_symlinks.py",
   "tests/test_workflow_admission.py",
   "tests/test_workflow_efficiency.py",
