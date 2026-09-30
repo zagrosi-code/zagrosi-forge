@@ -42,7 +42,10 @@ Parallelize only disjoint files and serialize records.
 
 1. Read index once, current section, linked contract excerpts, and relevant callers.
 2. Test changed behavior first; confirm meaningful failure. Reuse refactor coverage;
-   inspect cosmetic changes.
+   inspect cosmetic changes. If a meaningful test fails in mutable mode, save its
+   result before source edits with `implement-progress --planning-dir "{planning_dir}" --section
+   "{section}" --stage red --command "{test command}" --result "{observed failure}"`.
+   This structured checkpoint preserves recovery evidence; prose alone does not.
 3. Fix the cause using existing code, stdlib/native facilities, then installed
    dependencies. Prefer direct functions; reject speculative layers/configuration.
    Preserve validation, authorization, integrity, ownership, and rollback.
