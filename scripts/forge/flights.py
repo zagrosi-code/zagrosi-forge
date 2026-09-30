@@ -106,7 +106,6 @@ def plan_preflight_report(spec_file: Path, args: argparse.Namespace) -> dict[str
     depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", _policy.DEFAULT_DEPTH) or _policy.DEFAULT_DEPTH)
     jobs: list[tuple[str, list[str], bool]] = [
         ("doctor", _gates.append_strict(["doctor", "--plugin-root", str(plugin_root)], mode), True),
-        ("status", ["status", "--path", str(planning_dir)], False),
     ]
     if getattr(args, "write_evidence", False) or not _markdown.is_lean_depth(depth):
         jobs.insert(1, ("codebase-evidence", evidence_command, False))

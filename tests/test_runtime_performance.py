@@ -48,6 +48,7 @@ def test_local_plan_flights_do_not_start_python_children(forge, monkeypatch, cap
         pytest.fail("A local plan gate started a child process")
 
     monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(forge.child_process, "execute", forbidden)
     args = [phase, "--phase", "plan"]
     args += ["--file", str(plan / "spec.md")] if phase == "preflight" else ["--planning-dir", str(plan)]
     assert forge.entrypoint.main(args) == 0

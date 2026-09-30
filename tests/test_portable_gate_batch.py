@@ -39,8 +39,14 @@ def test_portable_batch_matches_individual_gates_with_one_process(forge, plan, t
     assert len(processes) == 1 and processes[0].poll() == 0
 
 
-def test_platform_without_timers_batches_entire_plan_flight(forge, plan, monkeypatch, capsys):
-    expected_args = ["postflight", "--phase", "plan", "--planning-dir", str(plan), "--full-output"]
+@pytest.mark.parametrize("phase", ["preflight", "postflight"])
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+def test_platform_without_timers_batches_entire_plan_flight(forge, plan, monkeypatch, capsys, phase, depth):
+    config_path = plan / "zagrosi_plan_config.json"
+    config = json.loads(config_path.read_text())
+    config_path.write_text(json.dumps({**config, "depth_mode": depth}))
+    expected_args = [phase, "--phase", "plan", "--planning-dir", str(plan), "--file", str(plan / "spec.md"),
+                     "--target-dir", str(plan.parent), "--full-output"]
     assert forge.entrypoint.main(expected_args) == 0
     expected = json.loads(capsys.readouterr().out)
     monkeypatch.delattr(signal, "setitimer", raising=False)

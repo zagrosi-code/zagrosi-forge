@@ -322,10 +322,11 @@ def test_final_record_returns_verification_without_repeating_tests(forge, worksp
     assert "record" not in result["commands"]
 
 
-def test_plan_setup_returns_valid_next_command_arguments(forge, tmp_path, capsys):
+@pytest.mark.parametrize("flight", ["off", "auto"])
+def test_plan_setup_returns_valid_next_command_arguments(forge, tmp_path, capsys, flight):
     (tmp_path / "spec.md").write_text("Keep existing invoice amounts correct.\n")
     code, result = invoke(forge, capsys, "plan-setup", "--file", str(tmp_path / "spec.md"),
-                          "--target-dir", str(tmp_path), "--depth", "deep", "--flight", "off")
+                          "--target-dir", str(tmp_path), "--depth", "deep", "--flight", flight)
     assert code == 0, result
     parser = forge.cli.build_parser()
     verify = parser.parse_args(result["commands"]["verify_plan"][2:])
