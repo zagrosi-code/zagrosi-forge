@@ -67,7 +67,7 @@ TEST_MANIFEST = {
     "test_portable_gate_batch.py": "a94a1bb94f261fa271a70b4f271ec72c68b78eaa50a80088144219206a1c06d8",
     "test_project_commands.py": "07f9a43b2455005164260571a45b178714c9519f8fb937f7b5f4052d3240f9f1",
     "test_project_contracts.py": "c7d695bb85222caa6c68a555f34a2de30e378f8ff04f43f23a58b905095d5af3",
-    "test_providers.py": "5b41e3363492f64c01b79d2f6f4082a7083f8bded359b40144aff62395c482e2",
+    "test_providers.py": "e087b71baf06be8f23175510a63be07e94e5d0a4a837f8f1691791419488e57c",
     "test_quality_gates.py": "99cdaefc06c01ca10d97b391fa35696a9ef8c537fdafb7601efc58e1001b8b52",
     "test_release.py": "d16f0ad9b4997bf97bf5b7115fce6c69fc1e81644a5e3f99807fee4cec740d55",
     "test_release_identity.py": "2a2bbbd03bc07e7ece8b6c5f1f4c6ae7d271b7bfa41a0f8fe218da14c2e232db",

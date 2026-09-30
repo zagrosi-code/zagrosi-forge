@@ -136,7 +136,8 @@ def test_review_retains_failure_without_fallback(forge, tmp_path, monkeypatch, c
     assert report["requested_model"] == "selected"
 
 
-@pytest.mark.parametrize("contents", [b"", b"\xff", b"x" * (256 * 1024 + 1)])
+@pytest.mark.parametrize("contents", [b"", b"\xff", b"x" * (256 * 1024 + 1)],
+                         ids=["empty", "invalid-utf8", "oversized"])
 def test_bad_packet_never_calls_provider(forge, tmp_path, monkeypatch, contents):
     options = args(tmp_path)
     Path(options.input).write_bytes(contents)
