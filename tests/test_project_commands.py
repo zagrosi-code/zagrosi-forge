@@ -125,7 +125,7 @@ def test_parallel_plan_parses_documented_dependency_graph_prose(tmp_path: Path) 
     original = sections / "section-01-normalize.md"
     section_body = original.read_text()
     original.unlink()
-    for name in ("section-01-foundation", "section-02-api", "section-03-ui"):
+    for name in ("section-01-foundation", "section-02-endpoints", "section-03-ui"):
         (sections / f"{name}.md").write_text(section_body.replace("section-01-normalize", name))
     (sections / "index.md").write_text(
         "<!-- PROJECT_CONFIG\n"
@@ -134,20 +134,21 @@ def test_parallel_plan_parses_documented_dependency_graph_prose(tmp_path: Path) 
         "END_PROJECT_CONFIG -->\n\n"
         "<!-- SECTION_MANIFEST\n"
         "section-01-foundation\n"
-        "section-02-api\n"
+        "section-02-endpoints\n"
         "section-03-ui\n"
         "END_MANIFEST -->\n\n"
         "# Sections\n\n"
         "## Dependency Graph\n\n"
-        "- section-02-api depends on section-01-foundation.\n"
-        "- `section-03-ui` depends on `section-02-api`.\n"
+        "- section-02-endpoints depends on section-01-foundation.\n"
+        "- `section-03-ui` depends on `section-02-endpoints`.\n"
+        "\nExecution order: section-01-foundation, section-02-endpoints, section-03-ui. Parallel: no.\n"
     )
 
     parallel = run_cmd("parallel-plan", "--planning-dir", str(tmp_path))
 
     assert parallel["layers"] == [
         ["section-01-foundation"],
-        ["section-02-api"],
+        ["section-02-endpoints"],
         ["section-03-ui"],
     ]
 
@@ -219,6 +220,13 @@ def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
     (sections / "section-01-status.md").write_text(
         "# section-01-status\n\nREQ-001 tests first; implement, verify, accept, and rollback.\n"
     )
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert status["next_action"] == "repair planning admission findings before implementation"
+    assert status["admission"]["success"] is False
+
+    from test_resume_guidance import documented_detached_plan
+
+    documented_detached_plan(tmp_path, "lean")
     status = run_cmd("status", "--path", str(tmp_path))
     assert status["next_action"] == "run zagrosi-implement"
 

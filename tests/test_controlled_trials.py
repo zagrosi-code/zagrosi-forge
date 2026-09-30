@@ -16,6 +16,7 @@ def test_plain_agent_keeps_behavior_and_cleanup_checks_without_forge(tmp_path, d
     prompt = (trial / "prompt.md").read_text()
     assert "Use your normal engineering workflow" in prompt
     assert "applicable Forge skills" not in prompt
+    assert "Start with" not in prompt
     write_cleanup(trial)
     result = trials.check(trial, review=write_review(trial))
     assert result["success"], result
@@ -26,16 +27,23 @@ def test_plain_agent_keeps_behavior_and_cleanup_checks_without_forge(tmp_path, d
     assert not trials.check(trial, review=trial / "review.json")["success"]
 
 
-def test_plugin_under_test_cannot_replace_evaluator_or_fixture(tmp_path):
+@pytest.mark.parametrize("has_router", [False, True])
+def test_plugin_under_test_cannot_replace_evaluator_or_fixture(tmp_path, has_router):
     plugin = tmp_path / "previous"
     (plugin / "scripts/forge").mkdir(parents=True)
     (plugin / "scripts/zagrosi_skills.py").write_text("raise RuntimeError('must not judge itself')")
     (plugin / "scripts/forge/old.py").write_text("OLD = True")
     (plugin / "tools").mkdir()
     (plugin / "tools/coding_trials.py").write_text("raise RuntimeError('foreign evaluator')")
+    router = plugin / "skills/zagrosi-forge/SKILL.md"
+    if has_router:
+        router.parent.mkdir(parents=True)
+        router.write_text("Use the selected Forge workflow.")
     trial = tmp_path / "trial"
     trials.prepare(trial, "cleanup", plugin_root=plugin)
-    assert str(plugin) in (trial / "prompt.md").read_text()
+    prompt = (trial / "prompt.md").read_text()
+    assert str(plugin) in prompt
+    assert (f"Start with {router}" in prompt) is has_router
     record = json.loads((trial / "trial.json").read_text())
     assert record["plugin_sha256"]["scripts/forge/old.py"]
     assert record["fixture_sha256"] == trials.files(trials.PACK / "fixture")

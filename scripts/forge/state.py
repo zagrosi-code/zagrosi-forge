@@ -122,11 +122,11 @@ def mutable_readiness_snapshot(
     }
 
 
-def mutable_admitted_readiness(planning_dir: Path, *, state=None, profile="solo", progress=None, admission=None) -> dict[str, Any]:
-    from . import validation
+def mutable_admitted_readiness(planning_dir: Path, *, state=None, profile=None, progress=None, admission=None) -> dict[str, Any]:
+    from . import actions, flights
 
     progress = _sections.check_section_progress(planning_dir) if progress is None else progress
-    admission = validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=profile, strict=True)) if admission is None else admission
+    admission = flights.plan_admission_report(planning_dir, profile=actions.implementation_profile(planning_dir, profile)) if admission is None else admission
     state = load_implementation_state(planning_dir) if state is None else state
     readiness = mutable_readiness_snapshot(
         {**progress, "sections": progress.get("sections", [])},

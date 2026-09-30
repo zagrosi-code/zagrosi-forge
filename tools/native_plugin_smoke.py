@@ -73,7 +73,7 @@ def check_references(root: Path) -> list[str]:
     for skill in (root / "skills").glob("*/SKILL.md"):
         for target in re.findall(r"\]\(([^)]+)\)", skill.read_text()):
             if not re.match(r"[a-z]+:|#", target) and not (skill.parent / target.split("#", 1)[0]).is_file():
-                missing.append(f"{skill.relative_to(root)}: {target}")
+                missing.append(f"{skill.relative_to(root).as_posix()}: {target}")
     return missing
 
 

@@ -49,6 +49,9 @@ Parallelize only disjoint files and serialize records.
 4. Capture targeted checks with `implement-verify --planning-dir "{planning_dir}"
    --target-dir "{target_dir}" --section "{section}" -- <command argv>`.
    Use its returned receipt; do not run the full suite per section.
+   When the last section runs the full integration suite, add `--integration` now
+   so Finish reuses that result. Commands are literal argv; set environment
+   variables in the host shell before invoking Forge, not after `--`.
 5. Review correctness, security, requirements, test gaps, and the concrete
    structural gain from cleanup; fix and retest.
 6. Record evidence; continue:
@@ -63,12 +66,11 @@ hooks. Do not push, open PRs, deploy, or watch without existing authorization.
 
 ## Finish
 
-Review the diff and affected callers for justified cleanup. Capture the full
-`test_command` once with `implement-verify` **without** `--section`, then run one
-final postflight without `--run-tests`. This receipt must match the final code and
-contracts; later edits require refreshed verification.
-If the last section's check is already the full integration suite, add
-`--section "{section}" --integration` to capture both receipts with one run.
+Review the diff and affected callers for justified cleanup. Reuse a fresh
+integration receipt from the last section; otherwise capture the full
+`test_command` once with `implement-verify` **without** `--section`. Run one final
+postflight without `--run-tests`. The receipt must match final code and contracts;
+later edits require refreshed verification.
 
 For externally run checks or inspection-only changes, explicitly label the source
 and outcome (`attestation` or `inspection`, `passed`) with actual evidence;

@@ -85,6 +85,9 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
                 f"Use Forge at {selected} depth from {plugin_root}; use this exact tree for skills and CLI commands.\n"
                 f"Read {plugin_root / 'skills/zagrosi-implement/references/engineering.md'} and applicable Forge skills.\n"
                 "Complete admitted planning, implementation, regression checks and completion recording.\n")
+    entry_skill = plugin_root / "skills/zagrosi-forge/SKILL.md"
+    if not plain_agent and entry_skill.is_file():
+        workflow += f"Start with {entry_skill} and follow its routing and linked phase guidance.\n"
     prompt = (f"Work only in {workspace}.\n{workflow}\n"
               f"{CASES[case]['request']}\n\n"
               "Preserve public APIs. Standard library only. If you create planning records, keep them compact under .planning/.\n"

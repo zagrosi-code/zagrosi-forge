@@ -354,7 +354,8 @@ def test_oversized_entry_returns_executable_complete_context_recovery(forge, wor
     root, planning = workspace
     section = planning / "sections" / f"{SECTION}.md"
     contract = "\n## Additional contract\n\n" + "Preserve behavior. " * 1200 + "COMPLETE-CONTRACT-END\n"
-    section.write_text(section.read_text() + contract)
+    (planning / "external-contract.md").write_text(contract)
+    section.write_text(section.read_text() + "\n[Detailed contract](../external-contract.md)\n")
     code, result = invoke(forge, capsys, "next-section", "--planning-dir", str(planning))
     assert code == 1 and not result["success"]
     assert "content" not in result["packet"]

@@ -206,7 +206,7 @@ def test_detached_implementation_mode_uses_dependency_ready_order_and_preserves_
             "pinner_file_sha256": predecessor_state["pinner_file_sha256"],
         }
     ]
-    assert dependent["next_section"] == "section-02-api"
+    assert dependent["next_section"] == "section-02-endpoints"
     assert planning_tree_snapshot(planning) == expected_planning
 
 

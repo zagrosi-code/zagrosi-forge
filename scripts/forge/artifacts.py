@@ -162,6 +162,7 @@ def configured_source_spec(planning_dir: Path) -> Path | None:
         candidates.append(candidate if candidate.is_absolute() else planning_dir / candidate)
     candidates.extend([planning_dir / "spec.md", planning_dir / "requirements.md"])
     for candidate in candidates:
+        _session.observe_path(candidate)
         if candidate.exists() and candidate.is_file():
             return candidate.resolve()
     return None
@@ -187,6 +188,18 @@ def planning_depth(planning_dir: Path, fallback: str = _policy.DEFAULT_DEPTH) ->
         meta_depth = meta.get("depth_mode") if isinstance(meta, dict) else None
         if isinstance(meta_depth, str) and meta_depth in _policy.DEPTH_MODES:
             return meta_depth
+    saved = artifact(planning_dir / "implementation", ["zagrosi_implement_config.json", "deep_implement_config.json"])
+    if saved:
+        try:
+            config = _storage.load_json(saved)
+        except (OSError, ValueError) as exc:
+            raise _models.PlanningDepthError(f"Cannot read saved implementation depth: {saved}") from exc
+        if not isinstance(config, dict) or ("depth_mode" in config and (
+            not isinstance(config["depth_mode"], str) or config["depth_mode"] not in _policy.DEPTH_MODES
+        )):
+            raise _models.PlanningDepthError(f"Invalid saved implementation depth: {saved}")
+        if "depth_mode" in config:
+            return config["depth_mode"]
     return fallback
 
 

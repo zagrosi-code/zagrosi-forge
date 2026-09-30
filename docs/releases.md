@@ -3,7 +3,7 @@
 ## 0.3.0 — shared quality workflows
 
 - One entry skill and a dedicated cleanup skill, shared by Codex and Claude Code.
-- Explicit verification outcomes and fresh integration evidence; failed checks cannot establish completion.
+- Full selected-depth planning admission, explicit verification outcomes, and fresh integration evidence; failed checks cannot establish completion.
 - Ownership-aware parallel work, portable bundled checks, and actionable context-budget recovery.
 - Optional selected-provider reviews through existing CLI authentication.
 - Native skill discovery and upgrade checks, plus broader behavioral evaluation fixtures.

@@ -1,6 +1,7 @@
 """Parallel layers respect live file ownership as well as dependency order."""
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +16,7 @@ def plan(tmp_path):
     first = sections / "section-01-normalize.md"
     body = first.read_text()
     first.unlink()
-    names = ["section-01-api", "section-02-ui", "section-03-worker"]
+    names = ["section-01-endpoints", "section-02-ui", "section-03-worker"]
     for name in names:
         (sections / f"{name}.md").write_text(body.replace("section-01-normalize", name).replace("labels", name))
     index = sections / "index.md"
@@ -88,9 +89,11 @@ def test_unknown_or_malformed_ownership_blocks_parallel_plan(plan, capsys, decla
     forge = load_zagrosi_module()
     for name in names[:2]:
         assert forge.ownership.extract_section_owned_paths((planning / "sections" / f"{name}.md").read_text()) == []
-    assert forge.state.mutable_admitted_readiness(planning)["admission"]["success"]
+    assert not forge.state.mutable_admitted_readiness(planning)["admission"]["success"]
     assert forge.entrypoint.main(["parallel-plan", "--planning-dir", str(planning)]) == 1
     result = json.loads(capsys.readouterr().out)
     assert not result["success"] and result["layers"] == []
-    assert result["unknown_ownership"] == names[:2]
-    assert "declare" in result["next_action"]
+    assert "lint-implementation-readiness" in result["admission"]["blocking_gates"]
+    readiness = next(gate for gate in result["admission"]["gates"] if gate["name"] == "lint-implementation-readiness")
+    assert {Path(item["path"]).stem for item in readiness["payload"]["findings"]
+            if item["code"] == "no-file-ownership"} == set(names[:2])

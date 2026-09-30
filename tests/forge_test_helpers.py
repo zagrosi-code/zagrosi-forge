@@ -100,8 +100,14 @@ def write_required_plan_artifacts(planning_dir: Path) -> None:
     )
     write_missing(
         "codex-plan.md",
-        "# Plan\n\nREQ-001 updates `scripts/zagrosi_skills.py` and verifies with `tests/test_zagrosi_skills.py`. "
-        "Architecture keeps workflow policy in Forge helpers. Rollback is reverting the helper change.\n",
+        "# Plan\n\nGoal: REQ-001 updates `scripts/zagrosi_skills.py`. "
+        "Current-state evidence: existing tests in `tests/test_zagrosi_skills.py` cover the CLI. "
+        "Runtime: Python from `pyproject.toml`; test command: `uv run pytest`. "
+        "Design contract: preserve CLI arguments and result fields. Rationale: reuse the existing helper, avoiding duplicate policy. "
+        "Tests first: `test_implement_setup_and_record` fails before implementation. "
+        "Risk/security/privacy: missing records must not bypass verification. Rollback: revert the helper change. "
+        "Migration: preserve backward compatibility. Assumptions: the existing local fixture owns all inputs. "
+        "Acceptance: recording and traceability tests pass without changing unrelated behavior.\n",
     )
     write_missing(
         "codex-integration-notes.md",
@@ -146,12 +152,16 @@ def write_single_section_fixture(planning_dir: Path, section: str = "section-01-
         "END_PROJECT_CONFIG -->\n\n"
         "<!-- SECTION_MANIFEST\n"
         f"{section}\n"
-        "END_MANIFEST -->\n"
+        "END_MANIFEST -->\n\n"
+        f"Dependencies: none. Execution order: {section}. Parallel: no.\n"
     )
     (sections / f"{section}.md").write_text(
-        "# Section\n\n"
-        "REQ-001 changes `scripts/zagrosi_skills.py` and `tests/test_zagrosi_skills.py`.\n"
-        "Tests first, expected failure, implementation, acceptance, rollback, and verification.\n"
+        "# Section\n\nGoal: implement REQ-001. Dependencies: none.\n"
+        "Ownership: modify `scripts/zagrosi_skills.py` and `tests/test_zagrosi_skills.py`.\n"
+        "Tests first: `test_implement_setup_and_record`; expected failure: no record is saved.\n"
+        "Implementation contract: preserve CLI results while recording verified work.\n"
+        "Risk: missing records. Rollback: revert the helper change.\n"
+        "Acceptance and verification: run `uv run pytest`; expect recording and traceability tests to pass.\n"
     )
     write_required_plan_artifacts(planning_dir)
     review_dir = planning_dir / "implementation" / "code_review"
@@ -171,7 +181,7 @@ def write_non_topological_section_fixture(planning_dir: Path) -> Path:
         "END_PROJECT_CONFIG -->\n\n"
         "<!-- SECTION_MANIFEST\n"
         "section-01-foundation\n"
-        "section-02-api\n"
+        "section-02-endpoints\n"
         "section-03-storage\n"
         "END_MANIFEST -->\n\n"
         "# Sections\n\n"
@@ -179,12 +189,17 @@ def write_non_topological_section_fixture(planning_dir: Path) -> Path:
         "| Section | Depends on |\n"
         "|---|---|\n"
         "| section-01-foundation | section-03-storage |\n"
-        "| section-02-api | section-01-foundation |\n"
+        "| section-02-endpoints | section-01-foundation |\n"
         "| section-03-storage | none |\n"
+        "\nExecution order: section-03-storage, section-01-foundation, section-02-endpoints. Parallel: no.\n"
     )
-    for section in ("section-01-foundation", "section-02-api", "section-03-storage"):
+    for section in ("section-01-foundation", "section-02-endpoints", "section-03-storage"):
         (sections / f"{section}.md").write_text(
-            f"# {section}\n\nTests first, expected failure, implementation, acceptance, rollback, and verification.\n"
+            f"# {section}\n\nGoal: implement REQ-001. Dependencies: follow the index dependency graph.\n"
+            f"Ownership: modify `src/{section}.py` and `tests/test_{section}.py`.\n"
+            "Tests first: `test_dependency_order`; expected failure: dependent work starts early.\n"
+            "Implementation contract: preserve dependency readiness. Risk: invalid ordering. Rollback: revert the change.\n"
+            "Acceptance and verification: run `uv run pytest`; expect dependency tests to pass.\n"
         )
     write_required_plan_artifacts(planning_dir)
     return sections
@@ -263,7 +278,7 @@ def write_quality_plan_fixture(tmp_path: Path) -> Path:
         "## Reader Note\nThis plan is self-contained for a fresh implementer with no prior context.\n\n"
         "## Current State Evidence\nVerified existing auth ownership through current state review: `src/auth/oauth.py`, "
         "`src/auth/session.py`, `src/auth/config.py`, and `tests/auth/test_oauth.py` are the files in scope. "
-        "A grep for auth callback routes should happen before implementation.\n\n"
+        "Inspected runtime `pyproject.toml` with `rg --files`. A grep for auth callback routes should happen before implementation.\n\n"
         "## Goal and Non-Goals\nREQ-001 adds OAuth callback handling and excludes billing.\n\n"
         "## Architecture\nUse `src/auth/oauth.py`, `src/auth/session.py`, and `src/auth/config.py`.\n\n"
         "## Architecture Rationale\nThe rationale is to keep callback-specific provider behavior in OAuth code while preserving session policy in "
@@ -349,13 +364,14 @@ def write_quality_plan_fixture(tmp_path: Path) -> Path:
     (sections / "section-01-auth.md").write_text(
         "# section-01-auth\n\n"
         "## Purpose\nImplement REQ-001 OAuth callback behavior.\n\n"
-        "## Tests First\nCreate `tests/auth/test_oauth.py` with failing tests for valid callback, invalid state, and provider error.\n\n"
+        "## Tests First\nCreate `tests/auth/test_oauth.py` with failing tests for valid callback, invalid state, and provider error.\n"
+        "Case: `test_valid_callback_creates_session`\nExpected: valid credentials return a valid session.\nCommand: `uv run pytest tests/auth/test_oauth.py`\n\n"
         "## Implementation\nModify `src/auth/oauth.py`, `src/auth/session.py`, and `src/auth/config.py` to validate state, handle provider errors, and create sessions.\n\n"
         "## Acceptance\nREQ-001 is complete when verification passes with `uv run pytest` and invalid callbacks do not create sessions.\n\n"
         "## Background Context\nThis section is self-contained and copies the OAuth ownership, security rationale, session contract, and route boundaries "
         "from the plan. It depends on no prior sections.\n\n"
         "## File Tree\n```\nsrc/auth/oauth.py\nsrc/auth/session.py\nsrc/auth/config.py\ntests/auth/test_oauth.py\n```\n\n"
-        "## Risks\nInvalid state, provider denial, duplicate accounts, and token leakage are the main risks.\n\n"
+        "## Risks\nInvalid state, provider denial, duplicate accounts, and token leakage are the main risks. Rollback: revert the auth files.\n\n"
         + "The section is self-contained and includes enough implementation context, expected failures, file paths, contracts, "
         "verification, risks, and acceptance details. " * 12
     )

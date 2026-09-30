@@ -10,6 +10,7 @@ import argparse
 import sys
 
 from . import output as _output
+from . import models as _models
 from . import policy as _policy
 from . import session as _session
 
@@ -569,8 +570,9 @@ def main(argv: list[str] | None = None) -> int:
         args.command in _policy.LOCAL_GATE_COMMANDS
         or args.handler[1] in {"deep_project_setup", "deep_plan_setup"}
         or (args.command in {"preflight", "postflight"} and args.phase in {"project", "plan"})
+        or (args.command == "preflight" and args.phase == "implement")
     )
-    read_cache = local_gates or (args.command == "preflight" and args.phase == "implement")
+    read_cache = local_gates
     token = _session._CLI_CONTEXT.set({
         "parser": parser, "pretty": pretty or getattr(args, "pretty", False),
         "full_output": full_output,
@@ -579,5 +581,7 @@ def main(argv: list[str] | None = None) -> int:
     })
     try:
         return args.func(args)
+    except _models.PlanningDepthError as exc:
+        return _output.print_json({"success": False, "error": str(exc), "error_code": "invalid-planning-depth"}, 1)
     finally:
         _session._CLI_CONTEXT.reset(token)

@@ -25,24 +25,7 @@ from forge_test_helpers import (
 
 
 def test_implement_setup_and_record(tmp_path: Path) -> None:
-    sections = tmp_path / "sections"
-    sections.mkdir()
-    (sections / "index.md").write_text(
-        "<!-- PROJECT_CONFIG\n"
-        "runtime: python-uv\n"
-        "test_command: uv run pytest\n"
-        "END_PROJECT_CONFIG -->\n\n"
-        "<!-- SECTION_MANIFEST\n"
-        "section-01-foundation\n"
-        "END_MANIFEST -->\n"
-    )
-    (sections / "section-01-foundation.md").write_text(
-        "# Section\n\n"
-        "REQ-001: Goal and dependencies: none. Tests first in `tests/test_zagrosi_skills.py`; "
-        "implementation modifies `scripts/zagrosi_skills.py`. Acceptance uses verification; "
-        "risks use rollback.\n"
-    )
-    write_required_plan_artifacts(tmp_path)
+    sections = write_single_section_fixture(tmp_path)
 
     setup = run_cmd(
         "implement-setup",
@@ -80,27 +63,21 @@ def test_implement_setup_and_record(tmp_path: Path) -> None:
 
 
 def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) -> None:
-    sections = tmp_path / "sections"
-    sections.mkdir()
+    sections = write_single_section_fixture(tmp_path, "section-01-status")
     (tmp_path / "zagrosi_plan_config.json").write_text('{"depth_mode":"standard"}\n')
     (tmp_path / "codex-spec.md").write_text("# Spec\n\nREQ-001: Implement status.\nREQ-002: Document status.\n")
-    (tmp_path / "codex-plan.md").write_text("# Plan\n\nREQ-001 in `scripts/tool.py`.\nREQ-002 in `README.md`.\n")
+    plan = tmp_path / "codex-plan.md"
+    plan.write_text(plan.read_text() + "\nREQ-002 documents the result in `README.md`.\n")
     (tmp_path / "codex-plan-tdd.md").write_text(
         "# TDD\n\nREQ-001: `test_status_flow`.\nREQ-002: `test_readme_status_docs`.\nRun `pytest -q`.\n"
     )
-    (sections / "index.md").write_text(
-        "<!-- PROJECT_CONFIG\n"
-        "runtime: python-uv\n"
-        "test_command: uv run pytest\n"
-        "END_PROJECT_CONFIG -->\n\n"
-        "<!-- SECTION_MANIFEST\n"
-        "section-01-status\n"
-        "section-02-docs\n"
-        "END_MANIFEST -->\n"
+    index = sections / "index.md"
+    index.write_text(index.read_text().replace("section-01-status\nEND_MANIFEST", "section-01-status\nsection-02-docs\nEND_MANIFEST"))
+    first = sections / "section-01-status.md"
+    first.write_text(first.read_text().replace("test_implement_setup_and_record", "test_status_flow"))
+    (sections / "section-02-docs.md").write_text(
+        first.read_text().replace("REQ-001", "REQ-002").replace("test_status_flow", "test_readme_status_docs")
     )
-    (sections / "section-01-status.md").write_text("# Section\n\nREQ-001 with `test_status_flow`.\n")
-    (sections / "section-02-docs.md").write_text("# Section\n\nREQ-002 with `test_readme_status_docs`.\n")
-    write_required_plan_artifacts(tmp_path)
     (tmp_path / "traceability.md").write_text(
         "# Traceability Matrix\n\n"
         "| Requirement | Plan Coverage | Section Coverage | Test Coverage | Status |\n"
@@ -291,8 +268,8 @@ def test_implement_setup_blocks_missing_core_plan_artifacts_even_with_flight_off
     assert result.returncode != 0
     payload = json.loads(result.stdout)
     assert payload["success"] is False
-    assert payload["gate"] == "plan-artifacts"
-    codes = {item["code"] for item in payload["findings"]}
+    assert "lint-plan-artifacts" in payload["blocking_gates"]
+    codes = {item["code"] for item in payload["diagnostics"]}
     assert {"missing-plan", "missing-review"} <= codes
     assert "missing-research" not in codes
     assert "placeholder-decisions" not in codes
@@ -381,6 +358,7 @@ def test_implement_progress_preserves_overlapping_writes(tmp_path: Path, monkeyp
 
 def test_implement_postflight_defers_state_lint_until_sections_recorded(tmp_path: Path) -> None:
     planning = write_quality_plan_fixture(tmp_path / "planning")
+    write_required_plan_artifacts(planning)
 
     postflight = run_cmd(
         "postflight",
@@ -482,6 +460,7 @@ def test_lean_implement_preflight_uses_one_in_process_analysis(tmp_path: Path) -
     assert names == {
         "sections-directory",
         "target-directory",
+        "lint-plan",
         "lint-plan-artifacts",
         "lint-sections",
         "traceability",
@@ -556,9 +535,8 @@ def test_mutable_implement_setup_propagates_preflight_failure(tmp_path: Path) ->
     assert result.returncode == 1, result.stderr + result.stdout
     payload = json.loads(result.stdout)
     assert payload["success"] is False
-    assert payload["preflight"]["success"] is False
-    assert "lint-sections" in payload["preflight"]["blocking_gates"]
-    assert "lint-implementation-readiness" in payload["preflight"]["blocking_gates"]
+    assert "lint-sections" in payload["blocking_gates"]
+    assert "lint-implementation-readiness" in payload["blocking_gates"]
 
 
 def test_detached_implement_setup_propagates_preflight_failure_without_planning_writes(

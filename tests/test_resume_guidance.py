@@ -73,7 +73,7 @@ def test_status_uses_dependency_readiness_and_exposes_blocked_work(tmp_path):
     assert payload["next_action"] == "implement section-03-storage"
     assert payload["ready_sections"] == ["section-03-storage"]
     index = sections / "index.md"
-    index.write_text(index.read_text().replace("| section-03-storage | none |", "| section-03-storage | section-02-api |"))
+    index.write_text(index.read_text().replace("| section-03-storage | none |", "| section-03-storage | section-02-endpoints |"))
     payload = run_cmd("status", "--path", str(planning))
     assert payload["next_action"] == "resolve blocked section dependencies"
     assert payload["remaining_sections"]

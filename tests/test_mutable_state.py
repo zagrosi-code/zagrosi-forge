@@ -49,9 +49,18 @@ def test_changed_contract_reopens_completion(forge, tmp_path):
 
 
 def test_unrelated_requirements_do_not_invalidate_completion(forge, tmp_path):
-    planning = make_plan(tmp_path / "plan")
+    from test_resume_guidance import documented_detached_plan
+
+    planning = documented_detached_plan(tmp_path / "plan", "lean")
     spec = planning / "spec.md"
     spec.write_text(spec.read_text() + "\nREQ-002: Unrelated export.\n")
+    plan = planning / "codex-plan.md"
+    plan.write_text(plan.read_text() + "\nREQ-002: Unrelated export, verified by `test_export`.\n")
+    index = planning / "sections/index.md"
+    second = "section-02-export"
+    index.write_text(index.read_text().replace("END_MANIFEST", second + "\nEND_MANIFEST"))
+    section = planning / "sections" / f"{SECTION}.md"
+    (section.parent / f"{second}.md").write_text(section.read_text().replace(SECTION, second).replace("REQ-001", "REQ-002").replace("labels", "exports").replace("test_trim_edges", "test_export"))
     record(planning)
     spec.write_text(spec.read_text().replace("Unrelated export", "Unrelated pagination"))
     assert forge.state.completed_sections(planning) == {SECTION}

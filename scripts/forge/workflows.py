@@ -17,7 +17,6 @@ from . import sections as _sections
 from . import state as _state
 from . import storage as _storage
 from . import traceability as _traceability
-from . import validation as _validation
 
 def deep_project_setup(args: argparse.Namespace) -> int:
     project_input, error = _projects.resolve_project_input(args)
@@ -253,10 +252,9 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
     if progress["state"] in {"invalid_index", "no_index"}:
         return _output.print_json({"success": False, "section_progress": progress}, 1)
 
-    artifact_payload = _validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
-    if not artifact_payload["success"]:
-        artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before implementation."
-        return _output.print_json(artifact_payload, 1)
+    admission = _flights.plan_admission_report(planning_dir, depth=args.depth, profile=args.profile)
+    if not admission["success"]:
+        return _output.print_json({**admission, "error": "Forge planning admission failed; finish zagrosi-plan before implementation."}, 1)
 
     state_dir = planning_dir / "implementation"
     config_path = state_dir / "zagrosi_implement_config.json"
@@ -282,11 +280,12 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         "test_command": progress.get("project_config", {}).get("test_command"),
         "runtime": progress.get("project_config", {}).get("runtime"),
         "profile": args.profile,
+        "depth_mode": admission["depth_mode"],
     }
     _storage.write_json(config_path, config)
 
     readiness = _state.mutable_admitted_readiness(planning_dir, state=state, profile=args.profile,
-                                                progress=progress, admission=artifact_payload)
+                                                progress=progress, admission=admission)
     readiness.pop("admission")
     repo = _storage.git_info(target_dir)
     warnings: list[str] = []
@@ -314,7 +313,7 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
             target_dir,
             args,
             progress=progress,
-            artifact_payload=artifact_payload,
+            admission_payload=admission,
             repo=repo,
         )
         payload["preflight"] = preflight
@@ -341,10 +340,9 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
 def _mutable_record_section(args: argparse.Namespace) -> int:
     sections_dir = _storage.resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
-    artifact_payload = _validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
-    if not artifact_payload["success"]:
-        artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before recording implementation."
-        return _output.print_json(artifact_payload, 1)
+    admission = _flights.plan_admission_report(planning_dir, depth=args.depth, profile=args.profile)
+    if not admission["success"]:
+        return _output.print_json({**admission, "error": "Forge planning admission failed; finish zagrosi-plan before recording implementation."}, 1)
     progress = _sections.check_section_progress(planning_dir)
     known = set(progress.get("sections", []))
     if args.section not in known:

@@ -108,6 +108,7 @@ def test_worker_cache_detects_mutations_without_timers_or_children(forge, tmp_pa
 def test_worker_deadline_returns_failure_and_reaps_process(forge, monkeypatch):
     processes = []
     popen, execute = subprocess.Popen, forge.child_process.execute
+    worker = [sys.executable, "-c", "import time; time.sleep(30)"]
 
     def counted(*args, **kwargs):
         processes.append(popen(*args, **kwargs))
@@ -115,14 +116,15 @@ def test_worker_deadline_returns_failure_and_reaps_process(forge, monkeypatch):
 
     def stalled(_argv, workspace, **kwargs):
         assert kwargs["timeout"] == 120
-        return execute([sys.executable, "-c", "import time; time.sleep(30)"], workspace, timeout=.05)
+        return execute(worker, workspace, timeout=.05)
 
     monkeypatch.setattr(subprocess, "Popen", counted)
     monkeypatch.setattr(forge.child_process, "execute", stalled)
     gates = forge.gates.run_gate_worker([("doctor", ["doctor"], True)])
     assert gates[0]["success"] is False and gates[0]["returncode"] == 124
     assert gates[0]["payload"] == {"error_code": "gate-timeout", "timeout_seconds": 120, "timeout_scope": "batch"}
-    assert len(processes) == 1 and processes[0].poll() is not None
+    assert sum(process.args == worker for process in processes) == 1
+    assert all(process.poll() is not None for process in processes)  # Includes Windows taskkill.
 
 
 @pytest.mark.parametrize("result", [
