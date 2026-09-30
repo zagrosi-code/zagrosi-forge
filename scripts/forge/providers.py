@@ -126,7 +126,7 @@ def provider_review(args: argparse.Namespace) -> int:
         models = report["observed_models"]
         if models:
             report["model_identity"] = "reported"
-            if args.model and args.model not in models:
+            if args.model and set(models) != {args.model}:
                 report["model_identity"] = "mismatch_or_alias"
                 raise ValueError("Reported model differs from the requested model; use its exact identifier to remove alias ambiguity")
         report["success"] = True

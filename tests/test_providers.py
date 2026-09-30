@@ -136,6 +136,36 @@ def test_review_retains_failure_without_fallback(forge, tmp_path, monkeypatch, c
     assert report["requested_model"] == "selected"
 
 
+@pytest.mark.parametrize("provider", ["claude", "gemini"])
+@pytest.mark.parametrize("selected,models,success,identity", [
+    ("selected", ["selected", "fallback"], False, "mismatch_or_alias"),
+    ("selected", ["selected"], True, "reported"),
+    ("selected", [], True, "unreported"),
+    (None, ["selected", "fallback"], True, "reported"),
+], ids=["mixed", "exact", "unreported", "default"])
+def test_selected_model_requires_every_reported_identity_to_match(forge, tmp_path, monkeypatch,
+                                                                 provider, selected, models, success, identity):
+    options = args(tmp_path)
+    options.provider, options.model = provider, selected
+    usage = {model: {} for model in models}
+    raw = ({"type": "result", "subtype": "success", "result": "Check error ordering.", "modelUsage": usage}
+           if provider == "claude" else {"response": "Check error ordering.", "stats": {"models": usage}})
+    monkeypatch.setattr(forge.providers.shutil, "which", lambda name: "/native/" + name)
+    calls = []
+
+    def native(command, workspace, **kwargs):
+        calls.append(command)
+        return {"returncode": 0, "timed_out": False, "seconds": .1, "stdout": json.dumps(raw)}
+
+    monkeypatch.setattr(forge.providers, "execute", native)
+    assert forge.providers.provider_review(options) == (0 if success else 1)
+    report = json.loads(Path(options.output).read_text())
+    assert report["success"] is success and report["model_identity"] == identity
+    assert report["requested_model"] == selected and report["observed_models"] == models
+    assert report["review"] == "Check error ordering."
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("contents", [b"", b"\xff", b"x" * (256 * 1024 + 1)],
                          ids=["empty", "invalid-utf8", "oversized"])
 def test_bad_packet_never_calls_provider(forge, tmp_path, monkeypatch, contents):
