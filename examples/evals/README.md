@@ -7,15 +7,16 @@ This directory documents the benchmark surface used by `eval-suite`.
 - `examples/saas/01-authentication`: Python-style SaaS OAuth foundation.
 - `examples/typescript-app/01-auth`: TypeScript OAuth plus preferences.
 
-Both tracks exercise the lean contract: source spec, compact plan, one Codex
-review, section index, and bounded section files. Optional research, interview,
-TDD, governance, evidence, integration, and traceability artifacts are absent
-because these fixtures do not need them.
+Both tracks retain the supported physical layout: source spec, `codex-plan.md`,
+`reviews/codex.md`, section index, and bounded section files. These filenames
+also work in Claude Code. They preserve compatibility coverage; new plans can use
+the [compact format](../../skills/zagrosi-plan/references/plan-format.md) at any
+depth, with evidence and review embedded in the canonical artifact.
 
 ## Deep Review Track
 
 - `examples/deep-review/zero-downtime-migration`: input scenario for deep-mode
-  review-board comparisons. It is intentionally not a completed eval row; use it
+  planning and review comparisons. It is intentionally not a completed eval row; use it
   to generate new deep artifacts, then score the result with the same strict
   gates.
 

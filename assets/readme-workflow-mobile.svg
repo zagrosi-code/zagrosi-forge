@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 690" role="img" aria-labelledby="title desc">
+  <title id="title">Project, Plan, Implement</title>
+  <desc id="desc">Start at the phase you need. Project splits a brief into project-manifest.md and child spec.md files. Plan creates sections/index.md and reviewed section contracts, with a shared plan when needed. Implement produces code, tests, and section records. All three depths use this flow.</desc>
+  <rect width="480" height="690" fill="#F3F8F7"/>
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" fill="#0B1F1E">
+    <text x="28" y="49" font-size="24" font-weight="600">Start at the phase you need.</text>
+    <g font-size="30" font-weight="700" fill="#0F766E">
+      <text x="28" y="108">Project</text>
+      <text x="28" y="307">Plan</text>
+      <text x="28" y="506">Implement</text>
+    </g>
+    <g font-size="20">
+      <text x="28" y="141">Split a broad brief.</text>
+      <text x="28" y="340">Review behavior and tests.</text>
+      <text x="28" y="539">Build, test, and record.</text>
+    </g>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">
+      <text x="28" y="179">project-manifest.md</text>
+      <text x="28" y="210">*/spec.md</text>
+      <text x="28" y="378">sections/index.md</text>
+      <text x="28" y="409">section-*.md</text>
+    </g>
+    <g font-size="22">
+      <text x="28" y="579">Code + tests</text>
+      <text x="28" y="610">Section records</text>
+    </g>
+    <text x="204" y="409" font-size="20" fill="#355E57">+ shared plan if needed</text>
+    <text x="28" y="660" font-size="20" fill="#355E57">Lean · standard · deep</text>
+  </g>
+  <g fill="none" stroke="#0F766E" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M43 234v29m-8-9 8 9 8-9M43 433v29m-8-9 8 9 8-9"/>
+  </g>
+  <path d="M28 634h424" stroke="#B6CEC8"/>
+</svg>

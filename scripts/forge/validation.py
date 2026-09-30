@@ -434,7 +434,7 @@ def plan_artifact_findings(planning_dir: Path, *, allow_compact: bool = True) ->
     reviews_dir = planning_dir / "reviews"
     review_files = sorted(path for path in reviews_dir.glob("*.md") if path.is_file()) if reviews_dir.exists() else []
     nonempty_review_files = [path for path in review_files if _storage.read_text(path).strip()]
-    review_required = config.get("review_mode", "codex_review") != "skip"
+    review_required = config.get("review_mode", "agent_review") != "skip"
     compact = _artifacts.compact_plan_descriptor(planning_dir)
     embedded_review = bool(compact and not compact["errors"] and compact["headings"].get("review"))
     if review_required and not nonempty_review_files and not embedded_review:

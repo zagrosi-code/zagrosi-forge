@@ -1,7 +1,7 @@
 {
   "name": "zagrosi-forge",
   "version": "0.2.0+codex.20260924153132",
-  "description": "Lean project decomposition, planning, and test-first implementation for Codex.",
+  "description": "Lean project decomposition, planning, and test-first implementation.",
   "author": {
     "name": "Zagrosi",
     "url": "https://github.com/zagrosi-code"

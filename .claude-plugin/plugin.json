@@ -1,0 +1,13 @@
+{
+  "name": "zagrosi-forge",
+  "version": "0.2.0",
+  "description": "Lean project decomposition, planning, and test-first implementation.",
+  "author": {
+    "name": "Zagrosi",
+    "url": "https://github.com/zagrosi-code"
+  },
+  "homepage": "https://github.com/zagrosi-code/zagrosi-forge",
+  "repository": "https://github.com/zagrosi-code/zagrosi-forge",
+  "license": "MIT",
+  "keywords": ["planning", "tdd", "implementation", "code-review", "skills"]
+}

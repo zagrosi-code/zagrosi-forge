@@ -11,17 +11,18 @@ Deep mode has no word-count floor. Depth comes from evidence and resolved
 decisions; every artifact stays bounded to information needed to implement and
 verify the change. Expected output should include:
 
-- a focused `codex-plan.md` covering migration order, contracts, failure modes,
-  data integrity, rollout, and rollback
-- a separate `codex-plan-tdd.md` only when it adds material test design beyond
-  the implementation plan
-- a bounded review set under `reviews/` covering only material perspectives
+- a [canonical compact plan](../../skills/zagrosi-plan/references/plan-format.md)
+  covering migration order, contracts, failure modes, data integrity, rollout,
+  and rollback: one section for bounded work, a shared plan for multiple sections
+- test design beside its requirements, with separate artifacts only for
+  independently reused detail
+- review by the active agent, with independent perspectives for concrete risks;
+  keep findings and resolutions in the canonical plan
 - section files with concrete ownership, dependencies, tests, stop lines, and
   rollback; split sections when ownership or risk boundaries diverge
-- integration notes only when accepted, rejected, or deferred findings cannot
-  be represented clearly in the plan or review
-- strict passes for `lint-plan`, `lint-sections`, `traceability`,
-  `lint-artifact-schema`, `lint-review-integration`, and `forge-score`
+- separate integration notes only when findings need independent ownership
+- a passing `postflight --phase plan --depth deep --strict` for the planning
+  directory; diagnose any failed gate before implementation
 
 Remove repetition, narrative padding, and context already recoverable from the
 source or repository. Add detail only when its absence would change a decision,

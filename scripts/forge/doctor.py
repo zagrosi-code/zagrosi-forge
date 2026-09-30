@@ -13,12 +13,44 @@ from . import models as _models
 from . import quality as _quality
 from . import storage as _storage
 
+
+def claude_metadata_findings(plugin_root: Path) -> list[_models.Finding]:
+    findings = []
+    for name in ("plugin", "marketplace"):
+        path = plugin_root / ".claude-plugin" / f"{name}.json"
+        if not path.exists():
+            continue  # The shared required-file check reports missing metadata.
+        try:
+            metadata = _storage.load_json(path)
+            if not isinstance(metadata, dict):
+                raise ValueError("Expected a JSON object")
+        except (OSError, ValueError) as exc:
+            findings.append(_quality.finding("critical", f"invalid-claude-{name}-json", str(exc), path))
+            continue
+        expected_name = "zagrosi-forge" if name == "plugin" else "zagrosi"
+        if metadata.get("name") != expected_name:
+            findings.append(_quality.finding("high", f"claude-{name}-name", f"Claude {name} name must be {expected_name}.", path))
+        if name == "plugin":
+            if metadata.get("skills", "./skills/") not in ("./skills", "./skills/"):
+                findings.append(_quality.finding("high", "claude-skill-root", "Claude must use the shared root skills directory.", path))
+            continue
+        plugins = metadata.get("plugins")
+        entries = [item for item in plugins if isinstance(item, dict) and item.get("name") == "zagrosi-forge"] if isinstance(plugins, list) else []
+        if len(entries) != 1:
+            findings.append(_quality.finding("high", "claude-marketplace-plugin", "Claude marketplace must contain exactly one zagrosi-forge entry.", path))
+        elif entries[0].get("source") not in (".", "./"):
+            findings.append(_quality.finding("high", "claude-marketplace-source", "Claude marketplace source must be './'.", path))
+    return findings
+
+
 def doctor(args: argparse.Namespace) -> int:
     plugin_root = _storage.resolve_path(args.plugin_root) if args.plugin_root else Path(str(CLI_PATH)).resolve().parents[1]
     findings: list[_models.Finding] = []
     expected = [
         plugin_root / ".codex-plugin" / "plugin.json",
         plugin_root / ".agents" / "plugins" / "marketplace.json",
+        plugin_root / ".claude-plugin" / "plugin.json",
+        plugin_root / ".claude-plugin" / "marketplace.json",
         plugin_root / "pyproject.toml",
         plugin_root / "scripts" / "zagrosi_skills.py",
         plugin_root / "scripts" / "deep_skills.py",
@@ -26,6 +58,7 @@ def doctor(args: argparse.Namespace) -> int:
     for path in expected:
         if not path.exists():
             findings.append(_quality.finding("critical", "missing-package-file", f"Missing package file: {path}", path))
+    findings.extend(claude_metadata_findings(plugin_root))
 
     manifest_path = plugin_root / ".codex-plugin" / "plugin.json"
     manifest: dict[str, Any] = {}

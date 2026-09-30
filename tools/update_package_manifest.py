@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 
-ROOTS = {".agents", ".codex-plugin", "assets", "docs", "examples", "scripts", "skills", "tests", "tools"}
+ROOTS = {".agents", ".codex-plugin", ".claude-plugin", "assets", "docs", "examples", "scripts", "skills", "tests", "tools"}
 FILES = {"README.md", "NOTICE.md", "LICENSE", "pyproject.toml"}
 MANIFEST = ".codex-plugin/package-files.json"
 
@@ -17,7 +17,7 @@ def main() -> int:
     args = parser.parse_args()
     paths = subprocess.check_output(["git", "ls-files", "-z", "--cached"], cwd=args.root).decode().split("\0")
     members = sorted({MANIFEST, *(name for name in paths if name and (name in FILES or Path(name).parts[0] in ROOTS)
-        and not any(part.startswith(".") and part not in {".agents", ".codex-plugin"} for part in Path(name).parts)
+        and not any(part.startswith(".") and part not in {".agents", ".codex-plugin", ".claude-plugin"} for part in Path(name).parts)
         and not name.startswith("docs/development/"))})
     rendered = json.dumps(members, indent=2) + "\n"
     path = args.root / MANIFEST

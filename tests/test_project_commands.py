@@ -315,6 +315,8 @@ def test_codebase_evidence_includes_forge_surface_without_cache_noise(tmp_path: 
     assert "scripts/zagrosi_skills.py" in evidence["source_files"]
     assert "skills/zagrosi-plan/SKILL.md" in evidence["skill_files"]
     assert ".codex-plugin/plugin.json" in evidence["plugin_metadata"]
+    assert ".claude-plugin/plugin.json" in evidence["plugin_metadata"]
+    assert ".claude-plugin/marketplace.json" in evidence["plugin_metadata"]
     assert ".github/workflows/validate.yml" in evidence["ci_files"]
     assert "examples/evals/suite.json" in evidence["example_files"]
 

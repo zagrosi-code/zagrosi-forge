@@ -1,0 +1,12 @@
+{
+  "name": "zagrosi",
+  "description": "Lean engineering workflows from Zagrosi.",
+  "owner": {"name": "Zagrosi"},
+  "plugins": [
+    {
+      "name": "zagrosi-forge",
+      "source": "./",
+      "description": "Lean project decomposition, planning, and test-first implementation."
+    }
+  ]
+}
