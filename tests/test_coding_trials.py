@@ -124,8 +124,8 @@ def test_optimized_parent_environment_cannot_disable_oracle(tmp_path, monkeypatc
     assert result["oracle"]["returncode"] != 0
 
 
-def write_workflow(workspace, depth="standard"):
-    planning = workspace / ".planning"
+def write_workflow(workspace, depth="standard", *, planning=None):
+    planning = planning or workspace / ".planning"
     sections = planning / "sections"
     sections.mkdir(parents=True)
     (planning / "spec.md").write_text("REQ-1: Remove duplicate invoice calculations while preserving behavior.\n")
@@ -183,13 +183,13 @@ REQ-1: independent behavior oracle and existing/added tests pass after refactor.
     }}, "pending_sections": {}}
     state_path = implementation / "zagrosi_implement_state.json"
     state_path.write_text(json.dumps(state))
-    verify_integration(workspace)
+    verify_integration(workspace, planning=planning)
     return state_path
 
 
-def verify_integration(workspace):
+def verify_integration(workspace, *, planning=None):
     result = trials.execute([sys.executable, str(ROOT / "scripts/zagrosi_skills.py"), "implement-verify",
-                             "--planning-dir", str(workspace / ".planning"), "--target-dir", str(workspace),
+                             "--planning-dir", str(planning or workspace / ".planning"), "--target-dir", str(workspace),
                              "--", sys.executable, "-m", "unittest", "discover", "-s", "tests"], workspace)
     assert result["returncode"] == 0, result
 

@@ -139,13 +139,36 @@ def _text(value) -> bool:
     return isinstance(value, str) and value.strip().lower() not in {"", "none", "pending", "todo", "tbd", "n/a"}
 
 
+def planning_root(workspace: Path) -> Path:
+    """Find the single plan permitted beneath .planning without selecting among rivals."""
+    root = workspace / ".planning"
+    if root.is_symlink() or not root.resolve().is_relative_to(workspace.resolve()):
+        raise ValueError("Trial planning must stay within the workspace without a root symlink")
+    candidates = set()
+    for pattern in ("codex-plan.md", "claude-plan.md", "sections/index.md"):
+        for marker in root.rglob(pattern):
+            if marker.is_symlink() or not marker.resolve().is_relative_to(root.resolve()):
+                raise ValueError("Trial plan markers must be regular files inside .planning")
+            if marker.is_file():
+                candidates.add(marker.parent.parent if pattern.startswith("sections/") else marker.parent)
+    if len(candidates) > 1:
+        raise ValueError("Trial contains multiple planning roots; cannot choose a completion result")
+    return next(iter(candidates), root)
+
+
 def workflow_summary(plugin_root: Path, workspace: Path, depth: str) -> int:
     """Require admitted planning at the trial depth before completed implementation."""
+    try:
+        planning = planning_root(workspace)
+    except ValueError as exc:
+        print(json.dumps({"success": False, "sections_recorded_complete": False,
+                          "admission_success": False, "reasons": [str(exc)]}))
+        return 1
     spec = importlib.util.spec_from_file_location("_trial_workflow_launcher", plugin_root / "scripts/zagrosi_skills.py")
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
-    argv = ["postflight", "--phase", "implement", "--planning-dir", str(workspace / ".planning"),
-            "--sections-dir", str(workspace / ".planning/sections"), "--target-dir", str(workspace),
+    argv = ["postflight", "--phase", "implement", "--planning-dir", str(planning),
+            "--sections-dir", str(planning / "sections"), "--target-dir", str(workspace),
             "--depth", depth]
     try:
         runtime = launcher.load_runtime()
@@ -154,7 +177,7 @@ def workflow_summary(plugin_root: Path, workspace: Path, depth: str) -> int:
     output = importlib.import_module(runtime.MODULE_NAMES["forge/output.py"])
     artifacts = importlib.import_module(runtime.MODULE_NAMES["forge/artifacts.py"])
     original_print = output.print_json
-    resolved_depth = artifacts.planning_depth(workspace / ".planning")
+    resolved_depth = artifacts.planning_depth(planning)
     if ("lean" if resolved_depth == "fast" else resolved_depth) != depth:
         return original_print({"success": False, "sections_recorded_complete": False,
                                "admission_success": False, "selected_depth": depth,
@@ -201,7 +224,8 @@ def workflow_summary(plugin_root: Path, workspace: Path, depth: str) -> int:
                 break
             if phase == "plan":
                 admitted = True
-        report.update(admission_success=admitted, selected_depth=depth, planning_depth=resolved_depth)
+        report.update(admission_success=admitted, selected_depth=depth, planning_depth=resolved_depth,
+                      planning_dir=str(planning))
         return original_print(report, 0 if report.get("success") is True else 1)
     finally:
         output.print_json = original_print

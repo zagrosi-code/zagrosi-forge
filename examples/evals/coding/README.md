@@ -49,9 +49,9 @@ support review; they do not establish readability or reward code golf.
 Results keep three decisions separate:
 
 - `behavior`: the independent oracle completed and existing/added tests passed.
-- `workflow`: Forge admits the actual `.planning` plan with strict checks at the
+- `workflow`: Forge admits the unique plan at or beneath `.planning` with strict checks at the
   selected trial depth, then verifies implementation completion records. A narrative
-  "done" note is insufficient.
+  "done" note is insufficient; competing planning roots and escaping links fail.
 - `cleanup`: for ordinary summary, import preview, cleanup, godfile and TypeScript access cases, implementation code must change, and an
   independent reviewer must confirm useful cleanup with concrete changes and
   before/after regression evidence. Existing tests and the independent oracle can
@@ -275,3 +275,51 @@ python3 tools/coding_trials.py run /tmp/forge-cross-host --case resume \
 If the first process finishes before interruption or cleanup is unconfirmed,
 the interruption trial fails explicitly. A successful helper-process recovery
 test does not claim that either model used a skill correctly.
+
+## Native skill acceptance matrix
+
+Use a frozen evaluator checkout and plugin snapshot. This separate harness uses
+the existing first-task example: twelve host/depth/directness workflows, each
+with planning-only, an implementation follow-up interrupted at a new red
+checkpoint, and fresh continuation; plus one unsupported request per host.
+It independently checks the original failing test, unchanged requirements/tests,
+saved input hashes, final behavior, admitted records and captured verification.
+These are workflow checks, not performance or general code-quality comparisons.
+
+```bash
+# No model calls: native staging/discovery, fixed inputs and evaluator hashes.
+python /frozen/evaluator/tools/native_workflow_trials.py prepare /saved/native-matrix \
+  --plugin-root /frozen/plugin --codex-model YOUR_CODEX_MODEL --effort medium
+# Explicit model-call opt-in. Prove one row before starting the host batch.
+python /frozen/evaluator/tools/native_workflow_trials.py run /saved/native-matrix \
+  --case codex-lean-indirect --resume-host codex
+python /frozen/evaluator/tools/native_workflow_trials.py run /saved/native-matrix \
+  --host codex --resume-host codex
+python /frozen/evaluator/tools/native_workflow_trials.py report /saved/native-matrix
+```
+
+Calls and whole rows have separate deadlines. Each attempt retains its prompt,
+native events, CLI version, result and reported usage. A host batch stops on a
+failure; failed attempts are never overwritten. Diagnose shared defects before
+preparing a new matrix. Missing authentication is blocked, not passed or failed.
+Codex inherits native settings unchanged and uses matching per-process plugin
+overrides for discovery/execution. Claude uses session-only `--plugin-dir`.
+Authentication stays with each CLI; the harness never copies credential stores.
+
+`--resume-host codex` permits Codex-only acceptance while preserving direct rows'
+cross-host checks as pending. Keep the matrix, frozen evaluator/plugin trees and
+the unique `installation.temporary_cache` directory recorded in `matrix.json`.
+The harness saves each exact interrupted workspace before continuation. After
+native Claude sign-in, use the same frozen evaluator and an explicit model:
+
+```bash
+python /frozen/evaluator/tools/native_workflow_trials.py resume /saved/native-matrix \
+  --case codex-lean-direct --claude-model YOUR_CLAUDE_MODEL
+python /frozen/evaluator/tools/native_workflow_trials.py run /saved/native-matrix \
+  --host claude --claude-model YOUR_CLAUDE_MODEL
+```
+
+Repeat `resume` for the standard/deep direct rows. It restores the verified red
+checkpoint at its original path and archives the prior completed candidate.
+After all desired continuations, only the recorded UUID cache namespace is
+disposable; user settings and other installed plugin directories remain separate.

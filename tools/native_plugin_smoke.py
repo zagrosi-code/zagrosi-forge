@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 
 def run(command, cwd, env, *, timeout=60):
@@ -23,8 +24,8 @@ def run(command, cwd, env, *, timeout=60):
     return result.stdout
 
 
-def codex_skills(executable, cwd, env):
-    process = subprocess.Popen([executable, "app-server"], cwd=cwd, env=env, text=True,
+def codex_skills(executable, cwd, env, *, flags=(), plugin_id="zagrosi-forge@zagrosi"):
+    process = subprocess.Popen([executable, "app-server", *flags], cwd=cwd, env=env, text=True,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     events = queue.Queue()
 
@@ -53,7 +54,7 @@ def codex_skills(executable, cwd, env):
                                "capabilities": {"experimentalApi": True}})
         rows = call(2, "skills/list", {"cwds": [str(cwd)], "forceReload": True})["data"]
         return [skill for row in rows for skill in row["skills"]
-                if skill.get("pluginId") == "zagrosi-forge@zagrosi"]
+                if skill.get("pluginId") == plugin_id]
     finally:
         process.stdin.close()
         try:
@@ -61,6 +62,45 @@ def codex_skills(executable, cwd, env):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+
+
+def live_flags(installation):
+    name = installation["marketplace_name"]
+    # CLI dotted keys are literal segments: quotes around the identity become part of the key.
+    return ["-c", f"marketplaces.{name}.source_type=\"local\"", "-c",
+            f"marketplaces.{name}.source={json.dumps(installation['marketplace'])}",
+            "-c", f"plugins.zagrosi-forge@{name}.enabled=true", "-c", "plugins.zagrosi-forge@zagrosi.enabled=false"]
+
+
+def prepare_live(root: Path, destination: Path, executable="codex", *, codex_home=None):
+    """Stage a unique native cache entry; never read or copy auth or change user settings."""
+    destination.mkdir(parents=True, exist_ok=False)
+    marketplace, settings = destination / "marketplace", destination / "settings"
+    source = marketplace / "plugin"
+    members = json.loads((root / ".codex-plugin/package-files.json").read_text())
+    for name in members:
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / name, path)
+    namespace = "forge-native-" + uuid.uuid4().hex
+    catalog = marketplace / ".agents/plugins/marketplace.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text(json.dumps({"name": namespace, "plugins": [{"name": "zagrosi-forge",
+        "source": {"source": "local", "path": "./plugin"}, "category": "Developer tools",
+        "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}}]}))
+    settings.mkdir()
+    env = {**os.environ, "CODEX_HOME": str(settings)}
+    run([executable, "plugin", "marketplace", "add", str(marketplace)], destination, env)
+    result = json.loads(run([executable, "plugin", "add", "zagrosi-forge@" + namespace, "--json"], destination, env))
+    installed = Path(result["installedPath"])
+    auth_home = Path(codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    cache = auth_home / "plugins/cache" / namespace
+    shutil.copytree(settings / "plugins/cache" / namespace, cache)
+    loaded = cache / installed.relative_to(settings / "plugins/cache" / namespace)
+    if mismatches(root, loaded, members):
+        raise ValueError("Native cache does not match the requested package")
+    return {"marketplace_name": namespace, "marketplace": str(marketplace), "codex_plugin": str(loaded),
+            "claude_plugin": str(source), "temporary_cache": str(cache), "settings": "unchanged", "auth": "native"}
 
 
 def mismatches(source: Path, installed: Path, members: list[str]) -> list[str]:
