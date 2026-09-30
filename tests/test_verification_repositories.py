@@ -1,6 +1,7 @@
 """Verification follows real repository boundaries and observes their source changes."""
 
 from pathlib import Path
+import os
 import subprocess
 
 import pytest
@@ -9,8 +10,17 @@ from test_verification_receipts import workspace
 from test_verification_symlinks import symlink, verify
 
 
-def git(path, *args):
-    return subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, timeout=10)
+def git(path, *args, input=None):
+    return subprocess.run(["git", "-C", str(path), *args], input=input, check=True, capture_output=True, timeout=10)
+
+
+def another_commit(nested):
+    first = git(nested, "rev-parse", "HEAD").stdout.decode().strip()
+    git(nested, "-c", "user.name=Forge", "-c", "user.email=forge@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "same source")
+    second = git(nested, "rev-parse", "HEAD").stdout.decode().strip()
+    git(nested, "checkout", "-q", first)
+    return first, second
 
 
 @pytest.fixture(params=["submodule", "embedded"])
@@ -97,6 +107,112 @@ def test_deinitialized_submodule_still_binds_ordinary_source(repository, capsys)
     assert not forge.verification.integration_report(planning, target)["success"]
 
 
+@pytest.mark.parametrize("repository", ["submodule"], indirect=True)
+@pytest.mark.parametrize("state", ["initialized", "deinitialized", "missing"])
+def test_staged_gitlink_revision_invalidates_receipt_with_unchanged_worktree(repository, capsys, state):
+    workspace, nested = repository
+    forge, planning, target = workspace
+    first, second = another_commit(nested)
+    if state != "initialized":
+        git(target, "submodule", "deinit", "-f", "--", "services/vendor")
+    if state == "missing":
+        nested.rmdir()
+    verify(workspace, capsys)
+    git(target, "update-index", "--cacheinfo", f"160000,{second},services/vendor")
+    if state == "initialized":
+        assert git(nested, "rev-parse", "HEAD").stdout.decode().strip() == first
+        assert (nested / "module.py").read_text() == "value = 1\n"
+    assert not forge.verification.integration_report(planning, target)["success"]
+
+
+@pytest.mark.parametrize("repository", ["submodule"], indirect=True)
+def test_staged_nested_gitlink_revision_invalidates_receipt(repository, capsys, tmp_path):
+    workspace, nested = repository
+    forge, planning, target = workspace
+    git(nested, "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        str(tmp_path / "vendor-source"), "deeper")
+    child = nested / "deeper"
+    first, second = another_commit(child)
+    verify(workspace, capsys)
+    git(nested, "update-index", "--cacheinfo", f"160000,{second},deeper")
+    assert git(child, "rev-parse", "HEAD").stdout.decode().strip() == first
+    assert not forge.verification.integration_report(planning, target)["success"]
+
+
+@pytest.mark.parametrize("repository,change", [("embedded", "add"), ("submodule", "remove"),
+                                             ("submodule", "mode")], indirect=["repository"])
+def test_staged_gitlink_type_changes_invalidate_receipt(repository, capsys, change):
+    workspace, _ = repository
+    forge, planning, target = workspace
+    verify(workspace, capsys)
+    if change == "add":
+        git(target, "add", "services/vendor")
+    elif change == "remove":
+        git(target, "update-index", "--force-remove", "services/vendor")
+    else:
+        blob = git(target, "hash-object", "-w", "--stdin", input=b"replacement file\n").stdout.decode().strip()
+        git(target, "update-index", "--cacheinfo", f"100644,{blob},services/vendor")
+    assert not forge.verification.integration_report(planning, target)["success"]
+
+
+@pytest.mark.parametrize("repository", ["submodule"], indirect=True)
+@pytest.mark.parametrize("change", ["object", "stage", "resolve"])
+def test_unmerged_gitlink_stages_remain_bound(repository, capsys, change, monkeypatch):
+    workspace, nested = repository
+    forge, planning, target = workspace
+    first, second = another_commit(nested)
+
+    def stages(entries):
+        git(target, "update-index", "--force-remove", "services/vendor")
+        data = "".join(f"160000 {revision} {stage}\tservices/vendor\0" for stage, revision in entries)
+        git(target, "update-index", "-z", "--index-info", input=data.encode())
+
+    stages([(1, first), (2, first), (3, first)])
+    execute = forge.mutable_inputs.subprocess.run
+    inventories = []
+
+    def inventory(argv, *args, **kwargs):
+        if "ls-files" in argv:
+            inventories.append(kwargs["cwd"])
+        return execute(argv, *args, **kwargs)
+
+    monkeypatch.setattr(forge.mutable_inputs.subprocess, "run", inventory)
+    verify(workspace, capsys)
+    # A before/after snapshot needs one inventory per repository, regardless of stages.
+    assert inventories.count(target) == inventories.count(nested) == 2
+    stages({"object": [(1, first), (2, first), (3, second)],
+            "stage": [(1, first), (3, first)], "resolve": [(0, first)]}[change])
+    assert not forge.verification.integration_report(planning, target)["success"]
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+@pytest.mark.skipif(os.name == "nt", reason="Windows filenames cannot contain tabs or newlines")
+def test_metadata_looking_filenames_remain_source_files(workspace, capsys, tracked):
+    forge, planning, target = workspace
+    git(target, "init", "-q")
+    path = target / ("160000 " + "a" * 40 + " 0\tordinary\nsource.py")
+    path.write_text("value = 1\n")
+    if tracked:
+        git(target, "add", ".")
+    verify(workspace, capsys)
+    path.write_text("value = 2\n")
+    assert not forge.verification.integration_report(planning, target)["success"]
+
+
+@pytest.mark.parametrize("length", [40, 64])
+def test_tagged_inventory_distinguishes_gitlinks_from_metadata_looking_names(workspace, monkeypatch, length):
+    forge, _, target = workspace
+    (target / ".git").mkdir()
+    metadata = "160000 " + "a" * length + " 3"
+    unusual = metadata + "\tordinary\nsource.py"
+    data = f"? {unusual}\0M {metadata}\tvendor\0".encode()
+    monkeypatch.setattr(forge.mutable_inputs.subprocess, "run",
+                        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, data))
+    inventory = forge.mutable_inputs.source_paths(target)
+    assert inventory[target / unusual] == []
+    assert inventory[target / "vendor"] == [metadata]
+
+
 def test_nested_directory_links_bind_identity_without_traversing(repository, capsys, tmp_path, monkeypatch):
     workspace, nested = repository
     forge, planning, target = workspace
@@ -139,7 +255,7 @@ def test_git_boundaries_cannot_escape_or_recurse_without_progress(workspace, tmp
     def inventory(argv, *, cwd, **kwargs):
         calls.append(cwd)
         assert len(calls) == 1, "Invalid boundaries must be rejected before traversal"
-        return subprocess.CompletedProcess(argv, 0, name.encode() + b"\0")
+        return subprocess.CompletedProcess(argv, 0, b"? " + name.encode() + b"\0")
 
     (target / ".git").mkdir()
     monkeypatch.setattr(forge.mutable_inputs.subprocess, "run", inventory)
@@ -161,7 +277,7 @@ def test_resolved_directory_boundaries_cannot_escape_or_recurse_to_root(workspac
     def inventory(argv, *, cwd, **kwargs):
         calls.append(cwd)
         assert len(calls) == 1, "Resolved boundaries must be checked before recursion"
-        return subprocess.CompletedProcess(argv, 0, b"boundary\0")
+        return subprocess.CompletedProcess(argv, 0, b"? boundary\0")
 
     monkeypatch.setattr(Path, "resolve", lambda path, *args, **kwargs:
                         resolved if path == boundary else resolve(path, *args, **kwargs))

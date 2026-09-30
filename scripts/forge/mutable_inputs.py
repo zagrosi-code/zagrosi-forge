@@ -122,10 +122,10 @@ def filesystem_paths(target_dir: Path) -> list[Path]:
     return paths
 
 
-def source_paths(target_dir: Path) -> list[Path]:
-    """Include nested Git inventories and their boundaries, never follow directory links."""
+def source_paths(target_dir: Path) -> dict[Path, list[str]]:
+    """Map source paths to staged gitlink identities, never follow directory links."""
     try:
-        result = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
+        result = subprocess.run(["git", "ls-files", "-z", "-t", "--stage", "--cached", "--others", "--exclude-standard", "--", "."],
                                 cwd=target_dir, capture_output=True, timeout=10)
         if result.returncode == 0 and not (target_dir / ".git").exists():
             # An ignored nested workspace can return success with no source paths.
@@ -137,22 +137,38 @@ def source_paths(target_dir: Path) -> list[Path]:
     except FileNotFoundError:
         result = None
     if result is not None and result.returncode == 0:
-        paths = []
-        for name in filter(None, result.stdout.split(b"\0")):
+        paths = {}
+        for entry in filter(None, result.stdout.split(b"\0")):
+            tag, separator, name = entry.partition(b" ")
+            metadata = None
+            if not separator or tag not in {b"?", b"H", b"S", b"M"}:
+                raise ValueError("Invalid tagged Git source inventory.")
+            if tag != b"?":
+                header, separator, name = name.partition(b"\t")
+                fields = header.split()
+                if not separator or len(fields) != 3:
+                    raise ValueError("Invalid staged Git source inventory.")
+                if fields[0] == b"160000":
+                    metadata = header.decode("ascii")
             relative = Path(os.fsdecode(name))
             if not relative.parts or relative.anchor or ".." in relative.parts or any(
                 (target_dir / parent).is_symlink() for parent in relative.parents if parent.parts
             ):
                 raise ValueError(f"Observed repository boundary must stay within the target directory: {relative}")
             path = target_dir / relative
-            paths.append(path)
+            paths.setdefault(path, [])
+            if metadata:
+                paths[path].append(metadata)
+        for path in list(paths):
             if not path.is_symlink() and path.is_dir():
                 resolved = path.resolve()
                 if resolved == target_dir or not resolved.is_relative_to(target_dir):
-                    raise ValueError(f"Observed repository boundary must stay within the target directory: {relative}")
-                paths.extend(source_paths(path) if (path / ".git").exists() else filesystem_paths(path))
+                    raise ValueError(f"Observed repository boundary must stay within the target directory: {path}")
+                nested = source_paths(path) if (path / ".git").exists() else {child: [] for child in filesystem_paths(path)}
+                for child, metadata in nested.items():
+                    paths.setdefault(child, []).extend(metadata)
     else:
-        paths = filesystem_paths(target_dir)
+        paths = {path: [] for path in filesystem_paths(target_dir)}
     return paths
 
 
@@ -207,6 +223,9 @@ def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | N
         path = target_dir / name
         identities[name] = {"content": content, "mode": stat.S_IMODE(path.lstat().st_mode) if content is not None else None,
                             "link": os.readlink(path) if path.is_symlink() else None}
+    for name, identity in identities.items():
+        if metadata := paths[target_dir / name]:
+            identity["gitlink"] = sorted(metadata)
     return {"version": 1, "planning_dir": str(planning_dir), "target_dir": str(target_dir),
             "section": section, "contract_digest": digest(contracts), "source_digest": digest(identities),
             "source_file_count": len(identities)}
