@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import signal
 import sys
 from types import ModuleType
 
@@ -171,19 +172,29 @@ def test_returned_record_command_preserves_paths_depth_and_evidence(forge, tmp_p
 
 @pytest.mark.parametrize("operation", ["implement-setup", "implement-record-section"])
 @pytest.mark.parametrize("override", [None, "solo"])
-def test_mutable_profile_resume_preserves_saved_value_and_allows_override(forge, workspace, capsys, monkeypatch, operation, override):
+@pytest.mark.parametrize("portable", [False, True])
+def test_mutable_profile_resume_preserves_saved_value_and_allows_override(forge, workspace, capsys, monkeypatch, operation, override, portable):
+    if portable:
+        monkeypatch.delattr(signal, "setitimer", raising=False)
     root, planning = workspace
     common = ["--sections-dir", str(planning / "sections"), "--target-dir", str(root), "--flight", "off"]
     code, result = invoke(forge, capsys, "implement-setup", *common, "--profile", "enterprise")
     assert code == 0, result
     checked_profiles = []
-    validate = forge.validation.plan_artifacts_payload
+    run_batch = forge.gates.run_internal_gate_batch
+    execute = forge.child_process.execute
+    workers = []
 
-    def checked(path, args):
-        checked_profiles.append(args.profile)
-        return validate(path, args)
+    def checked(jobs):
+        checked_profiles.extend(argv[argv.index("--profile") + 1] for _, argv, _ in jobs if "--profile" in argv)
+        return run_batch(jobs)
 
-    monkeypatch.setattr(forge.validation, "plan_artifacts_payload", checked)
+    def worker(argv, *args, **kwargs):
+        workers.append(argv)
+        return execute(argv, *args, **kwargs)
+
+    monkeypatch.setattr(forge.gates, "run_internal_gate_batch", checked)
+    monkeypatch.setattr(forge.child_process, "execute", worker)
     arguments = ["--profile", override] if override else []
     if operation == "implement-record-section":
         arguments += ["--section", SECTION, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest passed"]
@@ -191,6 +202,8 @@ def test_mutable_profile_resume_preserves_saved_value_and_allows_override(forge,
     assert code == 0, result
     expected = override or "enterprise"
     assert checked_profiles and all(profile == expected for profile in checked_profiles)
+    if portable:
+        assert workers and all(argv[2] == "gate-batch" for argv in workers)
     command = result["commands"]["postflight"]
     assert command[command.index("--profile") + 1] == expected
     if operation == "implement-setup":
