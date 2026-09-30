@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/icon.svg" alt="Zagrosi Forge icon" width="96" height="96" />
   <h1>Zagrosi Forge</h1>
-  <p><strong>Lean workflows for Codex and Claude Code: project decomposition, planning, and test-first implementation.</strong></p>
+  <p><strong>Lean project decomposition, planning, and test-first implementation for Codex and Claude Code.</strong></p>
   <p>
     <a href="https://github.com/zagrosi-code/zagrosi-forge"><img alt="Codex plugin" src="https://img.shields.io/badge/Codex-plugin-0F766E?style=flat-square" /></a>
     <a href="https://code.claude.com/docs/en/plugins"><img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude_Code-plugin-D97757?style=flat-square" /></a>
@@ -22,14 +22,13 @@ Lean mode is default: fewer files, shorter prompts, one setup, one final gate.
 | `standard` | Explicit opt-in for wider research, traceability, or coordination. |
 | `deep` | Explicit opt-in for high-risk or architecture-heavy work. |
 
-Depth changes investigation and review rigor. Every mode uses compact contracts
-with stable requirement IDs, file ownership, acceptance, and verification.
-No minimum prose quotas or duplicate research, TDD, decision, and review files.
+Depth changes research and review rigor. Compact contracts retain requirement IDs,
+ownership, acceptance, and verification. No minimum prose quotas or duplicate ledgers.
 
 ## Install
 
-Requires Python 3.11+ and plugin support in your host. Both hosts use the same
-skills and runtime, including `lean`, `standard`, `deep`, and detached workflows.
+Requires Python 3.11+ and host plugin support. Both hosts share all skills,
+depths, and detached workflows.
 
 ### Claude Code
 
@@ -38,11 +37,11 @@ claude plugin marketplace add zagrosi-code/zagrosi-forge
 claude plugin install zagrosi-forge@zagrosi
 ```
 
-Start a new Claude Code session after installation. Update with
+Restart after installation. Update with
 `claude plugin marketplace update zagrosi`, then
 `claude plugin update zagrosi-forge@zagrosi`.
 
-To try a local checkout before installing:
+Try a local checkout:
 
 ```bash
 claude --plugin-dir "/absolute/path/to/zagrosi-forge"
@@ -56,14 +55,13 @@ cd zagrosi-forge
 python3 scripts/zagrosi_skills.py install --pretty
 ```
 
-Restart Codex after success. Preview with `install --dry-run --pretty`; compare
-the installed cache with `update-check --pretty`; refresh it with
-`self-update --pretty`.
+Restart Codex. Preview: `install --dry-run --pretty`; compare:
+`update-check --pretty`; refresh: `self-update --pretty`.
 
 Updates exclude development artifacts and preserve a recoverable installation.
 Cache cleanup does not shrink the repository.
 
-Codex marketplace install is also supported:
+Or use Codex's marketplace:
 
 ```bash
 codex plugin marketplace add zagrosi-code/zagrosi-forge
@@ -90,8 +88,6 @@ Use $zagrosi-forge:zagrosi-implement on @planning/01-auth/sections/
 
 <img src="assets/readme-workflow.svg" alt="Zagrosi Forge artifact workflow" width="100%" />
 
-Output stays small at every depth:
-
 | Workflow | Required output |
 |----------|-----------------|
 | Project | `project-manifest.md` and child `spec.md` files |
@@ -110,73 +106,64 @@ python3 scripts/zagrosi_skills.py postflight \
 ```
 
 Project uses `project-setup`; implementation uses `implement-setup`.
-Setup returns applicable command arguments. Replace evidence placeholders with
-actual results; `status --path PATH --pretty` resumes work.
+Follow returned command arguments with actual evidence.
+`status --path PATH --pretty` resumes work;
 `commands --pretty` lists all commands.
 
-Use the explicit [compact-plan format](skills/zagrosi-plan/references/plan-format.md).
-Map source, behavior, expected results and verification once per requirement.
-Legacy plans and reviews remain supported. Use `plan-setup --for-detached` for
-detached frozen runs, which retain physical contracts and separate records.
+The [compact-plan format](skills/zagrosi-plan/references/plan-format.md) maps source,
+behavior, expected results and verification once per requirement.
+`plan-setup --for-detached` retains physical contracts and separate records.
 
 ## Context and Performance
 
-Context preserves complete sections and linked decisions/risks, selects relevant
-requirements, and identifies omissions. `context-brief` and `implementation-packet`
-default to 2,000 words; adjust `--max-words` when necessary. Broken links and
-oversized contracts fail explicitly. Setup and successful section recording
-include the next packet. A saved record remains saved if its successor needs repair.
+Context preserves complete sections, linked decisions/risks, relevant requirements,
+and explicit omissions. `context-brief` and `implementation-packet` default to
+2,000 words (`--max-words`). Broken links and oversized contracts fail explicitly.
+Setup and recording include the next packet; successor failures preserve saved records.
 
-Failed flights return unique diagnostics and a path to the complete report.
-Use `--full-output` for the nested machine payload; no findings are discarded.
+Failed flights link complete reports with unique diagnostics.
+`--full-output` returns the nested payload; no findings are discarded.
 
-Saved progress identifies the next action; changed inputs require fresh checks.
-Records bind requirements and dependencies. Contract edits reopen completion;
-code drift requires integration checks. Legacy records remain readable, labeled unbound.
+Progress identifies the next action. Records bind requirements and dependencies;
+contract edits reopen completion, code drift requires integration checks.
+Legacy records remain readable, labeled unbound.
 
 The shared [engineering standard](skills/zagrosi-implement/references/engineering.md)
-draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse
-code, prefer clear names and direct flow. Repair encountered duplication and mixed
-responsibilities; update ownership before broader edits. Characterize weak coverage,
-run targeted regression checks, then the full suite at integration.
+draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse code,
+prefer clear names and direct flow. Repair encountered duplication and mixed responsibilities;
+update ownership. Characterize behavior, run targeted regression checks, then the full suite.
 
-On macOS/Linux, known read-only gates avoid repeated process startup; other gates
-retain process isolation and timeouts. Compare stable local checkouts:
+macOS/Linux read-only gates avoid repeated process startup; other gates retain
+isolation and timeouts. Compare checkouts:
 
 ```bash
 python3 tools/benchmark_forge.py \
   --original-root /path/to/main --baseline-root /path/to/earlier-snapshot --runs 5
 ```
 
-Benchmarks measure helper latency, context size and modeled reference loads on
-identical fixtures across depths. See the
-[recorded comparison](examples/evals/performance.json).
+Benchmarks measure helper latency, context size and modeled reference loads across
+depths on identical fixtures: [recorded comparison](examples/evals/performance.json).
 
-[Coding trials](examples/evals/coding/README.md) compare complete tasks, retaining
-failures, timings and available usage. Verdicts separate behavior, workflow and
-independent cleanup review, bound to candidate, baseline, plugin and evaluator.
+[Coding trials](examples/evals/coding/README.md) retain failures, timings and usage.
+Behavior, workflow and independent cleanup verdicts bind candidate, baseline, plugin and evaluator.
 
 ## Runtime
 
-The CLI imports modules on demand. SHA-256 manifests bind runtime/test sources;
-verification compiles those exact bytes without bytecode caches. Detached runs
-reverify sources, ownership, locks and immutable inputs in isolated processes.
-Checks reuse unchanged analysis within one command. Mutable writes are serialized
-and atomic. Privileged policy uses a source-bound adapter with frozen checks.
+The CLI loads modules on demand. SHA-256 binds runtime/test sources; verification
+compiles those exact bytes without bytecode caches. Detached processes reverify
+sources, ownership, locks and frozen inputs. Analysis is reused within commands;
+writes are serialized and atomic. Privileged policy uses a source-bound adapter.
 
-The Codex installer copies only `.codex-plugin/package-files.json` members;
-undeclared local files stay out. Its configuration updates preserve unrelated
-values, publish atomically under a lock, and preview only Forge-owned settings.
-Claude Code manages its own marketplace and plugin installation. Forge adds no
-hooks, MCP servers, or background processes to either host.
+Codex installs only `.codex-plugin/package-files.json` members, preserving unrelated
+settings with locked, atomic updates. Claude Code manages its installation.
+Forge adds no hooks, MCP servers, or background processes.
 
 ## Compatibility
 
 `fast` remains a compatibility alias for `lean`. Existing `zagrosi-*`,
-`deep-*`, `DEEP_META`, and migrated `claude-*` workflows remain accepted. New
-work should use the names above. Reviews use the active agent; no second model
-CLI is required. Existing `codex_review` configuration remains accepted as an
-alias for `agent_review`. Migrate recognized old artifacts with:
+`deep-*`, `DEEP_META`, and migrated `claude-*` workflows remain accepted.
+Reviews use the active agent; `codex_review` aliases `agent_review`, without
+requiring another model CLI. Migrate old artifacts:
 
 ```bash
 python3 scripts/zagrosi_skills.py migrate --planning-dir planning/01-auth
