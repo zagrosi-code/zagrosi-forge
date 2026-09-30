@@ -257,3 +257,45 @@ def test_publication_rejects_same_size_rewrite_with_restored_timestamps(installe
         owner.publish_config(config, original, updated)
     assert config.read_bytes() == b'model = "bravo"\n'
     assert not list(tmp_path.glob("config.toml.bak-*"))
+
+
+@pytest.mark.parametrize("blocked_seconds", [7, 31])
+def test_install_waits_for_slow_concurrent_publication(installer, tmp_path, monkeypatch, capsys, blocked_seconds):
+    import argparse
+    import errno
+    from types import SimpleNamespace
+
+    # Advance only the lock's clock: a slow package publication must not turn a
+    # second install into an unsafe-configuration error after the old five seconds.
+    elapsed = [0.0]
+    monkeypatch.setattr(installer._storage, "time", SimpleNamespace(
+        monotonic=lambda: elapsed[0], sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)))
+    if os.name == "nt":
+        import msvcrt
+        module, name, acquire = msvcrt, "locking", msvcrt.LK_NBLCK
+    else:
+        import fcntl
+        module, name, acquire = fcntl, "flock", fcntl.LOCK_EX | fcntl.LOCK_NB
+    original_lock = getattr(module, name)
+
+    def busy_until_copy_finishes(fd, operation, *rest):
+        if operation == acquire and elapsed[0] < blocked_seconds:
+            raise OSError(errno.EAGAIN, "Simulated concurrent package copy")
+        return original_lock(fd, operation, *rest)
+
+    monkeypatch.setattr(module, name, busy_until_copy_finishes)
+    config = tmp_path / "config.toml"
+    original = b'# user-owned bytes\nsecret = "SYNTHETIC_CONFIG_CANARY"\n'
+    config.write_bytes(original)
+    options = argparse.Namespace(plugin_root=str(ROOT), config=str(config), command="install",
+                                 verify_codex=False, no_verify_codex=True, dry_run=False, no_backup=False)
+    assert installer.install_codex(options) == (0 if blocked_seconds < 30 else 1)
+    output = capsys.readouterr().out
+    assert "SYNTHETIC_CONFIG_CANARY" not in output
+    if blocked_seconds > 30:
+        assert "retry when it finishes" in json.loads(output)["error"]
+        assert elapsed[0] >= 30 and config.read_bytes() == original
+        assert not list(tmp_path.glob("config.toml.bak-*"))
+        return
+    assert json.loads(output)["success"]
+    assert elapsed[0] >= 7 and config.read_bytes().startswith(original)

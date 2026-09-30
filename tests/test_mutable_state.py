@@ -19,7 +19,7 @@ def forge():
 
 def record(planning, section=SECTION, *args):
     return run_cmd("implement-record-section", "--sections-dir", str(planning / "sections"),
-                   "--section", section, "--review-status", "pass", "--verification", "pytest -q",
+                   "--section", section, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q",
                    "--flight", "off", *args)
 
 
@@ -49,9 +49,18 @@ def test_changed_contract_reopens_completion(forge, tmp_path):
 
 
 def test_unrelated_requirements_do_not_invalidate_completion(forge, tmp_path):
-    planning = make_plan(tmp_path / "plan")
+    from test_resume_guidance import documented_detached_plan
+
+    planning = documented_detached_plan(tmp_path / "plan", "lean")
     spec = planning / "spec.md"
     spec.write_text(spec.read_text() + "\nREQ-002: Unrelated export.\n")
+    plan = planning / "codex-plan.md"
+    plan.write_text(plan.read_text() + "\nREQ-002: Unrelated export, verified by `test_export`.\n")
+    index = planning / "sections/index.md"
+    second = "section-02-export"
+    index.write_text(index.read_text().replace("END_MANIFEST", second + "\nEND_MANIFEST"))
+    section = planning / "sections" / f"{SECTION}.md"
+    (section.parent / f"{second}.md").write_text(section.read_text().replace(SECTION, second).replace("REQ-001", "REQ-002").replace("labels", "exports").replace("test_trim_edges", "test_export"))
     record(planning)
     spec.write_text(spec.read_text().replace("Unrelated export", "Unrelated pagination"))
     assert forge.state.completed_sections(planning) == {SECTION}
@@ -134,8 +143,8 @@ def test_code_observations_change_without_revoking_completed_contract(forge, tmp
 def test_legacy_records_explicitly_remain_unbound(forge, tmp_path):
     planning = make_plan(tmp_path / "plan")
     state = {"completed_sections": {SECTION: {"review_status": "pass", "verification": ["pytest -q"]}}}
-    assert forge.state.completed_sections(planning, state) == {SECTION}
-    assert forge.state.implementation_recording_status(planning, state)["legacy_unbound_sections"] == [SECTION]
+    assert forge.state.completed_sections(planning, state) == set()
+    assert forge.state.implementation_recording_status(planning, state)["verification_sources"] == {SECTION: "legacy_unknown"}
 
 
 def test_failed_atomic_write_preserves_existing_state(forge, tmp_path, monkeypatch):
@@ -192,7 +201,7 @@ def slow_read(path):
 forge.state.load_implementation_state = slow_read
 raise SystemExit(forge.entrypoint.main([
     "implement-record-section", "--sections-dir", sys.argv[3], "--section", sys.argv[4],
-    "--review-status", "pass", "--verification", "pytest -q", "--flight", "off",
+    "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off",
 ]))
 ''')
     processes = [subprocess.Popen([sys.executable, str(worker), str(ROOT / "tests"),

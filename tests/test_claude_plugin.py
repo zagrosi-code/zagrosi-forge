@@ -3,12 +3,11 @@
 import json
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 
 import pytest
 
-from forge_test_helpers import ROOT
+from forge_test_helpers import CLI_TIMEOUT_SECONDS, ROOT, run_process
 from test_compact_plan import SECTION, make_plan
 
 MANIFEST = ".codex-plugin/package-files.json"
@@ -27,10 +26,10 @@ def package(tmp_path):
     return package
 
 
-def run(command, cwd, *, success=True):
-    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
+def run(command, cwd, *, success=True, timeout=CLI_TIMEOUT_SECONDS):
+    result = run_process(command, cwd=cwd, timeout=timeout)
     assert (result.returncode == 0) is success, result.stdout + result.stderr
-    assert "Traceback" not in result.stdout + result.stderr
+    assert "Traceback" not in result.stderr and not result.stdout.startswith("Traceback")
     return json.loads(result.stdout)
 
 
@@ -115,12 +114,14 @@ def test_copied_package_runs_shared_workflows_and_resumes(package, tmp_path, dep
     entry = follow(plan["commands"]["implement_after_pass"])
     assert entry["next_section"] == SECTION
     test_argv = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
-    assert subprocess.run(test_argv, cwd=target, capture_output=True).returncode != 0
+    assert run_process(test_argv, cwd=target).returncode != 0
     source.write_text("def normalize(value):\n    return value.strip()\n", encoding="utf-8")
-    verified = subprocess.run(test_argv, cwd=target, capture_output=True, text=True)
-    assert verified.returncode == 0, verified.stdout + verified.stderr
+    verified = run(helper(package, "implement-verify", "--planning-dir", planning, "--target-dir", target,
+                          "--section", SECTION, "--integration", "--", *test_argv), target)
+    assert verified["outcome"] == "passed"
     values = {"<review-status>": "pass", "<verification>": test_command, "<changed-file>": "src/labels.py"}
-    record = follow([values.get(value, value) for value in entry["commands"]["record"]])
+    record_command = [values.get(value, value) for value in entry["commands"]["record"]]
+    record = follow(record_command)
     assert record["recorded"] is True
     follow(record["commands"]["postflight"])
     resumed = run(helper(package, "status", "--path", planning), target)
@@ -139,7 +140,7 @@ def test_copied_package_preserves_codex_configuration_and_is_idempotent(package,
     assert unrelated in config.read_bytes()
     cache = Path(installed["cache"]["path"])
     for name in [*CLAUDE_FILES, ".codex-plugin/plugin.json", ".agents/plugins/marketplace.json",
-                 *(f"skills/zagrosi-{skill}/SKILL.md" for skill in ("project", "plan", "implement"))]:
+                 *(f"skills/zagrosi-{skill}/SKILL.md" for skill in ("forge", "project", "plan", "implement", "cleanup"))]:
         assert (cache / name).read_bytes() == (package / name).read_bytes()
     before = config.read_bytes()
     assert run(command, tmp_path)["changed"] is False
@@ -150,14 +151,14 @@ def test_copied_package_preserves_codex_configuration_and_is_idempotent(package,
 def test_package_inventory_admits_only_staged_claude_files(tmp_path):
     root = tmp_path / "package source with spaces"
     root.mkdir()
-    subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+    run_process(["git", "init", str(root)], timeout=30).check_returncode()
     (root / ".codex-plugin").mkdir()
     (root / MANIFEST).write_text("[]\n", encoding="utf-8")
     (root / ".claude-plugin").mkdir()
     for name in [*CLAUDE_FILES, ".claude-plugin/local-settings.json"]:
         (root / name).write_text("{}\n", encoding="utf-8")
-    subprocess.run(["git", "add", MANIFEST, *sorted(CLAUDE_FILES)], cwd=root, check=True, capture_output=True)
+    run_process(["git", "add", MANIFEST, *sorted(CLAUDE_FILES)], cwd=root, timeout=30).check_returncode()
     command = [sys.executable, str(ROOT / "tools/update_package_manifest.py"), "--root", str(root)]
-    subprocess.run(command, check=True, capture_output=True)
+    run_process(command, timeout=30).check_returncode()
     assert set(json.loads((root / MANIFEST).read_text(encoding="utf-8"))) == {MANIFEST, *CLAUDE_FILES}
-    subprocess.run([*command, "--check"], check=True, capture_output=True)
+    run_process([*command, "--check"], timeout=30).check_returncode()

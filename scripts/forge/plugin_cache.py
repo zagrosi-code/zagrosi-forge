@@ -108,7 +108,7 @@ def materialize_plugin_cache(plugin_root: Path, cache_path: Path, dry_run: bool)
         raise ValueError("Plugin source and installed cache must not overlap.")
     if dry_run:
         return {**plugin_cache_status(plugin_root, cache_path), "dry_run": True}
-    with _storage.file_lock(cache_path):
+    with _storage.file_lock(cache_path, timeout_seconds=30):
         previous = cache_path.with_name(f".{cache_path.name}.previous")
         abandoned = [path for path in cache_path.parent.iterdir()
                      if path.name.startswith(f".{cache_path.name}.tmp-")]

@@ -10,6 +10,7 @@ import argparse
 import sys
 
 from . import output as _output
+from . import models as _models
 from . import policy as _policy
 from . import session as _session
 
@@ -248,6 +249,9 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--review-status", choices=["pass", "fixed", "blocked"])
     p.add_argument("--evidence-row", action="append", dest="evidence_rows", default=[], help="Detached canonical evidence binding as lower_snake_name=path.")
     p.add_argument("--verification", action="append", default=[])
+    p.add_argument("--verification-outcome", choices=["passed", "failed", "timed_out", "skipped", "pending"])
+    p.add_argument("--verification-source", choices=["attestation", "inspection"])
+    p.add_argument("--verification-receipt", help="Fresh section receipt produced by implement-verify.")
     p.add_argument("--commit-status")
     p.add_argument("--target-dir")
     p.add_argument("--depth", choices=sorted(_policy.DEPTH_MODES), default=_policy.DEFAULT_DEPTH)
@@ -257,8 +261,21 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     add_flight_args(p)
     p.set_defaults(func=invoke_command, handler=('workflows', 'deep_implement_record_section'))
 
+    p = sub.add_parser("implement-verify", help="Capture checks for mutable workflows; detached-frozen retains its separate pinned evidence contract.")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--target-dir")
+    p.add_argument("--section", help="Omit for the required final integration receipt.")
+    p.add_argument("--integration", action="store_true", help="With --section, also record final integration from this same full-suite run.")
+    p.add_argument("--timeout", type=float, default=600)
+    p.add_argument("--source", choices=["attestation", "inspection"])
+    p.add_argument("--outcome", choices=["passed", "failed", "timed_out", "skipped", "pending"])
+    p.add_argument("--evidence", action="append", default=[])
+    p.add_argument("command_argv", nargs=argparse.REMAINDER, help="Explicit argument vector after --; never read from the plan.")
+    p.set_defaults(func=invoke_command, handler=('verification', 'implement_verify'))
+
     p = sub.add_parser("next-section")
     p.add_argument("--planning-dir", required=True)
+    p.add_argument("--max-words", type=int, default=2000, help="Complete section context budget; oversized packets include an adjusted retry.")
     p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
     p.set_defaults(func=invoke_command, handler=('scheduling', 'next_section'))
 
@@ -307,6 +324,19 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
 
 
 def add_utility_commands(sub: argparse._SubParsersAction) -> None:
+    p = sub.add_parser("provider-status", help="Show optional reviewer availability without making model requests.")
+    p.add_argument("--check-auth", action="store_true", help="Ask native Codex/Claude CLIs for login status; never read credential stores.")
+    p.set_defaults(func=invoke_command, handler=('providers', 'provider_status'))
+
+    p = sub.add_parser("provider-review", help="Review one bounded packet using an explicitly selected provider.")
+    p.add_argument("--provider", required=True)
+    p.add_argument("--model", help="Exact model identifier; omitted means the native CLI default.")
+    p.add_argument("--input", required=True)
+    p.add_argument("--output", required=True)
+    p.add_argument("--timeout", type=float, default=120)
+    p.add_argument("--adapter", help="Explicit JSON argv adapter for an additional provider.")
+    p.set_defaults(func=invoke_command, handler=('providers', 'provider_review'))
+
     p = sub.add_parser("preflight", help=command_help("preflight"))
     p.add_argument("--phase", choices=["project", "plan", "implement", "release"], required=True)
     p.add_argument("--file")
@@ -515,6 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = ZagrosiArgumentParser(description="Helpers for Zagrosi Forge skills")
     parser.add_argument("--pretty", action="store_true", help="Print a human-readable report instead of JSON.")
     sub = parser.add_subparsers(dest="command", required=True)
+    worker = sub.add_parser("gate-batch")
+    worker.set_defaults(func=invoke_command, handler=('gates', 'gate_batch_worker'))
     add_project_commands(sub)
     add_plan_commands(sub)
     add_implement_commands(sub)
@@ -528,17 +560,19 @@ def main(argv: list[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if "implement-evidence-handoff" in raw_args and not exact_handoff_cli_shape(raw_args):
         return 2
-    pretty = "--pretty" in raw_args
-    full_output = "--full-output" in raw_args
-    raw_args = [item for item in raw_args if item not in {"--pretty", "--full-output"}]
+    boundary = raw_args.index("--") if "--" in raw_args else len(raw_args)
+    pretty = "--pretty" in raw_args[:boundary]
+    full_output = "--full-output" in raw_args[:boundary]
+    raw_args = [item for item in raw_args[:boundary] if item not in {"--pretty", "--full-output"}] + raw_args[boundary:]
     parser = build_parser()
     args = parser.parse_args(raw_args)
     local_gates = (
         args.command in _policy.LOCAL_GATE_COMMANDS
         or args.handler[1] in {"deep_project_setup", "deep_plan_setup"}
         or (args.command in {"preflight", "postflight"} and args.phase in {"project", "plan"})
+        or (args.command == "preflight" and args.phase == "implement")
     )
-    read_cache = local_gates or (args.command == "preflight" and args.phase == "implement")
+    read_cache = local_gates
     token = _session._CLI_CONTEXT.set({
         "parser": parser, "pretty": pretty or getattr(args, "pretty", False),
         "full_output": full_output,
@@ -547,5 +581,7 @@ def main(argv: list[str] | None = None) -> int:
     })
     try:
         return args.func(args)
+    except _models.PlanningDepthError as exc:
+        return _output.print_json({"success": False, "error": str(exc), "error_code": "invalid-planning-depth"}, 1)
     finally:
         _session._CLI_CONTEXT.reset(token)

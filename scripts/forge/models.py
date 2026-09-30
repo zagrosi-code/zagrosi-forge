@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+class PlanningDepthError(ValueError):
+    """A saved implementation depth cannot be interpreted safely."""
+
+
 @dataclass(frozen=True, slots=True)
 class Finding:
     severity: str

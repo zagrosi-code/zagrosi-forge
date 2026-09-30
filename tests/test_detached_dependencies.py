@@ -69,7 +69,7 @@ def test_detached_rerecord_rejects_completed_transitive_dependants_and_current_p
 
     record("section-03-storage", "storage-1")
     record("section-01-foundation", "foundation-1")
-    record("section-02-api", "api-1")
+    record("section-02-endpoints", "api-1")
     state_path = implementation_root / "zagrosi_implement_state.json"
     state_before = state_path.read_bytes()
     pinners_before = {
@@ -100,7 +100,7 @@ def test_detached_rerecord_rejects_completed_transitive_dependants_and_current_p
     assert rerecord.returncode != 0
     rerecord_payload = json.loads(rerecord.stdout)
     assert rerecord_payload["error_code"] == "completed-dependent-pinner-conflict"
-    assert rerecord_payload["completed_dependants"] == ["section-01-foundation", "section-02-api"]
+    assert rerecord_payload["completed_dependants"] == ["section-01-foundation", "section-02-endpoints"]
     assert state_path.read_bytes() == state_before
     assert {
         path.name: path.read_bytes() for path in sorted((implementation_root / "pinners").glob("*.json"))

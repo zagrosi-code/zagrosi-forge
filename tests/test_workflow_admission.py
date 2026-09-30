@@ -45,7 +45,7 @@ def test_unresolved_review_blocks_planning_and_implementation(tmp_path, depth, f
         ("postflight", "--phase", "plan", "--planning-dir", str(plan), "--strict"),
         ("lint-plan-artifacts", "--planning-dir", str(plan), "--strict"),
         ("implement-record-section", "--sections-dir", str(plan / "sections"), "--section", SECTION,
-         "--review-status", "pass", "--verification", "pytest -q", "--flight", "off"),
+         "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off"),
     ):
         result = run_raw(*command)
         assert result.returncode == 1, result.stdout + result.stderr
@@ -111,7 +111,7 @@ def test_markdown_dependency_references_preserve_execution_order(tmp_path, refer
     assert run_cmd("lint-plan-artifacts", "--planning-dir", str(plan), "--strict")["success"]
     assert run_cmd("next-section", "--planning-dir", str(plan))["ready_sections"] == [SECTION]
     record = ("implement-record-section", "--sections-dir", str(plan / "sections"),
-              "--review-status", "pass", "--verification", "pytest -q", "--flight", "off")
+              "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off")
     premature = run_raw(*record, "--section", "section-02-consumer")
     assert premature.returncode == 1
     assert json.loads(premature.stdout)["incomplete_predecessors"] == [SECTION]
@@ -132,7 +132,7 @@ def test_distinct_incoming_and_outgoing_dependency_columns_remain_supported(tmp_
     assert run_cmd("next-section", "--planning-dir", str(plan))["ready_sections"] == [SECTION]
     result = run_raw("implement-record-section", "--sections-dir", str(plan / "sections"),
                      "--section", "section-02-consumer", "--review-status", "pass",
-                     "--verification", "pytest -q", "--flight", "off")
+                     "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off")
     assert result.returncode == 1
     assert json.loads(result.stdout)["incomplete_predecessors"] == [SECTION]
 
@@ -146,7 +146,7 @@ def test_ambiguous_dependency_rows_fail_closed(tmp_path, dependent):
         ("next-section", "--planning-dir", str(plan)),
         ("lint-plan-artifacts", "--planning-dir", str(plan), "--strict"),
         ("implement-record-section", "--sections-dir", str(plan / "sections"), "--section", SECTION,
-         "--review-status", "pass", "--verification", "pytest -q", "--flight", "off"),
+         "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off"),
     ):
         result = run_raw(*command)
         assert result.returncode == 1
@@ -169,7 +169,7 @@ def test_incomplete_or_ambiguous_dependency_structure_fails_closed(tmp_path, mut
         ("next-section", "--planning-dir", str(plan)),
         ("lint-plan-artifacts", "--planning-dir", str(plan), "--strict"),
         ("implement-record-section", "--sections-dir", str(plan / "sections"), "--section", "section-02-consumer",
-         "--review-status", "pass", "--verification", "pytest -q", "--flight", "off"),
+         "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off"),
     ):
         result = run_raw(*command)
         assert result.returncode == 1, result.stdout

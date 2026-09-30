@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import argparse
-import re
 
 from . import markdown as _markdown
 from . import models as _models
@@ -82,6 +81,10 @@ def implementation_recording_status(planning_dir: Path, state: dict[str, Any] | 
                                            if "input_snapshot" not in raw_completed[section]),
         "changed_code_sections": sorted(section for section in recorded_known
                                          if code_observations_changed(raw_completed[section])),
+        "verification_sources": {section: (record["verification_result"].get("source")
+                                             if isinstance(record.get("verification_result"), dict) else "legacy_unknown")
+                                 for section, record in (raw_completed.items() if isinstance(raw_completed, dict) else [])
+                                 if isinstance(record, dict)},
     }
 
 
@@ -119,11 +122,11 @@ def mutable_readiness_snapshot(
     }
 
 
-def mutable_admitted_readiness(planning_dir: Path, *, state=None, profile="solo", progress=None, admission=None) -> dict[str, Any]:
-    from . import validation
+def mutable_admitted_readiness(planning_dir: Path, *, state=None, profile=None, progress=None, admission=None) -> dict[str, Any]:
+    from . import actions, flights
 
     progress = _sections.check_section_progress(planning_dir) if progress is None else progress
-    admission = validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=profile, strict=True)) if admission is None else admission
+    admission = flights.plan_admission_report(planning_dir, profile=actions.implementation_profile(planning_dir, profile)) if admission is None else admission
     state = load_implementation_state(planning_dir) if state is None else state
     readiness = mutable_readiness_snapshot(
         {**progress, "sections": progress.get("sections", [])},
@@ -169,36 +172,23 @@ def completion_evidence_findings(planning_dir: Path, section: str, record: Any) 
     if not _policy.SECTION_RE.fullmatch(section) or not isinstance(record, dict):
         return [_quality.finding("high", "invalid-completion-record", f"{section} completion must be an object.", path)]
     review_path = planning_dir / "implementation" / "code_review" / f"{section}-review.md"
-    legacy_text = ""
     legacy_review = ""
     if not record.get("review_status") or not record.get("verification"):
         if review_path.is_file():
             legacy_review = _storage.read_text(review_path)
-            blocks, lines = _markdown.split_markdown_fences_with_closure(legacy_review)
-            if all(closed for _, _, closed in blocks):
-                legacy_text = "\n".join(lines)
     status = record.get("review_status")
     if status is None:
         passing_review = _markdown.passing_review(legacy_review, allow_legacy=True)
     else:
         passing_review = isinstance(status, str) and status in {"pass", "fixed"}
-    verification = record.get("verification")
-    if isinstance(verification, str):
-        verification = [verification]
-    verified = isinstance(verification, list) and any(
-        isinstance(value, str) and value.strip().strip("`*. ").lower() not in {"", "none", "n/a", "tbd", "todo", "pending"}
-        for value in verification
-    )
-    if not verified:
-        verified = bool(re.search(
-            r"(?im)^(?:Verification|Verified|Tests):[ \t]*`[^`]+`[ \t:—-]*(?:passed|successful)\b(?![^\n]*\b(?:failed|blocked|pending)\b)[^\n]*$",
-            legacy_text,
-        ))
+    from .verification import result_error
+
+    verification_error = result_error(record.get("verification_result"))
     findings = []
     if not passing_review:
         findings.append(_quality.finding("high", "missing-review-status", f"{section} lacks a passing review verdict.", path))
-    if not verified:
-        findings.append(_quality.finding("high", "missing-verification", f"{section} has no verification evidence recorded.", path))
+    if verification_error:
+        findings.append(_quality.finding("high", "missing-verification", f"{section}: {verification_error}", path))
     if "input_snapshot" in record:
         snapshot = record["input_snapshot"]
         from .mutable_inputs import contract_inputs

@@ -6,6 +6,7 @@ import argparse
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 from pathlib import Path
 import statistics
 import subprocess
@@ -25,18 +26,40 @@ def read(path: Path) -> dict:
         return {}
 
 
-def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool) -> list[dict]:
+def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool, *, previous: bool = True) -> list[dict]:
     items = []
+    arms = ["current"]
+    if comparison:
+        arms = (["previous"] if previous else []) + ["current", "plain"]
     for repeat in range(1, repeats + 1):
         for depth in depths:
             for case in cases:
                 block = f"{case}-{depth}-{repeat}"
-                arms = ["previous", "current", "plain"] if comparison else ["current"]
                 offset = (len(items) // len(arms)) % len(arms)
                 for arm in arms[offset:] + arms[:offset]:
                     items.append({"id": f"{block}-{arm}" if comparison else block,
                                   "case": case, "depth": depth, "arm": arm, "block": block})
     return items
+
+
+def accepted_outcomes(attempts: list[dict]) -> dict:
+    """Charge every scheduled attempt to accepted work; unknown is never free."""
+    accepted = sum(row["status"] == "passed" for row in attempts)
+    def aggregate(values):
+        valid = [value for value in values if type(value) in (int, float) and math.isfinite(value) and value >= 0]
+        total = sum(valid) if len(valid) == len(values) and values else None
+        return {"observed": sum(valid) if valid else None, "observed_attempts": len(valid),
+                "total": total, "per_accepted": total / accepted if total is not None and accepted else None}
+    totals = {key: aggregate([((row.get("reported_telemetry") or {}).get("totals") or {}).get(key)
+                              for row in attempts])
+              for key in ("input_tokens", "output_tokens")}
+    return {"accepted": accepted, "scheduled": len(attempts),
+            "accepted_rate": accepted / len(attempts) if attempts else None,
+            "elapsed_seconds": aggregate([row.get("attempt_seconds") for row in attempts]),
+            "tokens": totals,
+            "reported_cost_usd": aggregate([(row.get("reported_telemetry") or {}).get("reported_cost_usd") for row in attempts]),
+            "interventions": aggregate([(row.get("reported_telemetry") or {}).get("interventions") for row in attempts]),
+            "limits": "Every attempt counts, including failures. Missing observations leave totals unknown; zero accepted leaves per-accepted values undefined. Elapsed time excludes independent review. CLI cost estimates are not subscription bills."}
 
 
 def report(directory: Path) -> dict:
@@ -68,6 +91,7 @@ def report(directory: Path) -> dict:
                           "outcomes": dict(Counter(row["status"] for row in attempts)),
                           "timed_attempts": len(times),
                           "median_runner_seconds": statistics.median(times) if times else None,
+                          "accepted_outcomes": accepted_outcomes(attempts),
                           "attempts": attempts})
     comparative = reviews(directory)
     expected = {item["block"] for item in manifest["trials"]} if manifest.get("comparison") else set()
@@ -103,10 +127,12 @@ def main() -> int:
     parser.add_argument("operation", choices=("run", "compare", "report", "blind", "apply-reviews"))
     parser.add_argument("directory", type=Path)
     parser.add_argument("--plugin-root", type=Path, default=ROOT)
-    parser.add_argument("--previous-root", type=Path)
+    parser.add_argument("--previous-root", type=Path, help="Optional third comparison arm; omit for current Forge versus plain")
     parser.add_argument("--model")
     parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh"))
+    parser.add_argument("--host", choices=("codex", "claude"), default="codex")
     parser.add_argument("--codex", default="codex")
+    parser.add_argument("--claude", default="claude")
     parser.add_argument("--cases", nargs="+")
     parser.add_argument("--depths", nargs="+", choices=("lean", "standard", "deep"))
     parser.add_argument("--repeats", type=int, default=2)
@@ -121,10 +147,10 @@ def main() -> int:
         if min(args.jobs, args.repeats, args.timeout) < 1:
             parser.error("jobs, repeats and timeout must be positive")
         if comparison:
-            if not args.previous_root or not args.model or not args.effort or args.jobs != 1 or args.runner:
-                parser.error("compare requires --previous-root, --model, --effort, serial --jobs 1 and the pinned built-in runner")
+            if not args.model or not args.effort or args.jobs != 1 or args.runner:
+                parser.error("compare requires --model, --effort, serial --jobs 1 and the pinned built-in runner")
             runner = [sys.executable, str(ROOT / "tools/coding_trial_runner.py"), "--model", args.model,
-                      "--effort", args.effort, "--codex", args.codex]
+                      "--effort", args.effort, "--host", args.host, "--codex", args.codex, "--claude", args.claude]
         elif not args.runner:
             parser.error("run requires --runner")
         else:
@@ -136,15 +162,17 @@ def main() -> int:
             parser.error("cases must exist in the fixed evaluator; cases and depths must not repeat")
         if comparison and "resume" in selected:
             parser.error("Forge's persisted resume checkpoint has no comparable plain-agent arm")
-        roots = {"current": root, "previous": args.previous_root.resolve() if args.previous_root else root, "plain": root}
+        roots = {"current": root, "plain": root}
+        if args.previous_root:
+            roots["previous"] = args.previous_root.resolve()
         if any(not (path / "scripts/zagrosi_skills.py").is_file() for path in set(roots.values())):
             parser.error("plugin roots must contain scripts/zagrosi_skills.py")
         directory.mkdir(parents=True, exist_ok=False)
-        items = schedule(selected, depths, args.repeats, comparison)
+        items = schedule(selected, depths, args.repeats, comparison, previous=bool(args.previous_root))
         (directory / "matrix.json").write_text(json.dumps({"plugin_root": str(root), "evaluator_root": str(ROOT),
             "roots": {arm: str(path) for arm, path in roots.items()}, "runner": runner,
             "comparison": comparison, "seed": args.seed, "cases": cases,
-            "settings": {"model": args.model, "effort": args.effort, "jobs": args.jobs},
+            "settings": {"host": args.host, "model": args.model, "effort": args.effort, "jobs": args.jobs},
             "timeout": args.timeout, "trials": items}, indent=2) + "\n")
         with ThreadPoolExecutor(max_workers=args.jobs) as executor:
             list(executor.map(lambda item: run_trial(directory, roots[item["arm"]], item, runner, args.timeout), items))

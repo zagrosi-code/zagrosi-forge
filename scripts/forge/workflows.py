@@ -17,7 +17,6 @@ from . import sections as _sections
 from . import state as _state
 from . import storage as _storage
 from . import traceability as _traceability
-from . import validation as _validation
 
 def deep_project_setup(args: argparse.Namespace) -> int:
     project_input, error = _projects.resolve_project_input(args)
@@ -91,7 +90,9 @@ def deep_project_setup(args: argparse.Namespace) -> int:
     }
     if _gates.effective_flight_mode(args) != "off":
         payload["preflight"] = _flights.project_preflight_report(project_input, args)
-    return _output.print_json(payload)
+        payload["success"] = bool(payload["preflight"]["success"])
+    payload["artifacts_created"] = mode == "new"
+    return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
 def deep_project_create_dirs(args: argparse.Namespace) -> int:
@@ -128,7 +129,8 @@ def deep_project_create_dirs(args: argparse.Namespace) -> int:
     }
     if _gates.effective_flight_mode(args) != "off":
         payload["postflight"] = _flights.project_postflight_report(planning_dir, args)
-    return _output.print_json(payload)
+        payload["success"] = bool(payload["postflight"]["success"])
+    return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
 def deep_plan_setup(args: argparse.Namespace) -> int:
@@ -209,11 +211,13 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
     }
     if _gates.effective_flight_mode(args) != "off":
         payload["preflight"] = _flights.plan_preflight_report(spec_file, args)
+        payload["success"] = bool(payload["preflight"]["success"])
     payload["commands"] = _actions.plan_commands(
         planning_dir, config.get("depth_mode", args.depth), _storage.resolve_path(args.target_dir or os.getcwd()),
         detached=getattr(args, "for_detached", False),
     )
-    return _output.print_json(payload)
+    payload["artifacts_created"] = mode == "new" or bool(scaffold["created"])
+    return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
 def deep_implement_setup(args: argparse.Namespace) -> int:
@@ -248,10 +252,9 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
     if progress["state"] in {"invalid_index", "no_index"}:
         return _output.print_json({"success": False, "section_progress": progress}, 1)
 
-    artifact_payload = _validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
-    if not artifact_payload["success"]:
-        artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before implementation."
-        return _output.print_json(artifact_payload, 1)
+    admission = _flights.plan_admission_report(planning_dir, depth=args.depth, profile=args.profile)
+    if not admission["success"]:
+        return _output.print_json({**admission, "error": "Forge planning admission failed; finish zagrosi-plan before implementation."}, 1)
 
     state_dir = planning_dir / "implementation"
     config_path = state_dir / "zagrosi_implement_config.json"
@@ -277,11 +280,12 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         "test_command": progress.get("project_config", {}).get("test_command"),
         "runtime": progress.get("project_config", {}).get("runtime"),
         "profile": args.profile,
+        "depth_mode": admission["depth_mode"],
     }
     _storage.write_json(config_path, config)
 
     readiness = _state.mutable_admitted_readiness(planning_dir, state=state, profile=args.profile,
-                                                progress=progress, admission=artifact_payload)
+                                                progress=progress, admission=admission)
     readiness.pop("admission")
     repo = _storage.git_info(target_dir)
     warnings: list[str] = []
@@ -309,7 +313,7 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
             target_dir,
             args,
             progress=progress,
-            artifact_payload=artifact_payload,
+            admission_payload=admission,
             repo=repo,
         )
         payload["preflight"] = preflight
@@ -336,10 +340,9 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
 def _mutable_record_section(args: argparse.Namespace) -> int:
     sections_dir = _storage.resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
-    artifact_payload = _validation.plan_artifacts_payload(planning_dir, argparse.Namespace(profile=args.profile, strict=True))
-    if not artifact_payload["success"]:
-        artifact_payload["error"] = "Forge planning process is incomplete; finish zagrosi-plan before recording implementation."
-        return _output.print_json(artifact_payload, 1)
+    admission = _flights.plan_admission_report(planning_dir, depth=args.depth, profile=args.profile)
+    if not admission["success"]:
+        return _output.print_json({**admission, "error": "Forge planning admission failed; finish zagrosi-plan before recording implementation."}, 1)
     progress = _sections.check_section_progress(planning_dir)
     known = set(progress.get("sections", []))
     if args.section not in known:
@@ -383,6 +386,11 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         )
     compact = _markdown.is_lean_depth(_artifacts.planning_depth(planning_dir))
     verification = _markdown.normalize_repeated(args.verification)
+    from . import mutable_inputs, verification as verification_evidence
+
+    verification_result = verification_evidence.section_result(
+        args, planning_dir, mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None)),
+    )
     review_status = getattr(args, "review_status", None)
     section_record = {
         "completed_at": _storage.now_iso(),
@@ -394,6 +402,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         "review_status": review_status,
         "evidence_rows": _markdown.normalize_repeated(getattr(args, "evidence_rows", [])),
         "verification": verification,
+        "verification_result": verification_result,
         "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
         "input_snapshot": _state.contract_snapshot(
             planning_dir, args.section,

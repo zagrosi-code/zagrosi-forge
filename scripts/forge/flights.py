@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import nullcontext
 from typing import Any
 import argparse
 import os
@@ -16,7 +17,6 @@ from . import policy as _policy
 from . import projects as _projects
 from . import quality as _quality
 from . import scoring as _scoring
-from . import sections as _sections
 from . import session as _session
 from . import state as _state
 from . import storage as _storage
@@ -106,7 +106,6 @@ def plan_preflight_report(spec_file: Path, args: argparse.Namespace) -> dict[str
     depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", _policy.DEFAULT_DEPTH) or _policy.DEFAULT_DEPTH)
     jobs: list[tuple[str, list[str], bool]] = [
         ("doctor", _gates.append_strict(["doctor", "--plugin-root", str(plugin_root)], mode), True),
-        ("status", ["status", "--path", str(planning_dir)], False),
     ]
     if getattr(args, "write_evidence", False) or not _markdown.is_lean_depth(depth):
         jobs.insert(1, ("codebase-evidence", evidence_command, False))
@@ -123,10 +122,8 @@ def plan_preflight_report(spec_file: Path, args: argparse.Namespace) -> dict[str
     )
 
 
-def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+def _plan_gate_jobs(planning_dir: Path, args: argparse.Namespace) -> list[tuple[str, list[str], bool]]:
     mode = _gates.effective_flight_mode(args)
-    if mode == "off":
-        return _gates.flight_payload(phase="plan", stage="postflight", mode=mode, gates=[])
     depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", _policy.DEFAULT_DEPTH) or _policy.DEFAULT_DEPTH)
     profile = getattr(args, "profile", "solo")
     compact = _markdown.is_lean_depth(depth)
@@ -154,11 +151,15 @@ def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict
             jobs.append(("forge-score", _gates.append_strict(["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], mode), True))
         if getattr(args, "write_report", False):
             jobs.append(("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], False))
-    jobs.append(("status", ["status", "--path", str(planning_dir)], False))
+    return jobs
+
+
+def _run_plan_gates(planning_dir: Path, args: argparse.Namespace, jobs) -> list[dict[str, Any]]:
+    depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", None) or _policy.DEFAULT_DEPTH)
     context = _session._CLI_CONTEXT.get()
     previous_inputs = context.get("score_inputs") if context is not None else None
     reuse = (
-        not compact and not getattr(args, "write_report", False)
+        not _markdown.is_lean_depth(depth) and not getattr(args, "write_report", False)
         and context is not None and context["texts"] is not None
         and _gates.local_gate_available("forge-score", ["forge-score", "--planning-dir", str(planning_dir)])
     )
@@ -169,7 +170,32 @@ def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict
     finally:
         if reuse:
             context["score_inputs"] = previous_inputs
-    return _gates.flight_payload(phase="plan", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir)})
+    return gates
+
+
+def plan_postflight_report(planning_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    mode = _gates.effective_flight_mode(args)
+    gates = [] if mode == "off" else _run_plan_gates(planning_dir, args, _plan_gate_jobs(planning_dir, args))
+    return _gates.flight_payload(phase="plan", stage="postflight", mode=mode, gates=gates, extras={"planning_dir": str(planning_dir),
+                "depth_mode": _artifacts.planning_depth(planning_dir, getattr(args, "depth", None) or _policy.DEFAULT_DEPTH)})
+
+
+def plan_admission_report(planning_dir: Path, *, depth: str | None = None, profile: str = "solo") -> dict[str, Any]:
+    """Reuse complete selected-depth admission while all observed inputs stay current."""
+    depth = _artifacts.planning_depth(planning_dir, depth or _policy.DEFAULT_DEPTH)
+    args = argparse.Namespace(depth=depth, profile=profile, strict=True, flight_mode="strict", write_report=False)
+
+    def analyze(observe):
+        for path in (planning_dir, planning_dir / "sections", planning_dir / "reviews", planning_dir / "implementation"):
+            observe(path)
+        return {**plan_postflight_report(planning_dir, args), "depth_mode": depth}
+
+    context = _session._CLI_CONTEXT.get()
+    with nullcontext() if context and context.get("local_gates") and context.get("texts") is not None else _session.read_phase():
+        # A child worker cannot contribute file observations to its parent cache.
+        if not _gates.local_gate_available("lint-plan", ["lint-plan", "--planning-dir", str(planning_dir)]):
+            return analyze(lambda path: path)
+        return _session.cached_analysis("plan_admission", (planning_dir, depth, profile), analyze)
 
 
 def implement_preflight_report(
@@ -179,6 +205,7 @@ def implement_preflight_report(
     *,
     progress: dict[str, Any] | None = None,
     artifact_payload: dict[str, Any] | None = None,
+    admission_payload: dict[str, Any] | None = None,
     repo: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     mode = _gates.effective_flight_mode(args)
@@ -188,33 +215,28 @@ def implement_preflight_report(
     depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", _policy.DEFAULT_DEPTH) or _policy.DEFAULT_DEPTH)
     profile = getattr(args, "profile", "solo")
     strict = mode == "strict"
-    progress = progress or _sections.check_section_progress(planning_dir)
-    artifact_payload = artifact_payload or _validation.plan_artifacts_payload(
-        planning_dir,
-        argparse.Namespace(profile=profile, strict=True),
-    )
     repo = repo or (_storage.git_info(target_dir) if target_dir.exists() else {"available": False, "root": None})
-
-    section_findings, section_extras = _scoring.section_findings_for_score(planning_dir, depth)
-    section_payload = _quality.quality_payload("sections", section_findings, section_extras, profile, strict)
-    trace_findings, trace_extras = _traceability.traceability_analysis(planning_dir)
-    trace_payload = _quality.quality_payload("traceability", trace_findings, trace_extras, profile, strict)
-    readiness_findings, readiness_extras = _scoring.implementation_readiness_analysis(planning_dir, 8)
-    readiness_payload = _quality.quality_payload(
-        "implementation-readiness",
-        readiness_findings,
-        readiness_extras,
-        profile,
-        strict,
-    )
     gates = [
         _gates.direct_gate("sections-directory", sections_dir.exists() and sections_dir.is_dir(), {"sections_dir": str(sections_dir)}),
         _gates.direct_gate("target-directory", target_dir.exists() and target_dir.is_dir(), {"target_dir": str(target_dir)}),
-        _gates.direct_gate("lint-plan-artifacts", bool(artifact_payload.get("success")), artifact_payload),
-        _gates.direct_gate("lint-sections", bool(section_payload["success"]), section_payload),
-        _gates.direct_gate("traceability", bool(trace_payload["success"]), trace_payload),
-        _gates.direct_gate("lint-implementation-readiness", bool(readiness_payload["success"]), readiness_payload),
     ]
+    if not getattr(args, "implementation_root", None):
+        admission = admission_payload or plan_admission_report(planning_dir, depth=depth, profile=profile)
+        gates.extend(admission["gates"])
+    else:
+        # Detached v1 admission retains its pinned artifact/readiness contract.
+        artifact_payload = artifact_payload or _validation.plan_artifacts_payload(
+            planning_dir, argparse.Namespace(profile=profile, strict=True),
+        )
+        gates.append(_gates.direct_gate("lint-plan-artifacts", bool(artifact_payload.get("success")), artifact_payload))
+        for name, analyze in (
+            ("sections", lambda: _scoring.section_findings_for_score(planning_dir, depth)),
+            ("traceability", lambda: _traceability.traceability_analysis(planning_dir)),
+            ("implementation-readiness", lambda: _scoring.implementation_readiness_analysis(planning_dir, 8)),
+        ):
+            findings, extras = analyze()
+            payload = _quality.quality_payload(name, findings, extras, profile, strict)
+            gates.append(_gates.direct_gate(name if name == "traceability" else f"lint-{name}", payload["success"], payload))
     warnings: list[str] = []
     if repo.get("is_protected_branch"):
         warnings.append(f"Current branch is protected-looking: {repo.get('branch')}")
@@ -249,16 +271,18 @@ def implement_postflight_report(
 def _implement_postflight_report(
     planning_dir: Path, args: argparse.Namespace, *, candidate_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from . import mutable_inputs, verification
+
     mode = _gates.effective_flight_mode(args)
     if mode == "off":
         return _gates.flight_payload(phase="implement", stage="postflight", mode=mode, gates=[])
     depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", _policy.DEFAULT_DEPTH) or _policy.DEFAULT_DEPTH)
-    compact = _markdown.is_lean_depth(depth)
     profile = getattr(args, "profile", "solo")
-    target_dir = _storage.resolve_path(getattr(args, "target_dir", None)) if getattr(args, "target_dir", None) else Path.cwd()
+    target_dir = mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None))
     recording_status = _state.implementation_recording_status(planning_dir, candidate_state)
     final_state_gates = recording_status["sections_recorded_complete"]
-    jobs: list[tuple[str, list[str], bool]] = []
+    plan_args = argparse.Namespace(depth=depth, profile=profile, strict=True, flight_mode="strict", write_report=False)
+    jobs = _plan_gate_jobs(planning_dir, plan_args)
     if getattr(args, "diff_file", None) or getattr(args, "staged", False):
         command = ["implementation-drift", "--planning-dir", str(planning_dir), "--repo", str(target_dir), "--profile", profile]
         if getattr(args, "diff_file", None):
@@ -301,17 +325,15 @@ def _implement_postflight_report(
             },
             required=False,
         )
-    if not compact:
-        score_command = ["forge-score", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile, "--write-history"]
-        if final_state_gates:
-            score_command = _gates.append_strict(score_command, mode)
-        jobs.append(("forge-score", score_command, final_state_gates))
     if getattr(args, "write_report", False):
         jobs.append(("report", ["report", "--planning-dir", str(planning_dir), "--depth", depth, "--profile", profile], False))
-    jobs.append(("status", ["status", "--path", str(planning_dir)], False))
-    gates = _gates.run_internal_gate_batch(jobs)
+    gates = _run_plan_gates(planning_dir, plan_args, jobs)
     if progress_gate is not None:
         gates.append(progress_gate)
+    integration = None
+    if candidate_state is None and final_state_gates:
+        integration = verification.integration_report(planning_dir, target_dir)
+        gates.append(_gates.direct_gate("integration-verification", integration["success"], integration))
     if candidate_state is None and recording_status["pending_sections"]:
         gates.append(_gates.direct_gate("pending-completion", False, {
             "pending_sections": recording_status["pending_sections"],
@@ -322,7 +344,8 @@ def _implement_postflight_report(
         stage="postflight",
         mode=mode,
         gates=gates,
-        extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir), **recording_status},
+        extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir), **recording_status,
+                "integration_verification": integration},
     )
 
 

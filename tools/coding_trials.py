@@ -7,6 +7,7 @@ import ast
 from collections import Counter
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -30,15 +31,17 @@ CASES = json.loads((PACK / "cases.json").read_text())
 
 
 def test_command(case: dict) -> list[str]:
-    return ["node", "--test", "tests/ledger.test.js"] if case.get("runtime") == "node" else [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"]
+    if case.get("runtime") == "typescript":
+        return ["node", "--test", "tests/access.test.ts"]
+    return ["node", "--test", "tests/ledger.test.js"] if case.get("runtime") in {"node", "typescript"} else [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"]
 
 
 def code_metrics(workspace: Path, runtime: str = "python") -> dict:
-    if runtime == "node":
-        paths = sorted(path for path in (workspace / "src").rglob("*") if path.suffix in {".js", ".cjs", ".mjs"})
+    if runtime in {"node", "typescript"}:
+        paths = sorted(path for path in (workspace / "src").rglob("*") if path.suffix in {".js", ".cjs", ".mjs", ".ts"})
         return {"source_lines": sum(len(path.read_text().splitlines()) for path in paths), "modules": len(paths),
                 "largest_function_lines": None, "branches": None, "repeated_loops": None,
-                "external_imports": None, "limits": "JavaScript complexity and dependency metrics are unmeasured."}
+                "external_imports": None, "limits": "JavaScript/TypeScript complexity and dependency metrics are unmeasured; independent review checks dependencies."}
     paths = sorted((workspace / "src").rglob("*.py"))
     functions, statements, imports, lines, branches = [], Counter(), set(), 0, 0
     for path in paths:
@@ -82,6 +85,9 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
                 f"Use Forge at {selected} depth from {plugin_root}; use this exact tree for skills and CLI commands.\n"
                 f"Read {plugin_root / 'skills/zagrosi-implement/references/engineering.md'} and applicable Forge skills.\n"
                 "Complete admitted planning, implementation, regression checks and completion recording.\n")
+    entry_skill = plugin_root / "skills/zagrosi-forge/SKILL.md"
+    if not plain_agent and entry_skill.is_file():
+        workflow += f"Start with {entry_skill} and follow its routing and linked phase guidance.\n"
     prompt = (f"Work only in {workspace}.\n{workflow}\n"
               f"{CASES[case]['request']}\n\n"
               "Preserve public APIs. Standard library only. If you create planning records, keep them compact under .planning/.\n"
@@ -123,7 +129,7 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
     oracle_path = ROOT / CASES[record["case"]].get("oracle", "tools/coding_trial_checks.py")
     fixture = PACK / CASES[record["case"]].get("fixture", "fixture")
     case = CASES[record["case"]]
-    oracle_runner = ["node"] if case.get("runtime") == "node" else [sys.executable, "-B"]
+    oracle_runner = ["node"] if case.get("runtime") in {"node", "typescript"} else [sys.executable, "-B"]
     oracle = execute([*oracle_runner, str(oracle_path), str(workspace), record["case"]], workspace)
     tests = execute(test_command(case), workspace)
     plain_agent = record.get("plain_agent", False)
@@ -174,9 +180,53 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
               "oracle_complete": oracle_complete,
               "before": record["baseline_metrics"], "after": metrics, "oracle": oracle, "tests": tests,
               "runner": record.get("runner"), "reported_telemetry": reported,
-              "limits": "Structural metrics and AST changes are review aids, not proof of useful cleanup. Independent review is an external attestation, not authenticated identity. Trials are not a security sandbox. POSIX timeout cleanup covers the process group; detached sessions may escape. Windows tree cleanup uses taskkill and is reported if unproven. Missing model usage is unknown. Resume starts from admitted planning, setup and an actual recorded failing test; it does not simulate killing an agent."}
+              "limits": "Structural metrics and AST changes are review aids, not proof of useful cleanup. Independent review is an external attestation, not authenticated identity. Trials are not a security sandbox. POSIX timeout cleanup covers the process group; detached sessions may escape. Windows tree cleanup uses taskkill and is reported if unproven. Missing model usage is unknown. Resume starts from admitted planning and a recorded failing test. A killed runner and fresh second session are evidenced only when runner.interruption.success is true."}
     (trial / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     return result
+
+
+def run_sessions(trial: Path, runner: list[str], timeout: int, *, resume_runner=None, interrupt_after=None) -> dict:
+    """One deliberate interruption, then a fresh process; retain both attempts."""
+    if resume_runner is not None and (not isinstance(resume_runner, list) or not resume_runner
+                                     or not all(isinstance(arg, str) and arg for arg in resume_runner)):
+        raise ValueError("resume runner must be a nonempty JSON argv array")
+    workspace = trial / "workspace"
+    prompt = (trial / "prompt.md").read_text()
+    first = execute(runner, workspace, prompt=prompt, timeout=interrupt_after or timeout)
+    if resume_runner is None:
+        return first
+    sessions = [{"argv": runner, "process": first}]
+    telemetry_path = trial / "telemetry.json"
+    telemetry = []
+    if telemetry_path.exists():
+        telemetry.append(json.loads(telemetry_path.read_text()))
+        telemetry_path.replace(trial / "telemetry-session-01.json")
+    else:
+        telemetry.append({})
+    events = trial / "agent-events.jsonl"
+    if events.exists():
+        events.replace(trial / "agent-events-01.jsonl")
+    if not first.get("timed_out") or first.get("termination_error"):
+        telemetry_path.write_text(json.dumps(telemetry[0]) + "\n")
+        return {**first, "returncode": 1, "sessions": sessions,
+                "interruption": {"success": False, "reason": "The first runner did not reach a confirmed timeout with cleanup."}}
+    second = execute(resume_runner, workspace,
+                     prompt="Continue the interrupted task from its persisted Forge checkpoint; preserve user changes and original regression evidence.\n" + prompt,
+                     timeout=timeout)
+    sessions.append({"argv": resume_runner, "process": second})
+    telemetry.append(json.loads(telemetry_path.read_text()) if telemetry_path.exists() else {})
+    if telemetry_path.exists():
+        telemetry_path.replace(trial / "telemetry-session-02.json")
+    def total(values):
+        return sum(values) if all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in values) else None
+    aggregate = {"source": "two fresh interrupted/resumed sessions", "sessions": telemetry,
+                 "totals": {key: total([(row.get("totals") or {}).get(key) for row in telemetry])
+                            for key in ("input_tokens", "cached_input_tokens", "output_tokens", "uncached_input_tokens")},
+                 "reported_cost_usd": total([row.get("reported_cost_usd") for row in telemetry]),
+                 "interventions": 1, "limits": "The deliberate interruption counts as one harness intervention. Missing session telemetry remains unknown."}
+    telemetry_path.write_text(json.dumps(aggregate, indent=2) + "\n")
+    return {**second, "seconds": first["seconds"] + second["seconds"], "sessions": sessions,
+            "interruption": {"success": True, "first_timed_out": True, "fresh_runner": True}}
 
 
 def main() -> int:
@@ -190,9 +240,22 @@ def main() -> int:
     parser.add_argument("--telemetry", type=Path)
     parser.add_argument("--review", type=Path, help="Independent review JSON outside the candidate workspace")
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--interrupt-after", type=float, help="Kill the first resume-case runner after this many seconds")
+    parser.add_argument("--resume-runner", help="JSON argv array for a fresh second session, including a different host if desired")
     parser.add_argument("--runner", nargs=argparse.REMAINDER, help="Agent argv; prompt arrives on stdin, cwd is the disposable workspace")
     args = parser.parse_args()
     trial = args.trial.resolve()
+    if bool(args.resume_runner) != bool(args.interrupt_after) or (args.interrupt_after is not None and not 0 < args.interrupt_after < args.timeout):
+        parser.error("resume runner requires a positive interrupt-after shorter than timeout")
+    if args.resume_runner and (args.operation != "run" or args.case != "resume"):
+        parser.error("interrupted sessions require run --case resume")
+    try:
+        resume_runner = json.loads(args.resume_runner) if args.resume_runner else None
+    except json.JSONDecodeError:
+        parser.error("resume runner must be a nonempty JSON argv array")
+    if resume_runner is not None and (not isinstance(resume_runner, list) or not resume_runner
+                                     or not all(isinstance(arg, str) and arg for arg in resume_runner)):
+        parser.error("resume runner must be a nonempty JSON argv array")
     if args.operation == "check":
         result = check(trial, args.telemetry, review=args.review)
     elif args.operation == "review-template":
@@ -202,7 +265,7 @@ def main() -> int:
             parser.error("run requires --runner followed by an agent executable and arguments")
         result = prepare(trial, args.case, args.depth, plugin_root=args.plugin_root, plain_agent=args.plain_agent)
         if args.operation == "run":
-            runner = execute(args.runner, trial / "workspace", prompt=(trial / "prompt.md").read_text(), timeout=args.timeout)
+            runner = run_sessions(trial, args.runner, args.timeout, resume_runner=resume_runner, interrupt_after=args.interrupt_after)
             record = json.loads((trial / "trial.json").read_text())
             record["runner"] = runner
             (trial / "trial.json").write_text(json.dumps(record, indent=2) + "\n")

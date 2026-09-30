@@ -65,6 +65,7 @@ def test_preflight_only_launches_requested_writer(tmp_path, monkeypatch, capsys,
         return process(argv, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", tracked)
+    monkeypatch.setattr(forge.child_process, "execute", lambda *_args, **_kwargs: pytest.fail("Preflight started a recursive gate worker"))
     args = ["preflight", "--phase", "plan", "--file", str(plan / "spec.md"), "--target-dir", str(tmp_path), "--depth", depth]
     if write_evidence:
         args.append("--write-evidence")
@@ -72,7 +73,7 @@ def test_preflight_only_launches_requested_writer(tmp_path, monkeypatch, capsys,
     payload = json.loads(capsys.readouterr().out)
     assert payload["success"]
     evidence_expected = write_evidence or depth in {"standard", "deep"}
-    assert [gate["name"] for gate in payload["gates"]] == ["spec-file", "doctor", *(["codebase-evidence"] if evidence_expected else []), "status"]
+    assert [gate["name"] for gate in payload["gates"]] == ["spec-file", "doctor", *(["codebase-evidence"] if evidence_expected else [])]
     assert len(calls) == int(write_evidence)
     assert len(inventories) == int(evidence_expected and not write_evidence)
     if calls:

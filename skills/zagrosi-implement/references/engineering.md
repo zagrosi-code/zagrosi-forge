@@ -16,10 +16,18 @@ or refactor unrelated systems. Planning-only requests still stop before coding.
 Preserve observable behavior and safety invariants. When existing coverage is
 weak, add characterization tests before refactoring. Run targeted regression
 checks before/after meaningful changes and one full suite at final integration.
-Include public exports promised by the compatibility contract. An exported name
-can have external callers even when it is unused internally.
+When compatibility is promised, capture existing public export names and
+signatures in a regression test before moving code, including re-exported
+types/dependencies. Keep that surface stable: a new facade or `__all__` must not
+silently narrow it. Internal non-use does not prove that callers no longer need it.
 Tests should expose behavioral failures, not mirror lines, private structure,
 or cosmetic choices. Record material deviations and measured verification.
+
+Before PR delivery, use the existing review to inspect the diff and relevant
+callers for introduced or encountered clutter. Fix justified local problems and
+refresh affected checks before the final integration result. Record unrelated
+debt without expanding the PR indefinitely. An explicitly requested repository
+cleanup uses [Cleanup](../../zagrosi-cleanup/SKILL.md).
 
 ## Useful simplification
 

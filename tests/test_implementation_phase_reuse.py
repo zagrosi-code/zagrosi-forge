@@ -18,6 +18,7 @@ from test_runtime_performance import requires_interval_timer
 
 def completion(forge, planning, target):
     return {"review_status": "pass", "verification": ["pytest passed"], "completed_at": "observed",
+            "verification_result": {"version": 1, "source": "attestation", "outcome": "passed", "evidence": ["pytest passed"]},
             "input_snapshot": forge.state.contract_snapshot(planning, SECTION, target_dir=target)}
 
 
@@ -27,6 +28,9 @@ def test_final_verification_reads_and_parses_unchanged_contract_once(tmp_path, m
     planning = make_plan(tmp_path / "plan")
     record = completion(forge, planning, tmp_path)
     forge.storage.write_json(forge.state.implementation_state_path(planning), {"completed_sections": {SECTION: record}})
+    assert forge.entrypoint.main(["implement-verify", "--planning-dir", str(planning), "--target-dir", str(tmp_path),
+                                  "--source", "attestation", "--outcome", "passed", "--evidence", "pytest passed"]) == 0
+    capsys.readouterr()
     inputs = importlib.import_module(forge.state.__package__ + ".mutable_inputs")
     name = "_contract_inputs" if hasattr(inputs, "_contract_inputs") else "contract_inputs"
     analyze, read = getattr(inputs, name), Path.read_text
@@ -42,7 +46,7 @@ def test_final_verification_reads_and_parses_unchanged_contract_once(tmp_path, m
 
     monkeypatch.setattr(inputs, name, counted)
     monkeypatch.setattr(Path, "read_text", counted_read)
-    args = ["postflight", "--phase", "implement", "--planning-dir", str(planning), "--strict", "--full-output"]
+    args = ["postflight", "--phase", "implement", "--planning-dir", str(planning), "--target-dir", str(tmp_path), "--strict", "--full-output"]
     assert forge.entrypoint.main(args) == 0
     expected = json.loads(capsys.readouterr().out)
     assert len(calls) == 1, calls

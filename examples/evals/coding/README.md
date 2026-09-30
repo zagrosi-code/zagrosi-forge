@@ -1,8 +1,9 @@
 # Coding trials
 
-Seven isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
+Eight isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
 deep discount design, a real Forge resume checkpoint, an order-dispatch godfile,
-an import preview across several modules, and a Node summary feature. The invoice cases preserve public APIs, exact exports, rounding, and
+an import preview across several modules, a Node summary feature, and TypeScript
+permission/transaction cleanup. The invoice cases preserve public APIs, exact exports, rounding, and
 errors. The godfile case exercises cohesive module extraction while preserving
 validation, pricing, shipping, serialization, file access, and order transitions.
 The ordinary summary request never asks for refactoring: independent review checks
@@ -48,18 +49,19 @@ support review; they do not establish readability or reward code golf.
 Results keep three decisions separate:
 
 - `behavior`: the independent oracle completed and existing/added tests passed.
-- `workflow`: Forge admits the actual `.planning` plan with strict checks at the
+- `workflow`: Forge admits the unique plan at or beneath `.planning` with strict checks at the
   selected trial depth, then verifies implementation completion records. A narrative
-  "done" note is insufficient.
-- `cleanup`: for ordinary summary, import preview, cleanup and godfile cases, source syntax must change, and an
+  "done" note is insufficient; competing planning roots and escaping links fail.
+- `cleanup`: for ordinary summary, import preview, cleanup, godfile and TypeScript access cases, implementation code must change, and an
   independent reviewer must confirm useful cleanup with concrete changes and
   before/after regression evidence. Existing tests and the independent oracle can
   supply sufficient coverage; add tests where coverage is weak. Test changes are
   reported separately. Other cases report `not_required`.
 
 An unchanged cleanup fixture can pass behavior, but cannot pass the overall trial.
-Comments, formatting, docstrings and empty new modules do not establish cleanup.
-Syntax differences establish that code changed; they do not judge its usefulness.
+Comments, formatting, docstrings and empty new modules do not establish useful cleanup.
+Python changes are compared using syntax trees; TypeScript/JavaScript changes use
+file hashes. The independent review determines whether changes are substantive.
 No line-count, complexity, or readability threshold determines success.
 
 After the candidate finishes, an independent reviewer can create an evidence form:
@@ -137,17 +139,17 @@ Scope permits `.gitignore` entries only for local planning and generated Python/
 See the [2026-09-24 observations](results-2026-09-24.md) for repeated tasks across
 all three depths, including failed and cancelled attempts and comparison limits.
 
-## Controlled previous/current/plain comparison
+## Controlled Forge/plain comparison
 
 [24 September controlled pilot](controlled-results-2026-09-24.md): lower observed input use, incomplete Forge outcomes, and independent review failures.
 
-The built-in comparison runner uses Codex CLI. These measurements do not cover
-Claude Code. For another agent, use manual `prepare`/`check` or the custom runner
-contract above.
+The historical measurements use Codex CLI and do not cover Claude Code. The
+current adapter also supports Claude; new runs must report their own outcomes.
+Other agents can use the explicit custom runner contract above.
 
 Use **one frozen evaluator checkout** for the entire experiment. `--plugin-root`
 selects only Forge's source under test; its evaluator, cases and fixtures are never
-executed. The fixed evaluator's Forge runtime judges both Forge arms by the same
+executed. The fixed evaluator's Forge runtime judges every Forge arm by the same
 admission/completion rules. Plain agents receive the same functional task, scope,
 regression checks and independent cleanup review; Forge records are inapplicable.
 Task fixtures contain no arm-specific workflow instruction. Forge's prepared
@@ -157,25 +159,27 @@ plain-agent starting state.
 The default comparative cases are the 251-line order-dispatch module with state,
 serialization and extraction requirements, and the multi-module CSV import preview
 with weak initial coverage. No artificial padding or arbitrary line-count gate is
-used. Each case/depth/repetition runs previous Forge, current Forge and plain agent
-in a rotating order. Comparisons run serially to avoid concurrent workload bias.
+used. Each case/depth/repetition runs current Forge and plain agent in rotating order.
+Add `--previous-root` for a third, previous-Forge arm only when its saved evidence
+contract remains compatible with the fixed evaluator. Comparisons run serially
+to avoid concurrent workload bias.
 All arms use the checked-in adapter, the same explicit model/effort, a fresh
 workspace/session, ignored user config/rules and identical sandbox settings.
-Confirm the chosen model works with the same Codex binary before scheduling.
+Confirm the chosen model works with the selected host binary before scheduling.
 
 ```bash
 # Run this script from the frozen evaluator, which includes the new harness.
 python /path/to/evaluator/tools/trial_matrix.py compare /tmp/forge-controlled \
-  --plugin-root /path/to/current --previous-root /path/to/previous \
+  --plugin-root /path/to/current \
   --model gpt-5.5 --effort medium --codex /opt/homebrew/bin/codex \
-  --cases godfile import-preview --depths standard --repeats 2
-# Twelve fresh attempts; cleanup results remain pending independent review.
+  --cases godfile typescript-access --depths standard --repeats 1 --timeout 600
+# Four fresh attempts; cleanup results remain pending independent review.
 python /path/to/evaluator/tools/trial_matrix.py blind /tmp/forge-controlled
 ```
 
 Give an independent reviewer each directory under `blind/`, **without**
 `blind-key.json`, parent logs, arm names, timing or usage. Packets contain original
-source/tests, three shuffled labeled candidates, behavior/scope check results and
+source/tests, original task requirements, shuffled labeled candidates, behavior/scope check results and
 `review.json`. Reviewers explain readability, cohesive boundaries, removed
 redundancy and regression protection using concrete files/functions. They select
 preferred labels (ties allowed), explain the choice, and complete the ordinary
@@ -217,3 +221,105 @@ and then retry packet creation. If preparation never produced a workspace,
 retain the incomplete block and schedule any replacement as a new attempt;
 never erase the original failure. An empty preferred-label list is allowed when
 no candidate is acceptable.
+
+## Native hosts and accepted outcomes
+
+The built-in writer adapter supports Codex and Claude Code. Compare Forge and
+plain work **within the same host, requested model and effort**; separate host
+experiments do not isolate a plugin effect. For example:
+
+```bash
+python3 tools/trial_matrix.py compare /tmp/forge-claude-comparison \
+  --previous-root /absolute/path/to/previous-forge --host claude \
+  --model YOUR_CLAUDE_MODEL --effort high --cases typescript-access --repeats 2
+```
+
+The TypeScript fixture requires Node24. It exercises duplicate authorization
+policy across modules, public exports, validation order, tenant isolation,
+auditing and rollback through 394 independent assertions. Known-defect tests
+check that the oracle rejects authorization, transaction, ordering and export
+regressions. These checks run TypeScript through Node and compare runtime behavior;
+they do not establish static type compatibility. Source-byte changes alone do not prove useful TypeScript cleanup;
+independent review must explain the concrete improvement.
+
+Native writer runs use existing CLI authentication and consume the account's
+usage. They do not read or copy credentials. Claude loads the selected plugin
+with `--plugin-dir`, suppresses user/project settings, and preserves OAuth; its
+plain arm omits the plugin. Host permission controls differ. The disposable trial
+workspace and scope checker are evaluation boundaries, not a security sandbox.
+
+Reports retain every attempt and add accepted rate, elapsed time, input/output
+usage, interventions and CLI-reported cost per accepted result. Failures count
+in totals. Missing observations stay unknown; zero accepted results leaves
+per-accepted figures undefined. Claude final-result usage is counted once;
+reported costs are estimates, not subscription charges. Independent review time
+is currently unmeasured. Offline stream tests are parser evidence, not live
+model-quality results. Historical reports above remain unchanged.
+
+## Deliberate interruption and a fresh session
+
+Use the existing `resume` case and supply the second runner as a JSON argv
+array. The harness saves both process attempts, transcripts and telemetry,
+confirms timeout cleanup, then starts a fresh process in the same workspace.
+The second runner may select the other host. The original red checkpoint and
+regression test must survive and the completed behavior must pass the oracle.
+
+```bash
+python3 tools/coding_trials.py run /tmp/forge-cross-host --case resume \
+  --interrupt-after 30 --timeout 600 \
+  --resume-runner '["python3","/absolute/path/to/forge/tools/coding_trial_runner.py","--host","claude","--model","YOUR_CLAUDE_MODEL","--effort","high"]' \
+  --runner python3 /absolute/path/to/forge/tools/coding_trial_runner.py \
+  --host codex --model YOUR_CODEX_MODEL --effort high
+```
+
+If the first process finishes before interruption or cleanup is unconfirmed,
+the interruption trial fails explicitly. A successful helper-process recovery
+test does not claim that either model used a skill correctly.
+
+## Native skill acceptance matrix
+
+Use a frozen evaluator checkout and plugin snapshot. This separate harness uses
+the existing first-task example: twelve host/depth/directness workflows, each
+with planning-only, an implementation follow-up interrupted at a new red
+checkpoint, and fresh continuation; plus one unsupported request per host.
+It independently checks the original failing test, unchanged requirements/tests,
+saved input hashes, final behavior, admitted records and captured verification.
+These are workflow checks, not performance or general code-quality comparisons.
+
+```bash
+# No model calls: native staging/discovery, fixed inputs and evaluator hashes.
+python /frozen/evaluator/tools/native_workflow_trials.py prepare /saved/native-matrix \
+  --plugin-root /frozen/plugin --codex-model YOUR_CODEX_MODEL --effort medium
+# Explicit model-call opt-in. Prove one row before starting the host batch.
+python /frozen/evaluator/tools/native_workflow_trials.py run /saved/native-matrix \
+  --case codex-lean-indirect --resume-host codex
+python /frozen/evaluator/tools/native_workflow_trials.py run /saved/native-matrix \
+  --host codex --resume-host codex
+python /frozen/evaluator/tools/native_workflow_trials.py report /saved/native-matrix
+```
+
+Calls and whole rows have separate deadlines. Each attempt retains its prompt,
+native events, CLI version, result and reported usage. A host batch stops on a
+failure; failed attempts are never overwritten. Diagnose shared defects before
+preparing a new matrix. Missing authentication is blocked, not passed or failed.
+Codex inherits native settings unchanged and uses matching per-process plugin
+overrides for discovery/execution. Claude uses session-only `--plugin-dir`.
+Authentication stays with each CLI; the harness never copies credential stores.
+
+`--resume-host codex` permits Codex-only acceptance while preserving direct rows'
+cross-host checks as pending. Keep the matrix, frozen evaluator/plugin trees and
+the unique `installation.temporary_cache` directory recorded in `matrix.json`.
+The harness saves each exact interrupted workspace before continuation. After
+native Claude sign-in, use the same frozen evaluator and an explicit model:
+
+```bash
+python /frozen/evaluator/tools/native_workflow_trials.py resume /saved/native-matrix \
+  --case codex-lean-direct --claude-model YOUR_CLAUDE_MODEL
+python /frozen/evaluator/tools/native_workflow_trials.py run /saved/native-matrix \
+  --host claude --claude-model YOUR_CLAUDE_MODEL
+```
+
+Repeat `resume` for the standard/deep direct rows. It restores the verified red
+checkpoint at its original path and archives the prior completed candidate.
+After all desired continuations, only the recorded UUID cache namespace is
+disposable; user settings and other installed plugin directories remain separate.

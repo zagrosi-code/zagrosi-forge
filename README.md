@@ -7,16 +7,16 @@
 </picture>
 </p>
 
-Forge turns requests into focused specs, reviewed plans, and tested changes.
-Lean mode is default: fewer files, shorter prompts, one setup, one final gate.
+Forge turns requests into compact plans, clear code, and verified changes.
+One entry point handles features, fixes, and cleanup in Codex and Claude Code.
+Lean mode is default: focused context, targeted checks, one final integration result.
 
 [Install](#install) · [Use](#use) · [Workflows](#workflows) · [Engineering](#engineering) · [Contribute](#contribute)
 
 ## Install
 
-Requires Python 3.11+ and plugin support in your host. Commands below use
-`python3`; on Windows, use your Python 3.11+ `python` or `py -3` interpreter.
-Restart your host after installing or updating.
+Requires Python 3.11+ and host plugin support. On Windows, replace `python3`
+with `python` or `py -3`. Restart after installing or updating.
 
 ### Claude Code
 
@@ -61,34 +61,33 @@ python3 scripts/zagrosi_skills.py update-check --pretty
 python3 scripts/zagrosi_skills.py self-update --pretty
 ```
 
-The Codex installer copies declared package files, preserves unrelated settings,
-excludes development artifacts, and keeps a recoverable installation.
+The installer preserves unrelated settings and excludes development artifacts.
 
 </details>
 
 ## Use
 
-Open your target repository in either host. Start at the phase you need;
-ask for `standard` or `deep` when needed.
+Open your target repository and describe the task; ask for `standard` or `deep`
+when needed. Try the [runnable first task](examples/first-task/README.md).
 
 **Claude Code**
 
 ```text
-/zagrosi-forge:zagrosi-project @planning/requirements.md
-/zagrosi-forge:zagrosi-plan @planning/01-auth/spec.md
-/zagrosi-forge:zagrosi-implement @planning/01-auth/sections/
+/zagrosi-forge:zagrosi-forge Add this feature and finish verification.
+/zagrosi-forge:zagrosi-cleanup Simplify this subsystem while preserving behavior.
 ```
 
 **Codex**
 
 ```text
-Use $zagrosi-forge:zagrosi-project on @planning/requirements.md
-Use $zagrosi-forge:zagrosi-plan on @planning/01-auth/spec.md
-Use $zagrosi-forge:zagrosi-implement on @planning/01-auth/sections/
+Use $zagrosi-forge:zagrosi-forge to add this feature and finish verification.
+Use $zagrosi-forge:zagrosi-cleanup to simplify this subsystem while preserving behavior.
 ```
 
 Both hosts share the same skills, runtime, and engineering standards.
 Forge adds no hooks, MCP servers, or background processes.
+The original `zagrosi-project`, `zagrosi-plan`, and `zagrosi-implement` skills
+remain available for direct phase control. Planning-only requests stop at the plan.
 
 ## Workflows
 
@@ -105,6 +104,7 @@ Forge adds no hooks, MCP servers, or background processes.
 | Single-section plan | `sections/index.md` and one canonical section with tests, evidence, decisions, risks, and review |
 | Multi-section plan | One shared plan and ordered sections linking shared contracts |
 | Implement | Code, tests, and machine-readable section records |
+| Cleanup | Simpler responsibilities and preserved behavior, with regression evidence |
 
 | Depth | Use |
 |---|---|
@@ -112,25 +112,22 @@ Forge adds no hooks, MCP servers, or background processes.
 | `standard` | Wider research, traceability, or coordination |
 | `deep` | High-risk or architecture-heavy work |
 
-Depth changes investigation and review rigor. Every mode uses compact contracts
-with requirement IDs, ownership, acceptance, and verification.
-No minimum prose quotas or duplicate research/review ledgers.
+Depth changes investigation and review rigor. Every mode retains requirements,
+ownership, acceptance, and verification, without prose quotas or duplicate ledgers.
 
-The skills handle setup and final postflight. Complete the generated draft before
-implementation; a scaffold is never an admitted plan. See the
+Skills handle setup and final checks; complete draft contracts before coding. See the
 [compact-plan format](skills/zagrosi-plan/references/plan-format.md),
 [depth standards](skills/zagrosi-plan/references/depth-standards.md), and
 [example briefs](examples/gallery/README.md).
 
 ### Resume and compatibility
 
-Ask the same skill to continue from the planning directory. Saved records identify
-progress; contract edits reopen completion and code drift requires integration checks.
-Legacy records remain readable, labeled unbound.
+Ask Forge to continue from the planning directory, including after switching hosts.
+Saved checkpoints retain progress; ownership conflicts serialize parallel work.
+Contract/code changes invalidate final verification. Legacy evidence remains
+readable but cannot establish new verified completion.
 
-Helper commands below run **from the Forge source checkout**. Use absolute paths
-for plans in another repository. `status` shows the next action;
-`commands --pretty` lists key commands; `--help` exposes the full CLI.
+Run helpers **from the Forge checkout**, using absolute paths for external plans.
 
 ```bash
 python3 scripts/zagrosi_skills.py status --path "/absolute/path/to/planning/01-auth" --pretty
@@ -138,15 +135,12 @@ python3 scripts/zagrosi_skills.py commands --pretty
 python3 scripts/zagrosi_skills.py --help
 ```
 
-`fast` remains a compatibility alias for `lean`. Existing `zagrosi-*`, `deep-*`,
-`DEEP_META`, and migrated `claude-*` artifacts remain accepted. `codex_review`
-aliases `agent_review`: review uses the active agent without another model CLI.
+`fast` aliases `lean`; existing `zagrosi-*`, `deep-*`, `DEEP_META`, and migrated
+`claude-*` artifacts remain accepted. `codex_review` aliases `agent_review`.
 
-[Detached authoring](skills/zagrosi-plan/references/detached-plan-format.md)
-uses `plan-setup --for-detached` to skip compact scaffolding.
-[Detached execution](skills/zagrosi-implement/references/detached-frozen.md)
-requires `--implementation-root`, admitted physical contracts and source checks;
-privileged handoff additionally requires Darwin/arm64 and APFS.
+[Detached execution](skills/zagrosi-implement/references/detached-frozen.md) retains
+its pinned evidence protocol and physical contracts; privileged handoff requires
+Darwin/arm64 and APFS.
 
 ## Engineering
 
@@ -155,32 +149,45 @@ draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, 
 code, prefer clear names and direct flow. Repair encountered duplication and mixed
 responsibilities; update ownership, characterize behavior, run targeted regression
 checks, then the full suite at integration.
+Explicit cleanup can cover a repository; the ordinary final PR pass covers the
+diff and affected callers. Public exports, errors, ordering, and side effects matter.
 
 Context preserves complete sections, linked decisions/risks, and explicit omissions.
 `context-brief` and `implementation-packet` default to 2,000 words (`--max-words`).
 Broken links and oversized contracts fail explicitly. Failed flights link complete
 reports; `--full-output` includes the nested payload.
+Oversized section entry returns an executable retry with the required word budget.
 
 The runtime loads modules on demand. SHA-256 binds runtime/test sources; verification
 compiles those exact bytes without bytecode caches. Writes are locked and atomic.
 
-[Helper benchmarks](examples/evals/performance.json) measure latency and context on
-fixed fixtures. [Coding trials](examples/evals/coding/README.md) report task outcomes,
-failures and usage. Neither establishes general speed or code-quality gains;
-existing model trials use Codex, not Claude Code.
+[Helper benchmarks](examples/evals/performance.json) measure fixed fixtures.
+[Coding trials](examples/evals/coding/README.md) separate host/model, accepted
+completion, cleanup quality, time, and usage. Historical trials remain unchanged;
+adapter support alone does not establish faster or better model output.
+
+### Multiple models
+
+Ask for independent reviews with selected Codex, Claude, or Gemini models. Forge
+reuses native CLI logins, sends bounded packets, and keeps one primary writer.
+Other providers can use an explicit executable adapter. Missing access, failed
+requests, and unreported usage/model identity remain visible; no silent fallback.
+See [provider setup and review](skills/zagrosi-forge/references/providers.md).
+
+```bash
+python3 scripts/zagrosi_skills.py provider-status --check-auth
+```
 
 ## Contribute
 
-`skills/` holds shared workflows; `scripts/forge/` holds runtime modules.
-`tests/` covers contracts, recovery and installation; `examples/` includes valid,
-invalid and compatibility fixtures. Host metadata lives in `.codex-plugin/` and
-`.claude-plugin/`; Codex packaging uses `.codex-plugin/package-files.json`.
+Shared workflows: `skills/`; runtime: `scripts/forge/`; checks: `tests/` and
+`examples/`; host metadata: `.codex-plugin/` and `.claude-plugin/`.
 
 After runtime/test edits, run `python3 tools/update_runtime_manifest.py`.
 After adding/removing package members, stage intended files and run
 `python3 tools/update_package_manifest.py`.
-CI runs the full Linux suite and focused Linux/macOS/Windows checks.
-Run these from the checkout; the final two validators require their optional CLIs.
+CI covers Linux/macOS/Windows and native host packaging. Optional native validators
+require their CLIs.
 
 ```bash
 python3 tools/update_runtime_manifest.py --check

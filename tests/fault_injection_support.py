@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
-import sys
 import textwrap
 from pathlib import Path
 
@@ -12,6 +10,7 @@ from detached_test_support import (
 from forge_test_helpers import (
     IMPLEMENTATION_SOURCE_RELATIVE_PATHS,
     ROOT,
+    run_script_raw,
 )
 
 
@@ -61,10 +60,7 @@ def instrument_runtime_modules(
         text = texts[name].replace(anchor, anchor + helper, 1)
         compile(text, str(path), "exec")
         replace_file(path, text.encode(), mode=path.stat().st_mode & 0o777)
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "tools/update_runtime_manifest.py"), "--plugin-root", str(plugin_root)],
-        capture_output=True, text=True, check=False,
-    )
+    result = run_script_raw(ROOT / "tools/update_runtime_manifest.py", "--plugin-root", str(plugin_root), timeout=30)
     assert result.returncode == 0, result.stderr + result.stdout
     return plugin_root / IMPLEMENTATION_SOURCE_RELATIVE_PATHS["tool"]
 

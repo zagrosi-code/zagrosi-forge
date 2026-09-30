@@ -34,6 +34,9 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
     assert "[marketplaces.zagrosi]" not in config.read_text()
     assert dry_run["cache"]["changed"] is True
     assert not Path(dry_run["cache"]["path"]).exists()
+    skills = [f"zagrosi-forge:zagrosi-{name}" for name in ("forge", "project", "plan", "implement", "cleanup")]
+    assert dry_run["verification"]["required_skills"] == skills
+    assert all(f"${skill}" in " ".join(dry_run["next_steps"]) for skill in skills)
 
     installed = run_cmd(
         "install",
@@ -56,7 +59,9 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
     cache_path = Path(installed["cache"]["path"])
     assert cache_path == tmp_path / "plugins" / "cache" / "zagrosi" / "zagrosi-forge" / PLUGIN_VERSION
     assert (cache_path / ".codex-plugin" / "plugin.json").exists()
-    assert (cache_path / "skills" / "zagrosi-project" / "SKILL.md").exists()
+    assert installed["verification"]["required_skills"] == skills
+    for skill in skills:
+        assert (cache_path / "skills" / skill.split(":")[1] / "SKILL.md").exists()
 
     repeated = run_cmd(
         "install",
@@ -70,6 +75,7 @@ def test_install_codex_updates_config(tmp_path: Path) -> None:
     assert repeated["changed"] is False
     assert repeated["cache"]["changed"] is False
     assert repeated["backup_path"] is None
+    assert repeated["verification"]["required_skills"] == skills
 
 
 def test_update_check_reports_cache_and_config_status(tmp_path: Path) -> None:
@@ -170,7 +176,8 @@ def test_install_codex_verifies_prompt_input_with_cached_plugin(tmp_path: Path) 
     fake_codex.write_text(
         "#!/bin/sh\n"
         "if [ \"$1\" = \"debug\" ] && [ \"$2\" = \"prompt-input\" ]; then\n"
-        "  printf '%s\\n' 'zagrosi-forge:zagrosi-project' 'zagrosi-forge:zagrosi-plan' 'zagrosi-forge:zagrosi-implement'\n"
+        "  printf '%s\\n' 'zagrosi-forge:zagrosi-forge' 'zagrosi-forge:zagrosi-project' "
+        "'zagrosi-forge:zagrosi-plan' 'zagrosi-forge:zagrosi-implement' 'zagrosi-forge:zagrosi-cleanup'\n"
         "  exit 0\n"
         "fi\n"
         "exit 2\n",
@@ -207,3 +214,4 @@ def test_install_codex_verifies_prompt_input_with_cached_plugin(tmp_path: Path) 
     assert unchanged["changed"] is False
     assert unchanged["verification"]["status"] == "skipped"
     assert unchanged["verification"]["reason"] == "installation unchanged"
+    assert unchanged["verification"]["required_skills"] == installed["verification"]["required_skills"]

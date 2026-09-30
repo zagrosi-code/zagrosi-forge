@@ -32,7 +32,9 @@ def test_project_setup_and_create_dirs(tmp_path: Path) -> None:
         "END_MANIFEST -->\n\n"
         "# Project Manifest\n"
     )
-    created = run_cmd("project-create-dirs", "--planning-dir", str(tmp_path))
+    result = run_raw("project-create-dirs", "--planning-dir", str(tmp_path))
+    created = json.loads(result.stdout)
+    assert result.returncode == 1 and not created["success"]
     assert created["splits"] == ["01-auth", "02-billing"]
     assert created["postflight"]["phase"] == "project"
     assert (tmp_path / "01-auth").is_dir()
@@ -123,7 +125,7 @@ def test_parallel_plan_parses_documented_dependency_graph_prose(tmp_path: Path) 
     original = sections / "section-01-normalize.md"
     section_body = original.read_text()
     original.unlink()
-    for name in ("section-01-foundation", "section-02-api", "section-03-ui"):
+    for name in ("section-01-foundation", "section-02-endpoints", "section-03-ui"):
         (sections / f"{name}.md").write_text(section_body.replace("section-01-normalize", name))
     (sections / "index.md").write_text(
         "<!-- PROJECT_CONFIG\n"
@@ -132,20 +134,21 @@ def test_parallel_plan_parses_documented_dependency_graph_prose(tmp_path: Path) 
         "END_PROJECT_CONFIG -->\n\n"
         "<!-- SECTION_MANIFEST\n"
         "section-01-foundation\n"
-        "section-02-api\n"
+        "section-02-endpoints\n"
         "section-03-ui\n"
         "END_MANIFEST -->\n\n"
         "# Sections\n\n"
         "## Dependency Graph\n\n"
-        "- section-02-api depends on section-01-foundation.\n"
-        "- `section-03-ui` depends on `section-02-api`.\n"
+        "- section-02-endpoints depends on section-01-foundation.\n"
+        "- `section-03-ui` depends on `section-02-endpoints`.\n"
+        "\nExecution order: section-01-foundation, section-02-endpoints, section-03-ui. Parallel: no.\n"
     )
 
     parallel = run_cmd("parallel-plan", "--planning-dir", str(tmp_path))
 
     assert parallel["layers"] == [
         ["section-01-foundation"],
-        ["section-02-api"],
+        ["section-02-endpoints"],
         ["section-03-ui"],
     ]
 
@@ -217,6 +220,13 @@ def test_status_reports_plan_artifact_sequence(tmp_path: Path) -> None:
     (sections / "section-01-status.md").write_text(
         "# section-01-status\n\nREQ-001 tests first; implement, verify, accept, and rollback.\n"
     )
+    status = run_cmd("status", "--path", str(tmp_path))
+    assert status["next_action"] == "repair planning admission findings before implementation"
+    assert status["admission"]["success"] is False
+
+    from test_resume_guidance import documented_detached_plan
+
+    documented_detached_plan(tmp_path, "lean")
     status = run_cmd("status", "--path", str(tmp_path))
     assert status["next_action"] == "run zagrosi-implement"
 
@@ -302,8 +312,7 @@ def test_command_catalog_matches_parser_aliases() -> None:
     } <= aliases
 
     help_text = run_text("--help")
-    assert "Inspect workflow state" in help_text
-    assert "Show grouped command catalog" in help_text
+    assert all(name in help_text for name in names | aliases)
 
 
 def test_codebase_evidence_includes_forge_surface_without_cache_noise(tmp_path: Path) -> None:

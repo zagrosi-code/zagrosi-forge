@@ -48,6 +48,7 @@ def test_local_plan_flights_do_not_start_python_children(forge, monkeypatch, cap
         pytest.fail("A local plan gate started a child process")
 
     monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(forge.child_process, "execute", forbidden)
     args = [phase, "--phase", "plan"]
     args += ["--file", str(plan / "spec.md")] if phase == "preflight" else ["--planning-dir", str(plan)]
     assert forge.entrypoint.main(args) == 0
@@ -196,22 +197,23 @@ def test_mixed_batch_retains_concurrent_processes_and_input_order(forge, monkeyp
     assert len(threads) == 2
 
 
-def test_nonmain_invocation_uses_processes_without_changing_signal_handlers(forge, monkeypatch, capsys, plan):
+def test_nonmain_invocation_uses_one_worker_without_changing_signal_handlers(forge, monkeypatch, capsys, plan):
     calls = []
+    execute = forge.child_process.execute
 
-    def process(argv, **_kwargs):
+    def process(argv, *args, **kwargs):
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, '{"success":true}\n', "")
+        return execute(argv, *args, **kwargs)
 
     def forbidden(*_args, **_kwargs):
         pytest.fail("A worker thread attempted to manage process signal handlers")
 
-    monkeypatch.setattr(subprocess, "run", process)
+    monkeypatch.setattr(forge.child_process, "execute", process)
     monkeypatch.setattr(signal, "setitimer", forbidden, raising=False)
     with ThreadPoolExecutor(max_workers=1) as executor:
         result = executor.submit(forge.entrypoint.main, ["postflight", "--phase", "plan", "--planning-dir", str(plan)]).result()
     assert result == 0
-    assert calls
+    assert len(calls) == 1 and calls[0][2] == "gate-batch"
     assert json.loads(capsys.readouterr().out)["success"]
     assert forge.session._CLI_CONTEXT.get() is None
 

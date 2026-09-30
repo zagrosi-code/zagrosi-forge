@@ -1,6 +1,8 @@
 # Review
 
 The active agent owns review in either host; a second model CLI is optional.
+For selected external providers/models, follow the shared
+[provider review protocol](../../zagrosi-forge/references/providers.md).
 
 Review material requirement/ownership gaps, security, data integrity, compatibility,
 concurrency/retry, recovery, test adequacy, and unnecessary complexity. Match

@@ -141,7 +141,7 @@ def test_advanced_operational_commands_and_snapshots(tmp_path: Path) -> None:
     )
     assert pre["success"] is True
     preflight_gates = {gate["name"] for gate in pre["gates"]}
-    assert preflight_gates >= {"spec-file", "doctor", "status"}
+    assert preflight_gates >= {"spec-file", "doctor"}
     assert "codebase-evidence" in preflight_gates
 
     evidence_pre = run_cmd(

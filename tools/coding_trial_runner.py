@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Pinned Codex adapter; observe commands and usage without claiming phase tokens."""
+"""Pinned native writer adapters; observed usage is not proof of accepted work."""
 from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -71,21 +72,101 @@ class Telemetry:
                 "limits": "Phases classify observed commands, not model thinking or phase tokens. Command durations are event receipt intervals and may overlap. Output byte counts cover emitted event text, which may be truncated by Codex. Retries count identical commands after a failed exit; API retries are unknown. Requested model identity is not an attested backend version."}
 
 
+class ClaudeTelemetry(Telemetry):
+    def __init__(self):
+        super().__init__()
+        self.commands = {}
+        self.models = set()
+        self.result = None
+
+    def observe(self, event: dict, elapsed: float):
+        self.events += 1
+        message = event.get("message")
+        message = message if isinstance(message, dict) else {}
+        if isinstance(message.get("model"), str):
+            self.models.add(message["model"])
+        if event.get("type") == "result":
+            self.result = event
+            self.usage = [event["usage"]] if isinstance(event.get("usage"), dict) else []
+        for block in message.get("content", []) if isinstance(message.get("content"), list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") == "Bash":
+                command = block.get("input")
+                command = command.get("command") if isinstance(command, dict) else None
+                if isinstance(block.get("id"), str) and isinstance(command, str):
+                    self.commands[block["id"]] = (command, elapsed)
+            elif block.get("type") == "tool_result" and isinstance(block.get("tool_use_id"), str) and block["tool_use_id"] in self.commands:
+                command, started = self.commands.pop(block["tool_use_id"])
+                phase = self.phases[command_phase(command)]
+                phase["commands"] += 1
+                phase["observed_command_seconds"] += max(0, elapsed - started)
+                phase["observed_output_bytes"] += len(json.dumps(block.get("content", "")).encode())
+                if command in self.failed:
+                    self.command_retries += 1
+                if block.get("is_error"):
+                    phase["failed_commands"] += 1
+                    self.failed.add(command)
+                else:
+                    self.failed.discard(command)
+
+    def summary(self) -> dict:
+        summary = super().summary()
+        usage = self.usage[-1] if self.usage else {}
+        uncached, cached, written = (usage.get(key) for key in
+            ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        valid = lambda value: type(value) is int and value >= 0
+        totals = summary["totals"]
+        totals.update(input_tokens=sum((uncached, cached, written)) if all(map(valid, (uncached, cached, written))) else None,
+                      cached_input_tokens=cached if valid(cached) else None,
+                      cache_creation_input_tokens=written if valid(written) else None,
+                      uncached_input_tokens=uncached if valid(uncached) else None)
+        cost = (self.result or {}).get("total_cost_usd")
+        return {**summary, "source": "claude print stream-json", "observed_models": sorted(self.models),
+                "reported_cost_usd": cost if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 else None,
+                "cost_basis": "CLI estimate, not subscription billing", "result_received": self.result is not None,
+                "permission_denials": (self.result or {}).get("permission_denials"),
+                "limits": "Final result usage only; assistant usage is not added twice. Input totals include uncached, cache reads and cache writes. Command timing uses received tool events. Missing fields remain unknown. CLI costs are estimates, not charges; model names are reported, not independently attested."}
+
+
+def writer_command(host: str, executable: str, model: str, effort: str, record: dict) -> list[str]:
+    if host == "codex":
+        return [executable, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--json",
+                "--sandbox", "workspace-write", "--skip-git-repo-check", "--model", model,
+                "-c", 'approval_policy="never"', "-c", f'model_reasoning_effort="{effort}"', "-"]
+    if effort == "xhigh":
+        raise ValueError("Claude does not accept Codex's xhigh effort; select an explicit supported effort")
+    command = [executable, "--print", "--output-format", "stream-json", "--verbose", "--model", model,
+               "--effort", effort, "--restricted", "--setting-sources", "", "--strict-mcp-config",
+               "--mcp-config", '{"mcpServers":{}}', "--permission-mode", "acceptEdits",
+               "--permission-prompts", "none", "--tools", "Read,Edit,Write,Bash,Glob,Grep,Skill",
+               "--allowedTools", "Read,Edit,Write,Bash,Glob,Grep,Skill"]
+    if record.get("plugin_root") and not record.get("plain_agent"):
+        command.extend(["--plugin-dir", record["plugin_root"]])
+    return command
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", choices=("codex", "claude"), default="codex")
     parser.add_argument("--model", required=True)
     parser.add_argument("--effort", required=True, choices=("low", "medium", "high", "xhigh"))
     parser.add_argument("--codex", default="codex")
+    parser.add_argument("--claude", default="claude")
     args = parser.parse_args()
     trial = Path.cwd().parent
-    command = [args.codex, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--json",
-               "--sandbox", "workspace-write", "--skip-git-repo-check", "--model", args.model,
-               "-c", 'approval_policy="never"', "-c", f'model_reasoning_effort="{args.effort}"', "-"]
-    version = subprocess.run([args.codex, "--version"], capture_output=True, text=True, timeout=10)
-    telemetry = Telemetry()
+    record_path = trial / "trial.json"
+    record = json.loads(record_path.read_text()) if record_path.exists() else {}
+    executable = args.claude if args.host == "claude" else args.codex
+    try:
+        command = writer_command(args.host, executable, args.model, args.effort, record)
+    except ValueError as exc:
+        parser.error(str(exc))
+    version = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=10)
+    telemetry = ClaudeTelemetry() if args.host == "claude" else Telemetry()
     def persist(code=None):
-        report = {**telemetry.summary(), "model": args.model, "effort": args.effort,
-                  "command": command, "codex_version": version.stdout.strip(), "returncode": code}
+        report = {**telemetry.summary(), "host": args.host, "model": args.model, "effort": args.effort,
+                  "command": command, args.host + "_version": version.stdout.strip(), "returncode": code}
         temporary = trial / "telemetry.tmp"
         temporary.write_text(json.dumps(report) + "\n")
         temporary.replace(trial / "telemetry.json")
@@ -102,13 +183,18 @@ def main() -> int:
                 event = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(event, dict):
+                continue
             telemetry.observe(event, time.monotonic() - start)
-            item = event.get("item", {})
+            item = event.get("item") or {}
             if event.get("type") == "item.completed" and item.get("type") == "agent_message":
                 print(item.get("text", ""), flush=True)
-            # Persist partial observations even when the supervising timeout kills this runner.
+            elif args.host == "claude" and event.get("type") == "result":
+                print(event.get("result", ""), flush=True)
             persist()
     code = process.wait()
+    if args.host == "claude" and code == 0 and (telemetry.result is None or telemetry.result.get("is_error")):
+        code = 1
     persist(code)
     return code
 

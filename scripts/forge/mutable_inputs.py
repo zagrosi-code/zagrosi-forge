@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 
 from . import artifacts, context, ownership, sections, session, storage
 
@@ -30,8 +31,9 @@ def target_directory(planning_dir: Path, target_dir: Path | None = None) -> Path
 def code_observations(target_dir: Path, paths) -> dict[str, str | None]:
     result = {}
     for name in sorted(set(paths)):
-        normalized = ownership.normalize_owned_path(name)
-        if not normalized or not (target_dir / normalized).resolve().is_relative_to(target_dir):
+        relative = Path(name)
+        normalized = relative.as_posix()
+        if not name or relative.is_absolute() or ".." in relative.parts or not (target_dir / relative).resolve().is_relative_to(target_dir):
             raise ValueError(f"Observed code path must stay within the target directory: {name}")
         path = target_dir / normalized
         try:
@@ -108,3 +110,76 @@ def contract_snapshot(planning_dir: Path, section: str, *, target_dir=None, file
     target = target_directory(planning_dir, target_dir)
     return {"version": 1, "contract": contract, "target_dir": str(target),
             "code": code_observations(target, owned | set(files))}
+
+
+def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | None = None) -> dict:
+    """Bind verification to source files and link identities, without traversing linked directories."""
+    names = sections.check_section_progress(planning_dir).get("sections", [])
+    if not names or (section and section not in names):
+        raise ValueError("Verification requires a complete section index.")
+    contracts = {name: contract_inputs(planning_dir, name)[0] for name in names}
+    sources = artifacts.planning_artifacts(planning_dir)
+    sources["spec"] = artifacts.requirement_source_spec(planning_dir)
+    authoritative = {
+        name: {"path": str(path.resolve()), "content": storage.read_text(path) if path.is_file() else None}
+        for name, path in sources.items() if path and name != "traceability"
+    }
+    contracts["artifacts"] = authoritative
+    contracts["planning_config"] = artifacts.planning_config(planning_dir)
+    excluded = {planning_dir / name for name in (".zagrosi-project", ".deep-project", ".forge/scores", ".forge/report.html",
+                                                "implementation/verification", "implementation/code_review")}
+    excluded.update(planning_dir / "sections" / f"{name}.md" for name in ["index", *names])
+    excluded.update(planning_dir / "implementation" / name for name in (
+        "zagrosi_implement_config.json", "deep_implement_config.json", "zagrosi_implement_state.json",
+        "deep_implement_state.json", "forge-progress.json", ".mutable-state.lock",
+    ))
+    excluded.update(path for path in artifacts.planning_artifacts(planning_dir).values() if path)
+    excluded.update(planning_dir / name for name in (
+        "zagrosi_plan_config.json", "deep_plan_config.json", "traceability.md", "forge-report.md",
+    ))
+    try:
+        result = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."],
+                                cwd=target_dir, capture_output=True, timeout=10)
+        if result.returncode == 0 and not (target_dir / ".git").exists():
+            # An ignored nested workspace can return success with no source paths.
+            # Check its parent so the target's own ignore rules remain authoritative.
+            ignored_target = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", target_dir.name],
+                                            cwd=target_dir.parent, capture_output=True, timeout=10)
+            if ignored_target.returncode == 0:
+                result = None
+    except FileNotFoundError:
+        result = None
+    if result is not None and result.returncode == 0:
+        paths = [target_dir / os.fsdecode(name) for name in result.stdout.split(b"\0") if name]
+    else:
+        ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+        paths = []
+        for directory, directories, files in os.walk(target_dir):
+            directories[:] = [name for name in directories if name not in ignored]
+            paths.extend(Path(directory) / name for name in directories if (Path(directory) / name).is_symlink())
+            paths.extend(Path(directory) / name for name in files if not name.endswith((".pyc", ".pyo")))
+    observed = [path.relative_to(target_dir).as_posix() for path in paths
+                if not any(path == excluded_path or path.is_relative_to(excluded_path) for excluded_path in excluded)]
+    identities, files = {}, []
+    for name in observed:
+        path = target_dir / name
+        if path.is_symlink():
+            if not path.parent.resolve().is_relative_to(target_dir):
+                raise ValueError(f"Observed code path must stay within the target directory: {name}")
+            try:
+                linked_mode = path.stat().st_mode
+            except FileNotFoundError:
+                linked_mode = 0
+            if not linked_mode or stat.S_ISDIR(linked_mode):
+                # Bind the entry, never enumerate linked directories or read outside source roots.
+                identities[name] = {"content": None, "mode": stat.S_IMODE(path.lstat().st_mode),
+                                    "link": os.readlink(path), "target_type": "directory" if linked_mode else "missing"}
+                continue
+        files.append(name)
+    for name, content in code_observations(target_dir, files).items():
+        path = target_dir / name
+        identities[name] = {"content": content, "mode": stat.S_IMODE(path.lstat().st_mode) if content is not None else None,
+                            "link": os.readlink(path) if path.is_symlink() else None}
+    return {"version": 1, "planning_dir": str(planning_dir), "target_dir": str(target_dir),
+            "section": section, "contract_digest": digest(contracts), "source_digest": digest(identities),
+            "source_file_count": len(identities)}
