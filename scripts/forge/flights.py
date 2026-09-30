@@ -249,13 +249,15 @@ def implement_postflight_report(
 def _implement_postflight_report(
     planning_dir: Path, args: argparse.Namespace, *, candidate_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    from . import mutable_inputs, verification
+
     mode = _gates.effective_flight_mode(args)
     if mode == "off":
         return _gates.flight_payload(phase="implement", stage="postflight", mode=mode, gates=[])
     depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", _policy.DEFAULT_DEPTH) or _policy.DEFAULT_DEPTH)
     compact = _markdown.is_lean_depth(depth)
     profile = getattr(args, "profile", "solo")
-    target_dir = _storage.resolve_path(getattr(args, "target_dir", None)) if getattr(args, "target_dir", None) else Path.cwd()
+    target_dir = mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None))
     recording_status = _state.implementation_recording_status(planning_dir, candidate_state)
     final_state_gates = recording_status["sections_recorded_complete"]
     jobs: list[tuple[str, list[str], bool]] = []
@@ -312,6 +314,10 @@ def _implement_postflight_report(
     gates = _gates.run_internal_gate_batch(jobs)
     if progress_gate is not None:
         gates.append(progress_gate)
+    integration = None
+    if candidate_state is None and final_state_gates:
+        integration = verification.integration_report(planning_dir, target_dir)
+        gates.append(_gates.direct_gate("integration-verification", integration["success"], integration))
     if candidate_state is None and recording_status["pending_sections"]:
         gates.append(_gates.direct_gate("pending-completion", False, {
             "pending_sections": recording_status["pending_sections"],
@@ -322,7 +328,8 @@ def _implement_postflight_report(
         stage="postflight",
         mode=mode,
         gates=gates,
-        extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir), **recording_status},
+        extras={"planning_dir": str(planning_dir), "target_dir": str(target_dir), **recording_status,
+                "integration_verification": integration},
     )
 
 

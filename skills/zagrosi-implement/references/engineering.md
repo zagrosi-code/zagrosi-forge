@@ -21,6 +21,12 @@ can have external callers even when it is unused internally.
 Tests should expose behavioral failures, not mirror lines, private structure,
 or cosmetic choices. Record material deviations and measured verification.
 
+Before PR delivery, use the existing review to inspect the diff and relevant
+callers for introduced or encountered clutter. Fix justified local problems and
+refresh affected checks before the final integration result. Record unrelated
+debt without expanding the PR indefinitely. An explicitly requested repository
+cleanup uses [Cleanup](../../zagrosi-cleanup/SKILL.md).
+
 ## Useful simplification
 
 - **Earn a helper.** Replace an internal `_label(prefix, name)` used once only to

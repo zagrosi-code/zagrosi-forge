@@ -32,10 +32,10 @@ def record_args(planning, *extra):
 
 @pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
 @pytest.mark.parametrize("evidence", [
-    ("--review-status", "blocked", "--verification", "pytest -q"),
+    ("--review-status", "blocked", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q"),
     ("--review-status", "pass"),
-    ("--verification", "pytest -q"),
-    ("--review-status", "pass", "--verification", "pending"),
+    ("--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q"),
+    ("--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pending"),
 ])
 def test_incomplete_evidence_never_records_completion(runtime, tmp_path, capsys, depth, evidence):
     planning = make_plan(tmp_path / "planning", depth)
@@ -50,7 +50,7 @@ def test_incomplete_evidence_never_records_completion(runtime, tmp_path, capsys,
 def test_structured_evidence_needs_no_duplicate_review_files(runtime, tmp_path, capsys, depth, flight):
     planning = make_plan(tmp_path / "planning", depth)
     code, payload = invoke(runtime, capsys, *record_args(
-        planning, "--review-status", "pass", "--verification", "pytest -q", "--flight", flight))
+        planning, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", flight))
     assert code == 0 and payload["success"]
     code, payload = invoke(runtime, capsys, "lint-implementation-state", "--sections-dir",
                            str(planning / "sections"), "--strict")
@@ -59,7 +59,7 @@ def test_structured_evidence_needs_no_duplicate_review_files(runtime, tmp_path, 
 
 @pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
 @pytest.mark.parametrize("legacy_review,passing", [
-    ("# Review\nNo blocking findings.\nVerification: `pytest -q` passed (18 tests).\n", True),
+    ("# Review\nNo blocking findings.\nVerification: `pytest -q` passed (18 tests).\n", False),
     ("", False),
     ("# Review\nVerdict: pass\nVerification: pending\n", False),
     ("```text\nNo blocking findings.\nVerification: `pytest -q` passed.\n```\n", False),
@@ -89,7 +89,7 @@ def test_failed_postflight_stays_pending_and_can_resume(runtime, tmp_path, capsy
         return failure
 
     monkeypatch.setattr(runtime.flights, "implement_postflight_report", fail)
-    args = record_args(planning, "--review-status", "pass", "--verification", "pytest -q", "--flight", "strict")
+    args = record_args(planning, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "strict")
     code, payload = invoke(runtime, capsys, *args)
     assert code == 1 and not payload["success"]
     assert payload["postflight"] == failure
@@ -116,7 +116,7 @@ def test_failed_postflight_stays_pending_and_can_resume(runtime, tmp_path, capsy
 
 def test_failed_rerecord_keeps_previous_completion(runtime, tmp_path, capsys, monkeypatch):
     planning = make_plan(tmp_path / "planning", "standard")
-    args = record_args(planning, "--review-status", "pass", "--verification", "pytest -q")
+    args = record_args(planning, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q")
     invoke(runtime, capsys, *args, "--commit", "previous", "--flight", "off")
     monkeypatch.setattr(runtime.flights, "implement_postflight_report",
                         lambda *a, **k: {"success": False, "blocking_gates": ["regression-check"]})
@@ -136,7 +136,7 @@ def test_interrupted_postflight_keeps_evidence_pending(runtime, tmp_path, capsys
 
     monkeypatch.setattr(runtime.flights, "implement_postflight_report", interrupt)
     with pytest.raises(KeyboardInterrupt):
-        invoke(runtime, capsys, *record_args(planning, "--review-status", "pass", "--verification", "pytest -q"))
+        invoke(runtime, capsys, *record_args(planning, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q"))
     state = runtime.state.load_implementation_state(planning)
     assert not state["completed_sections"]
     assert state["pending_sections"][SECTION]["verification"] == ["pytest -q"]
@@ -164,7 +164,7 @@ def test_failed_predecessor_does_not_unlock_successor(runtime, tmp_path, capsys,
     (planning / "sections" / f"{successor}.md").write_text(section.read_text())
     monkeypatch.setattr(runtime.flights, "implement_postflight_report",
                         lambda *a, **k: {"success": False, "blocking_gates": ["regression-check"]})
-    args = record_args(planning, "--review-status", "pass", "--verification", "pytest -q", "--flight", "strict")
+    args = record_args(planning, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "strict")
     code, payload = invoke(runtime, capsys, *args)
     assert code == 1 and successor not in payload["ready_sections"]
     successor_args = tuple(successor if value == SECTION else value for value in args)
@@ -204,7 +204,7 @@ def test_independent_sections_can_resolve_failed_records_in_either_order(runtime
 
     for name in (second, SECTION):
         code, payload = invoke(runtime, capsys, "implement-record-section", "--sections-dir", str(planning / "sections"),
-                               "--section", name, "--review-status", "pass", "--verification", "pytest -q", "--flight", "strict")
+                               "--section", name, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "strict")
         assert code == 0, payload
         assert name in runtime.state.completed_sections(planning)
     assert runtime.state.completed_sections(planning) == {SECTION, second}
@@ -214,7 +214,7 @@ def test_independent_sections_can_resolve_failed_records_in_either_order(runtime
 def test_canonical_completion_does_not_create_duplicate_traceability(runtime, tmp_path, capsys, depth):
     planning = make_plan(tmp_path / "planning", depth)
     code, payload = invoke(runtime, capsys, *record_args(planning, "--review-status", "pass",
-                                                       "--verification", "pytest -q", "--flight", "off"))
+                                                       "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off"))
     assert code == 0, payload
     assert payload["traceability_matrix"] is None
     assert not (planning / "traceability.md").exists()

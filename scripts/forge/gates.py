@@ -14,6 +14,8 @@ import subprocess
 import sys
 
 from . import CLI_PATH
+from . import child_process as _child_process
+from . import output as _output
 from . import policy as _policy
 from . import session as _session
 from . import storage as _storage
@@ -47,14 +49,8 @@ def compact_gate_record(gate: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def local_gate_available(name: str, command: list[str]) -> bool:
-    context = _session._CLI_CONTEXT.get()
-    if (
-        context is None or not context["local_gates"] or not command
-        or name != command[0] or name not in _policy.LOCAL_GATE_COMMANDS
-        or current_thread() is not main_thread() or not hasattr(signal, "setitimer")
-        or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
-    ):
+def read_only_gate(name: str, command: list[str]) -> bool:
+    if not command or name != command[0] or name not in _policy.LOCAL_GATE_COMMANDS:
         return False
     # Only generated read-only options with absolute paths preserve child cwd semantics.
     options = iter(command[1:])
@@ -71,21 +67,32 @@ def local_gate_available(name: str, command: list[str]) -> bool:
     return True
 
 
-def run_local_gate(command: list[str], timeout_seconds: int) -> subprocess.CompletedProcess:
+def local_gate_available(name: str, command: list[str]) -> bool:
+    context = _session._CLI_CONTEXT.get()
+    return bool(context and context["local_gates"] and read_only_gate(name, command) and (
+        context.get("gate_worker") or (
+            current_thread() is main_thread() and hasattr(signal, "setitimer")
+            and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+        )
+    ))
+
+
+def run_local_gate(command: list[str], timeout_seconds: int | None) -> subprocess.CompletedProcess:
     context = _session._CLI_CONTEXT.get()
     assert context is not None
     stdout, stderr = io.StringIO(), io.StringIO()
     capture = _session._GATE_STREAMS.set((stdout, stderr))
     payload: dict[str, Any] = {}
     quality_capture = _session._QUALITY_CAPTURE.set(payload)
-    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_handler = signal.getsignal(signal.SIGALRM) if timeout_seconds is not None else None
 
     def expire(_signum: int, _frame: Any) -> None:
         raise subprocess.TimeoutExpired(command, timeout_seconds, stdout.getvalue(), stderr.getvalue())
 
     try:
-        signal.signal(signal.SIGALRM, expire)
-        signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+        if timeout_seconds is not None:
+            signal.signal(signal.SIGALRM, expire)
+            signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
         try:
             args = context["parser"].parse_args(command)
             returncode = args.func(args)
@@ -102,8 +109,9 @@ def run_local_gate(command: list[str], timeout_seconds: int) -> subprocess.Compl
         output = (json.dumps(payload) + output if output else payload) if payload else output
         return subprocess.CompletedProcess(command, returncode, output, stderr.getvalue())
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
+        if timeout_seconds is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
         _session._GATE_STREAMS.reset(capture)
         _session._QUALITY_CAPTURE.reset(quality_capture)
 
@@ -119,7 +127,8 @@ def run_internal_gate(
     local = cwd is None and timeout_seconds == 120 and local_gate_available(name, command)
     try:
         if local:
-            result = run_local_gate(command, timeout_seconds)
+            context = _session._CLI_CONTEXT.get()
+            result = run_local_gate(command, None if context.get("gate_worker") else timeout_seconds)
         else:
             result = subprocess.run(
                 [sys.executable, str(Path(str(CLI_PATH)).resolve()), *command, "--full-output"],
@@ -173,6 +182,49 @@ def run_internal_gate(
     )
 
 
+def gate_batch_worker(_args: argparse.Namespace) -> int:
+    """Run only approved read-only commands; the parent bounds the entire process."""
+    try:
+        jobs = json.loads(sys.stdin.read(1024 * 1024))
+        if not isinstance(jobs, list) or not 1 <= len(jobs) <= 64 or any(
+            not isinstance(job, list) or len(job) != 3 or not isinstance(job[0], str)
+            or not isinstance(job[1], list) or not all(isinstance(arg, str) for arg in job[1])
+            or not isinstance(job[2], bool) or not read_only_gate(job[0], job[1]) for job in jobs
+        ):
+            raise ValueError("Batch requires 1-64 approved read-only gate commands.")
+    except (ValueError, TypeError) as exc:
+        return _output.print_json({"success": False, "error": str(exc)}, 1)
+    with _session.read_phase():
+        _session._CLI_CONTEXT.get()["gate_worker"] = True
+        results = [run_internal_gate(name, command, required=required) for name, command, required in jobs]
+    return _output.print_json({"success": True, "gates": results})
+
+
+def run_gate_worker(jobs: list[tuple[str, list[str], bool]]) -> list[dict[str, Any]]:
+    result = _child_process.execute(
+        [sys.executable, str(Path(str(CLI_PATH)).resolve()), "gate-batch", "--full-output"],
+        _storage.current_plugin_root(), prompt=json.dumps(jobs), timeout=120, output_limit=2 * 1024 * 1024,
+    )
+    if result["timed_out"]:
+        payload = {"error_code": "gate-timeout", "timeout_seconds": 120, "timeout_scope": "batch"}
+    else:
+        try:
+            gates = json.loads(result["stdout"])["gates"]
+            complete = not (result.get("stdout_truncated") or result.get("stderr_truncated"))
+            if result["returncode"] == 0 and complete and isinstance(gates, list) and len(gates) == len(jobs) and all(
+                isinstance(gate, dict) and gate.get("name") == job[0] and gate.get("required") is job[2]
+                and isinstance(gate.get("success"), bool) for gate, job in zip(gates, jobs)
+            ):
+                return gates
+        except (ValueError, TypeError, KeyError):
+            pass
+        payload = {"error_code": "invalid-gate-batch", "stdout": bounded_output_tail(result["stdout"])}
+    stderr, returncode = bounded_output_tail(result["stderr"]), result["returncode"] or 1
+    return [{"name": name, "required": required, "success": False, "returncode": returncode,
+             "command": " ".join(command), "payload": payload, "stderr_tail": stderr}
+            for name, command, required in jobs]
+
+
 def run_internal_gate_batch(jobs: list[tuple[str, list[str], bool]]) -> list[dict[str, Any]]:
     if not jobs:
         return []
@@ -184,9 +236,15 @@ def run_internal_gate_batch(jobs: list[tuple[str, list[str], bool]]) -> list[dic
     local = {index for index, (name, command, _) in enumerate(jobs) if local_gate_available(name, command)}
     if len(local) == len(jobs):
         return [run(job) for job in jobs]
+    context = _session._CLI_CONTEXT.get()
+    portable = {index for index, (name, command, _) in enumerate(jobs)
+                if index not in local and context and context["local_gates"] and read_only_gate(name, command)}
     with ThreadPoolExecutor(max_workers=min(4, len(jobs) - len(local)), thread_name_prefix="forge-gate") as executor:
-        pending = {index: executor.submit(run, job) for index, job in enumerate(jobs) if index not in local}
+        worker = executor.submit(run_gate_worker, [jobs[index] for index in sorted(portable)]) if portable else None
+        pending = {index: executor.submit(run, job) for index, job in enumerate(jobs) if index not in local | portable}
         results = {index: run(jobs[index]) for index in sorted(local)}
+        if worker:
+            results.update(zip(sorted(portable), worker.result()))
         results.update((index, future.result()) for index, future in pending.items())
     return [results[index] for index in range(len(jobs))]
 

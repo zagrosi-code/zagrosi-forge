@@ -176,12 +176,22 @@ REQ-1: independent behavior oracle and existing/added tests pass after refactor.
     implementation.mkdir()
     state = {"completed_sections": {"section-01-invoice": {
         "review_status": "pass", "verification": ["python3 -m unittest discover -s tests: passed"],
+        "verification_result": {"version": 1, "source": "attestation", "outcome": "passed",
+                                "evidence": ["python3 -m unittest discover -s tests passed"]},
         "files_changed": ["src/ledger.py"], "test_files": ["tests/test_ledger.py"],
         "completed_at": "2026-09-15T15:00:00+00:00", "review_artifacts": [],
     }}, "pending_sections": {}}
     state_path = implementation / "zagrosi_implement_state.json"
     state_path.write_text(json.dumps(state))
+    verify_integration(workspace)
     return state_path
+
+
+def verify_integration(workspace):
+    result = trials.execute([sys.executable, str(ROOT / "scripts/zagrosi_skills.py"), "implement-verify",
+                             "--planning-dir", str(workspace / ".planning"), "--target-dir", str(workspace),
+                             "--", sys.executable, "-m", "unittest", "discover", "-s", "tests"], workspace)
+    assert result["returncode"] == 0, result
 
 
 def write_cleanup(trial):
@@ -211,6 +221,9 @@ class InvoiceManager:
     def test_tax_rounds_after_aggregate(self):
         self.assertEqual(invoice("total", [{"price": 3, "quantity": 2}]), 7)
 ''')
+
+    if (workspace / ".planning").exists():
+        verify_integration(workspace)
 
 
 def write_review(trial, regression_evidence="The aggregate-rounding regression and compatibility oracle pass before and after cleanup."):
@@ -349,6 +362,7 @@ def test_workflow_requires_real_completed_section_records(tmp_path):
     assert not result["workflow"]["success"]
     state["pending_sections"] = {}
     del state["completed_sections"]["section-01-invoice"]["verification"]
+    del state["completed_sections"]["section-01-invoice"]["verification_result"]
     state_path.write_text(json.dumps(state))
     assert not trials.check(trial)["workflow"]["success"]
 
@@ -495,7 +509,8 @@ def test_redirected_descendants_stop_before_execute_returns(tmp_path, leader_exi
 def test_failed_residual_group_termination_cannot_report_process_success(tmp_path, monkeypatch):
     import signal
 
-    process_tools = sys.modules[trials.execute.__module__]
+    wrapper = sys.modules[trials.execute.__module__]
+    process_tools = sys.modules[wrapper._execute.__module__]
     signals = []
 
     def denied_killpg(_process_group, sig):

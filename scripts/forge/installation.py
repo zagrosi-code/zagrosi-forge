@@ -32,6 +32,8 @@ def _release_check(args: argparse.Namespace, config_path: Path) -> int:
     plugin_root = _storage.resolve_path(args.plugin_root)
     checks: list[tuple[str, list[str]]] = [
         ("compile-cli", [sys.executable, "-m", "py_compile", *map(str, sorted((plugin_root / "scripts").rglob("*.py")))]),
+        ("release-version", [sys.executable, str(plugin_root / "tools/sync_release.py"), "--plugin-root", str(plugin_root), "--check"]),
+        ("package-doctor", [sys.executable, str(plugin_root / "scripts/zagrosi_skills.py"), "doctor", "--plugin-root", str(plugin_root), "--strict"]),
         ("runtime-manifest", [sys.executable, str(plugin_root / "tools" / "update_runtime_manifest.py"), "--plugin-root", str(plugin_root), "--check"]),
         ("validate-plugin-manifest", [sys.executable, "-m", "json.tool", str(plugin_root / ".codex-plugin" / "plugin.json")]),
         ("validate-marketplace", [sys.executable, "-m", "json.tool", str(plugin_root / ".agents" / "plugins" / "marketplace.json")]),
@@ -77,6 +79,10 @@ def _release_check(args: argparse.Namespace, config_path: Path) -> int:
                 "stdout_tail": result.stdout[-1000:],
                 "stderr_tail": result.stderr[-1000:],
             }
+        except OSError as exc:
+            return {"name": name, "command": " ".join(command), "returncode": 127,
+                    "duration_seconds": round(time.monotonic() - check_started, 3),
+                    "stdout_tail": "", "stderr_tail": str(exc)}
         except subprocess.TimeoutExpired as exc:
             return {
                 "name": name,
@@ -339,7 +345,7 @@ def install_codex(args: argparse.Namespace) -> int:
     plugin_version = str(manifest.get("version") or "0.0.0")
     cache_path = plugin_cache_path(codex_home, "zagrosi", plugin_name, plugin_version)
     try:
-        with nullcontext() if args.dry_run else _storage.file_lock(config_path):
+        with nullcontext() if args.dry_run else _storage.file_lock(config_path, timeout_seconds=30):
             original = _codex_config.read_config(config_path)
             existing = _codex_config.config_text(original[0])
             updated, changes = expected_codex_config(existing, plugin_root)
@@ -352,6 +358,9 @@ def install_codex(args: argparse.Namespace) -> int:
             backup_path = None
             if config_changed and not args.dry_run:
                 backup_path = _codex_config.publish_config(config_path, original, updated, no_backup=args.no_backup)
+    except TimeoutError:
+        return _output.print_json({"success": False, "operation": operation, "config_path": str(config_path),
+                                  "error": "Another installation is still updating this configuration; retry when it finishes."}, 1)
     except (OSError, ValueError):
         return _output.print_json({"success": False, "operation": operation,
                                   "error": _codex_config.CONFIG_ERROR, "config_path": str(config_path)}, 1)

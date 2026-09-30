@@ -19,7 +19,7 @@ def forge():
 
 def record(planning, section=SECTION, *args):
     return run_cmd("implement-record-section", "--sections-dir", str(planning / "sections"),
-                   "--section", section, "--review-status", "pass", "--verification", "pytest -q",
+                   "--section", section, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q",
                    "--flight", "off", *args)
 
 
@@ -134,8 +134,8 @@ def test_code_observations_change_without_revoking_completed_contract(forge, tmp
 def test_legacy_records_explicitly_remain_unbound(forge, tmp_path):
     planning = make_plan(tmp_path / "plan")
     state = {"completed_sections": {SECTION: {"review_status": "pass", "verification": ["pytest -q"]}}}
-    assert forge.state.completed_sections(planning, state) == {SECTION}
-    assert forge.state.implementation_recording_status(planning, state)["legacy_unbound_sections"] == [SECTION]
+    assert forge.state.completed_sections(planning, state) == set()
+    assert forge.state.implementation_recording_status(planning, state)["verification_sources"] == {SECTION: "legacy_unknown"}
 
 
 def test_failed_atomic_write_preserves_existing_state(forge, tmp_path, monkeypatch):
@@ -192,7 +192,7 @@ def slow_read(path):
 forge.state.load_implementation_state = slow_read
 raise SystemExit(forge.entrypoint.main([
     "implement-record-section", "--sections-dir", sys.argv[3], "--section", sys.argv[4],
-    "--review-status", "pass", "--verification", "pytest -q", "--flight", "off",
+    "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off",
 ]))
 ''')
     processes = [subprocess.Popen([sys.executable, str(worker), str(ROOT / "tests"),

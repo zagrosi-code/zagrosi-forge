@@ -1,8 +1,9 @@
 # Coding trials
 
-Seven isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
+Eight isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
 deep discount design, a real Forge resume checkpoint, an order-dispatch godfile,
-an import preview across several modules, and a Node summary feature. The invoice cases preserve public APIs, exact exports, rounding, and
+an import preview across several modules, a Node summary feature, and TypeScript
+permission/transaction cleanup. The invoice cases preserve public APIs, exact exports, rounding, and
 errors. The godfile case exercises cohesive module extraction while preserving
 validation, pricing, shipping, serialization, file access, and order transitions.
 The ordinary summary request never asks for refactoring: independent review checks
@@ -51,15 +52,16 @@ Results keep three decisions separate:
 - `workflow`: Forge admits the actual `.planning` plan with strict checks at the
   selected trial depth, then verifies implementation completion records. A narrative
   "done" note is insufficient.
-- `cleanup`: for ordinary summary, import preview, cleanup and godfile cases, source syntax must change, and an
+- `cleanup`: for ordinary summary, import preview, cleanup, godfile and TypeScript access cases, implementation code must change, and an
   independent reviewer must confirm useful cleanup with concrete changes and
   before/after regression evidence. Existing tests and the independent oracle can
   supply sufficient coverage; add tests where coverage is weak. Test changes are
   reported separately. Other cases report `not_required`.
 
 An unchanged cleanup fixture can pass behavior, but cannot pass the overall trial.
-Comments, formatting, docstrings and empty new modules do not establish cleanup.
-Syntax differences establish that code changed; they do not judge its usefulness.
+Comments, formatting, docstrings and empty new modules do not establish useful cleanup.
+Python changes are compared using syntax trees; TypeScript/JavaScript changes use
+file hashes. The independent review determines whether changes are substantive.
 No line-count, complexity, or readability threshold determines success.
 
 After the candidate finishes, an independent reviewer can create an evidence form:
@@ -141,9 +143,9 @@ all three depths, including failed and cancelled attempts and comparison limits.
 
 [24 September controlled pilot](controlled-results-2026-09-24.md): lower observed input use, incomplete Forge outcomes, and independent review failures.
 
-The built-in comparison runner uses Codex CLI. These measurements do not cover
-Claude Code. For another agent, use manual `prepare`/`check` or the custom runner
-contract above.
+The historical measurements use Codex CLI and do not cover Claude Code. The
+current adapter also supports Claude; new runs must report their own outcomes.
+Other agents can use the explicit custom runner contract above.
 
 Use **one frozen evaluator checkout** for the entire experiment. `--plugin-root`
 selects only Forge's source under test; its evaluator, cases and fixtures are never
@@ -161,7 +163,7 @@ used. Each case/depth/repetition runs previous Forge, current Forge and plain ag
 in a rotating order. Comparisons run serially to avoid concurrent workload bias.
 All arms use the checked-in adapter, the same explicit model/effort, a fresh
 workspace/session, ignored user config/rules and identical sandbox settings.
-Confirm the chosen model works with the same Codex binary before scheduling.
+Confirm the chosen model works with the selected host binary before scheduling.
 
 ```bash
 # Run this script from the frozen evaluator, which includes the new harness.
@@ -217,3 +219,57 @@ and then retry packet creation. If preparation never produced a workspace,
 retain the incomplete block and schedule any replacement as a new attempt;
 never erase the original failure. An empty preferred-label list is allowed when
 no candidate is acceptable.
+
+## Native hosts and accepted outcomes
+
+The built-in writer adapter supports Codex and Claude Code. Compare Forge and
+plain work **within the same host, requested model and effort**; separate host
+experiments do not isolate a plugin effect. For example:
+
+```bash
+python3 tools/trial_matrix.py compare /tmp/forge-claude-comparison \
+  --previous-root /absolute/path/to/previous-forge --host claude \
+  --model YOUR_CLAUDE_MODEL --effort high --cases typescript-access --repeats 2
+```
+
+The TypeScript fixture requires Node24. It exercises duplicate authorization
+policy across modules, public exports, validation order, tenant isolation,
+auditing and rollback through 394 independent assertions. Known-defect tests
+check that the oracle rejects authorization, transaction, ordering and export
+regressions. These checks run TypeScript through Node and compare runtime behavior;
+they do not establish static type compatibility. Source-byte changes alone do not prove useful TypeScript cleanup;
+independent review must explain the concrete improvement.
+
+Native writer runs use existing CLI authentication and consume the account's
+usage. They do not read or copy credentials. Claude loads the selected plugin
+with `--plugin-dir`, suppresses user/project settings, and preserves OAuth; its
+plain arm omits the plugin. Host permission controls differ. The disposable trial
+workspace and scope checker are evaluation boundaries, not a security sandbox.
+
+Reports retain every attempt and add accepted rate, elapsed time, input/output
+usage, interventions and CLI-reported cost per accepted result. Failures count
+in totals. Missing observations stay unknown; zero accepted results leaves
+per-accepted figures undefined. Claude final-result usage is counted once;
+reported costs are estimates, not subscription charges. Independent review time
+is currently unmeasured. Offline stream tests are parser evidence, not live
+model-quality results. Historical reports above remain unchanged.
+
+## Deliberate interruption and a fresh session
+
+Use the existing `resume` case and supply the second runner as a JSON argv
+array. The harness saves both process attempts, transcripts and telemetry,
+confirms timeout cleanup, then starts a fresh process in the same workspace.
+The second runner may select the other host. The original red checkpoint and
+regression test must survive and the completed behavior must pass the oracle.
+
+```bash
+python3 tools/coding_trials.py run /tmp/forge-cross-host --case resume \
+  --interrupt-after 30 --timeout 600 \
+  --resume-runner '["python3","/absolute/path/to/forge/tools/coding_trial_runner.py","--host","claude","--model","YOUR_CLAUDE_MODEL","--effort","high"]' \
+  --runner python3 /absolute/path/to/forge/tools/coding_trial_runner.py \
+  --host codex --model YOUR_CODEX_MODEL --effort high
+```
+
+If the first process finishes before interruption or cleanup is unconfirmed,
+the interruption trial fails explicitly. A successful helper-process recovery
+test does not claim that either model used a skill correctly.

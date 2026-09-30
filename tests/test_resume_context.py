@@ -154,15 +154,16 @@ def test_returned_record_command_preserves_paths_depth_and_evidence(forge, tmp_p
                           "--target-dir", str(root), "--depth", depth, "--profile", profile, "--flight", "off")
     assert code == 0, result
     command = result["commands"]["record"]
-    values = {"<review-status>": "pass", "<verification>": "pytest tests/test_labels.py",
-              "<changed-file>": "src/labels.py"}
+    values = {"<review-status>": "pass", "<changed-file>": "src/labels.py"}
     args = forge.cli.build_parser().parse_args([values.get(arg, arg) for arg in command[2:]])
     assert args.sections_dir == str(planning / "sections")
     assert args.target_dir == str(root)
     assert args.depth == depth
     assert args.profile == profile
     assert args.files_changed == ["src/labels.py"]
-    assert args.verification == ["pytest tests/test_labels.py"]
+    assert args.verification == []
+    assert args.verification_receipt == str(planning / "implementation/verification" / f"{SECTION}.json")
+    assert result["commands"]["verify_section"][-3:] == ["--", "<command>", "<argument>"]
     assert result["record_options"]["--test-file"]
     _, resumed = invoke(forge, capsys, "next-section", "--planning-dir", str(planning))
     assert forge.cli.build_parser().parse_args([values.get(arg, arg) for arg in resumed["commands"]["record"][2:]]).profile == profile
@@ -185,7 +186,7 @@ def test_mutable_profile_resume_preserves_saved_value_and_allows_override(forge,
     monkeypatch.setattr(forge.validation, "plan_artifacts_payload", checked)
     arguments = ["--profile", override] if override else []
     if operation == "implement-record-section":
-        arguments += ["--section", SECTION, "--review-status", "pass", "--verification", "pytest passed"]
+        arguments += ["--section", SECTION, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest passed"]
     code, result = invoke(forge, capsys, operation, *common, *arguments)
     assert code == 0, result
     expected = override or "enterprise"
@@ -228,7 +229,7 @@ def test_record_returns_next_packet_after_publication(forge, tmp_path, capsys):
     from test_workflow_admission import two_sections
     planning = two_sections(tmp_path / "plan")
     code, result = invoke(forge, capsys, "implement-record-section", "--sections-dir", str(planning / "sections"),
-                          "--section", SECTION, "--review-status", "pass", "--verification", "pytest -q", "--flight", "off")
+                          "--section", SECTION, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off")
     assert code == 0, result
     assert result["recorded"] is True
     assert result["next_section"] == "section-02-consumer"
@@ -246,7 +247,7 @@ def test_next_packet_failure_does_not_report_record_failure(forge, tmp_path, cap
 
     monkeypatch.setattr(forge.resume, "section_entry", fail_entry)
     code, result = invoke(forge, capsys, "implement-record-section", "--sections-dir", str(planning / "sections"),
-                          "--section", SECTION, "--review-status", "pass", "--verification", "pytest -q", "--flight", "off")
+                          "--section", SECTION, "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest -q", "--flight", "off")
     assert code == 0, result
     assert result["success"] and result["recorded"]
     assert not result["entry"]["success"]
@@ -312,7 +313,7 @@ def test_final_record_returns_verification_without_repeating_tests(forge, worksp
     root, planning = workspace
     code, result = invoke(forge, capsys, "implement-record-section", "--sections-dir", str(planning / "sections"),
                           "--target-dir", str(root), "--section", SECTION, "--review-status", "pass",
-                          "--verification", "pytest tests/test_labels.py", "--flight", "off")
+                          "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "pytest tests/test_labels.py", "--flight", "off")
     assert code == 0, result
     assert result["recorded"]
     assert result["next_section"] is None
@@ -345,3 +346,33 @@ def test_returned_plan_gate_enforces_strict_admission(forge, tmp_path, capsys):
     code, result = invoke(forge, capsys, *setup["commands"]["verify_plan"][2:])
     assert code == 1, result
     assert not result["success"]
+
+
+def test_oversized_entry_returns_executable_complete_context_recovery(forge, workspace, capsys):
+    import subprocess
+
+    root, planning = workspace
+    section = planning / "sections" / f"{SECTION}.md"
+    contract = "\n## Additional contract\n\n" + "Preserve behavior. " * 1200 + "COMPLETE-CONTRACT-END\n"
+    section.write_text(section.read_text() + contract)
+    code, result = invoke(forge, capsys, "next-section", "--planning-dir", str(planning))
+    assert code == 1 and not result["success"]
+    assert "content" not in result["packet"]
+    recovery = result["commands"]["retry_context"]
+    assert recovery[-2:] == ["--max-words", str(result["packet"]["required_words"])]
+    completed = subprocess.run(recovery, cwd=root, capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    recovered = json.loads(completed.stdout)
+    assert recovered["packet"]["success"] and contract.strip() in recovered["packet"]["content"]
+    assert recovered["packet"]["word_count"] <= recovered["packet"]["max_words"]
+    assert "record" in recovered["commands"]
+
+
+def test_broken_link_does_not_offer_a_retry_that_repeats_the_same_failure(forge, workspace, capsys):
+    _, planning = workspace
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\n[Missing](../absent.md)\n")
+    code, result = invoke(forge, capsys, "next-section", "--planning-dir", str(planning))
+    assert code == 1
+    assert "retry_context" not in result.get("commands", {})
+    assert "absent.md" in result["next_action"]

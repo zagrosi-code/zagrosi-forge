@@ -6,6 +6,7 @@ import argparse
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 from pathlib import Path
 import statistics
 import subprocess
@@ -39,6 +40,26 @@ def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool
     return items
 
 
+def accepted_outcomes(attempts: list[dict]) -> dict:
+    """Charge every scheduled attempt to accepted work; unknown is never free."""
+    accepted = sum(row["status"] == "passed" for row in attempts)
+    def aggregate(values):
+        valid = [value for value in values if type(value) in (int, float) and math.isfinite(value) and value >= 0]
+        total = sum(valid) if len(valid) == len(values) and values else None
+        return {"observed": sum(valid) if valid else None, "observed_attempts": len(valid),
+                "total": total, "per_accepted": total / accepted if total is not None and accepted else None}
+    totals = {key: aggregate([((row.get("reported_telemetry") or {}).get("totals") or {}).get(key)
+                              for row in attempts])
+              for key in ("input_tokens", "output_tokens")}
+    return {"accepted": accepted, "scheduled": len(attempts),
+            "accepted_rate": accepted / len(attempts) if attempts else None,
+            "elapsed_seconds": aggregate([row.get("attempt_seconds") for row in attempts]),
+            "tokens": totals,
+            "reported_cost_usd": aggregate([(row.get("reported_telemetry") or {}).get("reported_cost_usd") for row in attempts]),
+            "interventions": aggregate([(row.get("reported_telemetry") or {}).get("interventions") for row in attempts]),
+            "limits": "Every attempt counts, including failures. Missing observations leave totals unknown; zero accepted leaves per-accepted values undefined. Elapsed time excludes independent review. CLI cost estimates are not subscription bills."}
+
+
 def report(directory: Path) -> dict:
     manifest = read(directory / "matrix.json")
     if not manifest.get("trials"):
@@ -68,6 +89,7 @@ def report(directory: Path) -> dict:
                           "outcomes": dict(Counter(row["status"] for row in attempts)),
                           "timed_attempts": len(times),
                           "median_runner_seconds": statistics.median(times) if times else None,
+                          "accepted_outcomes": accepted_outcomes(attempts),
                           "attempts": attempts})
     comparative = reviews(directory)
     expected = {item["block"] for item in manifest["trials"]} if manifest.get("comparison") else set()
@@ -106,7 +128,9 @@ def main() -> int:
     parser.add_argument("--previous-root", type=Path)
     parser.add_argument("--model")
     parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh"))
+    parser.add_argument("--host", choices=("codex", "claude"), default="codex")
     parser.add_argument("--codex", default="codex")
+    parser.add_argument("--claude", default="claude")
     parser.add_argument("--cases", nargs="+")
     parser.add_argument("--depths", nargs="+", choices=("lean", "standard", "deep"))
     parser.add_argument("--repeats", type=int, default=2)
@@ -124,7 +148,7 @@ def main() -> int:
             if not args.previous_root or not args.model or not args.effort or args.jobs != 1 or args.runner:
                 parser.error("compare requires --previous-root, --model, --effort, serial --jobs 1 and the pinned built-in runner")
             runner = [sys.executable, str(ROOT / "tools/coding_trial_runner.py"), "--model", args.model,
-                      "--effort", args.effort, "--codex", args.codex]
+                      "--effort", args.effort, "--host", args.host, "--codex", args.codex, "--claude", args.claude]
         elif not args.runner:
             parser.error("run requires --runner")
         else:
@@ -144,7 +168,7 @@ def main() -> int:
         (directory / "matrix.json").write_text(json.dumps({"plugin_root": str(root), "evaluator_root": str(ROOT),
             "roots": {arm: str(path) for arm, path in roots.items()}, "runner": runner,
             "comparison": comparison, "seed": args.seed, "cases": cases,
-            "settings": {"model": args.model, "effort": args.effort, "jobs": args.jobs},
+            "settings": {"host": args.host, "model": args.model, "effort": args.effort, "jobs": args.jobs},
             "timeout": args.timeout, "trials": items}, indent=2) + "\n")
         with ThreadPoolExecutor(max_workers=args.jobs) as executor:
             list(executor.map(lambda item: run_trial(directory, roots[item["arm"]], item, runner, args.timeout), items))

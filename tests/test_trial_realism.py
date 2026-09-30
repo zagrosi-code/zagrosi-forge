@@ -87,10 +87,13 @@ def test_node_case_runs_native_tests_and_independent_oracle(tmp_path):
         ["implement-setup", "--sections-dir", str(planning / "sections"), "--target-dir", str(workspace)],
         ["implement-record-section", "--sections-dir", str(planning / "sections"), "--target-dir", str(workspace),
          "--section", "section-01-invoice-summary", "--file", "src/ledger.js", "--test-file", "tests/ledger.test.js",
-         "--review-status", "pass", "--verification", "node --test tests/ledger.test.js: passed; independent oracle:1267 assertions"],
+         "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "node --test tests/ledger.test.js: passed; independent oracle:1267 assertions"],
     ):
         process = trials.execute(cli + command, workspace)
         assert process["returncode"] == 0, process
+    final = trials.execute(cli + ["implement-verify", "--planning-dir", str(planning), "--target-dir", str(workspace),
+                           "--", *trials.test_command(trials.CASES["node-summary"])], workspace)
+    assert final["returncode"] == 0, final
     assert trials.check(trial)["success"]
     (trial / "workspace/tests/ledger.test.js").write_text("// Candidate tests are not the independent oracle.\n")
     path.write_text(path.read_text().replace("n + item.quantity", "n + 1"))
@@ -238,9 +241,13 @@ def test_resume_preserves_original_test_and_history_while_allowing_progress(tmp_
     process = trials.execute([sys.executable, str(trials.ROOT / "scripts/zagrosi_skills.py"),
                               "implement-record-section", "--sections-dir", str(workspace / ".planning/sections"),
                               "--target-dir", str(workspace), "--section", "section-01-invoice-summary",
-                              "--review-status", "pass", "--verification", "python -m unittest discover -s tests: passed",
+                              "--review-status", "pass", "--verification-outcome", "passed", "--verification-source", "attestation", "--verification", "python -m unittest discover -s tests: passed",
                               "--flight", "strict"], workspace)
     assert process["returncode"] == 0, process
+    final = trials.execute([sys.executable, str(trials.ROOT / "scripts/zagrosi_skills.py"), "implement-verify",
+                            "--planning-dir", str(workspace / ".planning"), "--target-dir", str(workspace),
+                            "--source", "attestation", "--outcome", "passed", "--evidence", "Current tests passed before record"], workspace)
+    assert final["returncode"] == 0, final
     result = trials.check(trial)
     assert result["workflow"]["success"] and result["behavior"]["success"]
     assert result["success"] is (change == "append")

@@ -30,7 +30,7 @@ def package(tmp_path):
 def run(command, cwd, *, success=True):
     result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
     assert (result.returncode == 0) is success, result.stdout + result.stderr
-    assert "Traceback" not in result.stdout + result.stderr
+    assert "Traceback" not in result.stderr and not result.stdout.startswith("Traceback")
     return json.loads(result.stdout)
 
 
@@ -117,10 +117,12 @@ def test_copied_package_runs_shared_workflows_and_resumes(package, tmp_path, dep
     test_argv = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
     assert subprocess.run(test_argv, cwd=target, capture_output=True).returncode != 0
     source.write_text("def normalize(value):\n    return value.strip()\n", encoding="utf-8")
-    verified = subprocess.run(test_argv, cwd=target, capture_output=True, text=True)
-    assert verified.returncode == 0, verified.stdout + verified.stderr
+    verified = run(helper(package, "implement-verify", "--planning-dir", planning, "--target-dir", target,
+                          "--section", SECTION, "--integration", "--", *test_argv), target)
+    assert verified["outcome"] == "passed"
     values = {"<review-status>": "pass", "<verification>": test_command, "<changed-file>": "src/labels.py"}
-    record = follow([values.get(value, value) for value in entry["commands"]["record"]])
+    record_command = [values.get(value, value) for value in entry["commands"]["record"]]
+    record = follow(record_command)
     assert record["recorded"] is True
     follow(record["commands"]["postflight"])
     resumed = run(helper(package, "status", "--path", planning), target)

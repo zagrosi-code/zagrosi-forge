@@ -261,9 +261,19 @@ EVIDENCE_IGNORE_PARTS = {
 
 COMMAND_CATALOG = [
     {
+        "name": "provider-status", "phase": "utility",
+        "summary": "Inspect reviewer availability and native login status.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py provider-status --check-auth"],
+    },
+    {
+        "name": "provider-review", "phase": "quality",
+        "summary": "Review a packet with a selected provider/model.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py provider-review --provider claude --input packet.md --output review.json"],
+    },
+    {
         "name": "project-setup",
         "phase": "project",
-        "summary": "Start or resume project decomposition from a brief or requirements file.",
+        "summary": "Split a brief into planning units; resume existing work.",
         "aliases": ["project", "zagrosi-project-setup", "deep-project-setup"],
         "examples": [
             "python3 scripts/zagrosi_skills.py project-setup --file planning/requirements.md",
@@ -294,7 +304,7 @@ COMMAND_CATALOG = [
     {
         "name": "plan-generate-section-prompts",
         "phase": "plan",
-        "summary": "Generate bounded prompts for missing implementation sections.",
+        "summary": "Generate bounded prompts for missing sections.",
         "aliases": ["zagrosi-plan-generate-section-prompts", "deep-plan-generate-section-prompts"],
         "examples": ["python3 scripts/zagrosi_skills.py plan-generate-section-prompts --planning-dir planning/01-auth"],
     },
@@ -308,7 +318,7 @@ COMMAND_CATALOG = [
     {
         "name": "implement-evidence-handoff",
         "phase": "implement",
-        "summary": "Verify and persist the fixed privileged Section 26 or Section 28 evidence handoff.",
+        "summary": "Verify and persist privileged Section 26/28 evidence.",
         "aliases": [],
         "examples": [
             "python3 scripts/zagrosi_skills.py implement-evidence-handoff --implementation-root /external/implementation --section S26"
@@ -317,23 +327,35 @@ COMMAND_CATALOG = [
     {
         "name": "implement-record-section",
         "phase": "implement",
-        "summary": "Record a completed implementation section in Forge state.",
+        "summary": "Record a completed section with verification evidence.",
         "aliases": ["zagrosi-implement-record-section", "deep-implement-record-section"],
-        "examples": ["python3 scripts/zagrosi_skills.py implement-record-section --sections-dir planning/01-auth/sections --section section-01-auth"],
+        "examples": ["python3 scripts/zagrosi_skills.py implement-record-section --sections-dir planning/01-auth/sections --section section-01-auth --review-status pass --verification-receipt planning/01-auth/implementation/verification/section-01-auth.json"],
     },
     {
         "name": "preflight",
         "phase": "all",
-        "summary": "Run phase-aware readiness gates before workflow work.",
+        "summary": "Check readiness for the selected phase.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py preflight --phase plan --file planning/01-auth/spec.md"],
     },
     {
         "name": "postflight",
         "phase": "all",
-        "summary": "Run phase-aware completion gates after workflow work.",
+        "summary": "Check completion of the selected phase.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py postflight --phase plan --planning-dir planning/01-auth --strict"],
+    },
+    {
+        "name": "implement-verify",
+        "phase": "implement",
+        "summary": "Bind a check result to current code and contracts.",
+        "aliases": [],
+        "examples": [
+            "python3 scripts/zagrosi_skills.py implement-verify --planning-dir planning/01-auth --target-dir . --section section-01-auth -- python3 -m pytest tests/test_auth.py",
+            "python3 scripts/zagrosi_skills.py implement-verify --planning-dir planning/01-auth --target-dir . -- python3 -m pytest",
+            "python3 scripts/zagrosi_skills.py implement-verify --planning-dir planning/01-auth --target-dir . --section section-01-auth --integration -- python3 -m pytest",
+            "python3 scripts/zagrosi_skills.py implement-verify --planning-dir planning/01-auth --target-dir . --source attestation --outcome passed --evidence 'Full suite passed in the active host'",
+        ],
     },
     {
         "name": "status",
@@ -345,7 +367,7 @@ COMMAND_CATALOG = [
     {
         "name": "commands",
         "phase": "utility",
-        "summary": "Show grouped command catalog metadata for Forge helpers.",
+        "summary": "List commands by workflow phase.",
         "aliases": ["help-commands"],
         "examples": [
             "python3 scripts/zagrosi_skills.py commands --pretty",
@@ -355,35 +377,35 @@ COMMAND_CATALOG = [
     {
         "name": "workflow-options",
         "phase": "utility",
-        "summary": "Recommend interview, depth, git/privacy, and autonomy options for a Forge run.",
+        "summary": "Recommend depth, interview, privacy, and autonomy options.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py workflow-options --brief 'Improve this project'"],
     },
     {
         "name": "capability-inventory",
         "phase": "utility",
-        "summary": "Inventory Codex configuration and local tools without leaking secrets.",
+        "summary": "Inspect local tools and redacted Codex configuration.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py capability-inventory --plugin-root ."],
     },
     {
         "name": "review-capabilities",
         "phase": "utility",
-        "summary": "Report mandatory active-agent review and opt-in external review candidates.",
+        "summary": "Inspect active-agent and optional external review.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py review-capabilities --planning-dir planning/01-auth"],
     },
     {
         "name": "planning-consistency",
         "phase": "quality",
-        "summary": "Detect late-request requirement drift across Forge planning artifacts.",
+        "summary": "Detect requirement drift across planning artifacts.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py planning-consistency --planning-dir planning/01-auth --strict"],
     },
     {
         "name": "doctor",
         "phase": "release",
-        "summary": "Validate package metadata, skill files, marketplace entry, and Python support.",
+        "summary": "Check package, skills, marketplace, and Python support.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py doctor --plugin-root ."],
     },
@@ -397,14 +419,14 @@ COMMAND_CATALOG = [
     {
         "name": "update-check",
         "phase": "utility",
-        "summary": "Check whether the installed Codex plugin cache matches this local checkout.",
+        "summary": "Compare installed Codex bytes with this checkout.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py update-check --plugin-root ."],
     },
     {
         "name": "self-update",
         "phase": "release",
-        "summary": "Refresh Codex config and the installed plugin cache using the installer path.",
+        "summary": "Refresh Codex configuration and installed plugin bytes.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py self-update --plugin-root ."],
     },

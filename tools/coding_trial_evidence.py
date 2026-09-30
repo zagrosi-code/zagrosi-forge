@@ -55,6 +55,12 @@ def semantic_files(workspace: Path) -> dict[str, str]:
             if tree.body:
                 result[path.relative_to(workspace).as_posix()] = hashlib.sha256(
                     ast.dump(tree, include_attributes=False).encode()).hexdigest()
+    # Non-Python fingerprints establish changed bytes only; independent review
+    # must establish useful cleanup. Do not pretend a homemade lexer proves semantics.
+    for folder in ("src", "tests"):
+        for path in sorted((workspace / folder).rglob("*")):
+            if path.suffix in {".ts", ".js", ".mjs", ".cjs"}:
+                result[path.relative_to(workspace).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
 
 

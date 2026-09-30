@@ -66,7 +66,7 @@ def test_implement_setup_and_record(tmp_path: Path) -> None:
         "abc123",
         "--review-status",
         "pass",
-        "--verification",
+        "--verification-outcome", "passed", "--verification-source", "attestation", "--verification",
         "pytest -q",
     )
     assert record["success"] is True
@@ -117,7 +117,7 @@ def test_implement_record_section_refreshes_traceability_matrix(tmp_path: Path) 
         "section-01-status",
         "--review-status",
         "pass",
-        "--verification",
+        "--verification-outcome", "passed", "--verification-source", "attestation", "--verification",
         "pytest -q",
         "--commit",
         "abc123",
@@ -163,7 +163,7 @@ def test_implement_record_section_stores_evidence_and_refreshes_traceability(tmp
         "implementation/code_review/section-01-foundation-review.md",
         "--review-artifact",
         "implementation/code_review/section-01-foundation-decisions.md",
-        "--verification",
+        "--verification-outcome", "passed", "--verification-source", "attestation", "--verification",
         "uv run pytest",
         "--flight",
         "off",
@@ -231,7 +231,7 @@ def test_implementation_state_reuses_substantive_legacy_review(tmp_path: Path) -
         "tests/test_zagrosi_skills.py",
         "--review-artifact",
         "implementation/code_review/section-01-foundation-review.md",
-        "--verification",
+        "--verification-outcome", "passed", "--verification-source", "attestation", "--verification",
         "uv run pytest",
         "--flight",
         "off",
@@ -419,7 +419,7 @@ def test_lean_implementation_uses_machine_record_and_one_final_gate(tmp_path: Pa
         "section-01-lean-default",
         "--review-status",
         "pass",
-        "--verification",
+        "--verification-outcome", "passed", "--verification-source", "attestation", "--verification",
         "pytest tests/test_zagrosi_skills.py -q",
         "--flight",
         "off",
@@ -436,6 +436,9 @@ def test_lean_implementation_uses_machine_record_and_one_final_gate(tmp_path: Pa
 
     state = run_cmd("lint-implementation-state", "--sections-dir", str(sections), "--strict")
     assert state["success"] is True
+
+    run_cmd("implement-verify", "--planning-dir", str(planning), "--target-dir", str(tmp_path),
+            "--source", "attestation", "--outcome", "passed", "--evidence", "Full test suite passed")
 
     postflight = run_cmd(
         "postflight",
@@ -614,7 +617,7 @@ def test_lean_record_rejects_incomplete_review_or_verification(tmp_path: Path) -
         "section-01-lean-default",
         "--review-status",
         "blocked",
-        "--verification",
+        "--verification-outcome", "passed", "--verification-source", "attestation", "--verification",
         "pytest -q",
         "--flight",
         "off",

@@ -91,7 +91,9 @@ def deep_project_setup(args: argparse.Namespace) -> int:
     }
     if _gates.effective_flight_mode(args) != "off":
         payload["preflight"] = _flights.project_preflight_report(project_input, args)
-    return _output.print_json(payload)
+        payload["success"] = bool(payload["preflight"]["success"])
+    payload["artifacts_created"] = mode == "new"
+    return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
 def deep_project_create_dirs(args: argparse.Namespace) -> int:
@@ -128,7 +130,8 @@ def deep_project_create_dirs(args: argparse.Namespace) -> int:
     }
     if _gates.effective_flight_mode(args) != "off":
         payload["postflight"] = _flights.project_postflight_report(planning_dir, args)
-    return _output.print_json(payload)
+        payload["success"] = bool(payload["postflight"]["success"])
+    return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
 def deep_plan_setup(args: argparse.Namespace) -> int:
@@ -209,11 +212,13 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
     }
     if _gates.effective_flight_mode(args) != "off":
         payload["preflight"] = _flights.plan_preflight_report(spec_file, args)
+        payload["success"] = bool(payload["preflight"]["success"])
     payload["commands"] = _actions.plan_commands(
         planning_dir, config.get("depth_mode", args.depth), _storage.resolve_path(args.target_dir or os.getcwd()),
         detached=getattr(args, "for_detached", False),
     )
-    return _output.print_json(payload)
+    payload["artifacts_created"] = mode == "new" or bool(scaffold["created"])
+    return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
 def deep_implement_setup(args: argparse.Namespace) -> int:
@@ -383,6 +388,11 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         )
     compact = _markdown.is_lean_depth(_artifacts.planning_depth(planning_dir))
     verification = _markdown.normalize_repeated(args.verification)
+    from . import mutable_inputs, verification as verification_evidence
+
+    verification_result = verification_evidence.section_result(
+        args, planning_dir, mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None)),
+    )
     review_status = getattr(args, "review_status", None)
     section_record = {
         "completed_at": _storage.now_iso(),
@@ -394,6 +404,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         "review_status": review_status,
         "evidence_rows": _markdown.normalize_repeated(getattr(args, "evidence_rows", [])),
         "verification": verification,
+        "verification_result": verification_result,
         "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
         "input_snapshot": _state.contract_snapshot(
             planning_dir, args.section,

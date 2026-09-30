@@ -32,7 +32,9 @@ def test_project_setup_and_create_dirs(tmp_path: Path) -> None:
         "END_MANIFEST -->\n\n"
         "# Project Manifest\n"
     )
-    created = run_cmd("project-create-dirs", "--planning-dir", str(tmp_path))
+    result = run_raw("project-create-dirs", "--planning-dir", str(tmp_path))
+    created = json.loads(result.stdout)
+    assert result.returncode == 1 and not created["success"]
     assert created["splits"] == ["01-auth", "02-billing"]
     assert created["postflight"]["phase"] == "project"
     assert (tmp_path / "01-auth").is_dir()
@@ -302,8 +304,7 @@ def test_command_catalog_matches_parser_aliases() -> None:
     } <= aliases
 
     help_text = run_text("--help")
-    assert "Inspect workflow state" in help_text
-    assert "Show grouped command catalog" in help_text
+    assert all(name in help_text for name in names | aliases)
 
 
 def test_codebase_evidence_includes_forge_surface_without_cache_noise(tmp_path: Path) -> None:

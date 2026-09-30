@@ -38,7 +38,9 @@
     "oracle": "tools/import_trial_checks.py",
     "assertions": 638,
     "cleanup_required": true,
-    "protected_paths": ["src/customer_reports.py"],
+    "protected_paths": [
+      "src/customer_reports.py"
+    ],
     "request": "Read prompt.md and add the CSV import preview while preserving existing imports, pricing and receipt behavior."
   },
   "node-summary": {
@@ -48,5 +50,17 @@
     "oracle": "tools/node_trial_checks.cjs",
     "assertions": 1267,
     "request": "Add invoice('summary', items, customer) returning customer, subtotal, tax, total, and item_count (sum of quantities). Preserve existing exports, error messages and InvoiceManager. Use Node standard-library tests without adding a framework or dependencies."
+  },
+  "typescript-access": {
+    "depth": "deep",
+    "runtime": "typescript",
+    "fixture": "typescript-access",
+    "oracle": "tools/typescript_trial_checks.mjs",
+    "assertions": 394,
+    "cleanup_required": true,
+    "protected_paths": [
+      "src/reports.ts"
+    ],
+    "request": "Simplify the duplicated member-management policy and transaction orchestration across src/access.ts and src/profiles.ts. Preserve every public export, validation/error order, tenant isolation, self-demotion rule, audit order and transactional rollback. Characterize currently uncovered failures before refactoring. Use meaningful cohesive modules, Node native TypeScript and standard-library tests; no new dependencies."
   }
 }

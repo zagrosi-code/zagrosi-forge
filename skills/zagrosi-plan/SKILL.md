@@ -18,6 +18,8 @@ Resolve `plugin_root` from this loaded `SKILL.md`'s enclosing plugin directory
 containing `scripts/zagrosi_skills.py`, never from the target repo. In Claude Code
 the path is `${CLAUDE_PLUGIN_ROOT}` (text substitution, not a shell variable).
 Use Python 3.11+ (`python3` below; `python` or `py -3` on Windows).
+For a chat-only brief, first save the user's requirements unchanged as `spec.md`
+in the chosen planning directory; keep the implementation contract separate.
 
 ```bash
 python3 "{plugin_root}/scripts/zagrosi_skills.py" plan-setup --file "{spec_file}" --plugin-root "{plugin_root}" --depth "{depth}"
