@@ -1,9 +1,10 @@
 <div align="center">
   <img src="assets/icon.svg" alt="Zagrosi Forge icon" width="96" height="96" />
   <h1>Zagrosi Forge</h1>
-  <p><strong>Lean Codex workflows for project decomposition, planning, and test-first implementation.</strong></p>
+  <p><strong>Lean workflows for Codex and Claude Code: project decomposition, planning, and test-first implementation.</strong></p>
   <p>
     <a href="https://github.com/zagrosi-code/zagrosi-forge"><img alt="Codex plugin" src="https://img.shields.io/badge/Codex-plugin-0F766E?style=flat-square" /></a>
+    <a href="https://code.claude.com/docs/en/plugins"><img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude_Code-plugin-D97757?style=flat-square" /></a>
     <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-334155?style=flat-square" />
     <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-111827?style=flat-square" />
   </p>
@@ -27,7 +28,27 @@ No minimum prose quotas or duplicate research, TDD, decision, and review files.
 
 ## Install
 
-Requires Codex plugin support and Python 3.11+.
+Requires Python 3.11+ and plugin support in your host. Both hosts use the same
+skills and runtime, including `lean`, `standard`, `deep`, and detached workflows.
+
+### Claude Code
+
+```bash
+claude plugin marketplace add zagrosi-code/zagrosi-forge
+claude plugin install zagrosi-forge@zagrosi
+```
+
+Start a new Claude Code session after installation. Update with
+`claude plugin marketplace update zagrosi`, then
+`claude plugin update zagrosi-forge@zagrosi`.
+
+To try a local checkout before installing:
+
+```bash
+claude --plugin-dir "/absolute/path/to/zagrosi-forge"
+```
+
+### Codex
 
 ```bash
 git clone https://github.com/zagrosi-code/zagrosi-forge.git
@@ -51,7 +72,15 @@ codex plugin add zagrosi-forge@zagrosi
 
 ## Use
 
-Start at the phase you need:
+Start at the phase you need. In Claude Code:
+
+```text
+/zagrosi-forge:zagrosi-project @planning/requirements.md
+/zagrosi-forge:zagrosi-plan @planning/01-auth/spec.md
+/zagrosi-forge:zagrosi-implement @planning/01-auth/sections/
+```
+
+In Codex:
 
 ```text
 Use $zagrosi-forge:zagrosi-project on @planning/requirements.md
@@ -135,15 +164,19 @@ reverify sources, ownership, locks and immutable inputs in isolated processes.
 Checks reuse unchanged analysis within one command. Mutable writes are serialized
 and atomic. Privileged policy uses a source-bound adapter with frozen checks.
 
-Installed files come from `.codex-plugin/package-files.json`; undeclared local
-files stay out. Configuration updates preserve unrelated values, publish
-atomically under a lock, and preview only Forge-owned settings.
+The Codex installer copies only `.codex-plugin/package-files.json` members;
+undeclared local files stay out. Its configuration updates preserve unrelated
+values, publish atomically under a lock, and preview only Forge-owned settings.
+Claude Code manages its own marketplace and plugin installation. Forge adds no
+hooks, MCP servers, or background processes to either host.
 
 ## Compatibility
 
 `fast` remains a compatibility alias for `lean`. Existing `zagrosi-*`,
 `deep-*`, `DEEP_META`, and migrated `claude-*` workflows remain accepted. New
-work should use the names above. Migrate recognized old artifacts with:
+work should use the names above. Reviews use the active agent; no second model
+CLI is required. Existing `codex_review` configuration remains accepted as an
+alias for `agent_review`. Migrate recognized old artifacts with:
 
 ```bash
 python3 scripts/zagrosi_skills.py migrate --planning-dir planning/01-auth
@@ -152,7 +185,9 @@ python3 scripts/zagrosi_skills.py migrate --planning-dir planning/01-auth
 ## Package Map
 
 ```text
-skills/                    three Codex workflows
+skills/                    three shared Codex and Claude Code workflows
+.claude-plugin/            Claude Code plugin and marketplace metadata
+.codex-plugin/             Codex metadata and shared package inventory
 scripts/zagrosi_skills.py  verified entrypoint and runtime manifest
 scripts/forge/             focused CLI, workflow, and security modules
 scripts/deep_skills.py     compatibility wrapper
@@ -177,6 +212,7 @@ uv run --with pytest python -m pytest
 python3 scripts/zagrosi_skills.py doctor --plugin-root . --strict --pretty
 python3 scripts/zagrosi_skills.py release-check --plugin-root . --pretty
 plugin-scanner verify .
+claude plugin validate . --strict
 ```
 
 Zagrosi Forge is MIT licensed and includes attribution in [NOTICE.md](NOTICE.md).

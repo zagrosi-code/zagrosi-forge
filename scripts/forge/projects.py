@@ -45,7 +45,7 @@ def write_chat_requirements(planning_dir: Path, brief: str) -> tuple[Path, bool]
     path = unique_markdown_path(planning_dir, "requirements")
     content = (
         "# Project Brief\n\n"
-        "Source: chat brief captured by `$zagrosi-forge:zagrosi-project`.\n\n"
+        "Source: chat brief captured by Zagrosi Project.\n\n"
         f"{brief.strip()}\n\n"
         "## Interview Notes\n\n"
         "Detailed interview answers belong in `zagrosi_project_interview.md`.\n"

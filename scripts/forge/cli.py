@@ -108,7 +108,7 @@ def add_plan_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--target-dir")
     p.add_argument("--write-evidence", action="store_true")
     p.add_argument("--for-detached", action="store_true", help="Prepare physical artifacts for detached implementation.")
-    p.add_argument("--review-mode", choices=["codex_review", "external_llm", "skip"], default="codex_review")
+    p.add_argument("--review-mode", choices=["agent_review", "codex_review", "external_llm", "skip"], default="agent_review")
     p.add_argument("--depth", choices=sorted(_policy.DEPTH_MODES), default=_policy.DEFAULT_DEPTH)
     add_flight_args(p)
     p.set_defaults(func=invoke_command, handler=('workflows', 'deep_plan_setup'))
@@ -512,7 +512,7 @@ def add_utility_commands(sub: argparse._SubParsersAction) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = ZagrosiArgumentParser(description="Helpers for Zagrosi Forge Codex skills")
+    parser = ZagrosiArgumentParser(description="Helpers for Zagrosi Forge skills")
     parser.add_argument("--pretty", action="store_true", help="Print a human-readable report instead of JSON.")
     sub = parser.add_subparsers(dest="command", required=True)
     add_project_commands(sub)

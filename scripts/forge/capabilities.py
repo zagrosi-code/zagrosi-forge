@@ -104,20 +104,19 @@ def capability_inventory(args: argparse.Namespace) -> int:
     tools = local_tool_status()
     plugins = summarize_plugins(config)
     mcp_servers = summarize_mcp_servers(config)
-    recommendations: list[str] = []
+    recommendations = ["Use the active agent's available tools; this inventory reads Codex configuration only."]
     if any(server["name"] == "context7" and server["enabled"] for server in mcp_servers):
         recommendations.append("Use Context7 or configured documentation MCP for current library/API documentation when relevant.")
     if tools["gh"]["available"]:
         recommendations.append("GitHub CLI is available for opt-in PR and CI inspection workflows.")
-    if tools["claude"]["available"]:
-        recommendations.append("Claude CLI appears available as a possible external review candidate after explicit consent.")
-    if not tools["gemini"]["available"]:
-        recommendations.append("Gemini CLI was not detected; do not assume Gemini-based review is available.")
+    if any(tools[name]["available"] for name in ("codex", "claude", "gemini")):
+        recommendations.append("Detected model CLIs are optional review candidates; run them only with explicit user consent.")
     payload = {
         "success": True,
         "gate": "capability-inventory",
         "plugin_root": str(plugin_root),
         "config_path": loaded_config,
+        "config_scope": "codex",
         "warnings": warnings,
         "plugins": {"configured": plugins},
         "mcp_servers": {"configured": mcp_servers},
@@ -243,19 +242,20 @@ def review_capabilities(args: argparse.Namespace) -> int:
     elif planning_dir and (planning_dir / "zagrosi_plan_config.json").exists():
         config_path = planning_dir / "zagrosi_plan_config.json"
         config = _storage.load_json(config_path)
-    configured_mode = config.get("review_mode", "codex_review")
-    tools = local_tool_status(["claude", "gemini"])
+    configured_mode = config.get("review_mode", "agent_review")
+    tools = local_tool_status(["codex", "claude", "gemini"])
     external = {
         name: {"available": item["available"], "path": item["path"], "execution": "opt_in" if item["available"] else "not_configured"}
         for name, item in tools.items()
     }
-    recommendations = ["Run Codex review for every non-trivial plan and implementation section."]
+    recommendations = ["Use the active agent to review every non-trivial plan and implementation section; no separate model CLI is required."]
     if configured_mode == "skip":
         recommendations.append("Review mode is skip; do not skip review for non-trivial or deep Forge work.")
     if configured_mode == "external_llm" and not any(item["available"] for item in external.values()):
-        recommendations.append("External review mode is configured but no external CLI candidate was detected; use Codex review fallback.")
+        recommendations.append("External review mode is configured but no external CLI candidate was detected; use active-agent review.")
     elif configured_mode == "external_llm":
         recommendations.append("External review candidates are opt-in; run them only after explicit user consent.")
+    agent_review = {"available": True, "mandatory": True, "execution": "agent_review"}
     payload = {
         "success": True,
         "gate": "review-capabilities",
@@ -264,11 +264,8 @@ def review_capabilities(args: argparse.Namespace) -> int:
         "configured_mode": configured_mode,
         "warnings": warnings,
         "baseline": {
-            "codex_review": {
-                "available": True,
-                "mandatory": True,
-                "execution": "agent_review",
-            }
+            "agent_review": agent_review,
+            "codex_review": {**agent_review, "alias_for": "agent_review"},
         },
         "external": external,
         "recommendations": recommendations,

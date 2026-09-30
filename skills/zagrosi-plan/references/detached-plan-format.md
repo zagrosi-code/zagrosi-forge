@@ -12,7 +12,7 @@ Run normal plan postflight, then this read-only compatibility check **before**
 approval, admission hashes, or freezing:
 
 ```bash
-python3 {plugin_root}/scripts/zagrosi_skills.py lint-plan-artifacts --planning-dir "{planning_dir}" --for-detached --strict
+python3 "{plugin_root}/scripts/zagrosi_skills.py" lint-plan-artifacts --planning-dir "{planning_dir}" --for-detached --strict
 ```
 
 Repair failures while the plan is mutable. A passing check proves artifact

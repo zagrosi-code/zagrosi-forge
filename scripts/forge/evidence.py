@@ -214,7 +214,8 @@ def codebase_evidence(args: argparse.Namespace) -> int:
         [
             path.as_posix()
             for path in all_files
-            if path.as_posix() in {".codex-plugin/plugin.json", ".agents/plugins/marketplace.json", "pyproject.toml"}
+            if path.as_posix() in {".codex-plugin/plugin.json", ".agents/plugins/marketplace.json",
+                                  ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "pyproject.toml"}
             or path.parts[:2] == (".codex-plugin", "skills")
         ]
     )

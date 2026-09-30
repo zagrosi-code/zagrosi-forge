@@ -35,6 +35,8 @@ def _release_check(args: argparse.Namespace, config_path: Path) -> int:
         ("runtime-manifest", [sys.executable, str(plugin_root / "tools" / "update_runtime_manifest.py"), "--plugin-root", str(plugin_root), "--check"]),
         ("validate-plugin-manifest", [sys.executable, "-m", "json.tool", str(plugin_root / ".codex-plugin" / "plugin.json")]),
         ("validate-marketplace", [sys.executable, "-m", "json.tool", str(plugin_root / ".agents" / "plugins" / "marketplace.json")]),
+        ("validate-claude-plugin", [sys.executable, "-m", "json.tool", str(plugin_root / ".claude-plugin" / "plugin.json")]),
+        ("validate-claude-marketplace", [sys.executable, "-m", "json.tool", str(plugin_root / ".claude-plugin" / "marketplace.json")]),
         (
             "install-dry-run",
             [

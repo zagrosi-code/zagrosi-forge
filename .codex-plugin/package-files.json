@@ -1,5 +1,7 @@
 [
   ".agents/plugins/marketplace.json",
+  ".claude-plugin/marketplace.json",
+  ".claude-plugin/plugin.json",
   ".codex-plugin/package-files.json",
   ".codex-plugin/plugin.json",
   "LICENSE",
@@ -168,6 +170,7 @@
   "tests/test_benchmark_forge.py",
   "tests/test_cache_publication.py",
   "tests/test_capabilities.py",
+  "tests/test_claude_plugin.py",
   "tests/test_coding_trials.py",
   "tests/test_compact_evaluations.py",
   "tests/test_compact_helpers.py",

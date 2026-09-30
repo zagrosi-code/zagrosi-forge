@@ -362,14 +362,14 @@ COMMAND_CATALOG = [
     {
         "name": "capability-inventory",
         "phase": "utility",
-        "summary": "Inventory configured plugins, MCP servers, and local tools without leaking secrets.",
+        "summary": "Inventory Codex configuration and local tools without leaking secrets.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py capability-inventory --plugin-root ."],
     },
     {
         "name": "review-capabilities",
         "phase": "utility",
-        "summary": "Report mandatory Codex review fallback and opt-in external review candidates.",
+        "summary": "Report mandatory active-agent review and opt-in external review candidates.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py review-capabilities --planning-dir planning/01-auth"],
     },
