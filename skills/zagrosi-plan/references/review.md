@@ -1,5 +1,7 @@
 # Review
 
+The active agent owns review in either host; a second model CLI is optional.
+
 Review material requirement/ownership gaps, security, data integrity, compatibility,
 concurrency/retry, recovery, test adequacy, and unnecessary complexity. Match
 scrutiny to [depth](depth-standards.md); independent perspectives need a concrete risk.
