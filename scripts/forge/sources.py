@@ -26,7 +26,7 @@ TEST_MANIFEST = {
     "test_cache_publication.py": "218df403a40b42fe170ee816d0dd5de2df7f58106ac79e7d4dd55983f0698aff",
     "test_capabilities.py": "1d30df82e81ab304ae6c11991a9290bd34385bd533176704b56853243218d1e5",
     "test_claude_plugin.py": "aa1a7fe5b2abeb0ab494e22051a9cd16fb4b8d1246c37af8a34be384eb17dc72",
-    "test_cli_helper_timeouts.py": "fb85fa5e0a9ffa878199e89a6fe964cd7c0b11136d9c3c9649bcc9c8c352f58f",
+    "test_cli_helper_timeouts.py": "4ffeddf9de6eb7b8d794b6891414d204eaa3f5f71869876398e14dfca5878a5d",
     "test_coding_trials.py": "3541354468e8072c73df3edf76db6605f014411b82cfc8f5b9295cc6bc77ec01",
     "test_compact_evaluations.py": "0b6c8c448711a03e7a6586fece8c99f18fd4ff902c6399af6977511f7346f9d1",
     "test_compact_helpers.py": "cd01296d153b48d035cc31b4a95b9ca5536f963abe8e9e8cdbdd5438e214d1a8",
@@ -88,7 +88,7 @@ TEST_MANIFEST = {
     "test_trial_realism.py": "0e1ac97be61f9281083521a65cb445e9c2d7080e5089c434b27e6de35e72ac13",
     "test_verification_contracts.py": "76bb8151b2e64010f25b1d7cc60a96f4b4acba65cb7da1c257140546e5977314",
     "test_verification_receipts.py": "db7cedc292d431ea18323d9da502c6d7adb9041159b9ad85289726de132acd0b",
-    "test_verification_symlinks.py": "d03253f068024cae3eef1221d8d9d541c0dbaf0c2c5ff311d5a54a7ed4b3fe9c",
+    "test_verification_symlinks.py": "c722812b7b97b365765a0e33789d3c0c767ae6d2faf9785741fce66dbbb0a3a2",
     "test_workflow_admission.py": "a02a13a709a13c8553891a8431a0b7c11063cf72d9bb321f397d5e121b111cba",
     "test_workflow_efficiency.py": "2027dd50adac459168ae9d18334e2121b136a1d8addc8dc84c8884abd3411f48",
     "test_zagrosi_skills.py": "d2e0e0c6c4d1f2efb620ccadb0377473aa2f1898bb58d0b78b7cfbfa3c686cf0"

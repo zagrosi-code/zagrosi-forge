@@ -13,7 +13,9 @@ from test_claude_plugin import run as run_claude
 
 @pytest.mark.parametrize("helper", ["run_cmd", "run_raw", "run_script_raw", "run_text", "claude"])
 def test_cli_helpers_bound_stalls_and_keep_diagnostics(tmp_path, monkeypatch, helper):
-    script = tmp_path / "stalled.py"
+    # A literal backslash on POSIX also exercises Windows diagnostic escaping.
+    script = tmp_path / r"nested\stalled.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
         "import sys,time\nprint('stdout progress', flush=True)\n"
         "print('stderr detail', file=sys.stderr, flush=True)\ntime.sleep(60)\n", encoding="utf-8")
@@ -25,7 +27,7 @@ def test_cli_helpers_bound_stalls_and_keep_diagnostics(tmp_path, monkeypatch, he
         else:
             getattr(helpers, helper)(*([script] if helper == "run_script_raw" else []), cwd=tmp_path, timeout=1)
     message = str(failure.value)
-    assert "timed_out=True" in message and str(script) in message
+    assert "timed_out=True" in message and repr(str(script)) in message
     assert "stdout progress" in message and "stderr detail" in message
     assert time.monotonic() - started < 10
 

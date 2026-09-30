@@ -10,7 +10,7 @@ from test_verification_receipts import workspace, invoke, verify_args
 
 def symlink(path, destination, *, directory=True):
     try:
-        path.symlink_to(destination, target_is_directory=directory)
+        path.symlink_to(Path(destination), target_is_directory=directory)
     except OSError:
         pytest.skip("Symlinks are unavailable")
 
