@@ -139,7 +139,7 @@ Scope permits `.gitignore` entries only for local planning and generated Python/
 See the [2026-09-24 observations](results-2026-09-24.md) for repeated tasks across
 all three depths, including failed and cancelled attempts and comparison limits.
 
-## Controlled previous/current/plain comparison
+## Controlled Forge/plain comparison
 
 [24 September controlled pilot](controlled-results-2026-09-24.md): lower observed input use, incomplete Forge outcomes, and independent review failures.
 
@@ -149,7 +149,7 @@ Other agents can use the explicit custom runner contract above.
 
 Use **one frozen evaluator checkout** for the entire experiment. `--plugin-root`
 selects only Forge's source under test; its evaluator, cases and fixtures are never
-executed. The fixed evaluator's Forge runtime judges both Forge arms by the same
+executed. The fixed evaluator's Forge runtime judges every Forge arm by the same
 admission/completion rules. Plain agents receive the same functional task, scope,
 regression checks and independent cleanup review; Forge records are inapplicable.
 Task fixtures contain no arm-specific workflow instruction. Forge's prepared
@@ -159,8 +159,10 @@ plain-agent starting state.
 The default comparative cases are the 251-line order-dispatch module with state,
 serialization and extraction requirements, and the multi-module CSV import preview
 with weak initial coverage. No artificial padding or arbitrary line-count gate is
-used. Each case/depth/repetition runs previous Forge, current Forge and plain agent
-in a rotating order. Comparisons run serially to avoid concurrent workload bias.
+used. Each case/depth/repetition runs current Forge and plain agent in rotating order.
+Add `--previous-root` for a third, previous-Forge arm only when its saved evidence
+contract remains compatible with the fixed evaluator. Comparisons run serially
+to avoid concurrent workload bias.
 All arms use the checked-in adapter, the same explicit model/effort, a fresh
 workspace/session, ignored user config/rules and identical sandbox settings.
 Confirm the chosen model works with the selected host binary before scheduling.
@@ -168,16 +170,16 @@ Confirm the chosen model works with the selected host binary before scheduling.
 ```bash
 # Run this script from the frozen evaluator, which includes the new harness.
 python /path/to/evaluator/tools/trial_matrix.py compare /tmp/forge-controlled \
-  --plugin-root /path/to/current --previous-root /path/to/previous \
+  --plugin-root /path/to/current \
   --model gpt-5.5 --effort medium --codex /opt/homebrew/bin/codex \
-  --cases godfile import-preview --depths standard --repeats 2
-# Twelve fresh attempts; cleanup results remain pending independent review.
+  --cases godfile typescript-access --depths standard --repeats 1 --timeout 600
+# Four fresh attempts; cleanup results remain pending independent review.
 python /path/to/evaluator/tools/trial_matrix.py blind /tmp/forge-controlled
 ```
 
 Give an independent reviewer each directory under `blind/`, **without**
 `blind-key.json`, parent logs, arm names, timing or usage. Packets contain original
-source/tests, three shuffled labeled candidates, behavior/scope check results and
+source/tests, original task requirements, shuffled labeled candidates, behavior/scope check results and
 `review.json`. Reviewers explain readability, cohesive boundaries, removed
 redundancy and regression protection using concrete files/functions. They select
 preferred labels (ties allowed), explain the choice, and complete the ordinary

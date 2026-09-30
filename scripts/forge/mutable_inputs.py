@@ -113,7 +113,7 @@ def contract_snapshot(planning_dir: Path, section: str, *, target_dir=None, file
 
 
 def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | None = None) -> dict:
-    """Bind verification to all source inputs, including newly added and removed files."""
+    """Bind verification to source files and link identities, without traversing linked directories."""
     names = sections.check_section_progress(planning_dir).get("sections", [])
     if not names or (section and section not in names):
         raise ValueError("Verification requires a complete section index.")
@@ -158,11 +158,25 @@ def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | N
             directories[:] = [name for name in directories if name not in ignored]
             paths.extend(Path(directory) / name for name in directories if (Path(directory) / name).is_symlink())
             paths.extend(Path(directory) / name for name in files if not name.endswith((".pyc", ".pyo")))
-    observed = [str(path.relative_to(target_dir)) for path in paths
+    observed = [path.relative_to(target_dir).as_posix() for path in paths
                 if not any(path == excluded_path or path.is_relative_to(excluded_path) for excluded_path in excluded)]
-    code = code_observations(target_dir, observed)
-    identities = {}
-    for name, content in code.items():
+    identities, files = {}, []
+    for name in observed:
+        path = target_dir / name
+        if path.is_symlink():
+            if not path.parent.resolve().is_relative_to(target_dir):
+                raise ValueError(f"Observed code path must stay within the target directory: {name}")
+            try:
+                linked_mode = path.stat().st_mode
+            except FileNotFoundError:
+                linked_mode = 0
+            if not linked_mode or stat.S_ISDIR(linked_mode):
+                # Bind the entry, never enumerate linked directories or read outside source roots.
+                identities[name] = {"content": None, "mode": stat.S_IMODE(path.lstat().st_mode),
+                                    "link": os.readlink(path), "target_type": "directory" if linked_mode else "missing"}
+                continue
+        files.append(name)
+    for name, content in code_observations(target_dir, files).items():
         path = target_dir / name
         identities[name] = {"content": content, "mode": stat.S_IMODE(path.lstat().st_mode) if content is not None else None,
                             "link": os.readlink(path) if path.is_symlink() else None}

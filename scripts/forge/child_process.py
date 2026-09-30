@@ -74,11 +74,11 @@ def _terminate(process):
 
 def execute(argv: list[str], workspace: Path, *, prompt: str | None = None,
             timeout: float = 60, env: dict[str, str] | None = None,
-            output_limit: int = OUTPUT_LIMIT) -> dict:
+            output_limit: int = OUTPUT_LIMIT, inherit_env: bool = True) -> dict:
     if not 0 < timeout <= 86400 or not 0 < output_limit <= 8 * 1024 * 1024:
         raise ValueError("A bounded positive timeout and output limit are required")
     start = time.monotonic()
-    env = {**os.environ, **(env or {})}
+    env = {**os.environ, **(env or {})} if inherit_env or env is None else env
     tails = {name: _Tail(output_limit) for name in ("stdout", "stderr")}
     timed_out = False
     termination_error = None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import cache
 import subprocess
 import sys
 from pathlib import Path
@@ -23,27 +24,41 @@ IMPLEMENTATION_SOURCE_RELATIVE_PATHS = {
 
 DETACHED_CONTRACT_RELATIVE_PATH = Path("skills/zagrosi-implement/references/detached-frozen.md")
 
+# Leave room for the runtime's 120-second gate deadline and its cleanup.
+CLI_TIMEOUT_SECONDS = 180
 
-def run_cmd(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> dict:
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
-        cwd=cwd or ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-    )
+
+@cache
+def _command_executor():
+    return load_zagrosi_module().child_process.execute
+
+
+def run_process(command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = None,
+                timeout: float = CLI_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    result = _command_executor()(command, cwd, env=env, inherit_env=False,
+                                 timeout=timeout, output_limit=2 * 1024 * 1024)
+    if result["timed_out"] or any(result.get(key) for key in (
+            "stdout_truncated", "stderr_truncated", "termination_error")):
+        raise AssertionError(
+            f"Command did not complete within its bounds ({timeout}s): {command!r}\n"
+            f"timed_out={result['timed_out']}; cleanup={result.get('termination_error')}; "
+            f"truncated={bool(result.get('stdout_truncated') or result.get('stderr_truncated'))}\n"
+            f"stdout:\n{result['stdout'][-4000:]}\nstderr:\n{result['stderr'][-4000:]}")
+    # Preserve subprocess.run(text=True)'s universal-newline behavior on Windows.
+    stdout, stderr = (result[name].replace("\r\n", "\n").replace("\r", "\n") for name in ("stdout", "stderr"))
+    return subprocess.CompletedProcess(command, result["returncode"], stdout, stderr)
+
+
+def run_cmd(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None,
+            timeout: float = CLI_TIMEOUT_SECONDS) -> dict:
+    result = run_raw(*args, cwd=cwd, env=env, timeout=timeout)
     assert result.returncode == 0, result.stderr + result.stdout
     return json.loads(result.stdout)
 
 
-def run_raw(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(SCRIPT), *args],
-        cwd=cwd or ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-    )
+def run_raw(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None,
+            timeout: float = CLI_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    return run_process([sys.executable, str(SCRIPT), *args], cwd=cwd or ROOT, env=env, timeout=timeout)
 
 
 def run_script_raw(
@@ -51,18 +66,13 @@ def run_script_raw(
     *args: str,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    timeout: float = CLI_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(script), *args],
-        cwd=cwd or script.parents[1],
-        env=env,
-        text=True,
-        capture_output=True,
-    )
+    return run_process([sys.executable, str(script), *args], cwd=cwd or script.parents[1], env=env, timeout=timeout)
 
 
-def run_text(*args: str, cwd: Path | None = None) -> str:
-    result = run_raw(*args, cwd=cwd)
+def run_text(*args: str, cwd: Path | None = None, timeout: float = CLI_TIMEOUT_SECONDS) -> str:
+    result = run_raw(*args, cwd=cwd, timeout=timeout)
     assert result.returncode == 0, result.stderr + result.stdout
     return result.stdout
 

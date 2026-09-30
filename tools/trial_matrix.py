@@ -26,13 +26,15 @@ def read(path: Path) -> dict:
         return {}
 
 
-def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool) -> list[dict]:
+def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool, *, previous: bool = True) -> list[dict]:
     items = []
+    arms = ["current"]
+    if comparison:
+        arms = (["previous"] if previous else []) + ["current", "plain"]
     for repeat in range(1, repeats + 1):
         for depth in depths:
             for case in cases:
                 block = f"{case}-{depth}-{repeat}"
-                arms = ["previous", "current", "plain"] if comparison else ["current"]
                 offset = (len(items) // len(arms)) % len(arms)
                 for arm in arms[offset:] + arms[:offset]:
                     items.append({"id": f"{block}-{arm}" if comparison else block,
@@ -125,7 +127,7 @@ def main() -> int:
     parser.add_argument("operation", choices=("run", "compare", "report", "blind", "apply-reviews"))
     parser.add_argument("directory", type=Path)
     parser.add_argument("--plugin-root", type=Path, default=ROOT)
-    parser.add_argument("--previous-root", type=Path)
+    parser.add_argument("--previous-root", type=Path, help="Optional third comparison arm; omit for current Forge versus plain")
     parser.add_argument("--model")
     parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh"))
     parser.add_argument("--host", choices=("codex", "claude"), default="codex")
@@ -145,8 +147,8 @@ def main() -> int:
         if min(args.jobs, args.repeats, args.timeout) < 1:
             parser.error("jobs, repeats and timeout must be positive")
         if comparison:
-            if not args.previous_root or not args.model or not args.effort or args.jobs != 1 or args.runner:
-                parser.error("compare requires --previous-root, --model, --effort, serial --jobs 1 and the pinned built-in runner")
+            if not args.model or not args.effort or args.jobs != 1 or args.runner:
+                parser.error("compare requires --model, --effort, serial --jobs 1 and the pinned built-in runner")
             runner = [sys.executable, str(ROOT / "tools/coding_trial_runner.py"), "--model", args.model,
                       "--effort", args.effort, "--host", args.host, "--codex", args.codex, "--claude", args.claude]
         elif not args.runner:
@@ -160,11 +162,13 @@ def main() -> int:
             parser.error("cases must exist in the fixed evaluator; cases and depths must not repeat")
         if comparison and "resume" in selected:
             parser.error("Forge's persisted resume checkpoint has no comparable plain-agent arm")
-        roots = {"current": root, "previous": args.previous_root.resolve() if args.previous_root else root, "plain": root}
+        roots = {"current": root, "plain": root}
+        if args.previous_root:
+            roots["previous"] = args.previous_root.resolve()
         if any(not (path / "scripts/zagrosi_skills.py").is_file() for path in set(roots.values())):
             parser.error("plugin roots must contain scripts/zagrosi_skills.py")
         directory.mkdir(parents=True, exist_ok=False)
-        items = schedule(selected, depths, args.repeats, comparison)
+        items = schedule(selected, depths, args.repeats, comparison, previous=bool(args.previous_root))
         (directory / "matrix.json").write_text(json.dumps({"plugin_root": str(root), "evaluator_root": str(ROOT),
             "roots": {arm: str(path) for arm, path in roots.items()}, "runner": runner,
             "comparison": comparison, "seed": args.seed, "cases": cases,

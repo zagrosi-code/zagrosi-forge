@@ -23,7 +23,7 @@ def read(path: Path) -> dict:
 def packets(directory: Path) -> dict:
     manifest = read(directory / "matrix.json")
     if not manifest.get("comparison"):
-        raise ValueError("Blind comparisons require a three-arm matrix")
+        raise ValueError("Blind comparisons require a comparison matrix")
     destination = directory / "blind"
     blocks = {}
     for item in manifest["trials"]:
@@ -65,13 +65,15 @@ def packets(directory: Path) -> dict:
             key[f"{block}/{label}"] = item["id"]
         case = manifest["cases"][entries[0]["case"]]
         baseline = Path(manifest["evaluator_root"]) / "examples/evals/coding" / case.get("fixture", "fixture")
+        brief = baseline / "prompt.md"
+        (folder / "task.md").write_text(case["request"] + "\n\n" + (brief.read_text() if brief.is_file() else ""))
         for name in ("src", "tests"):
             shutil.copytree(baseline / name, folder / "baseline" / name,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         (folder / "review.json").write_text(json.dumps({"reviewer": "", "independent": False,
             "preferred": [], "rationale": "", "candidates": reviews}, indent=2) + "\n")
         (folder / "README.md").write_text(
-            "# Blind code comparison\n\nInspect baseline and every candidate's source/tests/checks. "
+            "# Blind code comparison\n\nRead task.md, then inspect baseline and every candidate's source/tests/checks. "
             "Do not inspect parent directories, logs, timing, or the private arm key. "
             "Judge correctness before preference; ties are allowed. Complete review.json with concrete "
             "file/function evidence for each criterion and the cleanup review. Empty templates grant no pass.\n\n"

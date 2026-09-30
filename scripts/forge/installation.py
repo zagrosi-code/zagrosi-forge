@@ -18,10 +18,14 @@ import time
 
 from . import codex_config as _codex_config
 from .codex_config import expected_codex_config
+from . import child_process as _child_process
+from .doctor import SKILL_NAMES
 from . import gates as _gates
 from . import output as _output
 from .plugin_cache import materialize_plugin_cache, plugin_cache_status
 from . import storage as _storage
+
+DOCTOR_TIMEOUT_SECONDS = 60
 
 def release_check(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix="forge-release-check-") as directory:
@@ -215,28 +219,20 @@ def update_check(args: argparse.Namespace) -> int:
 
 
 def verify_codex_install(codex_home: Path, require_codex: bool) -> dict[str, Any]:
+    required = [f"zagrosi-forge:{name}" for name in SKILL_NAMES]
     codex = shutil.which("codex")
     if not codex:
         payload = {
             "status": "failed" if require_codex else "skipped",
             "success": not require_codex,
             "reason": "codex executable was not found on PATH",
-            "required_skills": [
-                "zagrosi-forge:zagrosi-project",
-                "zagrosi-forge:zagrosi-plan",
-                "zagrosi-forge:zagrosi-implement",
-            ],
+            "required_skills": required,
         }
         return payload
 
-    command = [codex, "debug", "prompt-input", "Use $zagrosi-forge:zagrosi-project"]
+    command = [codex, "debug", "prompt-input", "List available skills."]
     env = os.environ.copy()
     env["CODEX_HOME"] = str(codex_home)
-    required = [
-        "zagrosi-forge:zagrosi-project",
-        "zagrosi-forge:zagrosi-plan",
-        "zagrosi-forge:zagrosi-implement",
-    ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=45)
     except subprocess.TimeoutExpired as exc:
@@ -284,9 +280,7 @@ def install_codex(args: argparse.Namespace) -> int:
     required = [
         plugin_root / ".codex-plugin" / "plugin.json",
         plugin_root / ".agents" / "plugins" / "marketplace.json",
-        plugin_root / "skills" / "zagrosi-project" / "SKILL.md",
-        plugin_root / "skills" / "zagrosi-plan" / "SKILL.md",
-        plugin_root / "skills" / "zagrosi-implement" / "SKILL.md",
+        *(plugin_root / "skills" / name / "SKILL.md" for name in SKILL_NAMES),
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -303,17 +297,19 @@ def install_codex(args: argparse.Namespace) -> int:
             1,
         )
 
-    doctor_result = subprocess.run(
+    doctor_result = _child_process.execute(
         [sys.executable, str(plugin_root / "scripts" / "zagrosi_skills.py"), "doctor", "--plugin-root", str(plugin_root), "--strict"],
-        cwd=plugin_root,
-        capture_output=True,
-        text=True,
+        plugin_root, timeout=DOCTOR_TIMEOUT_SECONDS, output_limit=2 * 1024 * 1024,
     )
     try:
-        doctor_payload: Any = json.loads(doctor_result.stdout) if doctor_result.stdout.strip() else {}
+        doctor_payload: Any = json.loads(doctor_result["stdout"]) if doctor_result["stdout"].strip() else {}
     except json.JSONDecodeError:
-        doctor_payload = {"stdout": doctor_result.stdout[-1000:], "stderr": doctor_result.stderr[-1000:]}
-    if doctor_result.returncode != 0:
+        doctor_payload = {"stdout": doctor_result["stdout"][-1000:], "stderr": doctor_result["stderr"][-1000:]}
+    incomplete = any(doctor_result.get(key) for key in (
+        "timed_out", "stdout_truncated", "stderr_truncated", "termination_error"))
+    if incomplete:
+        doctor_payload = {**doctor_result, "stdout": doctor_result["stdout"][-1000:], "stderr": doctor_result["stderr"][-1000:]}
+    if doctor_result["returncode"] != 0 or incomplete:
         return _output.print_json(
             {
                 "success": False,
@@ -322,7 +318,8 @@ def install_codex(args: argparse.Namespace) -> int:
                 "config_path": str(config_path),
                 "plugin": plugin_id,
                 "doctor": doctor_payload,
-                "error": "Package doctor failed; fix the plugin before installing.",
+                "error": (f"Package doctor timed out after {DOCTOR_TIMEOUT_SECONDS} seconds; installation was not changed."
+                          if doctor_result["timed_out"] else "Package doctor failed; fix the plugin before installing."),
             },
             1,
         )
@@ -367,27 +364,20 @@ def install_codex(args: argparse.Namespace) -> int:
     changed = config_changed or bool(cache.get("changed"))
 
     verification: dict[str, Any]
+    required_skills = [f"zagrosi-forge:{name}" for name in SKILL_NAMES]
     if args.dry_run or args.no_verify_codex:
         verification = {
             "status": "skipped",
             "success": True,
             "reason": "dry run" if args.dry_run else "disabled by --no-verify-codex",
-            "required_skills": [
-                "zagrosi-forge:zagrosi-project",
-                "zagrosi-forge:zagrosi-plan",
-                "zagrosi-forge:zagrosi-implement",
-            ],
+            "required_skills": required_skills,
         }
     elif not changed and not args.verify_codex:
         verification = {
             "status": "skipped",
             "success": True,
             "reason": "installation unchanged",
-            "required_skills": [
-                "zagrosi-forge:zagrosi-project",
-                "zagrosi-forge:zagrosi-plan",
-                "zagrosi-forge:zagrosi-implement",
-            ],
+            "required_skills": required_skills,
         }
     else:
         verification = verify_codex_install(codex_home, args.verify_codex)
@@ -419,9 +409,7 @@ def install_codex(args: argparse.Namespace) -> int:
         next_steps.append("Restart Codex so the plugin cache and marketplace are reloaded.")
     else:
         next_steps.append("Codex config and Zagrosi Forge plugin cache are already current.")
-    next_steps.append(
-        "Use $zagrosi-forge:zagrosi-project, $zagrosi-forge:zagrosi-plan, or $zagrosi-forge:zagrosi-implement in Codex."
-    )
+    next_steps.append("Use " + ", ".join(f"${skill}" for skill in required_skills) + " in Codex.")
 
     payload = {
         "success": True,

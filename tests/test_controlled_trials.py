@@ -81,6 +81,31 @@ def test_comparison_rotates_arms_and_preserves_every_case_depth_repeat():
     assert [items[index]["arm"] for index in (0, 3, 6)] == ["previous", "current", "plain"]
 
 
+def test_current_plain_comparison_rotates_pairs_without_legacy_arm():
+    items = matrix.schedule(["godfile", "typescript-access"], ["standard"], 2, True, previous=False)
+    assert len(items) == len({row["id"] for row in items}) == 8
+    for start in range(0, len(items), 2):
+        pair = items[start:start + 2]
+        assert len({row["block"] for row in pair}) == 1
+        assert {row["arm"] for row in pair} == {"current", "plain"}
+    assert [items[index]["arm"] for index in (0, 2, 4, 6)] == ["current", "plain", "current", "plain"]
+
+
+def test_compare_cli_without_previous_pins_four_matched_attempts(tmp_path, monkeypatch):
+    destination = tmp_path / "comparison"
+    monkeypatch.setattr(matrix.sys, "argv", ["trial_matrix", "compare", str(destination),
+        "--model", "exact-model", "--effort", "medium", "--cases", "godfile", "typescript-access",
+        "--depths", "standard", "--repeats", "1", "--timeout", "600"])
+    calls = []
+    monkeypatch.setattr(matrix, "run_trial", lambda *args: calls.append(args))
+    assert matrix.main() == 1  # Fake calls leave every attempt pending; they cannot claim success.
+    manifest = json.loads((destination / "matrix.json").read_text())
+    assert set(manifest["roots"]) == {"current", "plain"}
+    assert len(calls) == len(manifest["trials"]) == 4
+    assert manifest["settings"] == {"host": "codex", "model": "exact-model", "effort": "medium", "jobs": 1}
+    assert all(args[3] == manifest["runner"] and args[4] == 600 for args in calls)
+
+
 def test_plain_resume_rejected_before_creating_trial(tmp_path):
     with pytest.raises(ValueError, match="no comparable"):
         trials.prepare(tmp_path / "trial", "resume", plain_agent=True)
@@ -119,8 +144,8 @@ def test_phase_labels_describe_commands_only(command, phase):
     assert command_phase(command) == phase
 
 
-def make_blind_matrix(directory):
-    items = matrix.schedule(["cleanup"], ["standard"], 1, True)
+def make_blind_matrix(directory, *, previous=True):
+    items = matrix.schedule(["cleanup"], ["standard"], 1, True, previous=previous)
     (directory / "matrix.json").write_text(json.dumps({"comparison": True, "seed": 4,
         "evaluator_root": str(trials.ROOT), "cases": trials.CASES, "trials": items}))
     for item in items:
@@ -143,20 +168,38 @@ def complete_review(path):
     path.write_text(json.dumps(data))
 
 
-def test_blind_packets_hide_arms_and_reviews_bind_actual_code(tmp_path):
-    path = make_blind_matrix(tmp_path)
+@pytest.mark.parametrize("previous", [True, False])
+def test_blind_packets_hide_arms_and_reviews_bind_actual_code(tmp_path, previous):
+    path = make_blind_matrix(tmp_path, previous=previous)
     packet = path.parent
-    assert {p.name for p in packet.iterdir()} == {"A", "B", "C", "baseline", "README.md", "review.json"}
+    labels = {"A", "B", "C"} if previous else {"A", "B"}
+    assert {p.name for p in packet.iterdir()} == labels | {"baseline", "README.md", "review.json", "task.md"}
+    assert (packet / "task.md").read_text().startswith(trials.CASES["cleanup"]["request"])
     assert not (packet / "A/.planning").exists()
     assert not reviews(tmp_path)[0]["valid"]
     complete_review(path)
     assert reviews(tmp_path, apply=True)[0]["valid"]
-    assert len(list(tmp_path.glob("cleanup-*/review.json"))) == 3
+    assert len(list(tmp_path.glob("cleanup-*/review.json"))) == len(labels)
     with (packet / "A/src/ledger.py").open("a") as handle:
         handle.write("\n# Post-review edit\n")
     assert not reviews(tmp_path)[0]["valid"]
     with pytest.raises(ValueError, match="stale"):
         reviews(tmp_path, apply=True)
+
+
+def test_blind_packet_includes_original_feature_requirements(tmp_path):
+    items = matrix.schedule(["godfile"], ["standard"], 1, True, previous=False)
+    (tmp_path / "matrix.json").write_text(json.dumps({"comparison": True, "seed": 4,
+        "evaluator_root": str(trials.ROOT), "cases": trials.CASES, "trials": items}))
+    for item in items:
+        trial = tmp_path / item["id"]
+        trials.prepare(trial, "godfile", plain_agent=True)
+        trials.check(trial)
+    packets(tmp_path)
+    brief = (tmp_path / "blind/godfile-standard-1/task.md").read_text()
+    assert (trials.PACK / "godfile/prompt.md").read_text() in brief
+    assert str(trials.ROOT) not in brief
+    assert "Use Forge" not in brief
 
 
 def test_pinned_runner_records_requested_configuration_and_nonzero_exit(tmp_path, monkeypatch):
