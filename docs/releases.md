@@ -1,5 +1,10 @@
 # Releases
 
+## 0.3.3 — provider review validation
+
+- Accept completed Codex review text only and reject unfinished review turns.
+- Reject malformed provider model and tool metadata before accepting a review.
+
 ## 0.3.2 — project session validation
 
 - Reject unreadable or non-object saved project sessions before creating requirements files.

@@ -4,23 +4,63 @@ from __future__ import annotations
 import json
 
 
+def optional_object(value, label: str) -> dict:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Invalid {label}")
+    return value
+
+
+def codex_output(raw: str) -> dict:
+    events = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    if not events or any(not isinstance(event, dict) for event in events):
+        raise ValueError("Expected Codex JSON event objects")
+    if any(event.get("type") in {"error", "turn.failed"} for event in events):
+        raise ValueError("Codex reported a failed turn")
+    completed = [event for event in events if event.get("type") == "turn.completed"]
+    if len(completed) != 1:
+        raise ValueError("Expected one completed Codex turn")
+    pending, finished, text = set(), set(), []
+    started = ended = seen_item = False
+    for event in events:
+        kind, item = event.get("type"), event.get("item")
+        if isinstance(item, dict) and item.get("type") not in {"agent_message", "reasoning"}:
+            raise ValueError("Packet review attempted tool activity")
+        if kind == "turn.started":
+            if started or ended or seen_item:
+                raise ValueError("Invalid Codex turn lifecycle")
+            started = True
+        elif kind == "turn.completed":
+            if pending:
+                raise ValueError("Codex returned unfinished review items")
+            ended = True
+        elif kind in {"item.started", "item.updated", "item.completed"}:
+            if ended or not isinstance(item, dict):
+                raise ValueError("Invalid Codex item lifecycle")
+            seen_item = True
+            identity = item.get("id")
+            if identity is not None and (not isinstance(identity, str) or not identity or identity in finished):
+                raise ValueError("Invalid Codex item identity")
+            if kind != "item.completed":
+                if identity is None or (kind == "item.started" and identity in pending):
+                    raise ValueError("Invalid Codex item lifecycle")
+                pending.add(identity)
+            else:
+                if identity is not None:
+                    pending.discard(identity)
+                    finished.add(identity)
+                if item.get("type") == "agent_message":
+                    if not isinstance(item.get("text"), str):
+                        raise ValueError("Invalid completed Codex review text")
+                    text.append(item["text"])
+    models = list(dict.fromkeys(event["model"] for event in events if isinstance(event.get("model"), str)))
+    return {"review": "\n\n".join(text), "observed_models": models, "usage": completed[0].get("usage")}
+
+
 def review_output(provider: str, raw: str) -> dict:
     if provider == "codex":
-        events = [json.loads(line) for line in raw.splitlines() if line.strip()]
-        if not events or any(not isinstance(item, dict) for item in events):
-            raise ValueError("Expected Codex JSON event objects")
-        if any(item.get("type") in {"error", "turn.failed"} for item in events):
-            raise ValueError("Codex reported a failed turn")
-        completed = [item for item in events if item.get("type") == "turn.completed"]
-        if len(completed) != 1:
-            raise ValueError("Expected one completed Codex turn")
-        items = [event["item"] for event in events if isinstance(event.get("item"), dict)]
-        if any(item.get("type") not in {"agent_message", "reasoning"} for item in items):
-            raise ValueError("Packet review attempted tool activity")
-        text = "\n\n".join(item["text"] for item in items
-                            if item.get("type") == "agent_message" and isinstance(item.get("text"), str))
-        models = list(dict.fromkeys(event["model"] for event in events if isinstance(event.get("model"), str)))
-        result = {"review": text, "observed_models": models, "usage": completed[0].get("usage")}
+        result = codex_output(raw)
     else:
         data = json.loads(raw)
         if not isinstance(data, dict):
@@ -32,20 +72,21 @@ def review_output(provider: str, raw: str) -> dict:
                 raise ValueError("Expected a successful Claude result")
             if data.get("permission_denials"):
                 raise ValueError("Packet review attempted denied tool activity")
-            models = data.get("modelUsage", {})
+            models = optional_object(data.get("modelUsage"), "Claude model usage")
             result = {"review": data.get("result"),
-                      "observed_models": list(models) if isinstance(models, dict) else [],
+                      "observed_models": list(models),
                       "usage": data.get("usage"), "cost_usd": data.get("total_cost_usd")}
         elif provider == "gemini":
-            stats = data.get("stats") or {}
-            if not isinstance(stats, dict):
-                raise ValueError("Invalid Gemini statistics")
-            tool_stats = stats.get("tools") or {}
-            if isinstance(tool_stats, dict) and tool_stats.get("totalCalls", 0):
+            stats = optional_object(data.get("stats"), "Gemini statistics")
+            tool_stats = optional_object(stats.get("tools"), "Gemini tool statistics")
+            calls = tool_stats.get("totalCalls")
+            if calls is not None and type(calls) not in {int, float}:
+                raise ValueError("Invalid Gemini tool call count")
+            if calls:
                 raise ValueError("Packet review attempted tool activity")
-            models = stats.get("models") or {}
+            models = optional_object(stats.get("models"), "Gemini model statistics")
             result = {"review": data.get("response"),
-                      "observed_models": list(models) if isinstance(models, dict) else [], "usage": stats}
+                      "observed_models": list(models), "usage": stats}
         else:
             if data.get("success") is not True:
                 raise ValueError("Adapter must report success explicitly")
