@@ -279,7 +279,7 @@ def _implement_postflight_report(
     depth = _artifacts.planning_depth(planning_dir, getattr(args, "depth", _policy.DEFAULT_DEPTH) or _policy.DEFAULT_DEPTH)
     profile = getattr(args, "profile", "solo")
     target_dir = mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None))
-    recording_status = _state.implementation_recording_status(planning_dir, candidate_state)
+    recording_status = _state.implementation_recording_status(planning_dir, candidate_state, target_dir=target_dir)
     final_state_gates = recording_status["sections_recorded_complete"]
     plan_args = argparse.Namespace(depth=depth, profile=profile, strict=True, flight_mode="strict", write_report=False)
     jobs = _plan_gate_jobs(planning_dir, plan_args)
@@ -309,7 +309,7 @@ def _implement_postflight_report(
             },
         )
     elif final_state_gates or (candidate_state is None and recording_status["invalid_completed_sections"]):
-        findings, extras = _state.implementation_state_analysis(planning_dir, candidate_state)
+        findings, extras = _state.implementation_state_analysis(planning_dir, candidate_state, target_dir=target_dir)
         state_payload = _quality.quality_payload("implementation-state", findings, extras, profile, mode == "strict")
         progress_gate = _gates.direct_gate("lint-implementation-state", state_payload["success"], state_payload)
     else:
@@ -405,7 +405,12 @@ def postflight(args: argparse.Namespace) -> int:
         planning_dir = _storage.resolve_path(args.planning_dir) if args.planning_dir else (_storage.resolve_path(args.sections_dir).parent if args.sections_dir else None)
         if planning_dir is None:
             return _output.print_json({"success": False, "error": "--planning-dir or --sections-dir is required for implement postflight"}, 1)
-        payload = implement_postflight_report(planning_dir, args)
+        try:
+            payload = implement_postflight_report(planning_dir, args)
+        except _models.PlanningDepthError:
+            raise
+        except (OSError, ValueError) as exc:
+            return _output.print_json({"success": False, "planning_dir": str(planning_dir), "error": str(exc)}, 1)
     else:
         payload = release_postflight_report(_storage.resolve_path(args.plugin_root or _storage.current_plugin_root()), args)
     return _output.print_json(payload, 0 if payload["success"] else 1)

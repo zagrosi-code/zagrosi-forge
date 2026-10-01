@@ -6,6 +6,7 @@ from pathlib import Path
 
 from . import actions as _actions
 from . import context as _context
+from . import mutable_inputs as _mutable_inputs
 from . import state as _state
 from . import storage as _storage
 
@@ -73,5 +74,8 @@ def section_entry(planning_dir: Path, section: str, *, target_dir: Path | None =
                                                        pending=bool(brief and brief.get("verification_pending"))))
     elif packet.get("required_words"):
         payload["commands"] = {"retry_context": _actions.command(
-            "next-section", "--planning-dir", str(planning_dir), "--max-words", str(packet["required_words"]))}
+            "next-section", "--planning-dir", str(planning_dir),
+            "--target-dir", str(_mutable_inputs.target_directory(planning_dir, target_dir)),
+            "--profile", _actions.implementation_profile(planning_dir, profile),
+            "--max-words", str(packet["required_words"]))}
     return payload

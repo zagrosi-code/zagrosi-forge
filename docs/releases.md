@@ -1,5 +1,14 @@
 # Releases
 
+## 0.3.4 — reliable continuation and clearer reviews
+
+- Bind completed work to its target repository and preserve malformed saved evidence without overwriting it.
+- Support directory ownership when recording progress and completion, including descendant changes.
+- Continue directly to final checks when captured integration evidence is current.
+- Keep recovery actions, blockers, provider availability and model identity visible in readable reports.
+- Make multi-provider review easier to find and start in either host.
+- Reuse completed analyses in portable validation and release isolated test runtimes after use.
+
 ## 0.3.3 — provider review validation
 
 - Accept completed Codex review text only and reject unfinished review turns.

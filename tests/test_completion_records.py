@@ -393,6 +393,8 @@ def test_lean_implementation_uses_machine_record_and_one_final_gate(tmp_path: Pa
         "implement-record-section",
         "--sections-dir",
         str(sections),
+        "--target-dir",
+        str(tmp_path),
         "--section",
         "section-01-lean-default",
         "--review-status",

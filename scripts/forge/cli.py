@@ -183,7 +183,7 @@ def add_plan_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--write", action="store_true")
     p.set_defaults(func=invoke_command, handler=('context', 'assumption_ledger'))
 
-    p = sub.add_parser("context-brief")
+    p = sub.add_parser("context-brief", help=command_help("context-brief"))
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--section")
     p.add_argument("--lines-per-artifact", type=int, default=20)
@@ -273,13 +273,15 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("command_argv", nargs=argparse.REMAINDER, help="Explicit argument vector after --; never read from the plan.")
     p.set_defaults(func=invoke_command, handler=('verification', 'implement_verify'))
 
-    p = sub.add_parser("next-section")
+    p = sub.add_parser("next-section", help=command_help("next-section"))
     p.add_argument("--planning-dir", required=True)
+    p.add_argument("--target-dir")
+    p.add_argument("--profile", choices=sorted(_policy.QUALITY_PROFILES))
     p.add_argument("--max-words", type=int, default=2000, help="Complete section context budget; oversized packets include an adjusted retry.")
     p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
     p.set_defaults(func=invoke_command, handler=('scheduling', 'next_section'))
 
-    p = sub.add_parser("parallel-plan")
+    p = sub.add_parser("parallel-plan", help=command_help("parallel-plan"))
     p.add_argument("--planning-dir", required=True)
     p.set_defaults(func=invoke_command, handler=('scheduling', 'parallel_plan'))
 
@@ -304,7 +306,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     add_quality_args(p)
     p.set_defaults(func=invoke_command, handler=('diffs', 'implementation_drift'))
 
-    p = sub.add_parser("implementation-packet")
+    p = sub.add_parser("implementation-packet", help=command_help("implementation-packet"))
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--section", required=True)
     p.add_argument("--implementation-root", help="Existing external detached implementation root.")
@@ -312,7 +314,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--max-words", type=int, default=2000)
     p.set_defaults(func=invoke_command, handler=('context', 'implementation_packet'))
 
-    p = sub.add_parser("implement-progress")
+    p = sub.add_parser("implement-progress", help=command_help("implement-progress"))
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
     p.add_argument("--section", required=True)

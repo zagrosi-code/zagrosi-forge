@@ -182,6 +182,37 @@ def run_internal_gate(
     )
 
 
+def batch_score_inputs(jobs, context):
+    """Share findings only for one complete, consistently configured plan batch."""
+    names = [name for name, _command, _required in jobs]
+    if names[-1] != "forge-score" or len(set(names)) != len(names):
+        return None
+    from . import scoring
+
+    if not scoring.FlightScoreInputs.GATES.keys() <= set(names):
+        return None
+    # Invalid options must retain the normal per-gate diagnostic and exit behavior.
+    capture = _session._GATE_STREAMS.set((io.StringIO(), io.StringIO()))
+    try:
+        commands = [context["parser"].parse_args(command) for _name, command, _required in jobs]
+    except SystemExit:
+        return None
+    finally:
+        _session._GATE_STREAMS.reset(capture)
+    score = commands[-1]
+    if score.depth not in {"standard", "deep"} or score.max_files != 8:
+        return None
+    planning_dir = _storage.resolve_path(score.planning_dir)
+    for command in commands:
+        if (not getattr(command, "planning_dir", None)
+                or _storage.resolve_path(command.planning_dir) != planning_dir
+                or getattr(command, "depth", score.depth) != score.depth
+                or getattr(command, "profile", None) != score.profile
+                or getattr(command, "max_files", 8) != 8):
+            return None
+    return scoring.FlightScoreInputs(planning_dir, score.depth, context["texts"])
+
+
 def gate_batch_worker(_args: argparse.Namespace) -> int:
     """Run only approved read-only commands; the parent bounds the entire process."""
     try:
@@ -195,7 +226,13 @@ def gate_batch_worker(_args: argparse.Namespace) -> int:
     except (ValueError, TypeError) as exc:
         return _output.print_json({"success": False, "error": str(exc)}, 1)
     with _session.read_phase():
-        _session._CLI_CONTEXT.get()["gate_worker"] = True
+        context = _session._CLI_CONTEXT.get()
+        context["gate_worker"] = True
+        try:
+            context["score_inputs"] = batch_score_inputs(jobs, context)
+        except (OSError, ValueError, RuntimeError):
+            # Let individual gates report unreadable inputs through their usual contract.
+            context["score_inputs"] = None
         results = [run_internal_gate(name, command, required=required) for name, command, required in jobs]
     return _output.print_json({"success": True, "gates": results})
 

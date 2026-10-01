@@ -17,10 +17,11 @@ from . import storage as _storage
 
 # BEGIN TEST MANIFEST
 TEST_MANIFEST = {
+    "conftest.py": "35e40c2f68e0d304044cdf607f997597fdddcf18ad1f8f6b018152cc2266f5c3",
     "detached_test_support.py": "5deabb6b1dadbc155d450981e2836e730574f41f83e3feb53d7d462681467295",
     "fault_injection_support.py": "83597a7136891f9ee6cbb38603f7e2179c602ffcbae3cf307bdeec47dc88811b",
     "forge_test_helpers.py": "94180fbdb20ebefca347f1969cf04a3f063281ed7ccc02f3f02eea8aea414db4",
-    "runtime_support.py": "195586d290650a6add408c880164538450bdfbc346fc8971470e622d211446a1",
+    "runtime_support.py": "1317eecfdb7a424b0cecefe808dce719b9d2a102a30360ef813e049f16751699",
     "test_adapter_loading.py": "d8c4086464c3cd401caa2d6887b6f4ebbb44d863620f02086507d90da60a8b7c",
     "test_benchmark_forge.py": "1436b31c5fc07824a903fb4a2f5bccf565059dbffa67151da7819b932c2383eb",
     "test_cache_publication.py": "218df403a40b42fe170ee816d0dd5de2df7f58106ac79e7d4dd55983f0698aff",
@@ -33,7 +34,7 @@ TEST_MANIFEST = {
     "test_compact_plan.py": "bcdc03a4016c7ba2aaee540c7fc1aa3338c3fd9dea2f825d5efa274e5e7780e9",
     "test_complete_plan_admission.py": "388d6949bcb8b93079acb4c4a6aa33363bae663ff3ef34091108a0f4903870e3",
     "test_completion_contracts.py": "00bc8b153463486b062ceae517d7e8499a510643dcf9120296e48631c87fed24",
-    "test_completion_records.py": "dddafb5bce1aaecde79e2cdd984e310143c5eae0e2fa299c02e804047ef111e0",
+    "test_completion_records.py": "616a199a130e03f1210c010a76d674d5527f19cf05d1bd7a17ea3caf8259f9e2",
     "test_context_packets.py": "a2a81f174ebe35875dee36b661bc7c80567ae4cd5c386e99c50276e20866bdf8",
     "test_controlled_trials.py": "8e7fef354307e4aac8c3efd26e2cbab19b6960efc0482b57b33a3857e26149f4",
     "test_cross_host_resume.py": "b4308e20b080cb61bbce8f2a569104d7d26a0217de734630f9c2847ee1e62958",
@@ -44,6 +45,7 @@ TEST_MANIFEST = {
     "test_detached_recovery.py": "ec67066cbf4f0c505aa5573d2848bd0f332fc11a8ad0a82359dab36b5f09b9c0",
     "test_detached_resources.py": "87b343b4576d73408a641313eb881ce25ec76a2e22185121d9943abaddd617b7",
     "test_detached_setup.py": "c60606369d002b64c9b4c8cbc9c904f97eabed46c75a4ed39f8410c5d4814ba2",
+    "test_directory_observations.py": "8a444d00cf2273f5e32f0722de4efe23b008e22e325ac8c5f431f2f62e2692fa",
     "test_evaluations.py": "5a4f4ce677bcb8e4f1af7fa74e24f8e4b01b56f665c1621c3dec44c37458ee7f",
     "test_evidence_discovery.py": "1e2671eacebdbadda57d9f87a4570d7e1eb633574b8a01c78690d75d7bbcf0ce",
     "test_gate_reports.py": "4986d356f1261f95771993ea10a82956895f11313b595f302766d04868317b4f",
@@ -59,6 +61,7 @@ TEST_MANIFEST = {
     "test_installation_contract.py": "5497fbfd70310b238e2cc1e0206c51529ce2702f286afadd8243f4485f400457",
     "test_interview.py": "8e32056374b22a4247f916c3da205ceebd084ce66da0d79a2edebf4f0df4198b",
     "test_mutable_state.py": "c2a1bd08ce23094d4001a7e1998beac79c4c4ecf06f39dcf84a821ad86287b9e",
+    "test_mutable_state_safety.py": "e6d056e0e8d59ecc46c9a8c867a647ef58e902ff4c12ba3dea5d6926536756a3",
     "test_native_process.py": "5757b225cc4aac67c81fc61b0e5f498d3ab2364c9ef0c76d7a0760bbfc84c07f",
     "test_native_workflow_trials.py": "5d7b3a1641b53806d1566c3c17dbaab4c1ef40bebb043e40d134b8e27e3b3ba8",
     "test_parallel_ownership.py": "e0265620b989847bb0dc8cf60d8d5d12f62941a357c145d8da7e21cb0b2a1224",
@@ -67,7 +70,8 @@ TEST_MANIFEST = {
     "test_pinner_reads.py": "ebaf66728c0dabbf4c47d0bb67e8d634b04cf8542bf0fead02227973690cd32b",
     "test_plan_modes.py": "d01941dac0c93fb6a96f26fa594ccf4055854151ad9c2fc156bcae931e95e33f",
     "test_planning_contract.py": "a538b7e7435b97a800412ecb7e229dc0d5610c42f6852bf8d334cf2a1fefe80d",
-    "test_portable_gate_batch.py": "a94a1bb94f261fa271a70b4f271ec72c68b78eaa50a80088144219206a1c06d8",
+    "test_portable_gate_batch.py": "a6846a59a8fd19bbf0b3de1f31b44193a7a75e84bc9f9a6eb266087587fd753d",
+    "test_pretty_workflows.py": "ba7d333faa881d383b4fcd7133f08fcbca941526789257f2193a4b925d761a28",
     "test_project_commands.py": "07f9a43b2455005164260571a45b178714c9519f8fb937f7b5f4052d3240f9f1",
     "test_project_contracts.py": "c7d695bb85222caa6c68a555f34a2de30e378f8ff04f43f23a58b905095d5af3",
     "test_project_session_validation.py": "4b0df28adbb0817d732f2b5e250c26727a15785fd9f31c2a5a2498e9de8cf3ca",
@@ -79,6 +83,7 @@ TEST_MANIFEST = {
     "test_resume_context.py": "5aa47690740f0d1db589d1ea526f99c54de7541ae038641967aae610cc2df9b7",
     "test_resume_guidance.py": "40a776c2b9369e0b2fc0902ff4b287b7211639b5007f1f2d9d7ce66cb9f91bba",
     "test_runtime_binding.py": "5f10520b26f31e8c5af87ceb65b72e11ef2ac5807e98902620e90fbede6989b2",
+    "test_runtime_lifecycle.py": "ffd28bc6c15c09565afe3deb4fc89405598d925886bb7be659c52a7065dc4f08",
     "test_runtime_loading.py": "b8b77461891f3cad76e1f5842a838d6f408f7b8e8e0e1fc45b13d003b95e668a",
     "test_runtime_performance.py": "4f7cf467082e3eca7b2548dff0a7aa6239270c9118e0f5f8a2cd6a5bc084a5d7",
     "test_runtime_reuse.py": "91fe91c5ccbd9077fc4965fd3d2f547ef683a69d524ceddb654e801e36425856",
@@ -96,6 +101,7 @@ TEST_MANIFEST = {
     "test_verification_symlinks.py": "c722812b7b97b365765a0e33789d3c0c767ae6d2faf9785741fce66dbbb0a3a2",
     "test_workflow_admission.py": "a02a13a709a13c8553891a8431a0b7c11063cf72d9bb321f397d5e121b111cba",
     "test_workflow_efficiency.py": "2027dd50adac459168ae9d18334e2121b136a1d8addc8dc84c8884abd3411f48",
+    "test_workflow_handoff.py": "df05ed94edf06bdd4b36c9bde177461d6da73ae23d6c92127c5d13b30ba5c3a2",
     "test_zagrosi_skills.py": "d2e0e0c6c4d1f2efb620ccadb0377473aa2f1898bb58d0b78b7cfbfa3c686cf0"
 }
 # END TEST MANIFEST

@@ -1,9 +1,12 @@
 """A verified portable worker shares read analyses without losing isolation."""
 import io
 import json
+import os
 import signal
 import subprocess
 import sys
+from argparse import Namespace
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -146,3 +149,125 @@ def test_incomplete_or_failed_worker_cannot_report_success(forge, monkeypatch, r
     gates = forge.gates.run_gate_worker([("doctor", ["doctor"], True)])
     assert not gates[0]["success"]
     assert gates[0]["payload"]["error_code"] == "invalid-gate-batch"
+
+
+def plan_jobs(forge, plan, depth="standard", profile="solo"):
+    config_path = plan / "zagrosi_plan_config.json"
+    config_path.write_text(json.dumps({**json.loads(config_path.read_text()), "depth_mode": depth}))
+    return forge.flights._plan_gate_jobs(plan, Namespace(
+        depth=depth, profile=profile, strict=True, flight_mode="strict", write_report=False))
+
+
+def worker_result(forge, jobs, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(jobs)))
+    assert forge.entrypoint.main(["gate-batch", "--full-output"]) == 0
+    assert forge.session._CLI_CONTEXT.get() is None
+    return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("depth", ["standard", "deep"])
+@pytest.mark.parametrize("profile", ["solo", "enterprise"])
+def test_worker_scores_completed_analyses_once(forge, plan, monkeypatch, capsys, depth, profile):
+    jobs = plan_jobs(forge, plan, depth, profile)
+    calls = Counter()
+    for module, name in (
+        (forge.validation, "plan_analysis"), (forge.validation, "section_analysis"),
+        (forge.traceability, "traceability_analysis"), (forge.scoring, "implementation_readiness_analysis"),
+    ):
+        original = getattr(module, name)
+
+        def counted(*args, _original=original, _name=name, **kwargs):
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, counted)
+    actual = worker_result(forge, jobs, monkeypatch, capsys)
+    assert len(calls) == 4 and set(calls.values()) == {1}, calls
+    calls.clear()
+    monkeypatch.setattr(forge.scoring.FlightScoreInputs, "reusable", lambda *_args: {})
+    assert worker_result(forge, jobs, monkeypatch, capsys) == actual
+    assert set(calls.values()) == {2}, calls
+
+
+@pytest.mark.parametrize("change", ["rewrite", "new-artifact", "new-section", "delete-section", "configured-source"])
+def test_worker_recomputes_score_after_observed_inputs_change(forge, plan, tmp_path, monkeypatch, capsys, change):
+    jobs = plan_jobs(forge, plan)
+    score = forge.scoring.forge_score
+    payloads, recomputed = [], []
+    analyze = forge.scoring.section_findings_for_score
+    emit = forge.quality.emit_payload
+
+    def counted(*args):
+        recomputed.append(True)
+        return analyze(*args)
+
+    def capture(payload, args, exit_code=None):
+        if payload.get("gate") == "forge-score":
+            payloads.append(payload)
+        return emit(payload, args, exit_code)
+
+    def changed_score(args):
+        inputs = forge.session._CLI_CONTEXT.get().get("score_inputs")
+        assert inputs is not None and inputs.reusable(plan, "standard", 8)
+        if change == "rewrite":
+            source = plan / "spec.md"
+            before = source.stat()
+            source.write_text(source.read_text().replace("REQ-001", "REQ-999"))
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        elif change == "new-artifact":
+            (plan / "codex-spec.md").write_text("# Replacement spec\n\nREQ-999: new source.\n")
+        elif change == "new-section":
+            (plan / "sections/section-02-extra.md").write_text("# Extra\n\nREQ-999: orphan section.\n")
+        elif change == "delete-section":
+            next((plan / "sections").glob("section-*.md")).unlink()
+        else:
+            external = tmp_path / "new-source.md"
+            external.write_text("# External source\n\nREQ-999: new selected source.\n")
+            config_path = plan / "zagrosi_plan_config.json"
+            config_path.write_text(json.dumps({**json.loads(config_path.read_text()), "initial_file": str(external)}))
+        assert not inputs.reusable(plan, "standard", 8)
+        return score(args)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(forge.scoring, "section_findings_for_score", counted)
+        scoped.setattr(forge.scoring, "forge_score", changed_score)
+        scoped.setattr(forge.quality, "emit_payload", capture)
+        worker_result(forge, jobs, scoped, capsys)
+    assert len(payloads) == len(recomputed) == 1
+    forge.entrypoint.main(["forge-score", "--planning-dir", str(plan), "--depth", "standard", "--strict", "--full-output"])
+    assert json.loads(capsys.readouterr().out) == payloads[0]
+
+
+@pytest.mark.parametrize("mismatch", ["root", "depth", "profile", "order", "missing", "limit", "invalid-depth"])
+def test_worker_does_not_reuse_incompatible_gate_batches(forge, plan, tmp_path, monkeypatch, capsys, mismatch):
+    jobs = plan_jobs(forge, plan)
+    if mismatch in {"root", "depth", "profile"}:
+        name = "traceability" if mismatch == "root" else "lint-plan"
+        command = next(command for job_name, command, _ in jobs if job_name == name)
+        option = {"root": "--planning-dir", "depth": "--depth", "profile": "--profile"}[mismatch]
+        value = {"root": str(tmp_path / "missing-plan"), "depth": "lean", "profile": "enterprise"}[mismatch]
+        command[command.index(option) + 1] = value
+    elif mismatch == "order":
+        jobs.insert(0, jobs.pop())
+    elif mismatch == "limit":
+        command = next(command for name, command, _ in jobs if name == "lint-implementation-readiness")
+        command.extend(["--max-files", "2"])
+    elif mismatch == "invalid-depth":
+        command = next(command for name, command, _ in jobs if name == "lint-plan")
+        command[command.index("--depth") + 1] = "invalid"
+    else:
+        jobs = [job for job in jobs if job[0] != "traceability"]
+    seen = []
+    score = forge.scoring.forge_score
+
+    def checked_score(args):
+        inputs = forge.session._CLI_CONTEXT.get().get("score_inputs")
+        assert inputs is None or not inputs.reusable(plan, "standard", 8)
+        seen.append(True)
+        return score(args)
+
+    monkeypatch.setattr(forge.scoring, "forge_score", checked_score)
+    actual = worker_result(forge, jobs, monkeypatch, capsys)
+    monkeypatch.setattr(forge.scoring.FlightScoreInputs, "reusable", lambda *_args: {})
+    assert worker_result(forge, jobs, monkeypatch, capsys) == actual
+    assert len(seen) == 2

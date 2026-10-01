@@ -5,11 +5,67 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import json
+import os
+import shlex
 
 from . import session as _session
 
 def plain_status(success: Any) -> str:
     return "PASS" if bool(success) else "FAIL"
+
+
+def pretty_command(command: str | list[str]) -> str:
+    if isinstance(command, str):
+        return command
+    if os.name == "nt":
+        from subprocess import list2cmdline
+
+        return list2cmdline(command)
+    return shlex.join(command)
+
+
+def format_actions(payload: dict[str, Any]) -> list[str]:
+    lines = []
+    for label, key in (("Error", "error"), ("Next action", "next_action"), ("Record inputs", "record_inputs")):
+        if payload.get(key):
+            lines.append(f"{label}: {payload[key]}")
+    packet = payload.get("packet") or {}
+    if packet.get("error"):
+        lines.append(f"Context: {packet['error']}")
+    if payload.get("next_command"):
+        lines.append(f"Next command: {pretty_command(payload['next_command'])}")
+    commands = payload.get("commands")
+    if isinstance(commands, dict):
+        lines.extend(f"  {name}: {pretty_command(argv)}" for name, argv in commands.items())
+    return lines
+
+
+def format_workflow_details(payload: dict[str, Any]) -> list[str]:
+    lines = []
+    if "recorded" in payload:
+        lines.append(f"Recorded: {'yes' if payload['recorded'] else 'no'}")
+    admission = payload.get("admission")
+    if isinstance(admission, dict):
+        lines.append(f"Admission: {'READY' if admission.get('success') else 'BLOCKED'}")
+        if admission.get("blocking_gates"):
+            lines.append(f"Blocking: {', '.join(admission['blocking_gates'])}")
+    resume = payload.get("resume") or {}
+    if resume.get("stage"):
+        lines.append(f"Checkpoint: {resume['stage']}")
+    for label, key in (("Evidence current", "evidence_current"), ("Verification pending", "verification_pending")):
+        if key in resume:
+            lines.append(f"{label}: {'yes' if resume[key] else 'no'}")
+    for label, key in (("Changed inputs", "changed_inputs"), ("Blocking", "blocking_gates")):
+        if resume.get(key):
+            lines.append(f"{label}: {', '.join(resume[key])}")
+    if resume.get("notes"):
+        lines.append(f"Notes: {resume['notes']}")
+    lines.extend(format_actions(payload))
+    entry = payload.get("entry")
+    if isinstance(entry, dict):
+        lines.append(f"Next entry: {'READY' if entry.get('success') else 'BLOCKED'}")
+        lines.extend(format_actions(entry))
+    return lines
 
 
 def pretty_path(payload: dict[str, Any], *keys: str) -> str | None:
@@ -101,9 +157,10 @@ def format_setup(payload: dict[str, Any]) -> list[str]:
         phase = "plan"
     elif "sections_dir" in payload and "target_dir" in payload:
         phase = "implement"
+    status = "BLOCKED" if (payload.get("admission") or {}).get("success") is False else plain_status(payload.get("success"))
     lines = [
         f"ZAGROSI FORGE: {phase.upper()}",
-        f"Status: {plain_status(payload.get('success'))}   Mode: {payload.get('mode', 'n/a')}",
+        f"Status: {status}   Mode: {payload.get('mode', 'n/a')}",
     ]
     for label, key in (
         ("Planning dir", "planning_dir"),
@@ -137,6 +194,25 @@ def format_setup(payload: dict[str, Any]) -> list[str]:
 def format_pretty(payload: dict[str, Any]) -> str:
     if {"phase", "stage", "gates"}.issubset(payload):
         lines = format_flight(payload)
+    elif isinstance(payload.get("providers"), list):
+        lines = ["ZAGROSI FORGE REVIEWERS"]
+        for provider in payload["providers"]:
+            available = "available" if provider.get("available") else "unavailable"
+            lines.append(f"  {provider['provider']}: {available}; authentication: {provider.get('authentication', 'unknown')}")
+            if provider.get("login_argv"):
+                lines.append(f"    Login: {pretty_command(provider['login_argv'])}")
+        if payload.get("note"):
+            lines.append(payload["note"])
+    elif payload.get("schema") == "forge-provider-review-v1":
+        lines = ["ZAGROSI FORGE PROVIDER REVIEW", f"Request: {plain_status(payload.get('success'))}",
+                 f"Provider: {payload.get('provider')}",
+                 f"Requested model: {payload.get('requested_model') or 'native default'}",
+                 f"Observed models: {', '.join(payload.get('observed_models') or []) or 'unreported'}",
+                 f"Model identity: {payload.get('model_identity', 'unreported')}"]
+        if payload.get("output"):
+            lines.append(f"Review: {payload['output']}")
+        if payload.get("login_argv"):
+            lines.append(f"Login: {pretty_command(payload['login_argv'])}")
     elif payload.get("operation") == "update-check":
         lines = [
             "ZAGROSI FORGE UPDATE CHECK",
@@ -205,6 +281,7 @@ def format_pretty(payload: dict[str, Any]) -> str:
                 aliases = item.get("aliases") or []
                 alias_text = f" (aliases: {', '.join(aliases)})" if aliases else ""
                 lines.append(f"  - {item.get('name')}{alias_text}: {item.get('summary', '')}")
+                lines.extend(f"      {example}" for example in item.get("examples", []))
     elif "gate" in payload:
         lines = format_quality(payload)
     elif "results" in payload and "plugin_root" in payload:
@@ -223,19 +300,27 @@ def format_pretty(payload: dict[str, Any]) -> str:
             "ZAGROSI FORGE STATUS",
             f"Status: {plain_status(payload.get('success'))}",
             f"Planning dir: {payload.get('planning_dir')}",
-            f"Next action: {payload.get('next_action')}",
         ]
         progress = payload.get("section_progress", {})
         if progress:
             lines.append(f"Sections: {progress.get('progress', 'n/a')} ({progress.get('state', 'unknown')})")
     else:
         lines = ["ZAGROSI FORGE", f"Status: {plain_status(payload.get('success', True))}"]
-        for key in ("planning_dir", "output", "state_path", "path", "error"):
+        for key in ("planning_dir", "output", "state_path", "path"):
             if payload.get(key):
                 lines.append(f"{key.replace('_', ' ').title()}: {payload[key]}")
-    if "diagnostics" in payload:
+    lines.extend(format_workflow_details(payload))
+    findings = list(payload.get("diagnostics") or [])
+    admission = payload.get("admission") or {}
+    findings.extend(admission.get("diagnostics") or [])
+    for gate in admission.get("gates", []):
+        findings.extend((gate.get("payload") or {}).get("findings") or [])
+    if findings:
+        findings = list({json.dumps(item, sort_keys=True): item for item in findings}.values())
         lines.append("Diagnostics:")
-        lines.extend(pretty_findings(payload["diagnostics"], limit=None))
+        standalone_flight = {"phase", "stage", "gates"}.issubset(payload)
+        limit = 8 if payload.get("full_report") and not standalone_flight else None
+        lines.extend(pretty_findings(findings, limit=limit))
     if payload.get("full_report"):
         lines.append(f"Full report: {payload['full_report']}")
     if payload.get("full_report_error"):
@@ -245,7 +330,6 @@ def format_pretty(payload: dict[str, Any]) -> str:
 
 def failure_summary(payload: dict[str, Any]) -> dict[str, Any]:
     """Deduplicate findings only after saving the complete machine report."""
-    import os
     import tempfile
 
     report = None
@@ -327,6 +411,8 @@ def print_json(payload: dict[str, Any], exit_code: int = 0) -> int:
     context = _session._CLI_CONTEXT.get()
     pretty = context["pretty"] if context is not None else _session.PRETTY_OUTPUT
     flights = [payload, payload.get("preflight"), payload.get("postflight")]
+    if pretty:
+        flights.append(payload.get("admission"))
     if (streams is None and not (context or {}).get("full_output")
             and any(isinstance(item, dict) and item.get("success") is False and "gates" in item for item in flights)):
         payload = failure_summary(payload)

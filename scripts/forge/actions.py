@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from . import artifacts, mutable_inputs, sections, storage
+from . import artifacts, mutable_inputs, sections, state, storage
 
 
 def command(name: str, *args: str) -> list[str]:
@@ -15,8 +15,7 @@ def command(name: str, *args: str) -> list[str]:
 def implementation_profile(planning_dir: Path, profile: str | None = None) -> str:
     if profile is not None:
         return profile
-    config = artifacts.artifact(planning_dir / "implementation", ["zagrosi_implement_config.json", "deep_implement_config.json"])
-    return storage.load_json(config).get("profile", "solo") if config else "solo"
+    return state.load_implementation_config(planning_dir).get("profile", "solo")
 
 
 def plan_commands(planning_dir: Path, depth: str, target_dir: Path, *, detached: bool = False) -> dict:
@@ -62,8 +61,15 @@ def implementation_commands(planning_dir: Path, section: str | None = None, *, t
                                      "--commit": "Existing commit only; follow the user's Git authorization.",
                                      "manual_evidence": "Replace --verification-receipt with --verification-source attestation|inspection --verification-outcome passed --verification TEXT. This labels manual evidence, not captured execution."}
     else:
+        from .verification import integration_report
+
+        integration = integration_report(planning_dir, Path(target))
+        payload["integration_verification"] = integration
         payload["test_command"] = sections.check_section_progress(planning_dir).get("project_config", {}).get("test_command")
-        commands["verify_integration"] = command("implement-verify", "--planning-dir", str(planning_dir),
-                                                 "--target-dir", target, "--", "<command>", "<argument>")
-        payload["next_action"] = "capture the authorized full test command once with implement-verify, then postflight; an unchanged receipt is reused"
+        if integration["success"]:
+            payload["next_action"] = "run postflight with the current passing integration receipt, then summarize"
+        else:
+            commands["verify_integration"] = command("implement-verify", "--planning-dir", str(planning_dir),
+                                                     "--target-dir", target, "--", "<command>", "<argument>")
+            payload["next_action"] = "capture the authorized full test command once with implement-verify, then postflight; an unchanged receipt is reused"
     return payload

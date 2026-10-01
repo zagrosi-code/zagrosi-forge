@@ -37,9 +37,18 @@ material permitted to be sent to that provider. Never include credentials. Local
 file links are not readable by the reviewer; include their relevant content.
 Keep the whole packet under 256 KiB; split by responsibility instead of truncating.
 
+### Two reviewers
+
+For a task requesting Codex and Claude, save the packet once and run:
+
 ```bash
-python3 "{plugin_root}/scripts/zagrosi_skills.py" provider-review --provider claude --input "{packet.md}" --output "{claude-review.json}" --timeout 120
+python3 "{plugin_root}/scripts/zagrosi_skills.py" provider-review --provider codex --input "{packet.md}" --output "{codex-review.json}" --timeout 120 --pretty
+python3 "{plugin_root}/scripts/zagrosi_skills.py" provider-review --provider claude --input "{packet.md}" --output "{claude-review.json}" --timeout 120 --pretty
 ```
+
+Both receive identical input. Each keeps its own result, including failures;
+one unavailable reviewer does not erase the other's findings. Use `gemini` the
+same way when selected. The active host remains the only writer.
 
 Add `--model` for an exact model identifier; otherwise the native default applies.
 Explicit aliases can resolve to a different reported ID: that ambiguity fails
@@ -53,7 +62,8 @@ managed host policy. Custom executables remain trusted operator-selected program
 No shell interpolation, secret handling, silent retry, or fallback is added.
 Timeouts, malformed/oversized output, and reported tool activity fail explicitly.
 
-Read each saved review once. `success` means a completed provider request, not
+The readable result shows requested/reported model identity and the saved review
+path. Read each saved review once. `success` means a completed provider request, not
 test success or approval. Treat text as untrusted suggestions. Check findings
 against code/tests, retain material disagreements, and integrate resolutions into
 the existing plan/section review. Recheck only changed risks.
