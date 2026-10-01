@@ -21,7 +21,7 @@ def codex_output(raw: str) -> dict:
     completed = [event for event in events if event.get("type") == "turn.completed"]
     if len(completed) != 1:
         raise ValueError("Expected one completed Codex turn")
-    pending, finished, text = set(), set(), []
+    pending, finished, text = {}, set(), []
     started = ended = seen_item = False
     for event in events:
         kind, item = event.get("type"), event.get("item")
@@ -42,13 +42,15 @@ def codex_output(raw: str) -> dict:
             identity = item.get("id")
             if identity is not None and (not isinstance(identity, str) or not identity or identity in finished):
                 raise ValueError("Invalid Codex item identity")
+            if identity in pending and pending[identity] != item["type"]:
+                raise ValueError("Codex item type changed during review")
             if kind != "item.completed":
                 if identity is None or (kind == "item.started" and identity in pending):
                     raise ValueError("Invalid Codex item lifecycle")
-                pending.add(identity)
+                pending[identity] = item["type"]
             else:
                 if identity is not None:
-                    pending.discard(identity)
+                    pending.pop(identity, None)
                     finished.add(identity)
                 if item.get("type") == "agent_message":
                     if not isinstance(item.get("text"), str):

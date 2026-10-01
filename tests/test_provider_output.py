@@ -85,14 +85,27 @@ def test_malformed_final_codex_text_cannot_leave_only_an_earlier_review(review, 
     assert not report["success"] and "review text" in report["error"]
 
 
+@pytest.mark.parametrize("initial,changed", [("agent_message", "reasoning"), ("reasoning", "agent_message")])
+@pytest.mark.parametrize("kind", ["updated", "completed"])
+def test_codex_pending_items_cannot_change_type(review, initial, changed, kind):
+    events = [item("completed", "Earlier review.", "prior"),
+              item("started", item_type=initial), item(kind, item_type=changed)]
+    if kind == "updated":
+        events.append(item("completed", item_type=initial))
+    report = review("codex", [*events, DONE])
+    assert not report["success"] and "item type changed" in report["error"]
+    assert "review" not in report
+
+
 def test_codex_review_uses_only_completed_messages_once(review):
     events = [
         {"type": "thread.started", "thread_id": "thread-1", "model": "selected"},
         {"type": "turn.started"},
         item("started", "Thinking.", "reasoning-1", "reasoning"),
-        item("completed", "Finished reasoning.", "reasoning-1", "reasoning"),
         item("started", "Partial draft."),
+        item("updated", "Still thinking.", "reasoning-1", "reasoning"),
         item("updated", "Updated draft."),
+        item("completed", "Finished reasoning.", "reasoning-1", "reasoning"),
         item("completed", "Preserve error ordering."),
         item("completed", "Cover empty input.", "message-2"),
         DONE,
