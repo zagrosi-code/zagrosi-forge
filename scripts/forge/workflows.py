@@ -242,14 +242,17 @@ def _mutable_lifecycle(args: argparse.Namespace, operation) -> int:
 
 
 def _mutable_implement_setup(args: argparse.Namespace) -> int:
+    from . import mutable_inputs
+
     sections_dir = _storage.resolve_path(args.sections_dir)
-    target_dir = _storage.resolve_path(args.target_dir or os.getcwd())
+    planning_dir = sections_dir.parent
+    target_dir = mutable_inputs.target_directory(planning_dir, args.target_dir)
     if not sections_dir.exists() or not sections_dir.is_dir():
         return _output.print_json({"success": False, "error": f"Sections directory not found: {sections_dir}"}, 1)
     if not target_dir.exists() or not target_dir.is_dir():
         return _output.print_json({"success": False, "error": f"Target directory not found: {target_dir}"}, 1)
 
-    planning_dir = sections_dir.parent
+    state = _state.load_implementation_state(planning_dir)
     progress = _sections.check_section_progress(planning_dir)
     if progress["state"] in {"invalid_index", "no_index"}:
         return _output.print_json({"success": False, "section_progress": progress}, 1)
@@ -269,10 +272,7 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         state_path = legacy_state_path
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    if state_path.exists():
-        state = _storage.load_json(state_path)
-    else:
-        state = {"completed_sections": {}, "created_at": _storage.now_iso()}
+    if not state_path.exists():
         _storage.write_json(state_path, state)
 
     config = {
@@ -287,7 +287,7 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
     _storage.write_json(config_path, config)
 
     readiness = _state.mutable_admitted_readiness(planning_dir, state=state, profile=args.profile,
-                                                progress=progress, admission=admission)
+                                                progress=progress, admission=admission, target_dir=target_dir)
     readiness.pop("admission")
     repo = _storage.git_info(target_dir)
     warnings: list[str] = []
@@ -340,8 +340,12 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
 
 
 def _mutable_record_section(args: argparse.Namespace) -> int:
+    from . import mutable_inputs, verification as verification_evidence
+
     sections_dir = _storage.resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
+    state = _state.load_implementation_state(planning_dir)
+    target_dir = mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None))
     admission = _flights.plan_admission_report(planning_dir, depth=args.depth, profile=args.profile)
     if not admission["success"]:
         return _output.print_json({**admission, "error": "Forge planning admission failed; finish zagrosi-plan before recording implementation."}, 1)
@@ -358,7 +362,6 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
             1,
         )
     state_path = _state.implementation_state_path(planning_dir)
-    state = _state.load_implementation_state(planning_dir)
     dependencies = _sections.dependency_graph(planning_dir, progress)
     unknown_predecessors = sorted(dependency for dependency in dependencies.get(args.section, []) if dependency not in known)
     if unknown_predecessors:
@@ -373,7 +376,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
             1,
         )
     completed = state.get("completed_sections", {})
-    completed_names = _state.completed_sections(planning_dir, state)
+    completed_names = _state.completed_sections(planning_dir, state, target_dir=target_dir)
     incomplete_predecessors = [dependency for dependency in dependencies.get(args.section, []) if dependency not in completed_names]
     if incomplete_predecessors:
         return _output.print_json(
@@ -388,11 +391,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         )
     compact = _markdown.is_lean_depth(_artifacts.planning_depth(planning_dir))
     verification = _markdown.normalize_repeated(args.verification)
-    from . import mutable_inputs, verification as verification_evidence
-
-    verification_result = verification_evidence.section_result(
-        args, planning_dir, mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None)),
-    )
+    verification_result = verification_evidence.section_result(args, planning_dir, target_dir)
     review_status = getattr(args, "review_status", None)
     section_record = {
         "completed_at": _storage.now_iso(),
@@ -408,11 +407,11 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
         "input_snapshot": _state.contract_snapshot(
             planning_dir, args.section,
-            target_dir=getattr(args, "target_dir", None),
+            target_dir=target_dir,
             files=_markdown.normalize_repeated(args.files_changed + args.test_files),
         ),
     }
-    findings = _state.completion_evidence_findings(planning_dir, args.section, section_record)
+    findings = _state.completion_evidence_findings(planning_dir, args.section, section_record, target_dir=target_dir)
     if findings:
         return _output.print_json({
             "success": False,
@@ -422,7 +421,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
             "findings": [finding.to_dict() for finding in findings],
         }, 1)
 
-    completed = dict(completed) if isinstance(completed, dict) else {}
+    completed = dict(completed)
     pending = dict(state.get("pending_sections", {}))
     candidate = {**state, "completed_sections": {**completed, args.section: section_record},
                  "pending_sections": {name: record for name, record in pending.items() if name != args.section}}
@@ -454,7 +453,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
     readiness = _state.mutable_readiness_snapshot(
         progress,
         dependencies,
-        _state.completed_sections(planning_dir, state),
+        _state.completed_sections(planning_dir, state, target_dir=target_dir),
     )
     payload = {
         "success": postflight is None or postflight["success"],
@@ -474,9 +473,9 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
                 from .resume import section_entry
 
                 payload["entry"] = section_entry(planning_dir, readiness["next_section"],
-                                                  target_dir=getattr(args, "target_dir", None), profile=args.profile)
+                                                  target_dir=target_dir, profile=args.profile)
             elif not readiness["remaining_sections"]:
-                payload.update(_actions.implementation_commands(planning_dir, target_dir=getattr(args, "target_dir", None), profile=args.profile))
+                payload.update(_actions.implementation_commands(planning_dir, target_dir=target_dir, profile=args.profile))
         except (OSError, ValueError) as exc:
             payload["entry"] = {"success": False, "error": str(exc),
                                 "next_action": "repair next-section context; the preceding record is already saved",

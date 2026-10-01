@@ -8,6 +8,8 @@ import argparse
 import os
 
 from . import mutable_inputs as _mutable_inputs
+from . import actions as _actions
+from . import models as _models
 from . import output as _output
 from . import ownership as _ownership
 from . import resume as _resume
@@ -42,18 +44,36 @@ def next_section(args: argparse.Namespace) -> int:
 
         return _detached_progress.detached_next_section(args)
     planning_dir = _storage.resolve_path(args.planning_dir)
-    readiness = _state.mutable_admitted_readiness(planning_dir)
-    payload = {"planning_dir": str(planning_dir), **readiness}
-    payload["success"] = readiness["success"] and bool(readiness["ready_sections"] or not readiness["remaining_sections"])
-    if payload["success"] and readiness["next_section"]:
-        payload.update(_resume.section_entry(planning_dir, readiness["next_section"],
-                                             max_words=getattr(args, "max_words", 2000)))
+    try:
+        target = _mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None))
+        profile = _actions.implementation_profile(planning_dir, getattr(args, "profile", None))
+        readiness = _state.mutable_admitted_readiness(planning_dir, target_dir=target, profile=profile)
+        payload = {"planning_dir": str(planning_dir), **readiness}
+        payload["success"] = readiness["success"] and bool(readiness["ready_sections"] or not readiness["remaining_sections"])
+        if payload["success"] and readiness["next_section"]:
+            payload.update(_resume.section_entry(planning_dir, readiness["next_section"], target_dir=target,
+                                                profile=profile, max_words=getattr(args, "max_words", 2000)))
+        elif payload["success"]:
+            payload.update(_actions.implementation_commands(planning_dir, target_dir=target, profile=profile))
+        else:
+            payload["next_action"] = ("repair planning admission findings before implementation"
+                                      if not readiness["admission"]["success"] else "resolve blocked section dependencies")
+    except _models.PlanningDepthError:
+        raise
+    except (OSError, ValueError) as exc:
+        return _output.print_json({"success": False, "planning_dir": str(planning_dir), "error": str(exc)}, 1)
     return _output.print_json(payload, 0 if payload["success"] else 1)
 
 
 def parallel_plan(args: argparse.Namespace) -> int:
     planning_dir = _storage.resolve_path(args.planning_dir)
-    readiness = _state.mutable_admitted_readiness(planning_dir)
+    try:
+        target = _mutable_inputs.target_directory(planning_dir)
+        readiness = _state.mutable_admitted_readiness(planning_dir, target_dir=target)
+    except _models.PlanningDepthError:
+        raise
+    except (OSError, ValueError) as exc:
+        return _output.print_json({"success": False, "planning_dir": str(planning_dir), "error": str(exc)}, 1)
     progress = readiness["section_progress"]
     deps = _sections.dependency_graph(planning_dir, progress)
     known = set(progress.get("sections", []))
@@ -68,7 +88,6 @@ def parallel_plan(args: argparse.Namespace) -> int:
     completed = set(readiness["completed_sections"])
     remaining = [section for section in progress["sections"] if section not in completed]
     # Read current contracts on every invocation, including cleanup ownership added later.
-    target = _mutable_inputs.target_directory(planning_dir)
     ownership = {
         section: ownership_keys(target, _storage.read_text(planning_dir / "sections" / f"{section}.md"))
         for section in remaining
@@ -162,10 +181,11 @@ def implement_progress(args: argparse.Namespace) -> int:
         return {"events": [], "created_at": _storage.now_iso()}
 
     def append_event(state: dict[str, Any]) -> None:
+        _state.validate_implementation_progress(state, path)
         state.setdefault("events", []).append(event)
 
     try:
         state = _storage.update_json_locked(path, default_state, append_event)
-    except TimeoutError as exc:
+    except (OSError, ValueError) as exc:
         return _output.print_json({"success": False, "planning_dir": str(planning_dir), "state_path": str(path), "error": str(exc)}, 1)
     return _output.print_json({"success": True, "planning_dir": str(planning_dir), "state_path": str(path), "event": event, "event_count": len(state["events"])})

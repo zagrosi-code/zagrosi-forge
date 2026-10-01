@@ -9,6 +9,9 @@ import shlex
 import sys
 
 from . import artifacts as _artifacts
+from . import actions as _actions
+from . import mutable_inputs as _mutable_inputs
+from . import models as _models
 from . import planning_contract as _planning_contract
 from . import output as _output
 from . import resume as _resume
@@ -45,6 +48,15 @@ def detached_status(path: Path, implementation_root: Path) -> int:
     })
 
 def status(args: argparse.Namespace) -> int:
+    try:
+        return _status(args)
+    except _models.PlanningDepthError:
+        raise
+    except (OSError, ValueError) as exc:
+        return _output.print_json({"success": False, "path": str(args.path), "error": str(exc)}, 1)
+
+
+def _status(args: argparse.Namespace) -> int:
     raw_path = _storage.absolute_path_no_follow(args.path)
     candidate = raw_path.parent if raw_path.name in {"zagrosi_implement_config.json", "zagrosi_implement_state.json", "forge-progress.json"} else raw_path
     mutable_root = candidate.parent if candidate.name == "implementation" and (candidate.parent / "sections/index.md").is_file() else None
@@ -81,6 +93,8 @@ def status(args: argparse.Namespace) -> int:
     has_plan = plan_config.exists() or section_progress["state"] != "no_index"
     plan_artifacts = _artifacts.plan_artifact_state(planning_dir) if has_plan else None
     plan_config_payload = _storage.load_json(plan_config) if plan_config.exists() else {}
+    if not isinstance(plan_config_payload, dict):
+        raise ValueError(f"Planning configuration must be an object: {plan_config}")
     next_action = "start zagrosi-project or zagrosi-plan"
     details: dict[str, Any] = {}
     if has_plan:
@@ -89,25 +103,27 @@ def status(args: argparse.Namespace) -> int:
             details["scaffold_unfinished"] = True
             next_action = "complete the draft plan: choose section boundaries, fill the contract, and record review"
         elif section_progress["state"] == "complete":
-            readiness = _state.mutable_admitted_readiness(planning_dir)
+            target = _mutable_inputs.target_directory(planning_dir)
+            readiness = _state.mutable_admitted_readiness(planning_dir, target_dir=target)
             details.update({key: value for key, value in readiness.items() if key != "success"})
             if not readiness["admission"]["success"]:
                 next_action = "repair planning admission findings before implementation"
             else:
                 pending = readiness["pending_sections"]
                 if pending:
-                    brief = _resume.resume_brief(planning_dir, pending[0])
+                    brief = _resume.resume_brief(planning_dir, pending[0], target_dir=target)
                     details["resume"] = brief
                     next_action = brief["next_action"] if brief else "recheck pending completion state"
                 elif readiness["next_section"] and implementation_state.exists():
                     section = readiness["next_section"]
-                    brief = _resume.resume_brief(planning_dir, section)
+                    brief = _resume.resume_brief(planning_dir, section, target_dir=target)
                     details["resume"] = brief
                     next_action = brief["next_action"] if brief else f"implement {section}"
                 elif readiness["remaining_sections"] and not readiness["ready_sections"]:
                     next_action = "resolve blocked section dependencies"
                 elif not readiness["remaining_sections"]:
-                    next_action = "final verification and summary"
+                    details.update(_actions.implementation_commands(planning_dir, target_dir=target))
+                    next_action = details["next_action"]
     elif project_state.exists():
         next_action = "finish project manifest/spec generation"
 

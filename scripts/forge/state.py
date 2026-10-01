@@ -14,6 +14,46 @@ from . import quality as _quality
 from . import sections as _sections
 from . import storage as _storage
 
+
+class MutableStateError(ValueError):
+    """Saved mutable workflow data cannot safely be read or replaced."""
+
+
+def _state_object(value: Any, path: Path) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise MutableStateError(f"Saved state must be an object: {path}")
+    return value
+
+
+def validate_implementation_state(value: Any, path: Path) -> dict[str, Any]:
+    state = _state_object(value, path)
+    for field in ("completed_sections", "pending_sections"):
+        if field in state and not isinstance(state[field], dict):
+            raise MutableStateError(f"{field} must be an object: {path}")
+    return state
+
+
+def validate_implementation_progress(value: Any, path: Path) -> dict[str, Any]:
+    state = _state_object(value, path)
+    if "events" in state and not isinstance(state["events"], list):
+        raise MutableStateError(f"Progress events must be a list: {path}")
+    return state
+
+
+def load_implementation_config(planning_dir: Path) -> dict[str, Any]:
+    for name in ("zagrosi_implement_config.json", "deep_implement_config.json"):
+        path = planning_dir / "implementation" / name
+        if path.exists():
+            config = _state_object(_storage.load_json(path), path)
+            target = config.get("target_dir")
+            if target is not None and (not isinstance(target, str) or not target.strip()):
+                raise MutableStateError(f"target_dir must be a nonempty path string: {path}")
+            if "profile" in config and (not isinstance(config["profile"], str) or config["profile"] not in _policy.QUALITY_PROFILES):
+                raise MutableStateError(f"Unknown implementation profile: {path}")
+            return config
+    return {}
+
+
 def contract_snapshot(planning_dir: Path, section: str, *, target_dir=None, files=()) -> dict:
     from .mutable_inputs import contract_snapshot as snapshot
 
@@ -32,15 +72,13 @@ def code_observations_changed(record: dict) -> bool:
         return True
 
 
-def completed_sections(planning_dir: Path, state: dict[str, Any] | None = None) -> set[str]:
-    state = load_implementation_state(planning_dir) if state is None else state
+def completed_sections(planning_dir: Path, state: dict[str, Any] | None = None, *, target_dir: Path | None = None) -> set[str]:
+    state = load_implementation_state(planning_dir) if state is None else validate_implementation_state(state, implementation_state_path(planning_dir))
     completed = state.get("completed_sections", {})
-    if not isinstance(completed, dict):
-        return set()
     valid = {
         section for section, record in completed.items()
         if section not in state.get("pending_sections", {})
-        and not completion_evidence_findings(planning_dir, section, record)
+        and not completion_evidence_findings(planning_dir, section, record, target_dir=target_dir)
     }
     dependencies = _sections.dependency_graph(planning_dir)
     while stale := {section for section in valid if any(dep not in valid for dep in dependencies.get(section, []))}:
@@ -48,12 +86,12 @@ def completed_sections(planning_dir: Path, state: dict[str, Any] | None = None) 
     return valid
 
 
-def implementation_recording_status(planning_dir: Path, state: dict[str, Any] | None = None) -> dict[str, Any]:
+def implementation_recording_status(planning_dir: Path, state: dict[str, Any] | None = None, *, target_dir: Path | None = None) -> dict[str, Any]:
     state = load_implementation_state(planning_dir) if state is None else state
     progress = _sections.check_section_progress(planning_dir)
     sections = progress.get("sections", []) if progress.get("state") not in {"invalid_index", "no_index"} else []
     known_sections = set(sections)
-    recorded = completed_sections(planning_dir, state)
+    recorded = completed_sections(planning_dir, state, target_dir=target_dir)
     recorded_known = sorted(recorded & known_sections)
     remaining = [section for section in sections if section not in recorded]
     pending = sorted(state.get("pending_sections", {}))
@@ -98,7 +136,8 @@ def implementation_state_path(planning_dir: Path) -> Path:
 
 def load_implementation_state(planning_dir: Path) -> dict[str, Any]:
     state_path = implementation_state_path(planning_dir)
-    return _storage.load_json(state_path) if state_path.exists() else {"completed_sections": {}, "created_at": _storage.now_iso()}
+    return (validate_implementation_state(_storage.load_json(state_path), state_path) if state_path.exists()
+            else {"completed_sections": {}, "created_at": _storage.now_iso()})
 
 
 def mutable_readiness_snapshot(
@@ -122,15 +161,16 @@ def mutable_readiness_snapshot(
     }
 
 
-def mutable_admitted_readiness(planning_dir: Path, *, state=None, profile=None, progress=None, admission=None) -> dict[str, Any]:
+def mutable_admitted_readiness(planning_dir: Path, *, state=None, profile=None, progress=None, admission=None,
+                               target_dir: Path | None = None) -> dict[str, Any]:
     from . import actions, flights
 
+    state = load_implementation_state(planning_dir) if state is None else validate_implementation_state(state, implementation_state_path(planning_dir))
     progress = _sections.check_section_progress(planning_dir) if progress is None else progress
     admission = flights.plan_admission_report(planning_dir, profile=actions.implementation_profile(planning_dir, profile)) if admission is None else admission
-    state = load_implementation_state(planning_dir) if state is None else state
     readiness = mutable_readiness_snapshot(
         {**progress, "sections": progress.get("sections", [])},
-        _sections.dependency_graph(planning_dir, progress), completed_sections(planning_dir, state),
+        _sections.dependency_graph(planning_dir, progress), completed_sections(planning_dir, state, target_dir=target_dir),
     )
     if not admission["success"]:
         readiness.update(next_section=None, ready_sections=[])
@@ -166,7 +206,7 @@ def compact_section_evidence(record: dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "-"
 
 
-def completion_evidence_findings(planning_dir: Path, section: str, record: Any) -> list[_models.Finding]:
+def completion_evidence_findings(planning_dir: Path, section: str, record: Any, *, target_dir: Path | None = None) -> list[_models.Finding]:
     """Use the same evidence contract for new records, legacy records, and readiness."""
     path = implementation_state_path(planning_dir)
     if not _policy.SECTION_RE.fullmatch(section) or not isinstance(record, dict):
@@ -201,11 +241,19 @@ def completion_evidence_findings(planning_dir: Path, section: str, record: Any) 
         if not fresh:
             findings.append(_quality.finding("high", "stale-completion-contract",
                                              f"{section} contract changed after verification; review and record it again.", path))
+        # Direct legacy callers may have recorded an explicit target without setup.
+        # Compare identity whenever this invocation or the saved config selects one.
+        selected_target = target_dir if target_dir is not None else load_implementation_config(planning_dir).get("target_dir")
+        if selected_target is not None and (
+            not isinstance(snapshot, dict) or snapshot.get("target_dir") != str(_storage.resolve_path(selected_target))
+        ):
+            findings.append(_quality.finding("high", "stale-completion-target",
+                                             f"{section} was verified for another target; review and record it for the selected target.", path))
     return findings
 
 
 def implementation_state_analysis(
-    planning_dir: Path, state: dict[str, Any] | None = None,
+    planning_dir: Path, state: dict[str, Any] | None = None, *, target_dir: Path | None = None,
 ) -> tuple[list[_models.Finding], dict[str, Any]]:
     findings: list[_models.Finding] = []
     progress = _sections.check_section_progress(planning_dir)
@@ -213,20 +261,23 @@ def implementation_state_analysis(
     if progress["state"] in {"invalid_index", "no_index"}:
         findings.append(_quality.finding("critical", "invalid-sections", "Cannot validate implementation without valid sections/index.md.", planning_dir / "sections" / "index.md"))
         return findings, {}
-    if state is None:
-        if not state_path.exists():
-            findings.append(_quality.finding("high", "missing-state", "zagrosi_implement_state.json is missing.", state_path))
-        state = load_implementation_state(planning_dir)
+    try:
+        if state is None:
+            if not state_path.exists():
+                findings.append(_quality.finding("high", "missing-state", "zagrosi_implement_state.json is missing.", state_path))
+            state = load_implementation_state(planning_dir)
+        else:
+            state = validate_implementation_state(state, state_path)
+    except (OSError, ValueError) as exc:
+        findings.append(_quality.finding("critical", "invalid-state", str(exc), state_path))
+        return findings, {"state_path": str(state_path)}
     completed = state.get("completed_sections", {})
-    if not isinstance(completed, dict):
-        findings.append(_quality.finding("critical", "invalid-state", "completed_sections must be an object.", state_path))
-        completed = {}
     for section in progress["sections"]:
         if section not in completed:
             findings.append(_quality.finding("medium", "section-not-recorded", f"{section} is not recorded complete.", state_path))
             continue
         record = completed[section]
-        findings.extend(completion_evidence_findings(planning_dir, section, record))
+        findings.extend(completion_evidence_findings(planning_dir, section, record, target_dir=target_dir))
         if isinstance(record, dict) and not record.get("completed_at"):
             findings.append(_quality.finding("low", "missing-completed-at", f"{section} has no completed_at timestamp.", state_path))
     pending = sorted(state.get("pending_sections", {}))

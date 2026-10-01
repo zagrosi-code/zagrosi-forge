@@ -11,21 +11,53 @@ import subprocess
 
 from . import artifacts, context, ownership, sections, session, storage
 
+_IGNORED_SOURCE_DIRECTORIES = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+
 
 def digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def target_directory(planning_dir: Path, target_dir: Path | None = None) -> Path:
+    from .state import load_implementation_config
+
     if target_dir is not None:
-        return Path(target_dir).resolve()
-    for name in ("zagrosi_implement_config.json", "deep_implement_config.json"):
-        path = planning_dir / "implementation" / name
-        if path.is_file():
-            config = storage.load_json(path)
-            if config.get("target_dir"):
-                return storage.resolve_path(config["target_dir"])
+        return storage.resolve_path(target_dir)
+    config = load_implementation_config(planning_dir)
+    if config.get("target_dir"):
+        return storage.resolve_path(config["target_dir"])
     return Path.cwd().resolve()
+
+
+def _code_observation(target_dir: Path, path: Path) -> str | None:
+    """Hash an owned tree, retaining directory links without traversing them."""
+    name = path.relative_to(target_dir).as_posix()
+    if path != target_dir and not path.parent.resolve().is_relative_to(target_dir):
+        raise ValueError(f"Observed code path must stay within the target directory: {name}")
+    if path.is_symlink():
+        try:
+            linked_mode = path.stat().st_mode
+        except FileNotFoundError:
+            linked_mode = 0
+        if not linked_mode or stat.S_ISDIR(linked_mode):
+            return "link:" + digest({"link": os.readlink(path), "target_type": "directory" if linked_mode else "missing"})
+    if not path.resolve().is_relative_to(target_dir):
+        raise ValueError(f"Observed code path must stay within the target directory: {name}")
+    try:
+        if path.is_dir():
+            return "directory:" + digest({
+                child.name: _code_observation(target_dir, child)
+                for child in sorted(path.iterdir())
+                if not (child.name in _IGNORED_SOURCE_DIRECTORIES and child.is_dir())
+                and not child.name.endswith((".pyc", ".pyo"))
+            })
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValueError(f"Observed code path is not a regular file: {name}")
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+    except FileNotFoundError:
+        return None
 
 
 def code_observations(target_dir: Path, paths) -> dict[str, str | None]:
@@ -33,17 +65,9 @@ def code_observations(target_dir: Path, paths) -> dict[str, str | None]:
     for name in sorted(set(paths)):
         relative = Path(name)
         normalized = relative.as_posix()
-        if not name or relative.is_absolute() or ".." in relative.parts or not (target_dir / relative).resolve().is_relative_to(target_dir):
+        if not name or relative.is_absolute() or ".." in relative.parts:
             raise ValueError(f"Observed code path must stay within the target directory: {name}")
-        path = target_dir / normalized
-        try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-            with os.fdopen(descriptor, "rb") as handle:
-                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                    raise ValueError(f"Observed code path is not a regular file: {name}")
-                result[normalized] = hashlib.file_digest(handle, "sha256").hexdigest()
-        except FileNotFoundError:
-            result[normalized] = None
+        result[normalized] = _code_observation(target_dir, target_dir / normalized)
     return result
 
 
@@ -113,10 +137,9 @@ def contract_snapshot(planning_dir: Path, section: str, *, target_dir=None, file
 
 
 def filesystem_paths(target_dir: Path) -> list[Path]:
-    ignored = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
     paths = []
     for directory, directories, files in os.walk(target_dir):
-        directories[:] = [name for name in directories if name not in ignored]
+        directories[:] = [name for name in directories if name not in _IGNORED_SOURCE_DIRECTORIES]
         paths.extend(Path(directory) / name for name in directories if (Path(directory) / name).is_symlink())
         paths.extend(Path(directory) / name for name in files if not name.endswith((".pyc", ".pyo")))
     return paths
