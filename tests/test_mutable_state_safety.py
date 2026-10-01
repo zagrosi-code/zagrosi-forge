@@ -109,8 +109,7 @@ def test_setup_without_override_retains_saved_target_from_another_working_direct
     assert result["remaining_sections"] == []
 
 
-def test_explicit_record_target_cannot_borrow_another_targets_predecessor(workspace, tmp_path):
-    planning, target = workspace
+def add_dependent_section(planning):
     second = "section-02-export"
     index = planning / "sections/index.md"
     marker, body = index.read_text().split("END_FORGE_META -->\n", 1)
@@ -119,6 +118,12 @@ def test_explicit_record_target_cannot_borrow_another_targets_predecessor(worksp
     index.write_text(body.replace("END_MANIFEST", second + "\nEND_MANIFEST")
                      + f"\n{second} depends on {SECTION}\n")
     (section.parent / f"{second}.md").write_text(section.read_text().replace(SECTION, second).replace("labels.py", "exports.py"))
+    return second
+
+
+def test_explicit_record_target_cannot_borrow_another_targets_predecessor(workspace, tmp_path):
+    planning, target = workspace
+    second = add_dependent_section(planning)
     run_cmd(*record_args(planning, target))
     other = tmp_path / "other"
     other.mkdir()
@@ -130,6 +135,29 @@ def test_explicit_record_target_cannot_borrow_another_targets_predecessor(worksp
     assert result.returncode != 0, result.stdout
     assert json.loads(result.stdout)["incomplete_predecessors"] == [SECTION]
     assert state.read_bytes() == before
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+@pytest.mark.parametrize("same_cwd,saved_target", [(False, False), (True, False), (False, True)])
+def test_parallel_readiness_uses_effective_target(tmp_path, depth, same_cwd, saved_target):
+    planning = make_plan(tmp_path / "plan", depth)
+    second = add_dependent_section(planning)
+    original, other = tmp_path / "original", tmp_path / "other"
+    original.mkdir()
+    other.mkdir()
+    run_cmd(*record_args(planning, original))
+    config = planning / "implementation/zagrosi_implement_config.json"
+    assert not config.exists()
+    if saved_target:
+        config.write_text(json.dumps({"target_dir": str(original)}))
+    files = {path: path.read_bytes() for path in planning.rglob("*") if path.is_file()}
+
+    result = run_cmd("parallel-plan", "--planning-dir", str(planning), cwd=original if same_cwd else other)
+
+    retained = same_cwd or saved_target
+    assert result["completed_sections"] == ([SECTION] if retained else [])
+    assert result["layers"] == ([[second]] if retained else [[SECTION], [second]])
+    assert {path: path.read_bytes() for path in planning.rglob("*") if path.is_file()} == files
 
 
 def test_valid_legacy_state_remains_readable_and_preserved(workspace):

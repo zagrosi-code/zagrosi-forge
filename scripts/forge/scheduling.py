@@ -68,7 +68,8 @@ def next_section(args: argparse.Namespace) -> int:
 def parallel_plan(args: argparse.Namespace) -> int:
     planning_dir = _storage.resolve_path(args.planning_dir)
     try:
-        readiness = _state.mutable_admitted_readiness(planning_dir)
+        target = _mutable_inputs.target_directory(planning_dir)
+        readiness = _state.mutable_admitted_readiness(planning_dir, target_dir=target)
     except _models.PlanningDepthError:
         raise
     except (OSError, ValueError) as exc:
@@ -87,7 +88,6 @@ def parallel_plan(args: argparse.Namespace) -> int:
     completed = set(readiness["completed_sections"])
     remaining = [section for section in progress["sections"] if section not in completed]
     # Read current contracts on every invocation, including cleanup ownership added later.
-    target = _mutable_inputs.target_directory(planning_dir)
     ownership = {
         section: ownership_keys(target, _storage.read_text(planning_dir / "sections" / f"{section}.md"))
         for section in remaining
