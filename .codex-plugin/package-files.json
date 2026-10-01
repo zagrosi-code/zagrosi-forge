@@ -236,6 +236,7 @@
   "tests/test_portable_gate_batch.py",
   "tests/test_project_commands.py",
   "tests/test_project_contracts.py",
+  "tests/test_project_session_validation.py",
   "tests/test_providers.py",
   "tests/test_quality_gates.py",
   "tests/test_release.py",

@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, NamedTuple
 import argparse
-import json
 import re
 
 from . import artifacts as _artifacts
@@ -55,13 +54,7 @@ def write_chat_requirements(planning_dir: Path, brief: str) -> tuple[Path, bool]
 
 
 def existing_project_initial_file(planning_dir: Path) -> Path | None:
-    for state_path in (planning_dir / ".zagrosi-project" / "session.json", planning_dir / ".deep-project" / "session.json"):
-        if not state_path.exists():
-            continue
-        try:
-            state = _storage.load_json(state_path)
-        except (OSError, json.JSONDecodeError):
-            continue
+    for _, state in _artifacts.project_sessions(planning_dir):
         initial_file = state.get("initial_file")
         if isinstance(initial_file, str):
             candidate = _storage.resolve_path(initial_file)
@@ -83,18 +76,26 @@ def resolve_project_input(args: argparse.Namespace, *, materialize_chat: bool = 
         ok, error = ensure_markdown_file(input_file, "requirements file")
         if not ok:
             return None, error
+        planning_dir = input_file.parent
+    elif brief:
+        planning_dir = _storage.resolve_path(planning_dir_arg) if planning_dir_arg else Path.cwd().resolve()
+    else:
+        return None, "Project setup needs either --file PATH or --brief TEXT from the chat."
+
+    try:
+        _artifacts.project_sessions(planning_dir)
+    except ValueError as exc:
+        return None, str(exc)
+
+    if file_arg:
         return _models.ProjectInput(
-            planning_dir=input_file.parent,
+            planning_dir=planning_dir,
             input_file=input_file,
             input_mode="file",
             generated_file=False,
             brief_word_count=_markdown.word_count(_storage.read_text(input_file)),
         ), None
 
-    if not brief:
-        return None, "Project setup needs either --file PATH or --brief TEXT from the chat."
-
-    planning_dir = _storage.resolve_path(planning_dir_arg) if planning_dir_arg else Path.cwd().resolve()
     input_file: Path | None = None
     generated = False
     warnings: tuple[str, ...] = ()
@@ -269,13 +270,8 @@ def graph_cycle(graph: dict[str, list[str]]) -> list[str]:
 
 def project_requirement_source(planning_dir: Path, meta: dict[str, Any] | None) -> Path | None:
     candidates: list[Path] = []
-    for state_path in (planning_dir / ".zagrosi-project" / "session.json", planning_dir / ".deep-project" / "session.json"):
-        if not state_path.exists():
-            continue
-        try:
-            initial = _storage.load_json(state_path).get("initial_file")
-        except (OSError, ValueError, json.JSONDecodeError):
-            initial = None
+    for _, state in _artifacts.project_sessions(planning_dir):
+        initial = state.get("initial_file")
         if isinstance(initial, str) and initial.strip():
             candidate = Path(initial).expanduser()
             candidates.append(candidate if candidate.is_absolute() else planning_dir / candidate)
@@ -286,15 +282,8 @@ def project_requirement_source(planning_dir: Path, meta: dict[str, Any] | None) 
 
 
 def compact_project_session(planning_dir: Path) -> bool:
-    for path in (planning_dir / ".zagrosi-project" / "session.json", planning_dir / ".deep-project" / "session.json"):
-        if not path.exists():
-            continue
-        try:
-            state = _storage.load_json(path)
-        except (OSError, ValueError, json.JSONDecodeError):
-            return False
-        return isinstance(state, dict) and state.get("contract_version") == _policy.PROJECT_CONTRACT_VERSION
-    return False
+    sessions = _artifacts.project_sessions(planning_dir)
+    return bool(sessions and sessions[0][1].get("contract_version") == _policy.PROJECT_CONTRACT_VERSION)
 
 
 def project_artifact_depth(planning_dir: Path, meta: dict[str, Any] | None) -> str:
@@ -482,6 +471,11 @@ def lint_project_manifest(args: argparse.Namespace) -> int:
     planning_dir = _storage.resolve_path(args.planning_dir)
     manifest_path = planning_dir / "project-manifest.md"
     findings: list[_models.Finding] = []
+    try:
+        _artifacts.project_sessions(planning_dir)
+    except ValueError as exc:
+        findings.append(_quality.finding("critical", "invalid-project-session", str(exc), planning_dir))
+        return _quality.emit_quality("project-manifest", findings, args)
 
     if not manifest_path.exists():
         findings.append(_quality.finding("critical", "missing-manifest", "project-manifest.md is missing.", manifest_path))

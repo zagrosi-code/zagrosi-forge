@@ -203,16 +203,30 @@ def planning_depth(planning_dir: Path, fallback: str = _policy.DEFAULT_DEPTH) ->
     return fallback
 
 
-def project_depth(planning_dir: Path, fallback: str = _policy.DEFAULT_DEPTH) -> str:
+def project_sessions(planning_dir: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Validate the authoritative session; retain valid legacy source fallbacks."""
+    sessions = []
     for path in (planning_dir / ".zagrosi-project" / "session.json", planning_dir / ".deep-project" / "session.json"):
-        if not path.exists():
+        if not path.exists() and not path.is_symlink():
             continue
         try:
-            depth = _storage.load_json(path).get("depth_mode")
-        except (OSError, ValueError, json.JSONDecodeError):
-            return fallback
-        return depth if isinstance(depth, str) and depth in _policy.DEPTH_MODES else fallback
-    return fallback
+            if not path.is_file():
+                raise ValueError("expected a regular JSON file")
+            state = _storage.load_json(path)
+            if not isinstance(state, dict):
+                raise ValueError("expected a JSON object")
+        except (OSError, ValueError) as exc:
+            if not sessions:
+                raise ValueError(f"Invalid project session {path}: {exc}") from exc
+            continue
+        sessions.append((path, state))
+    return sessions
+
+
+def project_depth(planning_dir: Path, fallback: str = _policy.DEFAULT_DEPTH) -> str:
+    sessions = project_sessions(planning_dir)
+    depth = sessions[0][1].get("depth_mode") if sessions else None
+    return depth if isinstance(depth, str) and depth in _policy.DEPTH_MODES else fallback
 
 
 def default_governance_files(planning_dir: Path, depth: str = _policy.DEFAULT_DEPTH) -> dict[str, Path]:

@@ -1,5 +1,10 @@
 # Releases
 
+## 0.3.2 — project session validation
+
+- Reject unreadable or non-object saved project sessions before creating requirements files.
+- Report invalid session state consistently during setup and project checks.
+
 ## 0.3.1 — nested repository verification
 
 - Capture verification in repositories containing submodules or embedded Git repositories.

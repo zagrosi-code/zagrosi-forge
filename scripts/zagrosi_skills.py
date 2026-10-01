@@ -158,7 +158,7 @@ def bootstrap(manifest: dict[str, str], cli_path: Path, namespace: str):
 RUNTIME_MANIFEST = {
     "forge/__init__.py": "f6b2a10e6ee7118cac49c823f53216f5952058d206db18bf681db53864afa73f",
     "forge/actions.py": "73db0dcd915f85eddbb633580c394319a0af7416e015c8f0c0b552e300c21741",
-    "forge/artifacts.py": "a0e46792123ae129f48820202028aafb8da734936e3133b3824ab9bf2855cbf0",
+    "forge/artifacts.py": "fbd866a60754a144d51c4977ef29a16510cd1b5600d14460be27123c7070d786",
     "forge/authority.py": "dc3b592eeb2deba8e5778887f68c1435c4b04a7b215bc6b7f028c8a995563b41",
     "forge/capabilities.py": "f5ee57a7b19a7c747a82c66769581e1e2770493fdf38785c6b12edc2e9b9cb74",
     "forge/child_process.py": "2ef8f0447fc2e75ebd6487c1c204a45bf28112363c383d09e34c2de49fef04b9",
@@ -196,7 +196,7 @@ RUNTIME_MANIFEST = {
     "forge/plugin_cache.py": "78a040cf3839b0c9db92525d11fcfd208e6a548b5160a8572210fab0ff33d399",
     "forge/policy.py": "336cd9c756063771984a48cfbe56b7c9884cc22a81e29139f502197b6e119109",
     "forge/processes.py": "c9dbfda15593d10f7904749252fe3bf05beb069cd3565a9a884ee52e2bd10e66",
-    "forge/projects.py": "9cbd31497e6c47f8ef7db6c389d774b897114c97a637788794146f78ec95a7d8",
+    "forge/projects.py": "496988d203dc08dfcd96e0be894a4b7bee5b87848106ca84fa2b86c483c75dac",
     "forge/prompts.py": "98165c170b655fb72078c09d02e294f48f944d815385449d83abfd9fbae6e1eb",
     "forge/provider_output.py": "52e6d43b200f1c52ca125851ec79d7491dc86617e92e21817484514e1614e8dc",
     "forge/providers.py": "f6f9f2ac7ec4ad5fb215f7206f2a64c9dbb4451fdf09ea6550ccbf0fd62d12b6",
@@ -208,7 +208,7 @@ RUNTIME_MANIFEST = {
     "forge/sections.py": "f3875f1d448afc383bae5077b010d4914534238e2d354c5ff013ab083d07f32d",
     "forge/secure_io.py": "2c529854508436ff083d3a01c1ad97de4b5e5a532c1365b28a173c0cd0401108",
     "forge/session.py": "87d35fb6a68e016f6480d7fa083842022f535e4c5385529202498f71b4bbbc02",
-    "forge/sources.py": "af430ce3f6bc423d26706d2dfd1aaf1ce96639b776fd579ce3f7ec304bc972a6",
+    "forge/sources.py": "7a947231c3dabf0e1c61e45c9c2a1e6002e256239bf197bd60b000e16eba6744",
     "forge/state.py": "121f6c4b3ca2df65056f341f44f0027487d1d9ed5461f467fea2fe01d49241d6",
     "forge/status.py": "e14c1597fc4ed6d577a206f82eeb38a52b804077f70450063af30a47bb462569",
     "forge/storage.py": "e7c726dbfa07ec7ac4377bc780382fdcbca836935e04aad0caccfdcf0ffac2dd",
@@ -218,7 +218,7 @@ RUNTIME_MANIFEST = {
     "forge/unit12_adapter.py": "6319a6178572e603a7ec4767a9650e045af1b9afc3051c697dfb2b0317df553d",
     "forge/validation.py": "65659a86449894a794a1fd7e75d569ad916b4af0877293091361c57a9bb2ce23",
     "forge/verification.py": "323e5b92558b5cb22385494c20f2f660dfe4213c159b0900c65725b8912659da",
-    "forge/workflows.py": "d07f4d47310346c572ff8943083f76295fb1ae0f6be4b8194b08b0c4034457ca"
+    "forge/workflows.py": "91ff9a962bcb88430b9d8bfc5a8d39e6e2113eefaffecc044b6c3643c6dd2ddb"
 }
 # END RUNTIME MANIFEST
 
