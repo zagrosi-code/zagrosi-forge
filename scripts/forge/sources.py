@@ -71,6 +71,7 @@ TEST_MANIFEST = {
     "test_project_commands.py": "07f9a43b2455005164260571a45b178714c9519f8fb937f7b5f4052d3240f9f1",
     "test_project_contracts.py": "c7d695bb85222caa6c68a555f34a2de30e378f8ff04f43f23a58b905095d5af3",
     "test_project_session_validation.py": "4b0df28adbb0817d732f2b5e250c26727a15785fd9f31c2a5a2498e9de8cf3ca",
+    "test_provider_output.py": "52536a946a6abb86eb0f8b229c6a281c5285b648d5e7ce7772bd658a0ffd04c4",
     "test_providers.py": "937617e1400a89957435aafe669ee1a2b39107c7abad012182df4e847b344306",
     "test_quality_gates.py": "99cdaefc06c01ca10d97b391fa35696a9ef8c537fdafb7601efc58e1001b8b52",
     "test_release.py": "d16f0ad9b4997bf97bf5b7115fce6c69fc1e81644a5e3f99807fee4cec740d55",
