@@ -76,7 +76,8 @@ def packets(directory: Path) -> dict:
             "# Blind code comparison\n\nRead task.md, then inspect baseline and every candidate's source/tests/checks. "
             "Do not inspect parent directories, logs, timing, or the private arm key. "
             "Judge correctness before preference; ties are allowed. Complete review.json with concrete "
-            "file/function evidence for each criterion and the cleanup review. Empty templates grant no pass.\n\n"
+            "file/function evidence for each criterion and the cleanup review. cleanup.changed_files must contain "
+            "implementation paths only; describe test changes in cleanup.regression_evidence. Empty templates grant no pass.\n\n"
             + "\n".join(f"- {name}: {question}" for name, question in CRITERIA.items())
             + "\n\nPrefer useful simplicity and maintainability; line counts alone are not quality evidence. "
             "Arm labels/metrics are withheld, but code may reveal workflow fingerprints; blinding is partial.\n")

@@ -1,0 +1,1542 @@
+{
+  "schema": "forge-quality-observations-v1",
+  "date": "2026-10-02",
+  "source_commit": "8293a95268818db6ce8745150fb1a5423de51b4e",
+  "source_tree": "00b2dc996a6e53e15f55e67bae70d44be0b710e7",
+  "frozen_files_sha256": "95261765a8900a44e051381e48cdf13518cab494539f4f90e35d136d89ca3c94",
+  "settings": {
+    "host": "codex",
+    "model": "gpt-5.5",
+    "effort": "medium",
+    "jobs": 1
+  },
+  "environment": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.7",
+    "node": "v24.18.0",
+    "npm": "11.16.0",
+    "codex": "codex-cli 0.154.0",
+    "typescript": "7.0.2"
+  },
+  "shuffle_seed": 0,
+  "operator_corrections": {
+    "count": 0,
+    "source": "operator attestation; no candidate edits or corrective prompts during the sixteen attempts"
+  },
+  "deadline_seconds_per_attempt": 900,
+  "comparative_review": {
+    "expected": 8,
+    "completed": 8,
+    "complete": true
+  },
+  "arms": {
+    "current": {
+      "accepted": 6,
+      "scheduled": 8,
+      "accepted_rate": 0.75,
+      "elapsed_seconds": {
+        "observed": 2903.219,
+        "observed_attempts": 8,
+        "total": 2903.219,
+        "per_accepted": 483.86983333333336
+      },
+      "tokens": {
+        "input_tokens": {
+          "observed": 9178183,
+          "observed_attempts": 8,
+          "total": 9178183,
+          "per_accepted": 1529697.1666666667
+        },
+        "cached_input_tokens": {
+          "observed": 8672768,
+          "observed_attempts": 8,
+          "total": 8672768,
+          "per_accepted": 1445461.3333333333
+        },
+        "uncached_input_tokens": {
+          "observed": 505415,
+          "observed_attempts": 8,
+          "total": 505415,
+          "per_accepted": 84235.83333333333
+        },
+        "output_tokens": {
+          "observed": 118369,
+          "observed_attempts": 8,
+          "total": 118369,
+          "per_accepted": 19728.166666666668
+        }
+      },
+      "reported_cost_usd": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "interventions": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "limits": "Every attempt counts, including failures. Missing observations leave totals unknown; zero accepted leaves per-accepted values undefined. Elapsed time excludes independent review. CLI cost estimates are not subscription bills."
+    },
+    "plain": {
+      "accepted": 6,
+      "scheduled": 8,
+      "accepted_rate": 0.75,
+      "elapsed_seconds": {
+        "observed": 1149.684,
+        "observed_attempts": 8,
+        "total": 1149.684,
+        "per_accepted": 191.614
+      },
+      "tokens": {
+        "input_tokens": {
+          "observed": 2133731,
+          "observed_attempts": 8,
+          "total": 2133731,
+          "per_accepted": 355621.8333333333
+        },
+        "cached_input_tokens": {
+          "observed": 1958784,
+          "observed_attempts": 8,
+          "total": 1958784,
+          "per_accepted": 326464.0
+        },
+        "uncached_input_tokens": {
+          "observed": 174947,
+          "observed_attempts": 8,
+          "total": 174947,
+          "per_accepted": 29157.833333333332
+        },
+        "output_tokens": {
+          "observed": 51871,
+          "observed_attempts": 8,
+          "total": 51871,
+          "per_accepted": 8645.166666666666
+        }
+      },
+      "reported_cost_usd": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "interventions": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "limits": "Every attempt counts, including failures. Missing observations leave totals unknown; zero accepted leaves per-accepted values undefined. Elapsed time excludes independent review. CLI cost estimates are not subscription bills."
+    }
+  },
+  "attempts": [
+    {
+      "id": "summary-standard-1-current",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "current",
+      "block": "summary-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": true,
+      "outside_scope": [],
+      "attempt_seconds": 613.426,
+      "runner_seconds": 613.147,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 1157314,
+        "cached_input_tokens": 1093376,
+        "output_tokens": 13604,
+        "reasoning_output_tokens": 1949,
+        "uncached_input_tokens": 63938
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 34,
+          "observed_output_bytes": 37674,
+          "observed_command_seconds": 0.012077037943527102,
+          "failed_commands": 1
+        },
+        "forge_planning": {
+          "commands": 3,
+          "observed_output_bytes": 12951,
+          "observed_command_seconds": 0.0011272080009803176,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 7,
+          "observed_output_bytes": 16484,
+          "observed_command_seconds": 0.0795876660849899,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 4,
+          "observed_output_bytes": 3423,
+          "observed_command_seconds": 0.10174662503413856,
+          "failed_commands": 1
+        }
+      },
+      "candidate_sha256": "fc846154e0d7025e3b87d427e2e2e8e7815d1a7ff335b7b3dbf0052e2c890f06",
+      "fixture_identity": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+      "evaluator_identity": "3fe802e8c3376a87100b62881c88f2035d581695a58bb4aed34f7b11cff89ac1",
+      "plugin_identity": "afec7772f6c65528cc883b34a78091aaf65aab2da689b113eff68e2a0563ea54"
+    },
+    {
+      "id": "summary-standard-1-plain",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "summary-standard-1",
+      "accepted": false,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": false,
+      "outside_scope": [],
+      "attempt_seconds": 60.006,
+      "runner_seconds": 59.833,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 127208,
+        "cached_input_tokens": 110592,
+        "output_tokens": 2624,
+        "reasoning_output_tokens": 419,
+        "uncached_input_tokens": 16616
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 11,
+          "observed_output_bytes": 4327,
+          "observed_command_seconds": 0.003579038835596293
+        },
+        "verification": {
+          "commands": 1,
+          "observed_output_bytes": 102,
+          "observed_command_seconds": 0.0003802910214290023
+        }
+      },
+      "candidate_sha256": "21043c2e1c40a59cffaac8ea5c25af00dcac832d376931144601a5864fe4d46a",
+      "fixture_identity": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+      "evaluator_identity": "3fe802e8c3376a87100b62881c88f2035d581695a58bb4aed34f7b11cff89ac1",
+      "plugin_identity": null
+    },
+    {
+      "id": "retry-queue-standard-1-plain",
+      "case": "retry-queue",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "retry-queue-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": null,
+      "outside_scope": [],
+      "attempt_seconds": 87.477,
+      "runner_seconds": 87.324,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 164226,
+        "cached_input_tokens": 140672,
+        "output_tokens": 3999,
+        "reasoning_output_tokens": 479,
+        "uncached_input_tokens": 23554
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 14,
+          "observed_output_bytes": 15428,
+          "observed_command_seconds": 0.004846165073104203
+        },
+        "verification": {
+          "commands": 1,
+          "observed_output_bytes": 103,
+          "observed_command_seconds": 0.0003654999891296029
+        }
+      },
+      "candidate_sha256": "614cdcfe711b98a7a5ee4c29e8bb2d71fe16d953be4cb69c7bb7d4525aaf010d",
+      "fixture_identity": "9c9a2c468d0e9408dda2ed8bfc10668cae05e4141541f8a417d109dfe68e2cc1",
+      "evaluator_identity": "30dfbbbe7b51fb8f932f3b8d9fdf6f6106bc49b04f620ec3c2c92e1807e4f48c",
+      "plugin_identity": null
+    },
+    {
+      "id": "retry-queue-standard-1-current",
+      "case": "retry-queue",
+      "depth": "standard",
+      "arm": "current",
+      "block": "retry-queue-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": null,
+      "outside_scope": [],
+      "attempt_seconds": 276.794,
+      "runner_seconds": 276.502,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 836889,
+        "cached_input_tokens": 781440,
+        "output_tokens": 11348,
+        "reasoning_output_tokens": 922,
+        "uncached_input_tokens": 55449
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 29,
+          "observed_output_bytes": 32334,
+          "observed_command_seconds": 0.009798666054848582
+        },
+        "verification": {
+          "commands": 5,
+          "observed_output_bytes": 4374,
+          "observed_command_seconds": 0.061781333992257714,
+          "failed_commands": 1
+        },
+        "forge_planning": {
+          "commands": 3,
+          "observed_output_bytes": 12502,
+          "observed_command_seconds": 0.001088749966584146,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 4,
+          "observed_output_bytes": 20351,
+          "observed_command_seconds": 0.05836450000060722
+        }
+      },
+      "candidate_sha256": "5e98754a9336e59e3644c081c0cf7f97b035c4715ee66c16eac666b8408fa734",
+      "fixture_identity": "9c9a2c468d0e9408dda2ed8bfc10668cae05e4141541f8a417d109dfe68e2cc1",
+      "evaluator_identity": "30dfbbbe7b51fb8f932f3b8d9fdf6f6106bc49b04f620ec3c2c92e1807e4f48c",
+      "plugin_identity": "afec7772f6c65528cc883b34a78091aaf65aab2da689b113eff68e2a0563ea54"
+    },
+    {
+      "id": "godfile-standard-1-current",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "current",
+      "block": "godfile-standard-1",
+      "accepted": false,
+      "behavior": false,
+      "workflow": true,
+      "cleanup": false,
+      "outside_scope": [],
+      "attempt_seconds": 374.727,
+      "runner_seconds": 374.395,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 1135337,
+        "cached_input_tokens": 1070336,
+        "output_tokens": 18865,
+        "reasoning_output_tokens": 1709,
+        "uncached_input_tokens": 65001
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 29,
+          "observed_output_bytes": 44802,
+          "observed_command_seconds": 0.010613334248773754
+        },
+        "verification": {
+          "commands": 6,
+          "observed_output_bytes": 3788,
+          "observed_command_seconds": 0.044864624040201306,
+          "failed_commands": 2
+        },
+        "forge_planning": {
+          "commands": 3,
+          "observed_output_bytes": 12732,
+          "observed_command_seconds": 0.0011093749781139195,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 4,
+          "observed_output_bytes": 9254,
+          "observed_command_seconds": 0.03529495996190235
+        }
+      },
+      "candidate_sha256": "cc309de969f7c36a18bd51d02714d7b4af92b41ea1877afc3fad21ccfef4b577",
+      "fixture_identity": "1744a55aa9e3f8777cce6545c5f4c9da3ac315c5d9e012850d491029f2dc9c7b",
+      "evaluator_identity": "b897417ea4d6cca77788e213a1e916a046fe75d030960b57921543ea3be7529f",
+      "plugin_identity": "afec7772f6c65528cc883b34a78091aaf65aab2da689b113eff68e2a0563ea54"
+    },
+    {
+      "id": "godfile-standard-1-plain",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "godfile-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": true,
+      "outside_scope": [],
+      "attempt_seconds": 218.157,
+      "runner_seconds": 217.963,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 453199,
+        "cached_input_tokens": 417920,
+        "output_tokens": 10268,
+        "reasoning_output_tokens": 1033,
+        "uncached_input_tokens": 35279
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 20,
+          "observed_output_bytes": 20941,
+          "observed_command_seconds": 0.007304833154194057
+        },
+        "verification": {
+          "commands": 3,
+          "observed_output_bytes": 319,
+          "observed_command_seconds": 0.0011739169713109732
+        }
+      },
+      "candidate_sha256": "a165cfb87d9b249c3cbf5deba8811e044f92c01a5748b0493b408710d1fa3172",
+      "fixture_identity": "1744a55aa9e3f8777cce6545c5f4c9da3ac315c5d9e012850d491029f2dc9c7b",
+      "evaluator_identity": "b897417ea4d6cca77788e213a1e916a046fe75d030960b57921543ea3be7529f",
+      "plugin_identity": null
+    },
+    {
+      "id": "typescript-access-standard-1-plain",
+      "case": "typescript-access",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "typescript-access-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": true,
+      "outside_scope": [],
+      "attempt_seconds": 149.936,
+      "runner_seconds": 149.148,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 296837,
+        "cached_input_tokens": 275072,
+        "output_tokens": 6955,
+        "reasoning_output_tokens": 1112,
+        "uncached_input_tokens": 21765
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 20,
+          "observed_output_bytes": 15586,
+          "observed_command_seconds": 0.006833750114310533,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 4,
+          "observed_output_bytes": 1989,
+          "observed_command_seconds": 0.06704458297463134
+        }
+      },
+      "candidate_sha256": "139afa1b475ca52b1f1171648ba984bf0f3f279abc69d0082dd689bd669eb13a",
+      "fixture_identity": "899c44c08eee40750c61895116df174d4251ec58bf5e1ce016d6483d22d6a7e8",
+      "evaluator_identity": "3fe802e8c3376a87100b62881c88f2035d581695a58bb4aed34f7b11cff89ac1",
+      "plugin_identity": null
+    },
+    {
+      "id": "typescript-access-standard-1-current",
+      "case": "typescript-access",
+      "depth": "standard",
+      "arm": "current",
+      "block": "typescript-access-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": true,
+      "outside_scope": [],
+      "attempt_seconds": 458.866,
+      "runner_seconds": 458.408,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 2383163,
+        "cached_input_tokens": 2286464,
+        "output_tokens": 21960,
+        "reasoning_output_tokens": 2943,
+        "uncached_input_tokens": 96699
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 45,
+          "observed_output_bytes": 133383,
+          "observed_command_seconds": 0.016435000230558217,
+          "failed_commands": 1
+        },
+        "verification": {
+          "commands": 5,
+          "observed_output_bytes": 4540,
+          "observed_command_seconds": 0.21436350111616775
+        },
+        "forge_planning": {
+          "commands": 9,
+          "observed_output_bytes": 50316,
+          "observed_command_seconds": 0.10097079200204462,
+          "failed_commands": 7
+        },
+        "forge_implementation": {
+          "commands": 3,
+          "observed_output_bytes": 8288,
+          "observed_command_seconds": 0.03718220809241757,
+          "failed_commands": 1
+        }
+      },
+      "candidate_sha256": "180c2f7bfa3912346cd521145719c6d588d6794ef29184398b71ba45d8494296",
+      "fixture_identity": "899c44c08eee40750c61895116df174d4251ec58bf5e1ce016d6483d22d6a7e8",
+      "evaluator_identity": "3fe802e8c3376a87100b62881c88f2035d581695a58bb4aed34f7b11cff89ac1",
+      "plugin_identity": "afec7772f6c65528cc883b34a78091aaf65aab2da689b113eff68e2a0563ea54"
+    },
+    {
+      "id": "summary-standard-2-current",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "current",
+      "block": "summary-standard-2",
+      "accepted": false,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": false,
+      "outside_scope": [],
+      "attempt_seconds": 229.817,
+      "runner_seconds": 229.549,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 710144,
+        "cached_input_tokens": 662912,
+        "output_tokens": 10148,
+        "reasoning_output_tokens": 1200,
+        "uncached_input_tokens": 47232
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 29,
+          "observed_output_bytes": 32955,
+          "observed_command_seconds": 0.011234415112994611
+        },
+        "forge_planning": {
+          "commands": 3,
+          "observed_output_bytes": 12545,
+          "observed_command_seconds": 0.0011891660396941006,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 4,
+          "observed_output_bytes": 9438,
+          "observed_command_seconds": 0.03377287491457537
+        },
+        "verification": {
+          "commands": 3,
+          "observed_output_bytes": 1806,
+          "observed_command_seconds": 0.01830212603090331,
+          "failed_commands": 1
+        }
+      },
+      "candidate_sha256": "49d0b0aa2338c28d7e16d9fff8d91a2d67947c4877a91f8b7952fa55dccc217e",
+      "fixture_identity": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+      "evaluator_identity": "3fe802e8c3376a87100b62881c88f2035d581695a58bb4aed34f7b11cff89ac1",
+      "plugin_identity": "afec7772f6c65528cc883b34a78091aaf65aab2da689b113eff68e2a0563ea54"
+    },
+    {
+      "id": "summary-standard-2-plain",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "summary-standard-2",
+      "accepted": false,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": false,
+      "outside_scope": [],
+      "attempt_seconds": 63.524,
+      "runner_seconds": 63.373,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 110541,
+        "cached_input_tokens": 98944,
+        "output_tokens": 2524,
+        "reasoning_output_tokens": 363,
+        "uncached_input_tokens": 11597
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 10,
+          "observed_output_bytes": 5149,
+          "observed_command_seconds": 0.0039239159668795764
+        },
+        "verification": {
+          "commands": 1,
+          "observed_output_bytes": 102,
+          "observed_command_seconds": 0.00030145904747769237
+        }
+      },
+      "candidate_sha256": "81f2db30db35546e2ffe9291da4be6ff29e10e9b1b2074ba42cce6b1adc5af80",
+      "fixture_identity": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+      "evaluator_identity": "3fe802e8c3376a87100b62881c88f2035d581695a58bb4aed34f7b11cff89ac1",
+      "plugin_identity": null
+    },
+    {
+      "id": "retry-queue-standard-2-plain",
+      "case": "retry-queue",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "retry-queue-standard-2",
+      "accepted": true,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": null,
+      "outside_scope": [],
+      "attempt_seconds": 81.234,
+      "runner_seconds": 81.083,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 133746,
+        "cached_input_tokens": 121856,
+        "output_tokens": 3853,
+        "reasoning_output_tokens": 494,
+        "uncached_input_tokens": 11890
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 12,
+          "observed_output_bytes": 9043,
+          "observed_command_seconds": 0.005451540870126337
+        },
+        "verification": {
+          "commands": 1,
+          "observed_output_bytes": 103,
+          "observed_command_seconds": 0.0004112909664399922
+        }
+      },
+      "candidate_sha256": "5a438c45351be7d546596b11eca7d3ac4af5ee7edf310715529990f8f8460e99",
+      "fixture_identity": "9c9a2c468d0e9408dda2ed8bfc10668cae05e4141541f8a417d109dfe68e2cc1",
+      "evaluator_identity": "30dfbbbe7b51fb8f932f3b8d9fdf6f6106bc49b04f620ec3c2c92e1807e4f48c",
+      "plugin_identity": null
+    },
+    {
+      "id": "retry-queue-standard-2-current",
+      "case": "retry-queue",
+      "depth": "standard",
+      "arm": "current",
+      "block": "retry-queue-standard-2",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": null,
+      "outside_scope": [],
+      "attempt_seconds": 228.817,
+      "runner_seconds": 228.537,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 781376,
+        "cached_input_tokens": 722944,
+        "output_tokens": 10360,
+        "reasoning_output_tokens": 1465,
+        "uncached_input_tokens": 58432
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 25,
+          "observed_output_bytes": 50534,
+          "observed_command_seconds": 0.008771788969170302
+        },
+        "forge_planning": {
+          "commands": 3,
+          "observed_output_bytes": 12349,
+          "observed_command_seconds": 0.001232458045706153,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 4,
+          "observed_output_bytes": 8645,
+          "observed_command_seconds": 0.03358912403928116
+        },
+        "verification": {
+          "commands": 2,
+          "observed_output_bytes": 3429,
+          "observed_command_seconds": 0.026587207976263016,
+          "failed_commands": 1
+        }
+      },
+      "candidate_sha256": "53d78508d1097ef3987fa36cdfafa182ce286788b0af0130eea7f4989204a647",
+      "fixture_identity": "9c9a2c468d0e9408dda2ed8bfc10668cae05e4141541f8a417d109dfe68e2cc1",
+      "evaluator_identity": "30dfbbbe7b51fb8f932f3b8d9fdf6f6106bc49b04f620ec3c2c92e1807e4f48c",
+      "plugin_identity": "afec7772f6c65528cc883b34a78091aaf65aab2da689b113eff68e2a0563ea54"
+    },
+    {
+      "id": "godfile-standard-2-current",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "current",
+      "block": "godfile-standard-2",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": true,
+      "outside_scope": [],
+      "attempt_seconds": 391.673,
+      "runner_seconds": 391.338,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 1237102,
+        "cached_input_tokens": 1172096,
+        "output_tokens": 18692,
+        "reasoning_output_tokens": 2230,
+        "uncached_input_tokens": 65006
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 30,
+          "observed_output_bytes": 65533,
+          "observed_command_seconds": 0.011843789950944483
+        },
+        "forge_planning": {
+          "commands": 4,
+          "observed_output_bytes": 17406,
+          "observed_command_seconds": 0.0014694160199724138,
+          "failed_commands": 2
+        },
+        "forge_implementation": {
+          "commands": 4,
+          "observed_output_bytes": 9279,
+          "observed_command_seconds": 0.05437283299397677
+        },
+        "verification": {
+          "commands": 6,
+          "observed_output_bytes": 6384,
+          "observed_command_seconds": 0.06171300006099045,
+          "failed_commands": 2
+        }
+      },
+      "candidate_sha256": "204947e8f898961d39ec1f5805f72597d1d60f9c688c937237a712336fb2edf7",
+      "fixture_identity": "1744a55aa9e3f8777cce6545c5f4c9da3ac315c5d9e012850d491029f2dc9c7b",
+      "evaluator_identity": "b897417ea4d6cca77788e213a1e916a046fe75d030960b57921543ea3be7529f",
+      "plugin_identity": "afec7772f6c65528cc883b34a78091aaf65aab2da689b113eff68e2a0563ea54"
+    },
+    {
+      "id": "godfile-standard-2-plain",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "godfile-standard-2",
+      "accepted": true,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": true,
+      "outside_scope": [],
+      "attempt_seconds": 331.268,
+      "runner_seconds": 331.086,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 516146,
+        "cached_input_tokens": 485504,
+        "output_tokens": 14256,
+        "reasoning_output_tokens": 1488,
+        "uncached_input_tokens": 30642
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 17,
+          "observed_output_bytes": 16137,
+          "observed_command_seconds": 0.00627595791593194
+        },
+        "verification": {
+          "commands": 4,
+          "observed_output_bytes": 1772,
+          "observed_command_seconds": 0.0014817499904893339,
+          "failed_commands": 1
+        }
+      },
+      "candidate_sha256": "72e284beb246ccc6c7c8cb67cb122ae62c8033e3bfcd2070caccbedcf2983646",
+      "fixture_identity": "1744a55aa9e3f8777cce6545c5f4c9da3ac315c5d9e012850d491029f2dc9c7b",
+      "evaluator_identity": "b897417ea4d6cca77788e213a1e916a046fe75d030960b57921543ea3be7529f",
+      "plugin_identity": null
+    },
+    {
+      "id": "typescript-access-standard-2-plain",
+      "case": "typescript-access",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "typescript-access-standard-2",
+      "accepted": true,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": true,
+      "outside_scope": [],
+      "attempt_seconds": 158.082,
+      "runner_seconds": 157.707,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 331828,
+        "cached_input_tokens": 308224,
+        "output_tokens": 7392,
+        "reasoning_output_tokens": 1034,
+        "uncached_input_tokens": 23604
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 21,
+          "observed_output_bytes": 12749,
+          "observed_command_seconds": 0.00828837405424565
+        },
+        "verification": {
+          "commands": 5,
+          "observed_output_bytes": 3689,
+          "observed_command_seconds": 0.03867920790798962,
+          "failed_commands": 1
+        }
+      },
+      "candidate_sha256": "46441ecebcf63c5010f9665d01335522055747c8b5d4551f3cc035df1ac15597",
+      "fixture_identity": "899c44c08eee40750c61895116df174d4251ec58bf5e1ce016d6483d22d6a7e8",
+      "evaluator_identity": "3fe802e8c3376a87100b62881c88f2035d581695a58bb4aed34f7b11cff89ac1",
+      "plugin_identity": null
+    },
+    {
+      "id": "typescript-access-standard-2-current",
+      "case": "typescript-access",
+      "depth": "standard",
+      "arm": "current",
+      "block": "typescript-access-standard-2",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": true,
+      "outside_scope": [],
+      "attempt_seconds": 329.099,
+      "runner_seconds": 328.566,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 936858,
+        "cached_input_tokens": 883200,
+        "output_tokens": 13392,
+        "reasoning_output_tokens": 1435,
+        "uncached_input_tokens": 53658
+      },
+      "reported_cost_usd": null,
+      "interventions": null,
+      "commands_by_phase": {
+        "other": {
+          "commands": 36,
+          "observed_output_bytes": 45126,
+          "observed_command_seconds": 0.012471040769014508
+        },
+        "verification": {
+          "commands": 4,
+          "observed_output_bytes": 2775,
+          "observed_command_seconds": 0.3039168329560198
+        },
+        "forge_planning": {
+          "commands": 3,
+          "observed_output_bytes": 13801,
+          "observed_command_seconds": 0.0010811250540427864,
+          "failed_commands": 1
+        },
+        "forge_implementation": {
+          "commands": 3,
+          "observed_output_bytes": 21843,
+          "observed_command_seconds": 0.03937295894138515
+        }
+      },
+      "candidate_sha256": "104c9d7f2e6ea406f76e12a69d0eddc81595c2e86b0eac4798829f1318e908c6",
+      "fixture_identity": "899c44c08eee40750c61895116df174d4251ec58bf5e1ce016d6483d22d6a7e8",
+      "evaluator_identity": "3fe802e8c3376a87100b62881c88f2035d581695a58bb4aed34f7b11cff89ac1",
+      "plugin_identity": "afec7772f6c65528cc883b34a78091aaf65aab2da689b113eff68e2a0563ea54"
+    }
+  ],
+  "independent_reviews": [
+    {
+      "block": "godfile-standard-1",
+      "valid": true,
+      "reviewer": "blind_quality_boundaries",
+      "preferred": [
+        "plain"
+      ],
+      "rationale": "A preserves the public facade and passes every supplied check, with focused implementations for validation, pricing, rendering, serialization, file access, summary and workflow. B's supplied behavior_passed and oracle_complete are false, so it cannot be preferred. Independent source inspection also finds B/src/dispatch.py drops baseline public imports csv, io, json, deepcopy, date and Path; for example, from dispatch import Path no longer works. B has useful broader error-path tests, but they do not protect the full import surface.",
+      "candidates": {
+        "plain": {
+          "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+          "candidate_sha256": "a165cfb87d9b249c3cbf5deba8811e044f92c01a5748b0493b408710d1fa3172",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "src/dispatch.py exposes named imports, including the baseline's publicly importable standard-library names, and directs readers to responsibility-specific modules. _dispatch_summary.py:summarize_orders visibly validates each record, rejects normalized duplicate IDs, counts statuses, quotes confirmed orders and sorts the SKU result. Existing validation errors remain explicit in _dispatch_validation.py.",
+            "cohesion": "_dispatch_validation.py owns normalization, _dispatch_money.py owns quotes, _dispatch_rendering.py owns human-readable strings, _dispatch_serialization.py owns JSON/CSV and _dispatch_persistence.py owns filesystem access. _dispatch_book.py owns mutable workflow; its summary delegates to the independent _dispatch_summary.py aggregator. These are real implementation boundaries, not a relocated monolith or speculative framework.",
+            "duplication": "_dispatch_summary.py:summarize_orders reuses validate_order, STATUSES and order_totals rather than duplicating field validation or pricing formulas. _dispatch_constants.py provides one definition of shared constants. The new confirmed-item accumulation still repeats _dispatch_book.py:inventory_requirements, and confirmed-total selection also remains in outstanding_total; extraction improves ownership but does not remove these aggregation duplicates.",
+            "regressions": "tests/test_dispatch.py adds literal rendering and JSON expectations, file round-trip checks, add/get/list copy isolation, empty and generator summary cases, duplicate IDs and current book summary isolation. Existing quote, CSV round-trip and transition tests remain. Supplied checks.json reports all four fields true. Candidate coverage is weaker on exact CSV output, validation/transition errors, normalized duplicate IDs and summary changes after shipping; no test-run chronology is available."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/dispatch.py",
+              "src/_dispatch_book.py",
+              "src/_dispatch_constants.py",
+              "src/_dispatch_money.py",
+              "src/_dispatch_persistence.py",
+              "src/_dispatch_rendering.py",
+              "src/_dispatch_serialization.py",
+              "src/_dispatch_summary.py",
+              "src/_dispatch_validation.py"
+            ],
+            "rationale": "The mixed baseline dispatch.py is replaced by an import facade over cohesive implementations. In particular filesystem side effects move to _dispatch_persistence.py while JSON/CSV and human-readable rendering have separate modules, and summary aggregation does not depend on constructing a workflow object. Some pre-existing and newly repeated aggregation logic remains.",
+            "regression_evidence": "Inspected baseline/tests/test_dispatch.py: only quote, CSV round trip and a successful confirmation transition were covered. Inspected A/tests/test_dispatch.py: added rendering, serialization, persistence, copy-isolation and summary cases cover several extracted responsibilities. A/checks.json reports candidate_tests_passed, behavior_passed, oracle_complete and scope_passed true. Those are supplied results, not reviewer execution, and do not prove tests were added before refactoring."
+          }
+        },
+        "current": {
+          "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+          "candidate_sha256": "cc309de969f7c36a18bd51d02714d7b4af92b41ea1877afc3fad21ccfef4b577",
+          "verdict": "fail",
+          "criteria": {
+            "readability": "dispatch_summary.py:summarize_orders has readable validation and aggregation phases, and dispatch.py clearly lists the intended domain API. However, compared with baseline/src/dispatch.py, the facade omits public csv, io, json, deepcopy, date and Path bindings; code reading exposes a concrete import-compatibility break even though intended domain functions remain listed.",
+            "cohesion": "dispatch_validation.py, dispatch_pricing.py and dispatch_book.py establish useful validation, calculation and workflow boundaries. dispatch_io.py still combines packing_slip/order_receipt, JSON/CSV codecs and save_order/load_order filesystem effects; dispatch_validation.py also houses unrelated CSV_FIELDS and TRANSITIONS constants. This is meaningful extraction, but responsibility ownership is less focused than A.",
+            "duplication": "dispatch_summary.py:summarize_orders reuses validate_order and order_totals, avoiding separate validation and pricing formulas. It retains all normalized orders and then makes a second aggregation pass, although no retained collection is needed for the returned aggregate. Its SKU loop repeats dispatch_book.py:inventory_requirements and confirmed-total selection repeats outstanding_total; those shared causes remain.",
+            "regressions": "tests/test_dispatch.py:test_validation_and_shipping_errors_are_compatible, test_rendering_and_json_outputs_are_exact, test_csv_and_file_access_errors_are_compatible and the book tests offer useful exact-output and error-path protection. Summary tests cover generators, empty input, duplicate IDs and isolated current state. They do not check the dropped facade imports. B/checks.json reports candidate_tests_passed and scope_passed true but behavior_passed and oracle_complete false; the candidate is therefore a fail regardless of its useful tests."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/dispatch.py",
+              "src/dispatch_book.py",
+              "src/dispatch_io.py",
+              "src/dispatch_pricing.py",
+              "src/dispatch_summary.py",
+              "src/dispatch_validation.py"
+            ],
+            "rationale": "Moving validation, pricing, workflow and aggregation into real implementation modules is substantive cleanup. It is incomplete because dispatch_io.py still owns both pure formatting and filesystem effects, while the facade extraction removes baseline public imports. Restore those bindings before considering this compatible.",
+            "regression_evidence": "Inspected baseline/tests/test_dispatch.py: three tests cover quote, CSV round trip and confirmation. Inspected B/tests/test_dispatch.py: added exact JSON/CSV/rendering, file access, errors, isolation and summary cases broaden coverage. Supplied B/checks.json says candidate tests and scope pass but behavior fails and oracle is incomplete. I ran no tests; neither the checks nor the inspected suite proves full compatibility or pre-refactor test execution."
+          }
+        }
+      }
+    },
+    {
+      "block": "godfile-standard-2",
+      "valid": true,
+      "reviewer": "blind_quality_boundaries",
+      "preferred": [
+        "plain"
+      ],
+      "rationale": "Both candidates pass all supplied checks and preserve the baseline public bindings. Prefer B for direct one-way dependencies: _book.py delegates summary to _summary.py, which depends only on validation/pricing/constants; rendering, serialization and filesystem access are separately owned. A makes dispatch_summary.summarize_orders construct OrderBook through a delayed reverse import, then routes back to summarize_validated_orders through a copied/sorted book list. That extra stateful path and mixed dispatch_formats.py responsibilities are avoidable for a pure aggregate. B also explicitly tests a latest date from a non-confirmed order and summary-result mutation.",
+      "candidates": {
+        "current": {
+          "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+          "candidate_sha256": "204947e8f898961d39ec1f5805f72597d1d60f9c688c937237a712336fb2edf7",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "dispatch.py keeps the public imports visible and dispatch_summary.py:summarize_validated_orders uses clear accumulator names and an explicit result dictionary. Tracing the public summarize_orders requires following a local import into OrderBook(orders).summary(), then returning to the summary module, which obscures an otherwise straightforward aggregation path.",
+            "cohesion": "dispatch_validation.py, dispatch_pricing.py and dispatch_workflow.py split major baseline responsibilities. dispatch_formats.py still combines human-readable rendering, serialization and filesystem access. dispatch_summary.py:summarize_orders imports dispatch_workflow.OrderBook inside the function while dispatch_workflow imports summarize_validated_orders, introducing a circular module relationship solely to reuse validation through the stateful book.",
+            "duplication": "summarize_orders reuses OrderBook.add for normalized validation and duplicate IDs, and summarize_validated_orders reuses order_totals. The price of that reuse is constructing a complete temporary book, discarding add()'s returned deep copies and then copying/sorting via OrderBook.summary -> self.list(). Summary SKU accumulation still duplicates inventory_requirements; outstanding_total also keeps a separate confirmed-total selection. _empty_status_counts is a single-use wrapper with little abstraction value.",
+            "regressions": "tests/test_dispatch.py protects public constants, exact receipt/slip/JSON output, several validation and shipping errors, CSV duplicate errors, file return values and copy/transition behavior. Summary tests cover empty input, generators, duplicate IDs and a book after confirmation. Supplied checks.json reports all four fields true. Direct summary-result mutation, summary removal of shipped orders, and a latest date from a non-confirmed order are not explicit tests in this candidate."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/dispatch.py",
+              "src/dispatch_formats.py",
+              "src/dispatch_pricing.py",
+              "src/dispatch_summary.py",
+              "src/dispatch_validation.py",
+              "src/dispatch_workflow.py"
+            ],
+            "rationale": "The baseline monolith is genuinely divided into validation, pricing, formats, workflow and summary implementations, with an import-compatible facade. However, file effects still share dispatch_formats.py with pure rendering/codecs, and the summary-to-workflow-to-summary path introduces coupling and copying that a direct validated aggregation can avoid.",
+            "regression_evidence": "Inspected baseline/tests/test_dispatch.py: quote, CSV round-trip and confirmation were its three covered scenarios. Inspected A/tests/test_dispatch.py: compatibility constants, rendering/JSON literals, file access, errors, copy isolation and summary cases add useful protection. A/checks.json supplies passing candidate tests, behavior, oracle completeness and scope. I did not execute tests, and the packet cannot establish that regressions preceded the refactor."
+          }
+        },
+        "plain": {
+          "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+          "candidate_sha256": "72e284beb246ccc6c7c8cb67cb122ae62c8033e3bfcd2070caccbedcf2983646",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "dispatch.py is a clear facade; _summary.py:summarize_orders shows normalization, duplicate rejection, counts, latest date, confirmed pricing and sorted SKU accumulation in one loop. _book.py:summary delegates directly to that function, so the public free-function and method paths are easy to follow without delayed imports or temporary workflow construction.",
+            "cohesion": "_validation.py owns validation, _pricing.py owns calculations, _rendering.py owns textual documents, _serialization.py owns JSON/CSV, _persistence.py owns filesystem effects, and _book.py owns workflow. _summary.py depends on constants/validation/pricing and is reused by the book without a reverse dependency. These focused boundaries map to the requested responsibilities.",
+            "duplication": "_constants.py centralizes shared constants and _summary.py reuses validate_order and order_totals, avoiding separate pricing/validation implementations. The single-pass aggregator is shared by OrderBook.summary. SKU accumulation still repeats _book.py:inventory_requirements, and confirmed-total selection repeats outstanding_total; these remain opportunities for focused reuse rather than grounds to add another abstraction layer.",
+            "regressions": "tests/test_dispatch.py:test_summarize_orders_empty_generator_and_duplicate_rules covers multiple confirmed orders, repeated SKUs, a later draft date, generators, duplicate IDs and unchanged input. test_order_book_summary_reflects_transitions_and_is_isolated verifies confirmed/cancelled state and mutation of returned status counts. Other tests cover normalization, nested copies, rendering, shipping, persistence and CSV/JSON errors. Supplied checks.json reports all four fields true. Exact CSV bytes and summary after confirmed-to-shipped transition are not directly asserted."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/dispatch.py",
+              "src/_book.py",
+              "src/_constants.py",
+              "src/_persistence.py",
+              "src/_pricing.py",
+              "src/_rendering.py",
+              "src/_serialization.py",
+              "src/_summary.py",
+              "src/_validation.py"
+            ],
+            "rationale": "The facade delegates to focused implementations with filesystem access separated from pure formatting and codecs. The summary function directly validates and accumulates finite iterables, and OrderBook.summary delegates without creating another book. The responsibility split is useful despite remaining repeated confirmed-order aggregation in legacy book methods.",
+            "regression_evidence": "Inspected baseline/tests/test_dispatch.py: only quotation, CSV round-trip and confirmation were tested. Inspected B/tests/test_dispatch.py: validation/copy isolation, rendering, shipping, persistence, error cases and summary-specific state/input isolation were added. B/checks.json reports passing candidate-test and behavior results plus complete oracle and passing scope. I did not execute baseline or candidate tests and cannot attest to the order of test introduction."
+          }
+        }
+      }
+    },
+    {
+      "block": "retry-queue-standard-1",
+      "valid": true,
+      "reviewer": "blind_quality_summary",
+      "preferred": [
+        "plain",
+        "current"
+      ],
+      "rationale": "Tie: A/src/dispatch.py and B/src/dispatch.py implement the same minimal correction, keying progress by (tenant, id) and recording it only after send succeeds. Both preserve validation, deep copying, exception propagation and audit order, and all supplied checks pass. Their tests protect the same important retry and tenant-isolation boundaries; A preserves an unrelated tuple through failure/retry, while B preserves an unrelated string and asserts the return value when the payload is mutated. Neither has a material maintenance advantage or separate cleanup. This is an independent review of only this blinded packet; independence is a reviewer attestation, not an authenticated identity.",
+      "candidates": {
+        "plain": {
+          "baseline_sha256": "31460fd023f914c2453b45409f349f54191a7d24db0383686768cd2695e09bdd",
+          "candidate_sha256": "614cdcfe711b98a7a5ee4c29e8bb2d71fe16d953be4cb69c7bb7d4525aaf010d",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "A/src/dispatch.py:dispatch_batch reads directly as validate, identify a tenant/event pair, skip completed work, send a deep copy, then append successful progress and audit. Lines 16 and 20-23 make both repaired invariants visible without exception wrapping or additional control flow.",
+            "cohesion": "A/src/events.py:validate retains all validation rules and their order, while A/src/dispatch.py:dispatch_batch owns ordered delivery and the caller-owned journal. Moving completed.add after send keeps progress with successful side effects; no retry engine, storage abstraction or other unnecessary responsibility is added.",
+            "duplication": "A/src/dispatch.py:dispatch_batch uses one tuple key for the membership check and completion insertion and one delivery path for all tenants. There is no copied retry path or tenant-specific branch. Existing event-field references in the audit row are clear construction, not evidence that another helper is needed.",
+            "regressions": "A/tests/test_dispatch.py retains baseline duplicate-delivery and invalid-tenant tests, asserts tuple completion, and adds cross-tenant same-ID delivery, exact exception identity, partial progress, ordered retry without resending successes, unrelated tuple preservation and nested payload-copy coverage. It lacks explicit valid-then-invalid batch, empty batch, and mutation-then-failure tests, although validation remains before the loop and deepcopy remains before send on inspection. A/checks.json reports behavior_passed, oracle_complete, candidate_tests_passed and scope_passed all true; these are supplied results, not reviewer-executed tests."
+          },
+          "cleanup": {
+            "meaningful": false,
+            "changed_files": [],
+            "rationale": "A/src/dispatch.py changes the journal identity and moves completion recording after send, which are the necessary semantic fixes. It leaves the already-coherent dispatch/validation boundary intact. A/tests/test_dispatch.py adds useful regressions, but there is no separate structural cleanup or removed duplication to claim.",
+            "regression_evidence": "Inspected baseline/tests/test_dispatch.py covers successful duplicate delivery and a single invalid tenant before delivery. A/tests/test_dispatch.py retains these and adds failure/retry progress and audit assertions, exact send-exception identity, tenant separation, unrelated tuple retention and nested mutation isolation. Static comparison leaves events.validate and the public function signature unchanged. A/checks.json supplies all four passing flags; this reviewer ran neither baseline nor candidate tests."
+          }
+        },
+        "current": {
+          "baseline_sha256": "31460fd023f914c2453b45409f349f54191a7d24db0383686768cd2695e09bdd",
+          "candidate_sha256": "5e98754a9336e59e3644c081c0cf7f97b035c4715ee66c16eac666b8408fa734",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "B/src/dispatch.py:dispatch_batch exposes the complete synchronous sequence in one small loop: validation first, tuple identity, duplicate skip, copied-payload send, then completion and audit. The corrected ordering at lines 20-23 lets a reader see that send exceptions leave the failed event unrecorded.",
+            "cohesion": "B/src/events.py:validate continues to own field checks and error ordering, and B/src/dispatch.py:dispatch_batch owns delivery, journal updates and audit rows. The correction respects the existing API without adding persistence, automatic retries or a redundant abstraction.",
+            "duplication": "B/src/dispatch.py:dispatch_batch shares the same (tenant, id) key between lookup and insertion and uses a single delivery path for new sends and caller-driven retries. No repeated retry machinery is introduced; the audit dictionary explicitly selects its three required event fields.",
+            "regressions": "B/tests/test_dispatch.py retains baseline delivery/validation tests and adds tuple completion, cross-tenant same-ID delivery, unrelated string retention, exact exception identity, partial-progress audit, ordered retry without resending successes and nested payload-copy behavior with return counts. It does not explicitly test a valid event followed by an invalid event, empty batches or mutation followed by failure, but source retains full validation before delivery and deepcopy. B/checks.json reports behavior_passed, oracle_complete, candidate_tests_passed and scope_passed all true; no candidate or baseline tests were run by this reviewer."
+          },
+          "cleanup": {
+            "meaningful": false,
+            "changed_files": [],
+            "rationale": "B/src/dispatch.py makes precisely the required identity and successful-completion ordering corrections. Its source structure already separates validation from delivery, so leaving it intact is appropriate. B/tests/test_dispatch.py adds meaningful regression coverage, but there is no distinct cleanup or deduplication change.",
+            "regression_evidence": "Inspected baseline/tests/test_dispatch.py supplies successful duplicate-delivery and single-invalid-event coverage. B/tests/test_dispatch.py retains it and adds retry progress/audit and exact-exception assertions, cross-tenant isolation, unrelated string preservation and nested payload mutation isolation with delivered counts. Static comparison preserves events.validate, signature, return shape and deep-copy placement. B/checks.json supplies four true flags including behavior_passed and candidate_tests_passed; no tests were executed in this review."
+          }
+        }
+      }
+    },
+    {
+      "block": "retry-queue-standard-2",
+      "valid": true,
+      "reviewer": "blind_quality_boundaries",
+      "preferred": [
+        "plain",
+        "current"
+      ],
+      "rationale": "Tie: A and B have identical production implementations in src/dispatch.py and src/events.py. Both fix tenant-scoped completion and journal only successful sends without introducing extra machinery. Supplied checks report all four fields true for both. Their added tests offer comparable protection for retry progress, tenant collisions, exception identity and nested payload copying; neither establishes a material maintainability advantage.",
+      "candidates": {
+        "plain": {
+          "baseline_sha256": "31460fd023f914c2453b45409f349f54191a7d24db0383686768cd2695e09bdd",
+          "candidate_sha256": "5a438c45351be7d546596b11eca7d3ac4af5ee7edf310715529990f8f8460e99",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "src/dispatch.py:dispatch_batch keeps the complete path visible: validate the batch, form (tenant, id), skip completed entries, send a deep copy, then record completion and audit. The tuple key and post-send completed.add directly express both required fixes; unchanged src/events.py:validate preserves the existing error order and messages.",
+            "cohesion": "src/events.py:validate owns validation and src/dispatch.py:dispatch_batch owns synchronous delivery and progress. The fix stays inside the existing delivery loop without new retry policies, persistence or helper layers.",
+            "duplication": "src/dispatch.py:dispatch_batch uses one tuple key for the duplicate check and successful completion. Retry naturally reuses the same delivery path instead of adding a separate recovery loop. No pre-existing duplication required removal; this is a localized correctness change rather than a structural cleanup.",
+            "regressions": "tests/test_dispatch.py:test_failed_send_is_not_completed_and_retry_delivers_remainder checks exact exception identity, partial completion/audit, ordered remaining sends and retry counts. test_tenants_with_same_event_id_are_independent and test_payload_is_copied_and_unrelated_completed_entries_are_preserved cover tenant isolation, nested copying and unrelated journal entries. The supplied checks.json reports behavior_passed, oracle_complete, candidate_tests_passed and scope_passed true. Candidate tests do not explicitly exercise a valid event before an invalid later event or an empty batch; source inspection shows the original prevalidation and count behavior retained."
+          },
+          "cleanup": {
+            "meaningful": false,
+            "changed_files": [
+              "src/dispatch.py"
+            ],
+            "rationale": "The baseline already separated validation from delivery. dispatch_batch changes the identity key and the placement of completion recording, which are necessary fixes but do not constitute a separate boundary or duplication cleanup. Avoiding additional abstractions is appropriate for this small loop.",
+            "regression_evidence": "Inspected baseline/tests/test_dispatch.py: its two tests cover delivery/duplicate counting and an immediately invalid tenant. Inspected A/tests/test_dispatch.py: the original coverage remains and targeted tenant, failure/retry and copying regressions are added. A/checks.json supplies passing candidate-test and behavior results; I did not run tests and cannot infer that added tests ran before the change."
+          }
+        },
+        "current": {
+          "baseline_sha256": "31460fd023f914c2453b45409f349f54191a7d24db0383686768cd2695e09bdd",
+          "candidate_sha256": "53d78508d1097ef3987fa36cdfafa182ce286788b0af0130eea7f4989204a647",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "src/dispatch.py:dispatch_batch preserves the direct validate/check/send/record sequence. (tenant, id) is formed once and completed.add follows successful send, so both the tenant namespace and failure boundary are easy to verify. src/events.py:validate is unchanged.",
+            "cohesion": "src/events.py remains responsible only for validation; src/dispatch.py remains responsible only for synchronous dispatch and its journal/audit effects. No extra policy objects, wrapper layers or automatic retry mechanism are introduced.",
+            "duplication": "src/dispatch.py:dispatch_batch shares a single tuple identity between its duplicate check and completion update, and retries reuse the existing loop. Production code is identical to A; neither candidate adds a second recovery path or conceals distinct behavior behind flags.",
+            "regressions": "tests/test_dispatch.py:test_retry_after_failure_delivers_remaining_events verifies exception object identity, successful-only progress, audit order and remaining sends on retry. test_same_event_id_is_scoped_by_tenant also retains an unrelated completed entry, and test_payload_is_copied_before_send mutates a nested dictionary. Supplied checks.json reports all four fields true. Empty batches and validation of a later invalid event are not directly added to this suite, although the corresponding baseline implementation paths remain intact."
+          },
+          "cleanup": {
+            "meaningful": false,
+            "changed_files": [
+              "src/dispatch.py"
+            ],
+            "rationale": "The existing validation/delivery boundary is already suitable. The only production edits are the required scoped key and completion-after-send correction; these are useful focused fixes but not an independent structural cleanup.",
+            "regression_evidence": "Inspected baseline/tests/test_dispatch.py: two tests cover delivery/duplicate counting and an immediately invalid tenant. Inspected B/tests/test_dispatch.py: it retains those tests and adds retry, tenant and deep-copy cases. B/checks.json reports passing candidate tests and behavior. I did not run baseline or candidate tests, and the packet does not establish when new regression tests were first run."
+          }
+        }
+      }
+    },
+    {
+      "block": "summary-standard-1",
+      "valid": true,
+      "reviewer": "blind_quality_summary",
+      "preferred": [
+        "current"
+      ],
+      "rationale": "Both candidates satisfy the requested summary behavior and preserve the existing public API on source inspection; all supplied checks pass. Prefer A because _invoice_totals removes the shared arithmetic duplicated across invoice actions and its tests explicitly protect JSON bytes, public names, ignored options and unknown-action errors. The small item-count option is justified by keeping extra quantity addition out of existing actions. This is an independent review of only this blinded packet; independence is a reviewer attestation, not an authenticated identity.",
+      "candidates": {
+        "current": {
+          "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+          "candidate_sha256": "fc846154e0d7025e3b87d427e2e2e8e7815d1a7ff335b7b3dbf0052e2c890f06",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "A/src/ledger.py:5-15 (_invoice_totals) names subtotal, quantity, tax and item_count directly; invoice:18-38 shows each public action and its output without repeated arithmetic. The four-value tuple includes unused values for total, and the positional True at line 34 takes a little tracing, but the helper remains short and understandable. Unknown actions still raise before reading items.",
+            "cohesion": "A/src/ledger.py:_invoice_totals owns invoice arithmetic while invoice owns action selection and formatting. include_item_count is a narrowly scoped compatibility choice: old actions do not start adding quantities separately. InvoiceManager.total and the unrelated A/src/legacy_reports.py remain intact, with no additional layer or public export.",
+            "duplication": "A/src/ledger.py:_invoice_totals replaces the baseline total/json/receipt subtotal-and-tax loops and also serves summary. The flag controls only the additional count; distinct JSON and receipt formatting remain explicit in invoice instead of being hidden behind generic formatting machinery. The unchanged legacy_reports.py duplication is outside this task.",
+            "regressions": "A/tests/test_ledger.py retains baseline test_total and test_receipt, adds nonempty/default-empty summary assertions, and protects exact JSON text, ignored options, unknown-action error text and the exact public-name set. Malformed-item error ordering and one-shot iterables are not explicitly tested, although the single loop and action-local helper calls preserve their relevant paths on inspection. A/checks.json reports behavior_passed, oracle_complete, candidate_tests_passed and scope_passed all true; these are supplied results, not tests run by this reviewer."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/ledger.py"
+            ],
+            "rationale": "The private _invoice_totals extraction consolidates the arithmetic used by three pre-existing actions and the new summary action, removing an actual shared cause of future divergence. Supporting compatibility tests accompany the changed boundary. It preserves InvoiceManager and leaves unrelated report formatting alone.",
+            "regression_evidence": "Inspected baseline/tests/test_ledger.py provides only integer-cent total and empty-receipt assertions. A/tests/test_ledger.py retains both and adds exact JSON serialization, public exports, ignored options, unknown-action errors and summary coverage around the refactor. Static comparison shows the original signature, public wrapper and formatting retained. A/checks.json supplies four true check flags including candidate_tests_passed and behavior_passed; no baseline or candidate tests were executed during this review."
+          }
+        },
+        "plain": {
+          "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+          "candidate_sha256": "21043c2e1c40a59cffaac8ea5c25af00dcac832d376931144601a5864fe4d46a",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "B/src/ledger.py:29-37 (invoice summary branch) directly computes subtotal, quantity sum, floored tax and the requested dictionary. Existing total/json/receipt paths and the final error remain easily recognizable, although the receipt names v and t still require mental translation.",
+            "cohesion": "B/src/ledger.py:invoice keeps the feature within the existing action API and preserves InvoiceManager.total; B/src/legacy_reports.py is unchanged. No unnecessary class or abstraction is introduced, but invoice continues to combine repeated arithmetic with each export format.",
+            "duplication": "B/src/ledger.py:invoice now contains four copies of the subtotal/tax calculation, at lines 7-11, 13-18, 20-27 and 30-37. The new branch repeats item[\"quantity\"] lookup and adds another place to maintain tax logic. This is correct feature addition but does not remove the encountered arithmetic duplication.",
+            "regressions": "B/tests/test_ledger.py retains baseline test_total/test_receipt and adds a summary case with summed quantities and nonintegral tax before flooring, plus an empty summary. It adds no JSON serialization, export-name, unknown-action or ignored-options regression. Existing branches are unchanged on inspection, and B/checks.json reports behavior_passed, oracle_complete, candidate_tests_passed and scope_passed all true; no tests were run by this reviewer."
+          },
+          "cleanup": {
+            "meaningful": false,
+            "changed_files": [],
+            "rationale": "B/src/ledger.py only adds the summary branch, and B/tests/test_ledger.py adds its feature tests. The existing repeated calculations, wrapper and unrelated report module are unchanged; there is no separate simplification of encountered code to credit.",
+            "regression_evidence": "Inspected baseline/tests/test_ledger.py covers total and empty receipt; B/tests/test_ledger.py retains those assertions and adds nonempty/empty summary coverage. Static comparison shows the old source branches preserved. B/checks.json supplies four true flags, including behavior_passed and candidate_tests_passed. These reported checks are separate from this source/test inspection; neither baseline nor candidate tests were executed here."
+          }
+        }
+      }
+    },
+    {
+      "block": "summary-standard-2",
+      "valid": true,
+      "reviewer": "blind_quality_summary",
+      "preferred": [
+        "current"
+      ],
+      "rationale": "Both candidates have straightforward, correct summary branches and all supplied checks pass; neither meaningfully cleans up the repeated invoice arithmetic. A has a slight preference because its tests protect the existing JSON result, error text and function signature, directly addressing the task's compatibility constraint. B contributes useful empty-summary and tax-flooring coverage, so the difference is modest rather than an implementation-quality gap. This is an independent review of only this blinded packet; independence is a reviewer attestation, not an authenticated identity.",
+      "candidates": {
+        "current": {
+          "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+          "candidate_sha256": "49d0b0aa2338c28d7e16d9fff8d91a2d67947c4877a91f8b7952fa55dccc217e",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "A/src/ledger.py:19-27 (invoice summary branch) clearly names subtotal and item_count and returns exactly the requested five fields. The old action branches and Unknown action error remain directly visible; existing receipt variables v/t remain less descriptive but are not newly introduced.",
+            "cohesion": "A/src/ledger.py:invoice adds one public action within the existing API and keeps formatting local to its action branches. InvoiceManager.total and A/src/legacy_reports.py are unchanged. This avoids speculative structure but leaves computation and output formatting coupled inside invoice.",
+            "duplication": "A/src/ledger.py:invoice adds a fourth subtotal/tax loop at lines 20-27 beside the existing total/json/receipt copies. The summary branch also reads quantity separately for the subtotal and count. No shared arithmetic cause is removed; unchanged legacy_reports.py is appropriately outside scope.",
+            "regressions": "A/tests/test_ledger.py preserves baseline total/receipt tests and adds summed-quantity summary, decoded JSON result, exact unknown-action error text and exact invoice signature checks. It does not protect JSON byte order, the complete module export set, or empty/default-customer summary explicitly. A/checks.json reports behavior_passed, oracle_complete, candidate_tests_passed and scope_passed all true; these are supplied check results, not reviewer-executed tests."
+          },
+          "cleanup": {
+            "meaningful": false,
+            "changed_files": [],
+            "rationale": "A/src/ledger.py adds only summary behavior and retains the pre-existing duplicated arithmetic. A/tests/test_ledger.py improves compatibility regression protection, but neither change is a refactor or removal of an existing maintenance burden.",
+            "regression_evidence": "Inspected baseline/tests/test_ledger.py contains total and empty-receipt cases. A/tests/test_ledger.py retains both and adds summary, JSON semantic output, error text and signature coverage. Static comparison confirms old action implementations and public names remain. A/checks.json supplies four passing flags including behavior_passed and candidate_tests_passed; no baseline or candidate tests were executed for this review."
+          }
+        },
+        "plain": {
+          "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+          "candidate_sha256": "81f2db30db35546e2ffe9291da4be6ff29e10e9b1b2074ba42cce6b1adc5af80",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "B/src/ledger.py:19-28 (invoice summary branch) is easy to follow: quantity is read once and reused for subtotal and item_count, then tax and the five-field result are explicit. Existing output and unknown-action paths remain recognizable, including the original less descriptive receipt variables.",
+            "cohesion": "B/src/ledger.py:invoice contains the new behavior within its current signature and action dispatch; InvoiceManager.total and B/src/legacy_reports.py are preserved. There are no speculative helpers or new dependencies, while the existing mixture of arithmetic and export formatting remains.",
+            "duplication": "B/src/ledger.py:23-25 reuses the local quantity within the new summary branch, avoiding one repeated lookup. However, invoice still has separate subtotal and tax calculations for total, json, summary and receipt, so this is a minor local choice rather than removal of the existing shared duplication.",
+            "regressions": "B/tests/test_ledger.py retains baseline total and empty-receipt behavior and adds nonempty summary with summed quantities and floored tax, plus empty summary. It does not add tests for existing JSON output, error text, signature or exports, giving A somewhat better compatibility coverage. B/checks.json reports behavior_passed, oracle_complete, candidate_tests_passed and scope_passed all true; no tests were executed by this reviewer."
+          },
+          "cleanup": {
+            "meaningful": false,
+            "changed_files": [],
+            "rationale": "The new summary branch reuses a local quantity value, but B/src/ledger.py does not simplify existing action code or remove repeated arithmetic. B/tests/test_ledger.py adds feature regressions. No existing-code cleanup is present to credit.",
+            "regression_evidence": "Inspected baseline/tests/test_ledger.py supplies total and empty-receipt coverage, both retained in B/tests/test_ledger.py alongside nonempty/empty summary assertions. Static source comparison preserves the previous actions, signature and exports. B/checks.json supplies all four true flags, including behavior_passed and candidate_tests_passed; this review did not execute baseline or candidate tests."
+          }
+        }
+      }
+    },
+    {
+      "block": "typescript-access-standard-1",
+      "valid": true,
+      "reviewer": "blind_quality_types",
+      "preferred": [
+        "plain",
+        "current"
+      ],
+      "rationale": "Tie: both candidates preserve the inspected public behavior and all supplied checks pass. A separates policy from transactions coherently and tests rollback through both public mutators plus invalid-role precedence for self updates. B keeps the shared workflow in one cohesive module and more directly tests no lookup for unauthorized/invalid-member requests and transaction boundaries. These are useful but balanced differences; neither test suite convincingly protects the returned copy from aliasing the object passed to write. Packet contents cannot establish that characterization tests preceded refactoring.",
+      "candidates": {
+        "plain": {
+          "baseline_sha256": "011d015471d301f522c50b03a593fcce7b970ec2438ca354eea6d359c0704097",
+          "candidate_sha256": "139afa1b475ca52b1f1171648ba984bf0f3f279abc69d0082dd689bd669eb13a",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "A/src/access.ts changeRole and A/src/profiles.ts setDisplayName visibly follow shared authorization/lookup, local field validation, then commit. A/src/memberPolicy.ts requireManageableMember keeps unauthenticated, forbidden, invalid member, and not found in the original order; changeRole retains invalid role before cannot demote self. A/src/memberTransactions.ts commitMemberMutation makes write, audit, and returned spread order explicit.",
+            "cohesion": "A/src/memberPolicy.ts owns the read authorization and canActorManageMember predicate, while A/src/memberTransactions.ts owns atomic write/audit orchestration. The public mutators retain their distinct role and name rules, public Actor/Member/Store types remain in access.ts, and reports.ts is unchanged. The two helper modules separate real responsibilities without adding a configurable mutation framework.",
+            "duplication": "requireManageableMember replaces the repeated authentication, admin, ID, lookup, and tenant checks from baseline access.ts/profiles.ts. commitMemberMutation replaces both transaction callbacks. The action argument supplies audit data without selecting validation branches; role/self-demotion and name validation remain distinct. canManage delegates to the policy module, although its single-use predicate extraction is organizational rather than another duplication reduction.",
+            "regressions": "A/tests/access.test.ts adds competing-error assertions, cross-tenant rejection through both mutators, invalid-role-before-self-demotion, write-before-audit events, and audit-failure rollback for both name and role. Compared with the two baseline tests this covers meaningful failures. Coverage is weaker for profile authentication/forbidden precedence and transaction entry ordering. The defensive-copy assertion is not decisive: recordingStore.write clones next into saved, so mutating renamed would also leave saved unchanged if commit returned next itself. A/checks.json reports behavior_passed, oracle_complete, candidate_tests_passed, and scope_passed true; these supplied results were not rerun."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/access.ts",
+              "src/profiles.ts",
+              "src/memberPolicy.ts",
+              "src/memberTransactions.ts"
+            ],
+            "rationale": "The shared causes of policy and write/audit duplication are extracted into named helpers while field-specific behavior remains at the public entry points. Static comparison preserves exports, ordered validation, tenant isolation, self-demotion, read-before-transaction, write-before-audit, error propagation, and the returned shallow copy; the unrelated reports.ts remains identical.",
+            "regression_evidence": "Inspected baseline/tests/access.test.ts contains only successful name/role changes and missing-identity checks. Inspected A/tests/access.test.ts adds ordered failures, tenant isolation, self-demotion precedence, both audit orders, and both rollback paths. Supplied A/checks.json marks all four checks true. No baseline or candidate tests were executed by this reviewer; the packet does not establish characterization-before-refactoring chronology. Copy isolation from the write argument and explicit transaction-boundary assertions remain gaps in the candidate tests."
+          }
+        },
+        "current": {
+          "baseline_sha256": "011d015471d301f522c50b03a593fcce7b970ec2438ca354eea6d359c0704097",
+          "candidate_sha256": "180c2f7bfa3912346cd521145719c6d588d6794ef29184398b71ba45d8494296",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "B/src/access.ts changeRole and B/src/profiles.ts setDisplayName present authorization/lookup, operation validation, construction of result, then writeAuditedMember in a direct sequence. B/src/member-management.ts requireManagedMember preserves the baseline error ladder, and writeAuditedMember visibly writes before audit within store.transaction and returns a spread copy.",
+            "cohesion": "B/src/member-management.ts groups the small shared member-management workflow: capability check, authorized lookup, and transactional persistence. Role/self-demotion and name normalization remain in their public modules. The public Actor/Member/Store types and functions stay in place and reports.ts is unchanged. Its helpers have concrete responsibilities and no strategy registry or speculative abstraction.",
+            "duplication": "requireManagedMember removes the repeated authorization/ID/tenant lookup sequence, while writeAuditedMember removes the repeated transaction body from access.ts and profiles.ts. action is audit payload data rather than a flag that hides operation-specific behavior. canManageMember is a single-use delegation for policy organization, not an additional shared-code saving.",
+            "regressions": "B/tests/access.test.ts explicitly checks that invalid IDs and non-admin actors cause no read, cross-tenant rejection wins over invalid fields and cannot write/audit, and both successful mutators produce transaction:start, write, audit, transaction:end. Its rollback test protects setDisplayName only; changeRole rollback and invalid-role precedence on a self update are less directly covered than A. The return-copy assertions compare results to the fixture member, although read already returns a copy, so they do not prove separation from the object passed to write. B/checks.json reports all four checks true; this reviewer did not rerun them."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/access.ts",
+              "src/profiles.ts",
+              "src/member-management.ts"
+            ],
+            "rationale": "The cohesive member-management module eliminates duplicated ordered policy checks and transactional write/audit orchestration. The public operations still own their actual business differences. Static comparison preserves original exports, validation order, tenant isolation, self-demotion, audit ordering, rollback propagation, and copy construction, with reports.ts unchanged.",
+            "regression_evidence": "The inspected baseline has only the happy path and missing-identity test. B/tests/access.test.ts adds no-read assertions for invalid IDs/non-admins, tenant-isolation failures, field/self-demotion errors, both explicit transaction sequences, and name-update rollback. Supplied B/checks.json marks behavior_passed, oracle_complete, candidate_tests_passed, and scope_passed true. No tests were run by this reviewer, and the packet cannot prove the characterization tests were written before refactoring. Role-update rollback and meaningful result-versus-write-object identity protection are remaining candidate-suite gaps."
+          }
+        }
+      }
+    },
+    {
+      "block": "typescript-access-standard-2",
+      "valid": true,
+      "reviewer": "blind_quality_types",
+      "preferred": [
+        "current"
+      ],
+      "rationale": "Both candidates preserve the inspected baseline behavior and all supplied checks pass. B has a modest maintainability advantage: it leaves the simple canManage predicate at its public entry point, restricts internal audit actions to name or role, and uses a reusable store fixture to assert read/transaction/write/audit order and no transaction after field validation failures. A has useful overlength-name coverage and a stronger name-result identity assertion; B's cloned persistence fixture does not prove result/write-object separation. These limitations do not reveal a source regression. Packet contents cannot establish characterization-before-refactoring chronology.",
+      "candidates": {
+        "plain": {
+          "baseline_sha256": "011d015471d301f522c50b03a593fcce7b970ec2438ca354eea6d359c0704097",
+          "candidate_sha256": "46441ecebcf63c5010f9665d01335522055747c8b5d4551f3cc035df1ac15597",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "A/src/access.ts changeRole reads an authorized target, validates role and self-demotion, then commits; A/src/profiles.ts setDisplayName follows the same sequence with visible name validation/trim. A/src/member-management.ts readManagedMember retains the ordered baseline errors, and commitMemberUpdate directly shows transaction, write, audit, and copied return.",
+            "cohesion": "A/src/member-management.ts owns the shared policy, authorized lookup, and persistence workflow, while public modules retain field-specific validation. Actor/Member/Store remain exported by access.ts and reports.ts is unchanged. The single-use canManageMember predicate adds a minor delegation through access.ts canManage, but the overall boundary is small and coherent.",
+            "duplication": "readManagedMember consolidates both authentication/admin/ID/member/tenant check ladders; commitMemberUpdate consolidates the two write/audit transaction callbacks. The action string is audit data, with no flag-based business validation. Public mutators construct their actual changes directly, so the common work is shared without obscuring role-versus-name behavior.",
+            "regressions": "A/tests/access.test.ts adds exact error-message precedence for both public mutations, admin/tenant capability cases, the 81-character name rejection, transaction event order for both mutations, and both audit-failure rollback paths. The name-result identity check is meaningful because persisted receives the actual write argument. The role-result comparison occurs after persisted was replaced by the name update, so that particular comparison cannot detect a role-result alias. Missing-record behavior and failure-path absence of transactions are not directly asserted. A/checks.json reports all four checks true; those supplied results were not rerun."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/access.ts",
+              "src/profiles.ts",
+              "src/member-management.ts"
+            ],
+            "rationale": "The new shared workflow removes both duplicated policy validation and transactional persistence. Field-specific role/self-demotion and name rules remain at their public functions. Static inspection preserves public exports, validation order, tenant hiding, read outside the transaction, write-before-audit, exception propagation, and returned spread copies; reports.ts remains identical.",
+            "regression_evidence": "Inspected baseline/tests/access.test.ts covers only successful name/role updates and missing identity. Inspected A/tests/access.test.ts materially expands both validation ladders, tenant/admin capability, overlength names, both successful transaction sequences, and both audit-failure rollbacks. Supplied A/checks.json marks behavior_passed, oracle_complete, candidate_tests_passed, and scope_passed true. This reviewer ran no tests and cannot verify that characterization preceded refactoring. The role copy check compares against a later write, and failed validations are not checked for absence of transaction side effects."
+          }
+        },
+        "current": {
+          "baseline_sha256": "011d015471d301f522c50b03a593fcce7b970ec2438ca354eea6d359c0704097",
+          "candidate_sha256": "104c9d7f2e6ea406f76e12a69d0eddc81595c2e86b0eac4798829f1318e908c6",
+          "verdict": "pass",
+          "criteria": {
+            "readability": "B/src/access.ts changeRole and B/src/profiles.ts setDisplayName clearly expose authorized lookup, operation-specific validation, and commitMemberChange. access.ts canManage expresses its three short-circuit conditions directly. B/src/member-management.ts requireManagedMember keeps error precedence visible and commitMemberChange shows write then audit then copy within the transaction.",
+            "cohesion": "B/src/member-management.ts owns the two shared workflow responsibilities, authorized lookup and atomic mutation persistence; the public capability predicate stays local in access.ts without a single-use forwarding helper. MemberAction constrains this internal workflow to the actual role/name operations. Public types/functions remain available and reports.ts is unchanged.",
+            "duplication": "requireManagedMember replaces the identical baseline authentication/admin/ID/tenant lookup logic and commitMemberChange replaces both duplicated transaction bodies. The action union describes audit events rather than driving hidden validation branches. Each public operation retains its distinct validation and change construction, avoiding a generic update engine.",
+            "regressions": "B/tests/access.test.ts provides one stateful store fixture for both public APIs, exact validation errors, same-tenant/admin capability, explicit read-before-transaction and write-before-audit event sequences, no transaction after invalid role/name, and rollback of both updates on audit failure. These exercise changed boundaries beyond the baseline tests. However, store.write clones values before storing them, so mutating returned values would leave snapshots unchanged even without a separate return copy; the copy tests do not isolate that contract. It lacks A's 81-character-name assertion. B/checks.json reports all four checks true, without reviewer rerun."
+          },
+          "cleanup": {
+            "meaningful": true,
+            "changed_files": [
+              "src/access.ts",
+              "src/profiles.ts",
+              "src/member-management.ts"
+            ],
+            "rationale": "The shared policy and transaction extraction removes the actual repeated workflows while preserving operation-specific rules and a direct canManage predicate. The internal action union communicates the two supported audit events. Static comparison retains public exports, exact validation order, tenant isolation, self-demotion, read/transaction/audit ordering, rollback propagation, returned copies, and unchanged reports.ts.",
+            "regression_evidence": "Inspected baseline/tests/access.test.ts has only happy-path mutation and missing-identity coverage. B/tests/access.test.ts adds both error ladders, capability rules, read/transaction/write/audit sequences, absence of transaction events on invalid fields, and both rollback paths. Supplied B/checks.json marks all four checks true. No tests were executed by this reviewer; chronology of characterization versus refactoring is unavailable. The fixture copies on write, so its return-mutation checks do not prove independence from the write argument, and overlength-name behavior lacks a direct candidate assertion."
+          }
+        }
+      }
+    }
+  ],
+  "interrupted_resume": {
+    "source_commit": "f872c9c1c323a896c32becfd59bcc5c17f574f44",
+    "source_tree": "70e5e6db402c6c69184fb5f8975ac363ae394f54",
+    "frozen_files_sha256": "fc68cf49eba51a29056352ffbde2fa75f12acbc3a2ca4a28d07c2fa5e10bf457",
+    "first_deadline_seconds": 10,
+    "continuation_deadline_seconds": 900,
+    "attempts": [
+      {
+        "depth": "lean",
+        "accepted": true,
+        "behavior": true,
+        "workflow": true,
+        "resume": true,
+        "outside_scope": [],
+        "attempt_seconds": 232.591,
+        "runner_seconds": 231.852,
+        "interruption": {
+          "success": true,
+          "first_timed_out": true,
+          "fresh_runner": true
+        },
+        "sessions": [
+          {
+            "returncode": 124,
+            "seconds": 10.011,
+            "timed_out": true,
+            "termination_error": null
+          },
+          {
+            "returncode": 0,
+            "seconds": 221.841,
+            "timed_out": false,
+            "termination_error": null
+          }
+        ],
+        "usage": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "output_tokens": null,
+          "uncached_input_tokens": null
+        },
+        "interventions": 1,
+        "reported_cost_usd": null,
+        "candidate_sha256": "aec0da4e27d2a8d70ef25e377ac9d73fb72c35ffdb80f4d150a6b1d078cfdbb2",
+        "fixture_identity": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+        "evaluator_identity": "131e12c59b2b753d40bc9409ade6e4b2da6b94851b79bb792ae0b59b530a4280",
+        "plugin_identity": "10da984327ebb48aafc6f04284dc01e7d16a077d00068efcda74ba2805038bbc"
+      },
+      {
+        "depth": "standard",
+        "accepted": true,
+        "behavior": true,
+        "workflow": true,
+        "resume": true,
+        "outside_scope": [],
+        "attempt_seconds": 163.278,
+        "runner_seconds": 162.561,
+        "interruption": {
+          "success": true,
+          "first_timed_out": true,
+          "fresh_runner": true
+        },
+        "sessions": [
+          {
+            "returncode": 124,
+            "seconds": 10.011,
+            "timed_out": true,
+            "termination_error": null
+          },
+          {
+            "returncode": 0,
+            "seconds": 152.55,
+            "timed_out": false,
+            "termination_error": null
+          }
+        ],
+        "usage": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "output_tokens": null,
+          "uncached_input_tokens": null
+        },
+        "interventions": 1,
+        "reported_cost_usd": null,
+        "candidate_sha256": "a7963a398c27b6ba25089ab305b3fb2eccef092e3bbe8ca16c23fe6c94fbd113",
+        "fixture_identity": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+        "evaluator_identity": "131e12c59b2b753d40bc9409ade6e4b2da6b94851b79bb792ae0b59b530a4280",
+        "plugin_identity": "10da984327ebb48aafc6f04284dc01e7d16a077d00068efcda74ba2805038bbc"
+      },
+      {
+        "depth": "deep",
+        "accepted": true,
+        "behavior": true,
+        "workflow": true,
+        "resume": true,
+        "outside_scope": [],
+        "attempt_seconds": 164.968,
+        "runner_seconds": 164.276,
+        "interruption": {
+          "success": true,
+          "first_timed_out": true,
+          "fresh_runner": true
+        },
+        "sessions": [
+          {
+            "returncode": 124,
+            "seconds": 10.013,
+            "timed_out": true,
+            "termination_error": null
+          },
+          {
+            "returncode": 0,
+            "seconds": 154.263,
+            "timed_out": false,
+            "termination_error": null
+          }
+        ],
+        "usage": {
+          "input_tokens": null,
+          "cached_input_tokens": null,
+          "output_tokens": null,
+          "uncached_input_tokens": null
+        },
+        "interventions": 1,
+        "reported_cost_usd": null,
+        "candidate_sha256": "9fd1d54e39f38b032d4dd4f1146d746ea21e76d7c658a06554311df9974e1972",
+        "fixture_identity": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+        "evaluator_identity": "131e12c59b2b753d40bc9409ade6e4b2da6b94851b79bb792ae0b59b530a4280",
+        "plugin_identity": "10da984327ebb48aafc6f04284dc01e7d16a077d00068efcda74ba2805038bbc"
+      }
+    ],
+    "limits": "Three isolated Codex CLI checks start from a prepared red checkpoint. They do not establish native plugin discovery, Claude/Gemini access or cross-host handoff."
+  },
+  "ci_observations": {
+    "baseline": {
+      "url": "https://github.com/zagrosi-code/zagrosi-forge/actions/runs/36872690815",
+      "head": "c6075892eaac4095a9a04049752f4150ae51fd95",
+      "conclusion": "success"
+    },
+    "current": {
+      "url": "https://github.com/zagrosi-code/zagrosi-forge/actions/runs/37007325632",
+      "head": "8293a95268818db6ce8745150fb1a5423de51b4e",
+      "conclusion": "success"
+    },
+    "windows": {
+      "baseline": {
+        "critical_path_seconds": 1262.0,
+        "longest_job_seconds": 1262.0,
+        "aggregate_job_seconds": 1262.0,
+        "shared_tests": {
+          "passed": 493,
+          "skipped": 5,
+          "pytest_seconds": 432.8
+        },
+        "portable_tests": {
+          "passed": 764,
+          "skipped": 34,
+          "pytest_seconds": 799.96
+        }
+      },
+      "current": {
+        "critical_path_seconds": 784.0,
+        "longest_job_seconds": 784.0,
+        "aggregate_job_seconds": 1342.0,
+        "shared_tests": {
+          "passed": 585,
+          "skipped": 5,
+          "pytest_seconds": 523.73
+        },
+        "portable_tests": {
+          "passed": 772,
+          "skipped": 34,
+          "pytest_seconds": 748.54
+        }
+      },
+      "observed_critical_path_change_seconds": -478.0,
+      "observed_critical_path_change_percent": -37.88
+    },
+    "limits": [
+      "One observed run per version on independently allocated GitHub runners; runner variability and changed source prevent causal attribution.",
+      "Current Windows collection adds 92 shared and 8 portable tests, including static TypeScript compatibility checks; previous node coverage was retained.",
+      "Parallel jobs shorten the observed dependency path but aggregate runner time is reported separately; this is not a general compute-cost or plugin/model speed claim.",
+      "Job/step durations use GitHub timestamps; pytest durations come from retained job logs."
+    ]
+  },
+  "offline_cli_probes": [
+    {
+      "provider": "codex",
+      "authentication": "unchecked",
+      "cli": {
+        "reason": "The CLI accepted review arguments and rejected an invalid control argument with --help; model access is unchecked.",
+        "status": "compatible",
+        "version": "0.154.0"
+      }
+    },
+    {
+      "provider": "claude",
+      "authentication": "unchecked",
+      "cli": {
+        "reason": "The CLI help probe did not demonstrate argument validation; compatibility remains unknown.",
+        "status": "unknown",
+        "version": "2.1.285"
+      }
+    },
+    {
+      "provider": "gemini",
+      "authentication": "unchecked",
+      "cli": {
+        "reason": "The CLI help probe did not demonstrate argument validation; compatibility remains unknown.",
+        "status": "unknown",
+        "version": "0.62.0"
+      }
+    }
+  ],
+  "limits": [
+    "Sixteen small-fixture attempts at standard depth; no production-repository or all-depth superiority claim.",
+    "One local host and requested Codex model/effort; backend model revision is not attested.",
+    "These frozen workspaces inherit an ignored outer Git repository. Fresh-trial Git isolation was added after the experiment; these results do not measure that change.",
+    "Local development and targeted checks overlapped some attempts. Timing is observational and does not isolate CPU contention or model-service variability.",
+    "All failures/timeouts count. No operator corrections during attempts; absent instrumented intervention or cost fields remain null.",
+    "Reviews use shuffled labels without arm identities, timing or usage; code may reveal workflow fingerprints.",
+    "Three fresh review agents attested independence and inspected supplied source/tests/checks. Review identities are not externally authenticated; tests were not rerun by reviewers.",
+    "Independent review time is not measured. Command intervals are event-receipt observations, not CPU time or model thinking.",
+    "Cached input is a subset of total input. Token and CLI-cost observations are not subscription charges.",
+    "Claude/Gemini authentication and live cross-host acceptance remain pending.",
+    "Historical reports and raw attempt evidence are retained without rewriting."
+  ]
+}

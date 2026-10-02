@@ -1,5 +1,9 @@
 # Coding trials
 
+[2 October observations](quality-results-2026-10-02.md): sixteen repeated Forge/plain
+attempts, blinded code review, and separate interrupted-session checks. Prior
+reports below remain unchanged.
+
 Nine isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
 deep discount design, a real Forge resume checkpoint, an order-dispatch godfile,
 an import preview across several modules, a Node summary feature, and TypeScript
@@ -293,6 +297,12 @@ checkpoint, and fresh continuation; plus one unsupported request per host.
 It independently checks the original failing test, unchanged requirements/tests,
 saved input hashes, final behavior, admitted records and captured verification.
 These are workflow checks, not performance or general code-quality comparisons.
+
+Native `prepare` copies the selected package into a UUID namespace under the
+active Codex plugin cache (`$CODEX_HOME/plugins/cache`, default
+`~/.codex/plugins/cache`). It retains that namespace for later continuation;
+remove only the recorded namespace after finishing. Use the isolated coding-trial
+harness above when writing to the native cache is outside the authorized scope.
 
 ```bash
 # No model calls: native staging/discovery, fixed inputs and evaluator hashes.
