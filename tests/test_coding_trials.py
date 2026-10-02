@@ -17,6 +17,28 @@ trials = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(trials)
 
 
+@pytest.mark.parametrize("argv", [None, [], {}, "node --test", [None], [""], ["node", 1], ["node", "a\x00b"]])
+def test_invalid_case_test_argv_fails_before_preparation(tmp_path, monkeypatch, argv):
+    monkeypatch.setitem(trials.CASES["cleanup"], "test_argv", argv)
+    with pytest.raises(ValueError, match="test_argv"):
+        trials.prepare(tmp_path / "trial", "cleanup")
+    assert not (tmp_path / "trial").exists()
+
+
+def test_trusted_case_test_argv_runs_literally_and_preserves_definition(tmp_path, monkeypatch):
+    literal = "$(unexpected shell); value with spaces"
+    argv = [sys.executable, "-c", "import sys; print(sys.argv[1])", literal]
+    monkeypatch.setitem(trials.CASES["cleanup"], "test_argv", argv)
+    selected = trials.test_command(trials.CASES["cleanup"])
+    assert selected == argv
+    selected.append("local change")
+    assert trials.CASES["cleanup"]["test_argv"] == argv and len(argv) == 4
+    trials.prepare(tmp_path / "trial", "cleanup", plain_agent=True)
+    result = trials.check(tmp_path / "trial")
+    assert result["tests"]["returncode"] == 0
+    assert result["tests"]["stdout"].strip() == literal
+
+
 @pytest.mark.parametrize("case", ["summary", "discount", "resume", "godfile"])
 def test_unfinished_feature_fails_independent_oracle(tmp_path, case):
     trials.prepare(tmp_path / "trial", case)

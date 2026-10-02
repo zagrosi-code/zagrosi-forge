@@ -42,6 +42,10 @@ Parallelize only disjoint files and serialize records.
 
 1. Read index once, current section, original source excerpts, linked contracts,
    and relevant callers. Resolve assumptions that contradict the source first.
+   For required [compatibility checks](references/compatibility.md), activate this
+   ready section with `implement-setup --section "{section}"` and the setup arguments
+   above before source edits; capture its passing baseline. Follow returned actions
+   when resuming. Read-only status does not activate a section.
 2. Test changed behavior first; confirm meaningful failure. Reuse refactor coverage;
    inspect cosmetic changes. If a meaningful test fails in mutable mode, save its
    result before source edits with `implement-progress --planning-dir "{planning_dir}" --section
@@ -52,7 +56,9 @@ Parallelize only disjoint files and serialize records.
    Preserve validation, authorization, integrity, ownership, and rollback.
 4. Capture targeted checks with `implement-verify --planning-dir "{planning_dir}"
    --target-dir "{target_dir}" --section "{section}" -- <command argv>`.
-   Use its returned receipt; do not run the full suite per section.
+   First rerun required compatibility checks with `--stage candidate`; repair
+   failures. This pair supplements ordinary feature checks and final integration.
+   Use the ordinary verification receipt when recording; do not run the full suite per section.
    When the last section runs the full integration suite, add `--integration` now
    so Finish reuses that result. Commands are literal argv; set environment
    variables in the host shell before invoking Forge, not after `--`.
@@ -80,7 +86,8 @@ later edits require refreshed verification.
 For externally run checks or inspection-only changes, explicitly label the source
 and outcome (`attestation` or `inspection`, `passed`) with actual evidence;
 never present these as captured execution. Legacy free text remains readable but
-cannot prove new completion. Failed, skipped, or unknown checks block completion.
+cannot prove new completion. Manual evidence cannot replace a required compatibility
+pair. Failed, skipped, or unknown checks block completion.
 
 ```bash
 python3 "{plugin_root}/scripts/zagrosi_skills.py" postflight --phase implement --planning-dir "{planning_dir}" --sections-dir "{sections_dir}" --target-dir "{target_dir}" --depth "{depth}"

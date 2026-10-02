@@ -9,6 +9,58 @@ from coding_trial_comparison import CRITERIA, packets, reviews
 from coding_trial_runner import Telemetry, command_phase
 
 
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("failure", [None, "behavior", "scope", "review", "runner", "evaluator"])
+def test_common_quality_uses_the_same_nonworkflow_rules_for_every_arm(tmp_path, plain, failure):
+    trial = tmp_path / "trial"
+    trials.prepare(trial, "cleanup", plain_agent=plain)
+    write_cleanup(trial)
+    review = write_review(trial)
+    if failure == "behavior":
+        source = trial / "workspace/src/ledger.py"
+        original = source.read_text()
+        changed = original.replace("Total: ", "TOTAL: ")
+        assert changed != original
+        source.write_text(changed)
+        review = write_review(trial)
+    elif failure == "scope":
+        (trial / "workspace/unrelated.txt").write_text("outside scope")
+    elif failure == "review":
+        review = None
+    elif failure in {"runner", "evaluator"}:
+        record = json.loads((trial / "trial.json").read_text())
+        record.update({"runner": {"returncode": 7}} if failure == "runner" else {"oracle_sha256": "stale"})
+        (trial / "trial.json").write_text(json.dumps(record))
+    result = trials.check(trial, review=review)
+    assert result["common_quality"] == {"success": failure is None}
+    assert result["success"] is (plain and failure is None)
+
+
+def test_resume_protocol_failure_still_blocks_delivery_but_not_common_code_quality(tmp_path, monkeypatch):
+    trial = tmp_path / "trial"
+    trials.prepare(trial, "cleanup")
+    write_cleanup(trial)
+    monkeypatch.setattr(trials, "workflow_verdict", lambda *args: {"success": True})
+    monkeypatch.setattr(trials, "resume_verdict", lambda *args: {"success": False})
+    result = trials.check(trial, review=write_review(trial))
+    assert not result["success"]
+    assert result["common_quality"] == {"success": True}
+    assert result["resume"]["success"] is False
+
+
+def test_common_quality_retains_plugin_source_provenance(tmp_path):
+    trial = tmp_path / "trial"
+    trials.prepare(trial, "cleanup")
+    write_cleanup(trial)
+    record = json.loads((trial / "trial.json").read_text())
+    record["plugin_sha256"]["scripts/zagrosi_skills.py"] = "changed-source"
+    (trial / "trial.json").write_text(json.dumps(record))
+    result = trials.check(trial, review=write_review(trial))
+    assert result["behavior"]["success"] and result["cleanup"]["success"]
+    assert not result["plugin_provenance"]["success"]
+    assert not result["common_quality"]["success"]
+
+
 @pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
 def test_plain_agent_keeps_behavior_and_cleanup_checks_without_forge(tmp_path, depth):
     trial = tmp_path / "plain"

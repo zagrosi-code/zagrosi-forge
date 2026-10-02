@@ -161,10 +161,12 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
             "workflow": "zagrosi-plan",
             "created_at": _storage.now_iso(),
         }
-        _storage.write_json(config_path, config)
-
     scaffold = create_plan_scaffold(spec_file, config.get("depth_mode", args.depth),
                                     detached=getattr(args, "for_detached", False))
+    if mode == "new":
+        if scaffold["created"]:
+            config["compatibility_policy"] = "declared"
+        _storage.write_json(config_path, config)
     artifacts = _artifacts.plan_artifact_state(planning_dir)
     files = {name: artifacts[name] for name in ("research", "interview", "spec", "plan", "integration_notes")}
     files["plan_tdd"] = artifacts["tdd"]
@@ -226,6 +228,8 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
     if getattr(args, "implementation_root", None):
         from . import detached_setup as _detached_setup
 
+        if getattr(args, "section", None):
+            return _output.print_json({"success": False, "error": "--section activation is only supported by mutable setup."}, 1)
         args.profile = args.profile or "solo"
         return _detached_setup.detached_implement_setup(args)
     return _mutable_lifecycle(args, _mutable_implement_setup)
@@ -242,7 +246,7 @@ def _mutable_lifecycle(args: argparse.Namespace, operation) -> int:
 
 
 def _mutable_implement_setup(args: argparse.Namespace) -> int:
-    from . import mutable_inputs
+    from . import compatibility, mutable_inputs
 
     sections_dir = _storage.resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
@@ -261,6 +265,14 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
     if not admission["success"]:
         return _output.print_json({**admission, "error": "Forge planning admission failed; finish zagrosi-plan before implementation."}, 1)
 
+    readiness = _state.mutable_admitted_readiness(planning_dir, state=state, profile=args.profile,
+                                                progress=progress, admission=admission, target_dir=target_dir)
+    readiness.pop("admission")
+    selected = getattr(args, "section", None) or readiness["next_section"]
+    if selected and selected not in readiness["ready_sections"]:
+        return _output.print_json({"success": False, "error": "Select a known, incomplete section whose predecessors are complete.",
+                                   "section": selected, "ready_sections": readiness["ready_sections"]}, 1)
+
     state_dir = planning_dir / "implementation"
     config_path = state_dir / "zagrosi_implement_config.json"
     state_path = state_dir / "zagrosi_implement_state.json"
@@ -270,11 +282,6 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         config_path = legacy_config_path
     if not state_path.exists() and legacy_state_path.exists():
         state_path = legacy_state_path
-    state_dir.mkdir(parents=True, exist_ok=True)
-
-    if not state_path.exists():
-        _storage.write_json(state_path, state)
-
     config = {
         "sections_dir": str(sections_dir),
         "target_dir": str(target_dir),
@@ -284,11 +291,6 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         "profile": args.profile,
         "depth_mode": admission["depth_mode"],
     }
-    _storage.write_json(config_path, config)
-
-    readiness = _state.mutable_admitted_readiness(planning_dir, state=state, profile=args.profile,
-                                                progress=progress, admission=admission, target_dir=target_dir)
-    readiness.pop("admission")
     repo = _storage.git_info(target_dir)
     warnings: list[str] = []
     if repo.get("is_protected_branch"):
@@ -320,10 +322,16 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         )
         payload["preflight"] = preflight
         payload["success"] = bool(payload["success"] and preflight.get("success"))
-    if payload["success"] and readiness["next_section"]:
+    if payload["success"]:
+        if selected:
+            compatibility.activate(planning_dir, target_dir, selected)
+        if not state_path.exists():
+            _storage.write_json(state_path, state)
+        _storage.write_json(config_path, config)
+    if payload["success"] and selected:
         from .resume import section_entry
 
-        entry = section_entry(planning_dir, readiness["next_section"], target_dir=target_dir)
+        entry = section_entry(planning_dir, selected, target_dir=target_dir)
         payload.update(entry)
     elif payload["success"] and not readiness["remaining_sections"]:
         payload.update(_actions.implementation_commands(planning_dir, target_dir=target_dir))
@@ -340,7 +348,7 @@ def deep_implement_record_section(args: argparse.Namespace) -> int:
 
 
 def _mutable_record_section(args: argparse.Namespace) -> int:
-    from . import mutable_inputs, verification as verification_evidence
+    from . import compatibility, mutable_inputs, verification as verification_evidence
 
     sections_dir = _storage.resolve_path(args.sections_dir)
     planning_dir = sections_dir.parent
@@ -404,6 +412,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         "evidence_rows": _markdown.normalize_repeated(getattr(args, "evidence_rows", [])),
         "verification": verification,
         "verification_result": verification_result,
+        "compatibility": compatibility.completion_evidence(planning_dir, target_dir, args.section),
         "commit_status": args.commit_status or ("recorded" if args.commit else "not_recorded"),
         "input_snapshot": _state.contract_snapshot(
             planning_dir, args.section,

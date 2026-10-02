@@ -174,7 +174,7 @@ def lint_sections(args: argparse.Namespace) -> int:
     return _quality.emit_quality("sections", findings, args, extras)
 
 
-def section_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list[_models.Finding], dict[str, Any]]:
+def section_analysis(planning_dir: Path, depth: str | None = None, *, allow_compatibility: bool = True) -> tuple[list[_models.Finding], dict[str, Any]]:
     depth = depth or _artifacts.planning_depth(planning_dir)
     budgets = _markdown.word_budgets(depth)
     findings = _artifacts.compact_plan_findings(planning_dir, depth=depth)
@@ -189,6 +189,9 @@ def section_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list
         findings.append(_quality.finding("critical", "missing-section-index", "sections/index.md is missing.", planning_dir / "sections" / "index.md"))
         return findings, {"section_progress": progress}
 
+    if allow_compatibility:
+        findings.extend(_quality.finding("critical", code, message, path)
+                        for code, message, path in _contract.compatibility_errors(planning_dir))
     index_path = planning_dir / "sections" / "index.md"
     index_text = _storage.read_text(index_path)
     index_words = _markdown.word_count(index_text)
@@ -378,6 +381,9 @@ def plan_artifact_findings(planning_dir: Path, *, allow_compact: bool = True) ->
         "source_spec": "spec.md",
     }
     findings = _artifacts.compact_plan_findings(planning_dir, allow_compact=allow_compact)
+    if allow_compact:
+        findings.extend(_quality.finding("critical", code, message, path)
+                        for code, message, path in _contract.compatibility_errors(planning_dir))
     present: dict[str, str] = {}
     def has_placeholder_cell(text: str) -> bool:
         blocks, lines = _markdown.split_markdown_fences_with_closure(text)

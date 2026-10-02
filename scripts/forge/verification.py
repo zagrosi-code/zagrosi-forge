@@ -89,6 +89,13 @@ def implement_verify(args) -> int:
             raise ValueError("Provide an explicit command after --, or --source attestation|inspection with --outcome and --evidence.")
         if command and (args.outcome or args.evidence):
             raise ValueError("Captured execution determines its own outcome; omit --outcome and --evidence.")
+        if getattr(args, "stage", None):
+            from .compatibility import capture
+
+            if not args.section or args.integration or not command:
+                raise ValueError("Compatibility stages require --section and explicit argv; omit --integration and manual evidence.")
+            result = capture(planning, target, args.section, args.stage, command, args.timeout)
+            return output.print_json(result, 0 if result["success"] else 1)
         before = mutable_inputs.verification_snapshot(planning, target, args.section)
         path = receipt_path(planning, args.section)
         receipts = {path: before}

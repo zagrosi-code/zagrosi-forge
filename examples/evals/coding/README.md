@@ -43,6 +43,10 @@ so change inspection works even inside an ignored parent directory. Preparation
 isolates Git configuration, hooks, templates and signing; the surrounding
 repository remains untouched. Planning and generated caches are excluded through
 local Git metadata. Historical workspaces retain their original layout.
+Trusted evaluator case definitions may set `test_argv`, a nonempty array of
+nonempty strings without NUL bytes, to select their native test command. The
+array executes directly without shell expansion. Invalid definitions fail before
+workspace creation; candidate files cannot select or replace this command.
 Output is drained continuously; only the last 12,000 bytes of each stream are
 retained, with byte counts and truncation flags. Timeouts retain available output
 and return 124. POSIX timeouts kill the process group, including children that
@@ -61,7 +65,7 @@ the baseline. Known regressions fail while valid shared-calculation controls pas
 
 ## Verdicts and cleanup review
 
-Results keep three decisions separate:
+Results keep these decisions separate:
 
 - `behavior`: the independent oracle completed and existing/added tests passed.
 - `workflow`: Forge admits the unique plan at or beneath `.planning` with strict checks at the
@@ -72,6 +76,13 @@ Results keep three decisions separate:
   before/after regression evidence. Existing tests and the independent oracle can
   supply sufficient coverage; add tests where coverage is weak. Test changes are
   reported separately. Other cases report `not_required`.
+- `common_quality.success`: behavior, allowed scope/dependencies, unchanged
+  evaluator and applicable plugin provenance, required cleanup review, and runner
+  checks, applied equally to every arm. Forge workflow and resume-history evidence
+  are excluded from this code-quality measure.
+- `success`: the existing delivery verdict, which additionally requires Forge
+  workflow completion and preserved resume evidence where applicable. Those
+  delivery requirements are unchanged.
 
 An unchanged cleanup fixture can pass behavior, but cannot pass the overall trial.
 Comments, formatting, docstrings and empty new modules do not establish useful cleanup.
@@ -140,6 +151,15 @@ python tools/trial_matrix.py report /tmp/forge-matrix
 
 Every scheduled attempt remains in the denominator, including failures, timeouts
 and pending work. A passing checker without a completed runner is insufficient.
+Groups retain delivery `outcomes` and `accepted_outcomes`, and add
+`common_quality_outcomes` and `accepted_common_quality`. Each attempt records
+common quality as `passed`, `failed`, or `unknown`; old results without the new
+field remain unknown and are never regraded from delivery success. Both cost
+aggregates include all scheduled attempts. Their acceptance rate is recorded
+acceptances divided by scheduled work, not a pass rate among checked candidates;
+read it alongside the explicit unknown count. Missing runner or attempt evidence
+cannot establish common acceptance. A nonzero checker exit caused solely by
+missing Forge workflow can coexist with accepted common code quality.
 Each trial retains its log, runner time, preparation/check time, behavior and
 workflow verdicts, code metrics and source fingerprints. Supply independent
 cleanup reviews with the existing `check --review` command; rerun checks after

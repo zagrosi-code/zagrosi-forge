@@ -90,6 +90,28 @@ def requirements(planning_dir: Path) -> tuple[list[str], list[str]]:
     return (contract["ids"], contract["errors"]) if contract else (sorted(ids), [])
 
 
+def compatibility_errors(planning_dir: Path) -> list[tuple[str, str, Path]]:
+    """Validate declared boundaries; only newly configured mutable plans require them."""
+    from . import artifacts, compatibility, sections
+
+    config = artifacts.planning_config(planning_dir)
+    errors = []
+    if "compatibility_policy" in config and config["compatibility_policy"] != "declared":
+        errors.append(("invalid-compatibility-policy", "Saved compatibility_policy must be declared when present.", planning_dir))
+    for section in sections.check_section_progress(planning_dir).get("sections", []):
+        path = planning_dir / "sections" / f"{section}.md"
+        if not path.is_file():
+            continue  # Existing section admission reports missing files.
+        try:
+            declared = compatibility.parse_declaration(_storage.read_text(path))
+        except ValueError as exc:
+            errors.append(("invalid-compatibility", str(exc), path))
+        else:
+            if config.get("compatibility_policy") == "declared" and declared is None:
+                errors.append(("missing-compatibility", "Declare required compatibility checks or a concrete not_required reason.", path))
+    return errors
+
+
 def create_plan_scaffold(spec_file: Path, depth: str, *, detached: bool = False) -> dict:
     """Seed a draft once; existing files and detached authoring remain untouched."""
     planning_dir = spec_file.parent
@@ -110,6 +132,7 @@ def create_plan_scaffold(spec_file: Path, depth: str, *, detached: bool = False)
                     "Dependencies: none. Execution order: section-01-contract. Parallel: no siblings.\n"),
             section: (SCAFFOLD_MARKER + "\n# Draft: choose section boundaries before implementation\n\n"
                       "## Contract\n" + "\n".join(bodies) + "\n## Owned files\nTODO\n\n"
+                      '## Compatibility\n```json\n{"version": 1, "mode": "TODO"}\n```\n\n'
                       "## Evidence\nTODO\n\n## Review\nVerdict: blocked\nReviewed: TODO\n"),
         }
         index.parent.mkdir()
@@ -129,7 +152,7 @@ def scaffold_unfinished(planning_dir: Path) -> bool:
     plan = descriptor["path"] if descriptor else planning_dir / "sections/section-01-contract.md"
     contents = "\n".join(_storage.read_text(path) for path in (index, plan) if path and path.is_file())
     if SCAFFOLD_MARKER in contents:
-        return bool(artifacts.compact_plan_findings(planning_dir)) or bool(re.search(
+        return bool(artifacts.compact_plan_findings(planning_dir) or compatibility_errors(planning_dir)) or bool(re.search(
             r"(?im)(?:^|:\s*)(?:TODO|TBD)\s*$", contents,
         ))
     return False

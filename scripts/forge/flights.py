@@ -226,11 +226,11 @@ def implement_preflight_report(
     else:
         # Detached v1 admission retains its pinned artifact/readiness contract.
         artifact_payload = artifact_payload or _validation.plan_artifacts_payload(
-            planning_dir, argparse.Namespace(profile=profile, strict=True),
+            planning_dir, argparse.Namespace(profile=profile, strict=True, allow_compact=False),
         )
         gates.append(_gates.direct_gate("lint-plan-artifacts", bool(artifact_payload.get("success")), artifact_payload))
         for name, analyze in (
-            ("sections", lambda: _scoring.section_findings_for_score(planning_dir, depth)),
+            ("sections", lambda: _validation.section_analysis(planning_dir, depth, allow_compatibility=False)),
             ("traceability", lambda: _traceability.traceability_analysis(planning_dir)),
             ("implementation-readiness", lambda: _scoring.implementation_readiness_analysis(planning_dir, 8)),
         ):

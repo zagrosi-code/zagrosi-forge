@@ -47,6 +47,10 @@ material permitted to be sent to that provider. Never include credentials. Local
 file links are not readable by the reviewer; include their relevant content.
 For refactors, include the original compatibility wording and before/after
 caller-surface evidence; a plan's claim of preservation is insufficient.
+When delegating [check derivation](../../zagrosi-implement/references/compatibility.md),
+supply original source and callers before replacement code. Record who derived
+the checks and what they saw; a separate model or captured run alone does not
+prove independent derivation. Reviewing the candidate afterward is a separate task.
 Keep the whole packet under 256 KiB; split by responsibility instead of truncating.
 
 ### Two reviewers

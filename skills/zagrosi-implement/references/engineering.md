@@ -21,7 +21,11 @@ Preserve observable behavior and safety invariants. When existing coverage is
 weak, add characterization tests before refactoring. Run targeted regression
 checks before/after meaningful changes and one full suite at final integration.
 Derive compatibility tests from the unchanged source and its callers, not the
-planned replacement. When full public compatibility is promised, enumerate names
+planned replacement. For meaningful mutable refactors, use the shared
+[compatibility checks](compatibility.md) to capture a passing baseline and rerun
+unchanged checks against the candidate. Existing tests may suffice; record check
+provenance honestly. Keep intended changes in separate red/green regressions.
+When full public compatibility is promised, enumerate names
 and signatures, including re-exported types/dependencies, and run those assertions
 against the baseline before moving code. Keep them passing through the move.
 Neither a plan assumption nor a new facade or `__all__` may narrow that promise.

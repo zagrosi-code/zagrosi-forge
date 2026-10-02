@@ -32,6 +32,11 @@ CASES = json.loads((PACK / "cases.json").read_text())
 
 
 def test_command(case: dict) -> list[str]:
+    if "test_argv" in case:
+        argv = case["test_argv"]
+        if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in argv):
+            raise ValueError("test_argv must be a nonempty array of nonempty strings without NUL bytes")
+        return list(argv)
     if case.get("runtime") == "typescript":
         return ["node", "--test", "tests/access.test.ts"]
     return ["node", "--test", "tests/ledger.test.js"] if case.get("runtime") in {"node", "typescript"} else [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"]
@@ -104,13 +109,13 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
     plugin_root = (plugin_root or ROOT).resolve()
     if plain_agent and case == "resume":
         raise ValueError("The Forge resume checkpoint has no comparable plain-agent arm")
+    tests = test_command(CASES[case])
     trial.mkdir(parents=True, exist_ok=False)
     workspace = trial / "workspace"
     fixture = PACK / CASES[case].get("fixture", "fixture")
     oracle = ROOT / CASES[case].get("oracle", "tools/coding_trial_checks.py")
     shutil.copytree(fixture, workspace, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     selected = depth or CASES[case]["depth"]
-    tests = test_command(CASES[case])
     checkpoint = prepare_resume(ROOT, workspace, selected, tests, plugin_root=plugin_root) if case == "resume" else None
     baseline = files(workspace)
     initialize_repository(workspace, baseline)
@@ -200,10 +205,11 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
     behavior = {"success": oracle["returncode"] == tests["returncode"] == 0 and oracle_complete
                and not evaluator_changed}
     cleanup = cleanup_verdict(record, workspace, CASES[record["case"]].get("cleanup_required", False), review)
-    result = {"success": behavior["success"] and (plain_agent or workflow["success"]) and cleanup["success"] is not False
-              and resume["success"] is not False
-              and provenance["success"] and not outside_scope and "error" not in metrics
-              and not metrics.get("external_imports") and (record.get("runner") or {}).get("returncode", 0) == 0,
+    common_quality = (behavior["success"] and cleanup["success"] is not False and provenance["success"]
+                      and not outside_scope and "error" not in metrics and not metrics.get("external_imports")
+                      and (record.get("runner") or {}).get("returncode", 0) == 0)
+    result = {"success": common_quality and (plain_agent or workflow["success"]) and resume["success"] is not False,
+              "common_quality": {"success": common_quality},
               "case": record["case"], "depth": record["depth"], "plain_agent": plain_agent,
               "runtime": case.get("runtime", "python"), "changed_files": changed, "outside_scope": outside_scope,
               "evaluator_changed": evaluator_changed, "protected_changes": protected_changes,
