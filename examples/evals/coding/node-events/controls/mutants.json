@@ -1,0 +1,58 @@
+[
+  {
+    "name": "once-after-callback",
+    "path": "src/events.cjs",
+    "old": "      if (entry.once) entry.cancel();\n      const { listener } = entry;\n      listener(payload, topic);",
+    "new": "      const { listener } = entry;\n      listener(payload, topic);\n      if (entry.once) entry.cancel();",
+    "count": 1,
+    "violates": "One-shot listeners are cancelled immediately before user code."
+  },
+  {
+    "name": "cancelled-snapshot-runs",
+    "path": "src/events.cjs",
+    "old": "      if (!entry.active) continue;\n",
+    "new": "",
+    "count": 1,
+    "violates": "A registration cancelled before its turn must be skipped."
+  },
+  {
+    "name": "late-global-snapshot",
+    "path": "src/events.cjs",
+    "old": "    const entries = [...(this._topics.get(topic) || []), ...this._all];",
+    "new": "    const topicEntries = Array.from(this._topics.get(topic) || []);\n    const all = this._all;\n    function* snapshotGroups() {\n      yield* topicEntries;\n      yield* Array.from(all);\n    }\n    const entries = snapshotGroups();",
+    "count": 1,
+    "violates": "Both topic and global listener groups are snapshotted before any callback."
+  },
+  {
+    "name": "cloned-payload",
+    "path": "src/events.cjs",
+    "old": "      listener(payload, topic);",
+    "new": "      listener(structuredClone(payload), topic);",
+    "count": 1,
+    "violates": "Callbacks receive the original payload reference and can observe earlier listener mutations."
+  },
+  {
+    "name": "deduplicated-listeners",
+    "path": "src/events.cjs",
+    "old": "    const entry = { listener, once, active: true };",
+    "new": "    const existing = [...entries].find(entry => entry.listener === listener);\n    if (existing) return existing.cancel;\n    const entry = { listener, once, active: true };",
+    "count": 1,
+    "violates": "Every registration is independent, including repeated registration of the same function."
+  },
+  {
+    "name": "swallowed-error",
+    "path": "src/events.cjs",
+    "old": "      listener(payload, topic);",
+    "new": "      try { listener(payload, topic); } catch {}",
+    "count": 1,
+    "violates": "Propagate the exact callback error immediately and stop the current publication."
+  },
+  {
+    "name": "global-before-topic",
+    "path": "src/events.cjs",
+    "old": "    const entries = [...(this._topics.get(topic) || []), ...this._all];",
+    "new": "    const entries = [...this._all, ...(this._topics.get(topic) || [])];",
+    "count": 1,
+    "violates": "Matching topic listeners run before global listeners."
+  }
+]

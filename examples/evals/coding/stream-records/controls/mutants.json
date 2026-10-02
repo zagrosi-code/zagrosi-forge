@@ -1,0 +1,50 @@
+[
+  {
+    "name": "drop-final-record",
+    "path": "src/record_stream.py",
+    "old": "return self._record(tail) if tail else []",
+    "new": "return []",
+    "count": 1,
+    "violates": "finish must emit the final unterminated object"
+  },
+  {
+    "name": "discard-invalid-utf8",
+    "path": "src/record_stream.py",
+    "old": "codecs.getincrementaldecoder(\"utf-8\")()",
+    "new": "codecs.getincrementaldecoder(\"utf-8\")(errors=\"ignore\")",
+    "count": 1,
+    "violates": "invalid UTF-8 must fail rather than discard bytes"
+  },
+  {
+    "name": "ignore-blank-line-numbers",
+    "path": "src/record_stream.py",
+    "old": "self._line += 1\n        if not line.strip():\n            return []",
+    "new": "if not line.strip():\n            return []\n        self._line += 1",
+    "count": 1,
+    "violates": "errors count ignored blank physical lines"
+  },
+  {
+    "name": "reuse-after-content-error",
+    "path": "src/record_stream.py",
+    "old": "self._closed = True\n            raise RecordError",
+    "new": "raise RecordError",
+    "count": 3,
+    "violates": "content errors close the decoder"
+  },
+  {
+    "name": "eagerly-consume-chunks",
+    "path": "src/record_stream.py",
+    "old": "for chunk in chunks:",
+    "new": "for chunk in list(chunks):",
+    "count": 1,
+    "violates": "stop consuming the source iterable at the first error"
+  },
+  {
+    "name": "allow-json-arrays",
+    "path": "src/record_stream.py",
+    "old": "if not isinstance(record, dict):",
+    "new": "if not isinstance(record, (dict, list)):",
+    "count": 1,
+    "violates": "every record must be a JSON object"
+  }
+]

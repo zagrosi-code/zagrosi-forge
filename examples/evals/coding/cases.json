@@ -69,5 +69,55 @@
     "oracle": "tools/retry_trial_checks.py",
     "assertions": 271,
     "request": "Read prompt.md and fix failed webhook retries and cross-tenant event-ID collisions, preserving the documented API and side effects."
+  },
+  "config-layers": {
+    "fixture": "config-layers/fixture",
+    "oracle": "tools/config_trial_checks.py",
+    "assertions": 327,
+    "depth": "standard",
+    "cleanup_required": true,
+    "protected_paths": [
+      "src/service.py"
+    ],
+    "request": "Read prompt.md and add effective configuration provenance while preserving existing loaders, errors, input access order and public callers. Simplify duplicated resolution logic with regression coverage."
+  },
+  "atomic-publish": {
+    "fixture": "atomic-publish/fixture",
+    "oracle": "tools/publication_trial_checks.py",
+    "assertions": 513,
+    "depth": "deep",
+    "cleanup_required": true,
+    "protected_paths": [
+      "src/release.py"
+    ],
+    "request": "Read prompt.md and make release-bundle publication atomic per file and recoverable across staging, replacement and callback failures. Preserve public APIs, validation and caller behavior; consolidate duplicated orchestration with regression coverage."
+  },
+  "stream-records": {
+    "depth": "standard",
+    "fixture": "stream-records/fixture",
+    "oracle": "tools/stream_trial_checks.py",
+    "assertions": 556,
+    "cleanup_required": true,
+    "protected_paths": [
+      "src/stream_report.py"
+    ],
+    "request": "Read prompt.md and fix UTF-8 record decoding across arbitrary network chunks, preserving the documented API, errors, stream consumption and reporting caller. Simplify the duplicated row validation and unnecessary copies, and add focused regression tests."
+  },
+  "node-events": {
+    "runtime": "node",
+    "fixture": "node-events/fixture",
+    "oracle": "tools/event_trial_checks.cjs",
+    "assertions": 208,
+    "depth": "standard",
+    "cleanup_required": true,
+    "protected_paths": [
+      "src/job-monitor.cjs"
+    ],
+    "test_argv": [
+      "node",
+      "--test",
+      "tests/events.test.cjs"
+    ],
+    "request": "Read prompt.md and complete the one-shot event subscription improvement and cleanup. Preserve the documented public behavior and the existing job-monitor caller."
   }
 }

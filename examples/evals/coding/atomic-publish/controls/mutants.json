@@ -1,0 +1,58 @@
+[
+  {
+    "name": "forgets-failed-callback-file",
+    "path": "src/publisher.py",
+    "old": "            changed.append(name)\n            if on_publish is not None:\n                on_publish(name, target)",
+    "new": "            if on_publish is not None:\n                on_publish(name, target)\n            changed.append(name)",
+    "count": 1,
+    "violates": "forgets failed callback file"
+  },
+  {
+    "name": "leaves-created-files",
+    "path": "src/publisher.py",
+    "old": "            if old is None:\n                target.unlink()",
+    "new": "            if old is None:\n                pass",
+    "count": 1,
+    "violates": "leaves created files"
+  },
+  {
+    "name": "drops-permission-bits",
+    "path": "src/publisher.py",
+    "old": "                stage.chmod(previous[name][1])",
+    "new": "                stage.chmod(0o400)",
+    "count": 1,
+    "violates": "Existing destinations retain their observed permission bits instead of a fixed read-only mode."
+  },
+  {
+    "name": "writes-without-atomic-replace",
+    "path": "src/publisher.py",
+    "old": "            os.replace(stage, target)",
+    "new": "            target.write_bytes(stage.read_bytes())\n            stage.unlink()",
+    "count": 1,
+    "violates": "writes without atomic replace"
+  },
+  {
+    "name": "swallows-original-failure",
+    "path": "src/publisher.py",
+    "old": "        raise\n    finally:",
+    "new": "        return []\n    finally:",
+    "count": 1,
+    "violates": "swallows original failure"
+  },
+  {
+    "name": "leaks-unpublished-stages",
+    "path": "src/publisher.py",
+    "old": "            stage.unlink(missing_ok=True)",
+    "new": "            pass",
+    "count": 1,
+    "violates": "leaks unpublished stages"
+  },
+  {
+    "name": "mutates-input-records",
+    "path": "src/publisher.py",
+    "old": "        data = document.get(\"data\")",
+    "new": "        data = document.pop(\"data\", None)",
+    "count": 1,
+    "violates": "mutates input records"
+  }
+]

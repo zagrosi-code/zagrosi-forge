@@ -41,6 +41,10 @@ def test_windows_partitions_cover_linux_and_macos_once():
     assert not (selected["shared"] & selected["portable"])
     assert selected["shared"] + selected["portable"] == selected["all"]
     assert all(count == 1 for count in selected["all"].values())
+    assert {
+        "tests/test_compatibility_checks.py", "tests/test_compatibility_workflows.py",
+        "tests/test_compatibility_admission.py", "tests/test_heldout_contracts.py",
+    } <= selected["all"].keys()
 
 
 def test_type_contract_compiler_is_installed_for_full_and_compatibility_tests():
