@@ -466,17 +466,43 @@ def test_execute_retains_bounded_tails_without_buffering_all_output(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group integration test")
-@pytest.mark.parametrize("leader_exits", [False, True])
-def test_timeout_stops_descendants_even_after_leader_exit(tmp_path, leader_exits):
+@pytest.mark.parametrize(("leader_exits", "kill_group"), [
+    pytest.param(False, True, id="False"), pytest.param(True, True, id="True"),
+    pytest.param(True, False, id="surviving-child-control"),
+])
+def test_timeout_stops_descendants_even_after_leader_exit(tmp_path, monkeypatch, leader_exits, kill_group):
+    ready = tmp_path / "child-ready"
+    release = tmp_path / "release-child"
     marker = tmp_path / "child-survived"
-    child = ("import signal,time,pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-             f"time.sleep(.5); pathlib.Path({str(marker)!r}).write_text('leaked')")
-    leader = (f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}]); "
-              + ("pass" if leader_exits else "time.sleep(10)"))
-    result = trials.execute([sys.executable, "-c", leader], tmp_path, timeout=.15)
+    child = ("import os,pathlib,signal,time\n"
+             "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+             f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+             f"while not pathlib.Path({str(release)!r}).exists(): time.sleep(.01)\n"
+             f"pathlib.Path({str(marker)!r}).write_text('leaked')\n")
+    leader = ("import pathlib,subprocess,sys,time\n"
+              f"subprocess.Popen([sys.executable,'-c',{child!r}])\n"
+              f"while not pathlib.Path({str(ready)!r}).exists(): time.sleep(.01)\n"
+              "print('child ready', flush=True)\n"
+              + ("pass\n" if leader_exits else "time.sleep(10)\n"))
+    if not kill_group:
+        # Negative control: the same post-return probe must detect a real survivor.
+        wrapper = sys.modules[trials.execute.__module__]
+        process_tools = sys.modules[wrapper._execute.__module__]
+        monkeypatch.setattr(process_tools.os, "killpg", lambda *_: None)
+    try:
+        result = trials.execute([sys.executable, "-c", leader], tmp_path, timeout=2)
+    finally:
+        release.touch()  # A marker can now only describe survival past execute().
+    assert ready.exists() and "child ready" in result["stdout"]
     assert result["returncode"] == 124
-    time.sleep(.55)
-    assert not marker.exists()
+    deadline = time.monotonic() + 2
+    while not marker.exists() and time.monotonic() < deadline:
+        try:
+            os.kill(int(ready.read_text()), 0)
+        except ProcessLookupError:
+            break
+        time.sleep(.01)
+    assert marker.exists() is (not kill_group)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group integration test")

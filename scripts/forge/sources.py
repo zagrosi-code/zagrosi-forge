@@ -29,7 +29,7 @@ TEST_MANIFEST = {
     "test_ci_coverage.py": "432b221e572aaa221e61e565aa7c8516c84f2402bcdf13342f2a2d9a9f9cd500",
     "test_claude_plugin.py": "aa1a7fe5b2abeb0ab494e22051a9cd16fb4b8d1246c37af8a34be384eb17dc72",
     "test_cli_helper_timeouts.py": "4ffeddf9de6eb7b8d794b6891414d204eaa3f5f71869876398e14dfca5878a5d",
-    "test_coding_trials.py": "19b30887bfe2153a1d047308b341d5f4fcf12fc5b772929fe5c3057842d8e19d",
+    "test_coding_trials.py": "d0478687ed3e3f7a4882c45b63e7e9cab394ebdcb63e84d63913ae34b12e5ae9",
     "test_compact_evaluations.py": "0b6c8c448711a03e7a6586fece8c99f18fd4ff902c6399af6977511f7346f9d1",
     "test_compact_helpers.py": "cd01296d153b48d035cc31b4a95b9ca5536f963abe8e9e8cdbdd5438e214d1a8",
     "test_compact_plan.py": "bcdc03a4016c7ba2aaee540c7fc1aa3338c3fd9dea2f825d5efa274e5e7780e9",
