@@ -4,7 +4,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as baselineAccess from '../examples/evals/coding/typescript-access/src/access.ts';
 import * as baselineProfiles from '../examples/evals/coding/typescript-access/src/profiles.ts';
+import { checkPublicTypes } from './typescript_type_checks.mjs';
 
+checkPublicTypes(process.argv[2]);
 const candidateAccess = await import(pathToFileURL(path.resolve(process.argv[2], 'src/access.ts')).href);
 const candidateProfiles = await import(pathToFileURL(path.resolve(process.argv[2], 'src/profiles.ts')).href);
 let assertions = 0;

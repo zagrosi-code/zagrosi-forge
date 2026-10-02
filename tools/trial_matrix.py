@@ -52,7 +52,7 @@ def accepted_outcomes(attempts: list[dict]) -> dict:
                 "total": total, "per_accepted": total / accepted if total is not None and accepted else None}
     totals = {key: aggregate([((row.get("reported_telemetry") or {}).get("totals") or {}).get(key)
                               for row in attempts])
-              for key in ("input_tokens", "output_tokens")}
+              for key in ("input_tokens", "cached_input_tokens", "uncached_input_tokens", "output_tokens")}
     return {"accepted": accepted, "scheduled": len(attempts),
             "accepted_rate": accepted / len(attempts) if attempts else None,
             "elapsed_seconds": aggregate([row.get("attempt_seconds") for row in attempts]),

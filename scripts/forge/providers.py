@@ -10,6 +10,7 @@ import tempfile
 
 from .child_process import execute
 from .output import print_json
+from .provider_preflight import check_cli
 from .provider_output import review_output
 from .storage import write_json
 
@@ -25,11 +26,23 @@ REVIEW_INSTRUCTION = (
 )
 
 
+class ExecutableUnavailable(ValueError):
+    """The selected native CLI or adapter could not be found."""
+
+
 def provider_status(args: argparse.Namespace) -> int:
     rows = []
     for name, login in PROVIDERS.items():
         binary = shutil.which(name)
         row = {"provider": name, "available": bool(binary), "authentication": "unchecked", "login_argv": login}
+        row["cli"] = {"status": "unchecked", "version": None}
+        if getattr(args, "check_cli", False):
+            if binary:
+                with tempfile.TemporaryDirectory(prefix="forge-cli-") as directory:
+                    workspace = Path(directory)
+                    row["cli"] = check_cli(review_command(name, None, workspace, None), workspace, execute)
+            else:
+                row["cli"]["status"] = "unavailable"
         if binary and args.check_auth and name != "gemini":
             command = [binary, "login", "status"] if name == "codex" else [binary, "auth", "status", "--json"]
             with tempfile.TemporaryDirectory(prefix="forge-auth-") as directory:
@@ -50,7 +63,7 @@ def provider_status(args: argparse.Namespace) -> int:
                     row["authentication"] = "unknown"
         rows.append(row)
     return print_json({"success": True, "providers": rows,
-                       "note": "Availability and login status do not prove model access. Gemini authentication is checked by its next request."})
+                       "note": "CLI compatibility means review arguments were accepted by help, not model access. Availability and login status do not prove model access. Gemini authentication is checked by its next request."})
 
 
 def review_command(provider: str, model: str | None, workspace: Path, adapter: str | None) -> list[str]:
@@ -91,13 +104,15 @@ def review_command(provider: str, model: str | None, workspace: Path, adapter: s
         raise ValueError("Unknown provider; supply an explicit --adapter JSON file")
     binary = shutil.which(argv[0])
     if not binary:
-        raise ValueError(f"Provider executable is unavailable: {argv[0]}")
+        raise ExecutableUnavailable(f"Provider executable is unavailable: {argv[0]}")
     return [binary, *argv[1:]]
 
 
 def provider_review(args: argparse.Namespace) -> int:
     report = {"schema": "forge-provider-review-v1", "success": False, "provider": args.provider,
               "requested_model": args.model, "observed_models": [], "model_identity": "unreported"}
+    failure_kind = "invalid_request"
+    recovery = "Correct the packet, output path or review options before retrying."
     try:
         if not 0 < args.timeout <= 3600:
             raise ValueError("Review timeout must be greater than 0 and at most 3600 seconds")
@@ -117,21 +132,34 @@ def provider_review(args: argparse.Namespace) -> int:
             argv = review_command(args.provider, args.model, workspace, args.adapter)
             result = execute(argv, workspace, prompt=prompt, timeout=args.timeout, output_limit=OUTPUT_LIMIT)
         report.update({key: result[key] for key in ("returncode", "seconds", "timed_out")})
+        if result.get("termination_error"):
+            report["termination_error"] = "".join(char for char in str(result["termination_error"]) if char.isprintable())[:512]
+            failure_kind, recovery = "process_cleanup", "Check for remaining provider processes and stop them before retrying."
+            raise ValueError(f"Provider process cleanup could not be confirmed (exit {result['returncode']}); no retry was attempted.")
+        if result["timed_out"]:
+            failure_kind, recovery = "timeout", "Reduce the packet or explicitly choose a larger --timeout before retrying."
+            raise ValueError(f"Provider review exceeded its {args.timeout:g}-second timeout (exit {result['returncode']}); no retry was attempted.")
         if result["returncode"]:
-            report["login_argv"] = PROVIDERS.get(args.provider)
-            raise ValueError(f"Provider request failed (exit {result['returncode']}); check the native CLI's login/model access. No fallback was attempted.")
+            failure_kind, recovery = "request_failed", "Inspect the native CLI's request settings, service status and model access before retrying."
+            raise ValueError(f"Provider request failed (exit {result['returncode']}); no fallback was attempted.")
         if result.get("stdout_truncated") or result.get("stderr_truncated"):
+            failure_kind, recovery = "output_limit", "Split the packet by responsibility to request shorter complete reviews."
             raise ValueError("Provider output exceeded the limit; incomplete reviews are rejected")
+        failure_kind, recovery = "invalid_output", "Check the native CLI or adapter's review format; partial or tool-using reviews cannot be accepted."
         report.update(review_output(args.provider, result["stdout"]))
         models = report["observed_models"]
         if models:
             report["model_identity"] = "reported"
             if args.model and set(models) != {args.model}:
                 report["model_identity"] = "mismatch_or_alias"
+                failure_kind, recovery = "model_mismatch", "Select the exact reported model identifier or investigate the native provider's model routing."
                 raise ValueError("Reported model differs from the requested model; use its exact identifier to remove alias ambiguity")
         report["success"] = True
     except (OSError, ValueError, TypeError, RecursionError) as exc:
         report["error"] = str(exc)
+        if isinstance(exc, ExecutableUnavailable):
+            failure_kind, recovery = "executable_unavailable", "Install the selected native CLI or correct the adapter executable path."
+        report.update(failure_kind=failure_kind, recovery=recovery)
     try:
         # Persist complete review text once; keep normal command output compact.
         if Path(args.input).resolve() == Path(args.output).resolve():

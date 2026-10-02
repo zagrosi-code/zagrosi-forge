@@ -248,10 +248,12 @@ def unsupported_matrix(tmp_path, workspace, monkeypatch):
     workspace.rename(trial / "workspace")
     package = tmp_path / "plugin"
     package.mkdir()
+    (package / ".codex-plugin").mkdir()
+    (package / ".codex-plugin/package-files.json").write_text('[".codex-plugin/package-files.json"]')
     installation = {"codex_plugin": str(package), "claude_plugin": str(package), "marketplace_name": "test", "marketplace": str(package)}
     trials.write(directory / "matrix.json", {"rows": [{"id": "codex-unsupported", "host": "codex", "trigger": "unsupported"}],
         "models": {"codex": "pinned"}, "efforts": {"codex": "medium"}, "plugin_root": str(package),
-        "plugin_sha256": {}, "installation": installation, "total_timeout": 10, "timeout": 5,
+        "package_identity": trials.package_identity(package), "installation": installation, "total_timeout": 10, "timeout": 5,
         "evaluator_sha256": trials.evaluator_identity()})
     trials.write(trial / "baseline.json", trials.files(trial / "workspace"))
     monkeypatch.setattr(trials, "authenticated", lambda host: True)

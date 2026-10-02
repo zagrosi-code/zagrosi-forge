@@ -63,3 +63,21 @@ def test_matrix_runs_fresh_attempts_and_retains_nonzero_exits(tmp_path):
     before = (destination / "matrix.json").read_bytes()
     assert subprocess.run(command, capture_output=True).returncode != 0
     assert (destination / "matrix.json").read_bytes() == before
+
+
+def test_accepted_cost_separates_cache_usage_and_keeps_missing_observations_unknown():
+    attempts = [
+        {"status": "passed", "reported_telemetry": {"totals": {"input_tokens": 100, "cached_input_tokens": 70,
+            "uncached_input_tokens": 30, "output_tokens": 20}}},
+        {"status": "failed", "reported_telemetry": {"totals": {"input_tokens": 200, "cached_input_tokens": 120,
+            "uncached_input_tokens": 80, "output_tokens": 10}}},
+    ]
+    result = matrix.accepted_outcomes(attempts)
+    assert result["tokens"]["cached_input_tokens"]["per_accepted"] == 190
+    assert result["tokens"]["uncached_input_tokens"]["per_accepted"] == 110
+    assert result["tokens"]["output_tokens"]["per_accepted"] == 30
+    attempts[1]["reported_telemetry"]["totals"].pop("cached_input_tokens")
+    result = matrix.accepted_outcomes(attempts)
+    assert result["tokens"]["cached_input_tokens"] == {
+        "observed": 70, "observed_attempts": 1, "total": None, "per_accepted": None}
+    assert result["tokens"]["uncached_input_tokens"]["total"] == 110

@@ -327,6 +327,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
 
 def add_utility_commands(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("provider-status", help="Show optional reviewer availability without making model requests.")
+    p.add_argument("--check-cli", action="store_true", help="Check native CLI version and review flags using bounded offline help probes.")
     p.add_argument("--check-auth", action="store_true", help="Ask native Codex/Claude CLIs for login status; never read credential stores.")
     p.set_defaults(func=invoke_command, handler=('providers', 'provider_status'))
 

@@ -24,7 +24,9 @@ def plugin_files(root: Path) -> dict[str, str]:
 
 def evaluator_files(root: Path, oracle: Path, cases: Path) -> dict[str, str]:
     paths = [oracle, cases, *sorted((cases.parent / "resume-plan").rglob("*.md")),
-             *sorted((root / "tools").glob("coding_trial*.py")), root / "tools/trial_matrix.py"]
+             *sorted((root / "tools").glob("coding_trial*.py")), root / "tools/trial_matrix.py",
+             *(root / "tools" / name for name in ("typescript_trial_checks.mjs", "typescript_type_checks.mjs",
+                 "typescript_public_contract.ts", "package.json", "package-lock.json"))]
     return {**plugin_files(root), **{p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in paths if p.is_file()}}
 

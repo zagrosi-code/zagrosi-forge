@@ -62,5 +62,12 @@
       "src/reports.ts"
     ],
     "request": "Simplify the duplicated member-management policy and transaction orchestration across src/access.ts and src/profiles.ts. Preserve every public export, validation/error order, tenant isolation, self-demotion rule, audit order and transactional rollback. Characterize currently uncovered failures before refactoring. Use meaningful cohesive modules, Node native TypeScript and standard-library tests; no new dependencies."
+  },
+  "retry-queue": {
+    "depth": "standard",
+    "fixture": "retry-queue",
+    "oracle": "tools/retry_trial_checks.py",
+    "assertions": 271,
+    "request": "Read prompt.md and fix failed webhook retries and cross-tenant event-ID collisions, preserving the documented API and side effects."
   }
 }

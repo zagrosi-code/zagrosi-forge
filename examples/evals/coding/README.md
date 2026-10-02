@@ -234,12 +234,15 @@ python3 tools/trial_matrix.py compare /tmp/forge-claude-comparison \
   --model YOUR_CLAUDE_MODEL --effort high --cases typescript-access --repeats 2
 ```
 
-The TypeScript fixture requires Node24. It exercises duplicate authorization
+The TypeScript fixture requires Node24 and the pinned tooling-only compiler
+(`npm ci --prefix tools` in the evaluator checkout). It exercises duplicate authorization
 policy across modules, public exports, validation order, tenant isolation,
 auditing and rollback through 394 independent assertions. Known-defect tests
 check that the oracle rejects authorization, transaction, ordering and export
-regressions. These checks run TypeScript through Node and compare runtime behavior;
-they do not establish static type compatibility. Source-byte changes alone do not prove useful TypeScript cleanup;
+regressions. An immutable external consumer checks exported types and function signatures
+before the runtime oracle imports candidate code. Missing or mismatched compiler,
+type erasure and incompatible signatures fail acceptance; candidate tests and
+compiler configuration cannot disable this check. The compiler emits no files. Source-byte changes alone do not prove useful TypeScript cleanup;
 independent review must explain the concrete improvement.
 
 Native writer runs use existing CLI authentication and consume the account's
@@ -248,8 +251,8 @@ with `--plugin-dir`, suppresses user/project settings, and preserves OAuth; its
 plain arm omits the plugin. Host permission controls differ. The disposable trial
 workspace and scope checker are evaluation boundaries, not a security sandbox.
 
-Reports retain every attempt and add accepted rate, elapsed time, input/output
-usage, interventions and CLI-reported cost per accepted result. Failures count
+Reports retain every attempt and add accepted rate, elapsed time, cached/uncached
+input and output usage, interventions and CLI-reported cost per accepted result. Failures count
 in totals. Missing observations stay unknown; zero accepted results leaves
 per-accepted figures undefined. Claude final-result usage is counted once;
 reported costs are estimates, not subscription charges. Independent review time
@@ -323,3 +326,22 @@ Repeat `resume` for the standard/deep direct rows. It restores the verified red
 checkpoint at its original path and archives the prior completed candidate.
 After all desired continuations, only the recorded UUID cache namespace is
 disposable; user settings and other installed plugin directories remain separate.
+
+## Retry bug-fix fixture
+
+`retry-queue` covers synchronous webhook delivery with tenant-scoped completion,
+failed sends, repeated events, full-batch validation, audit order and nested
+payload mutation. Its 271 independent assertions run outside the editable
+workspace. The original bug and five independently broken variants fail the
+oracle; a valid fix passes. This is an in-memory journal fixture, not a claim of
+exactly-once delivery across crashes or concurrent workers.
+
+## Native package identity
+
+New matrices use versioned, path-independent hashes for every declared package
+member plus the native loading roots. Missing files, unsafe paths, or additional
+loading metadata invalidate the run before model execution; source and staged
+copies must agree. Reports identify legacy coverage explicitly. Keep historical
+matrices with their original frozen evaluator; the new evaluator rejects legacy
+continuation instead of rewriting their evidence. Compiler configuration and the
+external type consumer are also included in coding-evaluator identity.

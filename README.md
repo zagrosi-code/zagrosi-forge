@@ -61,13 +61,13 @@ python3 scripts/zagrosi_skills.py update-check --pretty
 python3 scripts/zagrosi_skills.py self-update --pretty
 ```
 
-The installer preserves unrelated settings and excludes development artifacts.
+The installer preserves unrelated settings.
 
 </details>
 
 ## Use
 
-Open your repository and describe the task; request `standard` or `deep`
+Describe your task; request `standard` or `deep`
 when needed. Try the [runnable first task](examples/first-task/README.md).
 
 **Claude Code**
@@ -86,12 +86,12 @@ Use $zagrosi-forge:zagrosi-cleanup to simplify this subsystem while preserving b
 
 Both hosts share skills, runtime, and standards. Forge adds no hooks, MCP servers,
 or background processes. Use `zagrosi-project`, `zagrosi-plan`, and
-`zagrosi-implement` for direct phase control. Planning-only requests stop at the plan.
+`zagrosi-implement` for direct phase control. Authorized delivery continues through phases; planning-only requests stop at the plan.
 
 ## Multiple models
 
 Request independent Codex, Claude, or Gemini reviews. Keep one primary writer;
-reviewers receive the same bounded packet. Try either host:
+reviewers receive the same bounded packet:
 
 **Claude Code**
 
@@ -107,10 +107,10 @@ Use $zagrosi-forge:zagrosi-forge to implement this feature with independent Code
 
 Forge reuses native CLI logins. Choose exact model IDs or use native defaults;
 missing access and unreported identity stay visible. No silent fallback.
-See [provider setup and two-reviewer example](skills/zagrosi-forge/references/providers.md).
+CLI checks use bounded help probes; add `--check-auth` for login status. See [provider setup and two-reviewer example](skills/zagrosi-forge/references/providers.md).
 
 ```bash
-python3 scripts/zagrosi_skills.py provider-status --check-auth --pretty
+python3 scripts/zagrosi_skills.py provider-status --check-cli --pretty
 ```
 
 ## Workflows
@@ -193,12 +193,12 @@ Shared workflows: `skills/`; runtime: `scripts/forge/`; checks: `tests/` and
 After runtime/test edits, run `python3 tools/update_runtime_manifest.py`.
 After adding/removing package members, stage intended files and run
 `python3 tools/update_package_manifest.py`.
-CI covers Linux/macOS/Windows and native host packaging. Optional native validators
-require their CLIs.
+CI covers Linux/macOS/Windows and native host packaging. Native validators require their CLIs.
 
 ```bash
 python3 tools/update_runtime_manifest.py --check
 python3 tools/update_package_manifest.py --check
+npm ci --prefix tools
 uv run --with pytest python -m pytest
 python3 scripts/zagrosi_skills.py doctor --plugin-root . --strict --pretty
 python3 scripts/zagrosi_skills.py release-check --plugin-root . --pretty

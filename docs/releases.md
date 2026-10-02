@@ -1,5 +1,16 @@
 # Releases
 
+## 0.3.5 — stronger quality evidence and smoother delivery
+
+- Continue authorized delivery across phases without repeating generic preference interviews.
+- Explain provider failures with specific recovery; optionally check native CLI arguments through bounded help probes, without model or authentication calls. Inconclusive help remains unknown.
+- Check public TypeScript types with a pinned development-only compiler before running the independent runtime oracle.
+- Bind new native trial evidence to the complete declared package and native loading metadata; keep historical reports readable without relabeling their coverage.
+- Exercise whole workflow sequences at lean, standard and deep; add a tenant-isolated retry bug-fix trial with an independent oracle.
+- Separate cached and uncached input usage per accepted result. Split Windows compatibility groups while retaining their combined coverage.
+
+The plugin runtime remains Python standard-library only. Live Claude/Gemini and cross-host acceptance still require native sign-in; offline checks do not establish model access or general code-quality superiority.
+
 ## 0.3.4 — reliable continuation and clearer reviews
 
 - Bind completed work to its target repository and preserve malformed saved evidence without overwriting it.
