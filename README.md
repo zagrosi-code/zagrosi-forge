@@ -9,7 +9,7 @@
 
 Forge turns requests into compact plans, clear code, and verified changes.
 One entry point handles features, fixes, and cleanup in Codex and Claude Code.
-Lean mode is default: focused context, targeted checks, one final integration result.
+Lean is default: focused context, targeted checks, one integration result.
 
 [Install](#install) · [Use](#use) · [Multiple models](#multiple-models) · [Workflows](#workflows) · [Engineering](#engineering) · [Releases](docs/releases.md) · [Contribute](#contribute)
 
@@ -43,13 +43,13 @@ git clone https://github.com/zagrosi-code/zagrosi-forge.git
 cd zagrosi-forge
 ```
 
-Claude Code can load this checkout for one session:
+Load this checkout in Claude Code for one session:
 
 ```bash
 claude --plugin-dir "/absolute/path/to/zagrosi-forge"
 ```
 
-For Codex, run these from the checkout:
+From the checkout in Codex:
 
 ```bash
 python3 scripts/zagrosi_skills.py install --pretty
@@ -84,9 +84,9 @@ Use $zagrosi-forge:zagrosi-forge to add this feature and finish verification.
 Use $zagrosi-forge:zagrosi-cleanup to simplify this subsystem while preserving behavior.
 ```
 
-Both hosts share skills, runtime, and standards. Forge adds no hooks, MCP servers,
-or background processes. Use `zagrosi-project`, `zagrosi-plan`, and
-`zagrosi-implement` for direct phase control. Authorized delivery continues through phases; planning-only requests stop at the plan.
+Both hosts share skills, runtime and standards, without hooks, MCP servers or
+background processes. Use `zagrosi-project`, `zagrosi-plan`, and `zagrosi-implement`
+for individual phases. Authorized work continues through delivery; planning-only requests stop at the plan.
 
 ## Multiple models
 
@@ -139,7 +139,7 @@ python3 scripts/zagrosi_skills.py provider-status --check-cli --pretty
 Depth changes investigation and review. Every mode retains requirements,
 ownership, acceptance, and verification without duplicate ledgers.
 
-Skills handle setup and final checks; complete draft contracts before coding. See the
+Skills handle setup and verification; complete draft contracts before coding. See
 [compact-plan format](skills/zagrosi-plan/references/plan-format.md),
 [depth standards](skills/zagrosi-plan/references/depth-standards.md), and
 [example briefs](examples/gallery/README.md).
@@ -168,17 +168,16 @@ Darwin/arm64 and APFS.
 ## Engineering
 
 The [engineering standard](skills/zagrosi-implement/references/engineering.md)
-draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse
-code, prefer direct flow. Repair encountered duplication and mixed responsibilities;
-preserve public contracts. Run targeted regressions, then one integration suite.
-Explicit cleanup can cover a repository; final PR review covers the diff and callers.
-Characterize uncertain behavior before extending duplication; check refactoring
-assumptions against the original request and baseline caller tests.
+follows [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse
+code, prefer direct flow. Characterize uncertain behavior before repairing
+duplication or mixed responsibilities. Preserve public contracts; check assumptions
+against the original request and baseline tests. Run targeted regressions, then one
+integration suite. Explicit cleanup can cover a repository; PR review covers the diff and callers.
 
-`context-brief` and `implementation-packet` preserve complete sections, mapped
-original requirements and linked contracts within 2,000 words (`--max-words`). Broken links fail explicitly;
-oversized sections return an adjusted retry. Readable output retains blockers
-and recovery commands; failed flights link complete reports (`--full-output`).
+`context-brief` and `implementation-packet` keep complete sections, mapped source
+requirements and linked contracts. Default budget: 2,000 words (`--max-words`);
+broken links fail and oversized sections return an adjusted retry. Failures retain
+blockers, recovery commands and complete reports (`--full-output`).
 
 Runtime loading verifies SHA-256 source bindings; writes are locked and atomic.
 
