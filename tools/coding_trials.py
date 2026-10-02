@@ -65,6 +65,39 @@ def code_metrics(workspace: Path, runtime: str = "python") -> dict:
             "external_imports": sorted(imports - sys.stdlib_module_names - local)}
 
 
+def initialize_repository(workspace: Path, baseline: dict[str, str]) -> None:
+    """Commit trusted fixture bytes without inheriting another repository or hooks."""
+    metadata = workspace / ".git"
+    if metadata.exists() or metadata.is_symlink():
+        raise ValueError("Trial fixture must not contain Git metadata")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_ATTR_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0", GIT_AUTHOR_DATE="2000-01-01T00:00:00+00:00",
+               GIT_COMMITTER_DATE="2000-01-01T00:00:00+00:00")
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=workspace, env=env, check=True,
+                       capture_output=True, text=True, timeout=30)
+
+    try:
+        git("init", "--quiet", "--template=", "--initial-branch=trial")
+        hooks = metadata / "disabled-hooks"
+        hooks.mkdir()
+        for name, value in (("user.name", "Forge Trial"), ("user.email", "forge-trial@example.invalid"),
+                            ("core.hooksPath", hooks.as_posix()), ("commit.gpgSign", "false"),
+                            ("core.autocrlf", "false"), ("core.excludesFile", os.devnull),
+                            ("core.attributesFile", os.devnull)):
+            git("config", "--local", name, value)
+        (metadata / "info").mkdir(exist_ok=True)
+        (metadata / "info/exclude").write_text("/.planning/\n__pycache__/\n.pytest_cache/\n*.pyc\n*.pyo\n")
+        git("add", "--force", "--", *(name for name in sorted(baseline) if not name.startswith(".planning/")))
+        git("commit", "--quiet", "--no-gpg-sign", "-m", "Trial baseline")
+    except FileNotFoundError as exc:
+        raise ValueError("Git is required to prepare an isolated trial workspace") from exc
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"Git baseline preparation failed: {exc}") from exc
+
+
 def prepare(trial: Path, case: str, depth: str | None = None, *,
             plugin_root: Path | None = None, plain_agent: bool = False) -> dict:
     plugin_root = (plugin_root or ROOT).resolve()
@@ -78,6 +111,8 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
     selected = depth or CASES[case]["depth"]
     tests = test_command(CASES[case])
     checkpoint = prepare_resume(ROOT, workspace, selected, tests, plugin_root=plugin_root) if case == "resume" else None
+    baseline = files(workspace)
+    initialize_repository(workspace, baseline)
     displayed_command = subprocess.list2cmdline(tests) if os.name == "nt" else shlex.join(tests)
     protected = CASES[case].get("protected_paths", [])
     workflow = ("Use your normal engineering workflow. Do not read or invoke Forge skills/tools.\n"
@@ -98,7 +133,7 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
               "Do not read external trial checkers, other candidates, or edit plugin/evaluator infrastructure.\n"
               "Report tests, cleanup, remaining issues, and observed usage if available.\n")
     (trial / "prompt.md").write_text(prompt)
-    record = {"case": case, "depth": selected, "baseline_files": files(workspace),
+    record = {"case": case, "depth": selected, "baseline_files": baseline,
               "baseline_semantics": semantic_files(workspace), "provenance_version": 2,
               "baseline_metrics": code_metrics(workspace, CASES[case].get("runtime", "python")),
               "prepared_checkpoint": checkpoint, "oracle_sha256": hashlib.sha256(

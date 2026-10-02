@@ -100,6 +100,7 @@ TEST_MANIFEST = {
     "test_trial_matrix.py": "a7b5208efdbb03f590025a58e4a18edd5dfd518c0aa8a3d6fcb1e96852ba1186",
     "test_trial_planning_roots.py": "e8968fb283b0de99963020fbdba3778d15dc7f72550fa893e3e9821ff4d4ab16",
     "test_trial_realism.py": "0e1ac97be61f9281083521a65cb445e9c2d7080e5089c434b27e6de35e72ac13",
+    "test_trial_workspaces.py": "56f3cf95406268ec2dd6b413b1bf54ff1f6bca7f0f0b60fe9f8e3f80dc5b008d",
     "test_typescript_contract.py": "56505d33575982a78c65601b31e2791fd744e4e3de9a5652e2f1b30390ced3dc",
     "test_verification_contracts.py": "76bb8151b2e64010f25b1d7cc60a96f4b4acba65cb7da1c257140546e5977314",
     "test_verification_receipts.py": "db7cedc292d431ea18323d9da502c6d7adb9041159b9ad85289726de132acd0b",

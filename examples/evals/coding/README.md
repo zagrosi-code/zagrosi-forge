@@ -1,9 +1,9 @@
 # Coding trials
 
-Eight isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
+Nine isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
 deep discount design, a real Forge resume checkpoint, an order-dispatch godfile,
 an import preview across several modules, a Node summary feature, and TypeScript
-permission/transaction cleanup. The invoice cases preserve public APIs, exact exports, rounding, and
+permission/transaction cleanup, and webhook retry correctness. The invoice cases preserve public APIs, exact exports, rounding, and
 errors. The godfile case exercises cohesive module extraction while preserving
 validation, pricing, shipping, serialization, file access, and order transitions.
 The ordinary summary request never asks for refactoring: independent review checks
@@ -31,6 +31,11 @@ at every depth. For unattended trials, `run ... --runner EXECUTABLE ARGS...` sta
 an agent in the workspace, sends the prompt on stdin, times it, and checks its
 output. Use a runner that accepts this contract. Default timeout: 600 seconds.
 An existing trial is never overwritten. Use a fresh directory for each run.
+Fresh workspaces require Git and receive their own committed fixture baseline,
+so change inspection works even inside an ignored parent directory. Preparation
+isolates Git configuration, hooks, templates and signing; the surrounding
+repository remains untouched. Planning and generated caches are excluded through
+local Git metadata. Historical workspaces retain their original layout.
 Output is drained continuously; only the last 12,000 bytes of each stream are
 retained, with byte counts and truncation flags. Timeouts retain available output
 and return 124. POSIX timeouts kill the process group, including children that

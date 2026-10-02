@@ -8,6 +8,7 @@
 - Bind new native trial evidence to the complete declared package and native loading metadata; keep historical reports readable without relabeling their coverage.
 - Exercise whole workflow sequences at lean, standard and deep; add a tenant-isolated retry bug-fix trial with an independent oracle.
 - Separate cached and uncached input usage per accepted result. Split Windows compatibility groups while retaining their combined coverage.
+- Give fresh coding trials a clean Git baseline for reliable change inspection, preserving parent repositories and historical trials.
 
 The plugin runtime remains Python standard-library only. Live Claude/Gemini and cross-host acceptance still require native sign-in; offline checks do not establish model access or general code-quality superiority.
 
