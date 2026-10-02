@@ -1,6 +1,7 @@
 """Public mutable commands must preserve caller checks before accepting completion."""
 from __future__ import annotations
 
+import builtins
 import json
 from pathlib import Path
 import sys
@@ -160,9 +161,17 @@ def test_setup_does_not_activate_a_blocked_successor(forge, tmp_path, capsys):
     assert not (planning / "implementation/zagrosi_implement_state.json").exists()
 
 
-def test_detached_setup_rejects_mutable_selector_before_writes(forge, tmp_path, capsys):
+def test_detached_setup_rejects_mutable_selector_before_writes(forge, tmp_path, capsys, monkeypatch):
     planning, target = workspace(tmp_path)
     external = tmp_path / "detached"
+    original_import = builtins.__import__
+
+    def portable_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if "detached_setup" in (fromlist or ()):
+            raise AssertionError("Invalid arguments must not load native detached dependencies")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", portable_import)
     code, payload = setup(forge, capsys, planning, target, "--section", SECTION,
                           "--implementation-root", str(external))
     assert code == 1, payload

@@ -226,10 +226,10 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
 
 def deep_implement_setup(args: argparse.Namespace) -> int:
     if getattr(args, "implementation_root", None):
-        from . import detached_setup as _detached_setup
-
         if getattr(args, "section", None):
             return _output.print_json({"success": False, "error": "--section activation is only supported by mutable setup."}, 1)
+        from . import detached_setup as _detached_setup
+
         args.profile = args.profile or "solo"
         return _detached_setup.detached_implement_setup(args)
     return _mutable_lifecycle(args, _mutable_implement_setup)
