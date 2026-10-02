@@ -18,6 +18,181 @@ def forge():
 SECTION = "section-01-auth"
 
 
+def mapped_source_plan(path, depth="standard"):
+    """An unchanged, untagged brief and a narrower derived interpretation."""
+    path.mkdir()
+    sections = path / "sections"
+    sections.mkdir()
+    (sections / "index.md").write_text(
+        "<!-- PROJECT_CONFIG\nruntime: python\ntest_command: pytest tests/test_auth.py\nEND_PROJECT_CONFIG -->\n"
+        "<!-- SECTION_MANIFEST\nsection-01-auth\nEND_MANIFEST -->\n"
+    )
+    (sections / f"{SECTION}.md").write_text(
+        "# Authentication\n\nREQ-001 and REQ-002: preserve the domain API.\n\n"
+        "Assumption: imported dependencies need not remain available.\n\n"
+        "## Owned files\n- src/auth.py\n- tests/test_auth.py\n\n"
+        "## Tests\nExpected: test_auth preserves imports.\nCommand: pytest tests/test_auth.py\n"
+    )
+    (path / "spec.md").write_text(
+        "Keep every existing public import compatible.\n"
+        "Imported dependencies must remain accessible to external callers.\n"
+        "Preserve callable signatures and defaults.\n"
+        "Add unrelated billing functionality.\n"
+        "Retain existing billing errors.\n"
+    )
+    meta = {"artifact_type": "compact_plan", "depth_mode": depth, "source": "spec.md"}
+    contract = "<!-- FORGE_META\n" + json.dumps(meta) + "\nEND_FORGE_META -->\n## Contract\n"
+    for req, span in (("REQ-001", "L1-L2"), ("REQ-002", "L2-L3"), ("REQ-003", "L4-L5")):
+        contract += (
+            f"### {req}\nSource: spec.md#{span}\nBehavior: preserve the selected behavior.\n"
+            "Expected: the existing contract remains available.\nCommand: pytest tests/test_auth.py\n\n"
+        )
+    (path / "codex-plan.md").write_text(
+        contract + "## Owned files\n- src/auth.py\n- tests/test_auth.py\n\n"
+        "## Review\nReviewed: source requirements and baseline behavior.\nVerdict: pass.\n"
+    )
+    return path
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+def test_compact_context_keeps_original_source_spans_over_narrower_assumptions(forge, tmp_path, depth):
+    planning = mapped_source_plan(tmp_path / "plan", depth)
+    source = (planning / "spec.md").read_bytes()
+    result = forge.context.build_context(planning, SECTION, 2000, line_limit=1)
+    assert result["success"], result
+    content = result["content"]
+    for line in source.decode().splitlines()[:3]:
+        assert content.count(line) == 1
+    assert "Assumption: imported dependencies need not remain available." in content
+    assert "unrelated billing" not in content
+    assert "Retain existing billing errors." not in content
+    assert f"{planning / 'spec.md'}:1" in content
+    assert (planning / "spec.md").read_bytes() == source
+
+
+def test_compact_source_context_reflects_current_brief_bytes(forge, tmp_path):
+    planning = mapped_source_plan(tmp_path / "plan")
+    source = planning / "spec.md"
+    before = forge.context.build_context(planning, SECTION, 2000)
+    source.write_text(source.read_text().replace("Preserve callable signatures and defaults.", "Preserve keyword-only defaults exactly."))
+    after = forge.context.build_context(planning, SECTION, 2000)
+    assert "Preserve callable signatures and defaults." in before["content"]
+    assert "Preserve keyword-only defaults exactly." in after["content"]
+    assert "Preserve callable signatures and defaults." not in after["content"]
+
+
+@pytest.mark.parametrize("depth", ["lean", "standard", "deep"])
+def test_compact_packets_and_verification_snapshots_bind_the_current_source(forge, tmp_path, capsys, depth):
+    planning = mapped_source_plan(tmp_path / "plan", depth)
+    source = planning / "spec.md"
+    before = forge.state.contract_snapshot(planning, SECTION)
+    command = ["implementation-packet", "--planning-dir", str(planning), "--section", SECTION]
+    assert forge.entrypoint.main(command) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert "Keep every existing public import compatible." in Path(result["output"]).read_text()
+    source.write_text(source.read_text().replace("Keep every existing public import compatible.", "Keep every existing public import and alias compatible."))
+    after = forge.state.contract_snapshot(planning, SECTION)
+    assert before["contract"]["spec"] != after["contract"]["spec"]
+    assert forge.entrypoint.main(command) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert "Keep every existing public import and alias compatible." in Path(result["output"]).read_text()
+
+
+def test_required_compact_source_excerpts_cannot_be_omitted_to_fit_budget(forge, tmp_path, capsys):
+    planning = mapped_source_plan(tmp_path / "plan")
+    source = planning / "spec.md"
+    source.write_text(source.read_text().replace("Preserve callable signatures and defaults.", "Required public contract. " * 300))
+    output = planning / "brief.md"
+    code = forge.entrypoint.main([
+        "context-brief", "--planning-dir", str(planning), "--section", SECTION,
+        "--max-words", "500", "--output", str(output),
+    ])
+    result = json.loads(capsys.readouterr().out)
+    assert code == 1, result
+    assert not result["success"]
+    assert result["required_words"] > result["max_words"]
+    assert "content" not in result
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mapping", ["spec.md#L1-L999", "spec.md#L3-L1", "other.md#L1-L2"])
+def test_invalid_compact_source_spans_cannot_become_context(forge, tmp_path, mapping):
+    planning = mapped_source_plan(tmp_path / "plan")
+    contract = planning / "codex-plan.md"
+    contract.write_text(contract.read_text().replace("spec.md#L1-L2", mapping))
+    result = forge.context.build_context(planning, SECTION, 2000)
+    assert not result["success"]
+    assert "content" not in result
+
+
+def test_fixed_protocol_context_keeps_existing_source_selection(forge, tmp_path):
+    planning = mapped_source_plan(tmp_path / "plan")
+    result = forge.context.build_context(planning, SECTION, 2000, follow_links=False)
+    assert result["success"]
+    assert "Keep every existing public import compatible." not in result["content"]
+    assert str(planning / "spec.md") in result["omitted_sources"]
+
+
+def test_mapped_and_explicitly_linked_source_spans_are_not_duplicated(forge, tmp_path):
+    planning = mapped_source_plan(tmp_path / "plan")
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\nRead the [original brief](../spec.md).\n")
+    result = forge.context.build_context(planning, SECTION, 2000)
+    assert result["success"]
+    for line in (planning / "spec.md").read_text().splitlines():
+        assert result["content"].count(line) == 1
+
+
+def test_mapped_source_follows_its_explicit_contract_links(forge, tmp_path):
+    planning = mapped_source_plan(tmp_path / "plan")
+    source = planning / "spec.md"
+    source.write_text(source.read_text().replace(
+        "Imported dependencies must remain accessible to external callers.",
+        "Imported dependencies follow the [binding contract](binding.md).",
+    ))
+    (planning / "binding.md").write_text("Import aliases must retain their original object identity.\n")
+    result = forge.context.build_context(planning, SECTION, 2000, line_limit=1)
+    assert result["success"]
+    assert "Import aliases must retain their original object identity." in result["content"]
+
+
+@pytest.mark.parametrize(("opening", "closing"), [("<!--", "-->"), ("```markdown", "```"), ("`literal", "end`")])
+def test_mapped_source_link_scanning_retains_full_markdown_state(forge, tmp_path, opening, closing):
+    planning = mapped_source_plan(tmp_path / "plan")
+    source = planning / "spec.md"
+    source.write_text(
+        f"Keep public imports.\n{opening}\n[ignored literal](missing.md)\n{closing}\n"
+        "Preserve signatures.\nUnrelated behavior.\n"
+    )
+    contract = planning / "codex-plan.md"
+    contract.write_text(contract.read_text().replace("L2-L3", "L3-L5").replace("L4-L5", "L6"))
+    result = forge.context.build_context(planning, SECTION, 2000)
+    assert result["success"], result
+    assert "[ignored literal](missing.md)" in result["content"]
+    assert "Unrelated behavior." not in result["content"]
+
+
+def test_mapped_source_does_not_follow_an_unselected_visible_link(forge, tmp_path):
+    planning = mapped_source_plan(tmp_path / "plan")
+    source = planning / "spec.md"
+    source.write_text(source.read_text().replace("Add unrelated billing functionality.", "Read [unrelated details](missing.md)."))
+    result = forge.context.build_context(planning, SECTION, 2000)
+    assert result["success"], result
+    assert "unrelated details" not in result["content"]
+
+
+def test_explicit_full_source_link_expands_beyond_the_initial_mapped_spans(forge, tmp_path):
+    planning = mapped_source_plan(tmp_path / "plan")
+    source = planning / "spec.md"
+    source.write_text(source.read_text().replace("Add unrelated billing functionality.", "Read [billing details](billing.md)."))
+    (planning / "billing.md").write_text("Explicitly included billing contract.\n")
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text() + "\nRead the [complete brief](../spec.md).\n")
+    result = forge.context.build_context(planning, SECTION, 2000)
+    assert result["success"], result
+    assert "Explicitly included billing contract." in result["content"]
+
+
 @pytest.fixture
 def plan(tmp_path):
     (tmp_path / "zagrosi_plan_config.json").write_text(json.dumps({"depth_mode": "standard"}))

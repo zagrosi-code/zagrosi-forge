@@ -172,9 +172,11 @@ draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, 
 code, prefer direct flow. Repair encountered duplication and mixed responsibilities;
 preserve public contracts. Run targeted regressions, then one integration suite.
 Explicit cleanup can cover a repository; final PR review covers the diff and callers.
+Characterize uncertain behavior before extending duplication; check refactoring
+assumptions against the original request and baseline caller tests.
 
-`context-brief` and `implementation-packet` preserve complete sections and linked
-contracts within 2,000 words (`--max-words`). Broken links fail explicitly;
+`context-brief` and `implementation-packet` preserve complete sections, mapped
+original requirements and linked contracts within 2,000 words (`--max-words`). Broken links fail explicitly;
 oversized sections return an adjusted retry. Readable output retains blockers
 and recovery commands; failed flights link complete reports (`--full-output`).
 

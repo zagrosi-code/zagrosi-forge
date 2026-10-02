@@ -40,7 +40,8 @@ only with actual results. After recording, use the returned `entry` for the next
 section. `recorded: true` means the record is saved even if that entry needs repair.
 Parallelize only disjoint files and serialize records.
 
-1. Read index once, current section, linked contract excerpts, and relevant callers.
+1. Read index once, current section, original source excerpts, linked contracts,
+   and relevant callers. Resolve assumptions that contradict the source first.
 2. Test changed behavior first; confirm meaningful failure. Reuse refactor coverage;
    inspect cosmetic changes. If a meaningful test fails in mutable mode, save its
    result before source edits with `implement-progress --planning-dir "{planning_dir}" --section
@@ -55,8 +56,9 @@ Parallelize only disjoint files and serialize records.
    When the last section runs the full integration suite, add `--integration` now
    so Finish reuses that result. Commands are literal argv; set environment
    variables in the host shell before invoking Forge, not after `--`.
-5. Review correctness, security, requirements, test gaps, and the concrete
-   structural gain from cleanup; fix and retest.
+5. Review against the original request and section: correctness, security,
+   caller contracts, test gaps, concrete cleanup gains and justified deferrals.
+   Passing workflow records do not prove untested behavior. Fix and retest.
 6. Record evidence; continue:
 
 ```bash

@@ -12,14 +12,20 @@ the feature; implement it without extra permission when already authorized. If
 additional files are needed, update ownership/contracts and serialize overlapping
 work before editing. Do not hide necessary repairs behind an obsolete file fence
 or refactor unrelated systems. Planning-only requests still stop before coding.
+If extending encountered duplication, characterize uncertain behavior first,
+then repair the shared cause. Weak coverage calls for characterization, not
+another copy. Defer only for a concrete scope or compatibility constraint,
+explained in the existing review. Cache removal is housekeeping, not code cleanup.
 
 Preserve observable behavior and safety invariants. When existing coverage is
 weak, add characterization tests before refactoring. Run targeted regression
 checks before/after meaningful changes and one full suite at final integration.
-When compatibility is promised, capture existing public export names and
-signatures in a regression test before moving code, including re-exported
-types/dependencies. Keep that surface stable: a new facade or `__all__` must not
-silently narrow it. Internal non-use does not prove that callers no longer need it.
+Derive compatibility tests from the unchanged source and its callers, not the
+planned replacement. When full public compatibility is promised, enumerate names
+and signatures, including re-exported types/dependencies, and run those assertions
+against the baseline before moving code. Keep them passing through the move.
+Neither a plan assumption nor a new facade or `__all__` may narrow that promise.
+Internal non-use does not prove that callers no longer need it.
 Tests should expose behavioral failures, not mirror lines, private structure,
 or cosmetic choices. Record material deviations and measured verification.
 
@@ -40,6 +46,9 @@ cleanup uses [Cleanup](../../zagrosi-cleanup/SKILL.md).
   a short composition of parsing, calculation, and output. Reuse existing module
   boundaries; move cohesive behavior with its tests. Renaming a 300-line method
   or distributing arbitrary chunks among new classes does not simplify it.
+- **Keep dependencies direct.** Let stateful workflows call pure calculation;
+  don't make a calculation construct the workflow to call back into itself.
+  Remove such reverse dependencies instead of hiding cycles with delayed imports.
 
 During the existing review, identify the concrete gain: less repeated policy,
 fewer concepts to follow, clearer responsibilities, or easier changes. Reject

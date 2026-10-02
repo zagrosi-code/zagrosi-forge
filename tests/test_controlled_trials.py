@@ -264,3 +264,70 @@ def test_deleted_block_review_remains_in_comparison_denominator(tmp_path):
     result = matrix.report(tmp_path)
     assert not result["success"]
     assert result["comparative_review"] == {"expected": 1, "completed": 0, "complete": False}
+
+
+def test_required_quality_acceptance_is_shared_by_all_arms_and_reviewers(tmp_path):
+    from coding_trial_comparison import task_acceptance
+    for plain in (True, False):
+        trial = tmp_path / str(plain)
+        trials.prepare(trial, "summary", plain_agent=plain)
+        assert task_acceptance(trials.CASES["summary"]) in (trial / "prompt.md").read_text()
+    assert "Required acceptance includes useful cleanup" in task_acceptance(trials.CASES["summary"])
+    path = make_blind_matrix(tmp_path)
+    assert task_acceptance(trials.CASES["cleanup"]) in (path.parent / "task.md").read_text()
+    assert "Leave these unrelated files unchanged: src/untouched.py." in task_acceptance(
+        {"protected_paths": ["src/untouched.py"]})
+
+
+@pytest.mark.parametrize("data", [None, [], "invalid", 42])
+def test_nonobject_blind_review_is_invalid_without_crashing(tmp_path, data):
+    path = make_blind_matrix(tmp_path)
+    path.write_text(json.dumps(data))
+    assert not reviews(tmp_path)[0]["valid"]
+    with pytest.raises(ValueError, match="Incomplete or stale"):
+        reviews(tmp_path, apply=True)
+
+
+@pytest.mark.parametrize("checks", [{}, [], None, {"behavior_passed": True},
+    {"behavior_passed": 1, "oracle_complete": True, "candidate_tests_passed": True, "scope_passed": True}])
+def test_blind_checks_require_complete_boolean_evidence(tmp_path, checks):
+    path = make_blind_matrix(tmp_path)
+    complete_review(path)
+    (path.parent / "A/checks.json").write_text(json.dumps(checks))
+    assert not reviews(tmp_path)[0]["valid"]
+
+
+@pytest.mark.parametrize("field,value", [("behavior", {"success": False}), ("oracle_complete", False),
+    ("tests", {"returncode": 1}), ("outside_scope", ["unexpected.txt"]), ("candidate_sha256", "stale")])
+def test_blind_checks_match_the_source_bound_result_even_for_unpreferred_candidates(tmp_path, field, value):
+    path = make_blind_matrix(tmp_path)
+    complete_review(path)
+    key = json.loads((tmp_path / "blind-key.json").read_text())
+    result_path = tmp_path / key[path.parent.name + "/C"] / "result.json"
+    result = json.loads(result_path.read_text())
+    result[field] = value
+    result_path.write_text(json.dumps(result))
+    assert not reviews(tmp_path)[0]["valid"]
+
+
+@pytest.mark.parametrize("cleanup", [None, {}, {"meaningful": "yes", "changed_files": [],
+    "rationale": "Evidence", "regression_evidence": "Tests"}])
+def test_blind_review_requires_a_complete_cleanup_judgment(tmp_path, cleanup):
+    path = make_blind_matrix(tmp_path)
+    complete_review(path)
+    data = json.loads(path.read_text())
+    data["candidates"]["A"]["cleanup"] = cleanup
+    path.write_text(json.dumps(data))
+    assert not reviews(tmp_path)[0]["valid"]
+
+
+def test_comparison_can_prefer_correct_code_without_accepting_its_cleanup(tmp_path):
+    path = make_blind_matrix(tmp_path)
+    complete_review(path)
+    data = json.loads(path.read_text())
+    data["candidates"]["A"]["cleanup"].update(meaningful=False, changed_files=[], rationale="No useful structural gain")
+    path.write_text(json.dumps(data))
+    assert reviews(tmp_path, apply=True)[0]["valid"]
+    key = json.loads((tmp_path / "blind-key.json").read_text())
+    trial = tmp_path / key[path.parent.name + "/A"]
+    assert not trials.check(trial, review=trial / "review.json")["cleanup"]["success"]

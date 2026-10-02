@@ -42,6 +42,7 @@ def analyze_contract(source: Path, text: str, planning_dir: Path) -> dict | None
     meaningful = {number for number, line in enumerate(source_lines, 1) if line.strip() and not line.lstrip().startswith(("```", "~~~"))}
     covered: set[int] = set()
     ids: list[str] = []
+    source_spans: dict[str, tuple[int, int]] = {}
     for req_id, contract in zip(rows[1::2], rows[2::2]):
         if req_id in ids:
             errors.append(f"Contract repeats {req_id}.")
@@ -59,6 +60,7 @@ def analyze_contract(source: Path, text: str, planning_dir: Path) -> dict | None
                 errors.append(f"{req_id} Source must include its visible, unfenced requirement ID.")
             else:
                 covered.update(span)
+                source_spans[req_id] = first, last
         if not link:
             errors.append(f"{req_id} needs a valid Source: path.md#L1-L2 in the selected brief.")
         if not re.search(r"(?im)^Behavior:\s*\S", contract) or not _markdown.has_verification(contract):
@@ -71,7 +73,7 @@ def analyze_contract(source: Path, text: str, planning_dir: Path) -> dict | None
         errors.append("Contract IDs must match every explicit requirement in the source brief.")
     if not source_ids and meaningful - covered:
         errors.append("Contract source links must cover the visible brief, including constraints.")
-    return {"ids": sorted(source_ids) or ids, "text": body, "errors": errors}
+    return {"ids": sorted(source_ids) or ids, "text": body, "errors": errors, "source_spans": source_spans}
 
 
 def requirements(planning_dir: Path) -> tuple[list[str], list[str]]:

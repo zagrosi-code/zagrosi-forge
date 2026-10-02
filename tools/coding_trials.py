@@ -25,6 +25,7 @@ from coding_trial_evidence import (
 )
 from coding_trial_process import execute
 from coding_trial_resume import prepare_resume, resume_verdict
+from coding_trial_comparison import task_acceptance
 
 PACK = ROOT / "examples/evals/coding"
 CASES = json.loads((PACK / "cases.json").read_text())
@@ -114,7 +115,6 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
     baseline = files(workspace)
     initialize_repository(workspace, baseline)
     displayed_command = subprocess.list2cmdline(tests) if os.name == "nt" else shlex.join(tests)
-    protected = CASES[case].get("protected_paths", [])
     workflow = ("Use your normal engineering workflow. Do not read or invoke Forge skills/tools.\n"
                 if plain_agent else
                 f"Use Forge at {selected} depth from {plugin_root}; use this exact tree for skills and CLI commands.\n"
@@ -125,10 +125,8 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
         workflow += f"Start with {entry_skill} and follow its routing and linked phase guidance.\n"
     prompt = (f"Work only in {workspace}.\n{workflow}\n"
               f"{CASES[case]['request']}\n\n"
-              "Preserve public APIs. Standard library only. If you create planning records, keep them compact under .planning/.\n"
-              "Edit only src/, tests/, and .planning/. .gitignore may list .planning/, __pycache__/, .pytest_cache/, and *.pyc.\n"
+              f"{task_acceptance(CASES[case])}"
               f"Run existing/added tests with `{displayed_command}`. Python trials require PYTHONPATH=src.\n"
-              + (f"Leave these unrelated files unchanged: {', '.join(protected)}.\n" if protected else "") +
               "Operator choices are settled: local .planning artifacts; manual Git, no commits, pushes or deployment.\n"
               "Do not read external trial checkers, other candidates, or edit plugin/evaluator infrastructure.\n"
               "Report tests, cleanup, remaining issues, and observed usage if available.\n")

@@ -234,6 +234,7 @@
   "tests/test_installation.py",
   "tests/test_installation_contract.py",
   "tests/test_interview.py",
+  "tests/test_invoice_contract.py",
   "tests/test_mutable_state.py",
   "tests/test_mutable_state_safety.py",
   "tests/test_native_package_identity.py",

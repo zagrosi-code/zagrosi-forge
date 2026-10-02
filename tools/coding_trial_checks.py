@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 from copy import deepcopy
+import inspect
 import json
 import random
 import sys
@@ -25,6 +26,76 @@ def compare(call, expected, items) -> int:
     return 2
 
 
+def outcome(call):
+    try:
+        return "return", call()
+    except Exception as exc:
+        return "raise", type(exc), exc.args
+
+
+def parameters(function, *, discount=False):
+    signature = inspect.signature(function).parameters.copy()
+    if discount and "discount_percent" in signature:
+        added = signature.pop("discount_percent")
+        assert added.kind in (added.POSITIONAL_OR_KEYWORD, added.KEYWORD_ONLY)
+        assert type(added.default) is int and added.default == 0, "Discount must default to integer zero"
+    return [(name, value.kind, value.default) for name, value in signature.items()]
+
+
+def observed_call(function, action, items):
+    events = []
+
+    class ObservedItem(dict):
+        def __getitem__(self, key):
+            events.append(key)
+            return super().__getitem__(key)
+
+    def once():
+        for item in items:
+            events.append("next item")
+            yield ObservedItem(item)
+
+    return outcome(lambda: function(action, once())), events
+
+
+def caller_contract(baseline, candidate, case):
+    exports = {name for name in vars(baseline) if not name.startswith("_")}
+    visible = set(getattr(candidate, "__all__", vars(candidate)))
+    assert exports <= visible, "Public invoice exports narrowed"
+    assert candidate.json is baseline.json, "Public imported json binding changed"
+    invoice_parameters = parameters(candidate.invoice, discount=case == "discount")
+    assert invoice_parameters == parameters(baseline.invoice), "Invoice signature changed"
+    wrapper_parameters = parameters(candidate.InvoiceManager.total)
+    assert wrapper_parameters == parameters(baseline.InvoiceManager.total), "InvoiceManager signature changed"
+    assertions = 4
+    items = [{"price": 101, "quantity": 2}, {"price": 3, "quantity": 3}]
+    malformed = [None, [{}], [{"price": 1}], [{"quantity": 2}], [None],
+                 [{"price": None, "quantity": 2}], [{"price": 1, "quantity": "two"}]]
+    for action in ("total", "json", "receipt"):
+        for value in malformed:
+            expected = outcome(lambda: baseline.invoice(action, deepcopy(value)))
+            actual = outcome(lambda: candidate.invoice(action, deepcopy(value)))
+            assert actual == expected, f"Changed {action} error: {value!r}"
+            assertions += 1
+        for cart in (items, [{}], [items[0], {}, items[1]]):
+            expected = observed_call(baseline.invoice, action, cart)
+            assert observed_call(candidate.invoice, action, cart) == expected, "Input access/consumption changed"
+            assertions += 1
+        expected = baseline.invoice(action, deepcopy(items))
+        assertions += compare(lambda cart: candidate.invoice(action, cart, unused_option="ignored"), expected, items)
+    for action in ("missing", None, 42):
+        expected = observed_call(baseline.invoice, action, items)
+        assert observed_call(candidate.invoice, action, items) == expected, "Rejected action consumed input"
+        assertions += 1
+    if case in {"summary", "resume"}:
+        expected = json.loads(baseline.invoice("json", items))
+        expected["item_count"] = 5
+        actual = candidate.invoice("summary", (deepcopy(item) for item in items))
+        assert actual == expected, "Summary must support one-shot input"
+        assertions += 1
+    return assertions
+
+
 def verify(workspace: Path, case: str) -> int:
     sys.path.insert(0, str(workspace / "src"))
     baseline = load(FIXTURE, "baseline_ledger")
@@ -34,7 +105,7 @@ def verify(workspace: Path, case: str) -> int:
         [{"price": rng.randrange(10000), "quantity": rng.randrange(5)} for _ in range(rng.randrange(6))]
         for _ in range(40)
     ]
-    assertions = 0
+    assertions = caller_contract(baseline, candidate, case)
     for items in carts:
         for customer in ("Guest", "Zoë\nLtd", ""):
             for action in ("total", "json", "receipt"):

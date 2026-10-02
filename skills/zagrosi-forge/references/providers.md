@@ -45,6 +45,8 @@ Create a UTF-8 packet with the question, relevant requirements, changed code/dif
 affected caller contracts, measured checks, and unresolved risks. Include only
 material permitted to be sent to that provider. Never include credentials. Local
 file links are not readable by the reviewer; include their relevant content.
+For refactors, include the original compatibility wording and before/after
+caller-surface evidence; a plan's claim of preservation is insufficient.
 Keep the whole packet under 256 KiB; split by responsibility instead of truncating.
 
 ### Two reviewers

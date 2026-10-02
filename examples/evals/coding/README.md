@@ -10,8 +10,9 @@ an import preview across several modules, a Node summary feature, and TypeScript
 permission/transaction cleanup, and webhook retry correctness. The invoice cases preserve public APIs, exact exports, rounding, and
 errors. The godfile case exercises cohesive module extraction while preserving
 validation, pricing, shipping, serialization, file access, and order transitions.
-The ordinary summary request never asks for refactoring: independent review checks
-whether relevant duplication was cleaned up along the way. Its unrelated
+The ordinary summary feature request does not prescribe a refactor. Fresh writer
+and reviewer prompts disclose required cleanup equally to all arms; independent
+review judges useful changes to encountered code. Historical prompts remain unchanged. Its unrelated
 `src/legacy_reports.py` is protected; editing it fails scope even if tests pass.
 The Node case uses CommonJS, `node --test`, and an independent Node oracle without
 a framework. Node must be available to run it.
@@ -52,6 +53,9 @@ computed first, and input mutation is checked separately. Reports include scope 
 loops, external imports, test output, and runner time. Python AST metrics are not
 ported by guesswork: JavaScript complexity/dependency metrics remain unknown. These structural measures
 support review; they do not establish readability or reward code golf.
+The Python invoice oracle also compares malformed-input errors, input access and
+one-shot iteration, public imports/signatures/defaults, and ignored options with
+the baseline. Known regressions fail while valid shared-calculation controls pass.
 
 ## Verdicts and cleanup review
 
@@ -202,10 +206,13 @@ python /path/to/evaluator/tools/trial_matrix.py report /tmp/forge-controlled
 ```
 
 Applying reviews validates baseline/candidate hashes against both the original
-workspace and review packet, writes the existing per-trial cleanup evidence,
+workspace and review packet, checks complete boolean evidence against the
+source-bound result, writes the existing per-trial cleanup evidence,
 rechecks candidates with the fixed evaluator, and retains comparative judgments
 in `summary.json`. Source/test changes invalidate review; stale checker output
 cannot create a blind packet. Templates grant no passing verdict.
+Preference is distinct from acceptance: a preferred candidate with passing
+behavior/scope checks can still fail required cleanup. Every judgment stays visible.
 
 The adapter saves raw `agent-events.jsonl` plus atomic partial `telemetry.json`,
 including CLI version, requested model/effort, total input/output tokens and

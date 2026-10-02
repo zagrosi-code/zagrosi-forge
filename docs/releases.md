@@ -9,6 +9,8 @@
 - Exercise whole workflow sequences at lean, standard and deep; add a tenant-isolated retry bug-fix trial with an independent oracle.
 - Separate cached and uncached input usage per accepted result. Split Windows compatibility groups while retaining their combined coverage.
 - Give fresh coding trials a clean Git baseline for reliable change inspection, preserving parent repositories and historical trials.
+- Keep original source promises in compact handoffs and check refactoring assumptions against them; characterize uncertain behavior before extending duplication.
+- Protect Python caller contracts with independent error, iteration, signature and export checks; bind blind review checks to their source results and disclose required cleanup equally to every arm.
 
 The plugin runtime remains Python standard-library only. Live Claude/Gemini and cross-host acceptance still require native sign-in; offline checks do not establish model access or general code-quality superiority.
 

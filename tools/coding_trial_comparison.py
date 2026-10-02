@@ -20,6 +20,26 @@ def read(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def task_acceptance(case: dict) -> str:
+    """Disclose the same quality and scope requirements to writers and reviewers."""
+    text = ("Preserve public APIs. Standard library only. If you create planning records, keep them compact under .planning/.\n"
+            "Edit only src/, tests/, and .planning/. .gitignore may list .planning/, __pycache__/, .pytest_cache/, and *.pyc.\n")
+    if case.get("cleanup_required"):
+        text += ("Required acceptance includes useful cleanup of encountered duplication or mixed responsibilities "
+                 "in the changed execution path, with regression evidence. Preserve public behavior and avoid "
+                 "unrelated edits; choose the smallest coherent repair.\n")
+    if protected := case.get("protected_paths"):
+        text += f"Leave these unrelated files unchanged: {', '.join(protected)}.\n"
+    return text
+
+
+def check_evidence(result: dict) -> dict:
+    return {"behavior_passed": result["behavior"]["success"],
+            "oracle_complete": result["oracle_complete"],
+            "candidate_tests_passed": result["tests"]["returncode"] == 0,
+            "scope_passed": not result["outside_scope"]}
+
+
 def packets(directory: Path) -> dict:
     manifest = read(directory / "matrix.json")
     if not manifest.get("comparison"):
@@ -52,10 +72,7 @@ def packets(directory: Path) -> dict:
             for name in ("src", "tests"):
                 shutil.copytree(trial / "workspace" / name, folder / label / name,
                                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache"))
-            evidence = {"behavior_passed": result["behavior"]["success"],
-                        "oracle_complete": result["oracle_complete"],
-                        "candidate_tests_passed": result["tests"]["returncode"] == 0,
-                        "scope_passed": not result["outside_scope"]}
+            evidence = check_evidence(result)
             (folder / label / "checks.json").write_text(json.dumps(evidence, indent=2) + "\n")
             template = review_template(trial)
             reviews[label] = {"baseline_sha256": template["baseline_sha256"],
@@ -66,7 +83,8 @@ def packets(directory: Path) -> dict:
         case = manifest["cases"][entries[0]["case"]]
         baseline = Path(manifest["evaluator_root"]) / "examples/evals/coding" / case.get("fixture", "fixture")
         brief = baseline / "prompt.md"
-        (folder / "task.md").write_text(case["request"] + "\n\n" + (brief.read_text() if brief.is_file() else ""))
+        (folder / "task.md").write_text(case["request"] + "\n\n" + task_acceptance(case)
+                                      + "\n" + (brief.read_text() if brief.is_file() else ""))
         for name in ("src", "tests"):
             shutil.copytree(baseline / name, folder / "baseline" / name,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -80,7 +98,9 @@ def packets(directory: Path) -> dict:
             "implementation paths only; describe test changes in cleanup.regression_evidence. Empty templates grant no pass.\n\n"
             + "\n".join(f"- {name}: {question}" for name, question in CRITERIA.items())
             + "\n\nPrefer useful simplicity and maintainability; line counts alone are not quality evidence. "
-            "Arm labels/metrics are withheld, but code may reveal workflow fingerprints; blinding is partial.\n")
+            "Preference ranks code with passing behavior/scope checks; required cleanup is judged separately "
+            "and can still prevent trial acceptance. Arm labels/metrics are withheld, but code may reveal "
+            "workflow fingerprints; blinding is partial.\n")
     (directory / "blind-key.json").write_text(json.dumps(key, indent=2) + "\n")
     return {"packets": str(destination), "blocks": len(blocks), "private_key": str(directory / "blind-key.json")}
 
@@ -92,15 +112,22 @@ def reviews(directory: Path, *, apply: bool = False) -> list[dict]:
     key = read(key_path)
     results = []
     for path in sorted((directory / "blind").glob("*/review.json")):
-        block, data = path.parent.name, read(path)
-        candidates = data.get("candidates", {})
+        block = path.parent.name
+        try:
+            data = read(path)
+        except (OSError, ValueError):
+            data = None
+        form = data if isinstance(data, dict) else {}
+        candidates = form.get("candidates", {})
         if not isinstance(candidates, dict):
             candidates = {}
         expected = {name.split("/")[-1] for name in key if name.startswith(block + "/")}
-        valid = (data.get("independent") is True and _text(data.get("reviewer"))
-                 and _text(data.get("rationale")) and set(candidates) == expected
-                 and isinstance(data.get("preferred"), list)
-                 and all(isinstance(label, str) and label in expected for label in data["preferred"]))
+        preferred = form.get("preferred")
+        valid = (form.get("independent") is True and _text(form.get("reviewer"))
+                 and _text(form.get("rationale")) and set(candidates) == expected
+                 and isinstance(preferred, list)
+                 and all(isinstance(label, str) and label in expected for label in preferred)
+                 and len(preferred) == len(set(preferred)))
         for label, row in candidates.items():
             trial_id = key.get(f"{block}/{label}")
             if not trial_id or not isinstance(row, dict):
@@ -108,16 +135,31 @@ def reviews(directory: Path, *, apply: bool = False) -> list[dict]:
                 continue
             trial = directory / trial_id
             template = review_template(trial)
+            try:
+                result = read(trial / "result.json")
+                checks = read(path.parent / label / "checks.json")
+                valid &= (isinstance(checks, dict) and checks == check_evidence(result)
+                          and all(type(value) is bool for value in checks.values())
+                          and result["candidate_sha256"] == template["candidate_sha256"])
+            except (OSError, ValueError, KeyError, TypeError):
+                valid = False
+                checks = {}
+            cleanup = row.get("cleanup")
             valid &= (row.get("baseline_sha256") == template["baseline_sha256"]
                       and row.get("baseline_sha256") == code_fingerprint(files(path.parent / "baseline"))
                       and row.get("candidate_sha256") == code_fingerprint(files(trial / "workspace"))
                       and row.get("candidate_sha256") == code_fingerprint(files(path.parent / label))
                       and row.get("verdict") in ("pass", "fixed", "fail")
                       and isinstance(row.get("criteria"), dict)
-                      and all(_text(row["criteria"].get(name)) for name in CRITERIA))
-            if isinstance(data.get("preferred"), list) and label in data["preferred"]:
+                      and all(_text(row["criteria"].get(name)) for name in CRITERIA)
+                      and isinstance(cleanup, dict) and type(cleanup.get("meaningful")) is bool
+                      and isinstance(cleanup.get("changed_files"), list)
+                      and all(isinstance(name, str) and name.startswith("src/") for name in cleanup["changed_files"])
+                      and _text(cleanup.get("rationale")) and _text(cleanup.get("regression_evidence")))
+            if isinstance(preferred, list) and label in preferred:
                 valid &= (row.get("verdict") in ("pass", "fixed")
-                          and all(value is True for value in read(path.parent / label / "checks.json").values()))
+                          and isinstance(checks, dict) and bool(checks)
+                          and all(value is True for value in checks.values()))
         if apply and not valid:
             raise ValueError(f"Incomplete or stale independent comparison: {block}")
         if apply:
@@ -127,5 +169,5 @@ def reviews(directory: Path, *, apply: bool = False) -> list[dict]:
                 evidence.update(reviewer=data["reviewer"], independent=True)
                 (trial / "review.json").write_text(json.dumps(evidence, indent=2) + "\n")
         results.append({"block": block, "valid": bool(valid), "review": data,
-                        "preferred_trials": [key[f"{block}/{label}"] for label in data.get("preferred", []) if label in expected] if valid else []})
+                        "preferred_trials": [key[f"{block}/{label}"] for label in preferred] if valid else []})
     return results

@@ -206,6 +206,15 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
     reqs = context_requirement_ids(section_text)
     artifacts = _artifacts.planning_artifacts(planning_dir)
     artifacts["spec"] = _artifacts.requirement_source_spec(planning_dir)
+    parts = [section_text.rstrip()] if section_path else [f"# Context: {planning_dir.name}"]
+    source_spans: list[tuple[int, int]] = []
+    if follow_links and (compact := _artifacts.compact_plan_descriptor(planning_dir)):
+        contract = _planning_contract.analyze_contract(compact["source"], _storage.read_text(compact["path"]), planning_dir)
+        if contract and contract["errors"]:
+            return {"success": False, "error": "Compact source mappings are invalid.", "errors": contract["errors"]}
+        if contract:
+            source_spans = [span for req, span in contract["source_spans"].items() if not section or req in reqs]
+            source_lines = _storage.read_text(compact["source"]).splitlines()
     names = ("spec", "plan") if _markdown.is_lean_depth(_artifacts.planning_depth(planning_dir)) else ("spec", "plan", "tdd", "decisions", "risks", "traceability")
     sources = []
     seen_paths: set[Path] = set()
@@ -213,6 +222,8 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
         path = artifacts.get(name)
         if path and path.is_file() and path != section_path and path not in seen_paths:
             seen_paths.add(path)
+            if name == "spec" and source_spans:
+                continue  # Validated brief excerpts are required, not optional context.
             text = _artifacts.planning_artifact_text(planning_dir, name, path)
             blocks = selected_context_blocks(text, reqs) if not section or reqs else []
             shared = bool(section and any(
@@ -222,21 +233,35 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
             if blocks or shared:
                 reference = f"Omitted {name} context: `{path}`."
                 sources.append((name, path, blocks, reference, _markdown.word_count(reference), shared))
-    if not section and not sources:
+    if not section and not sources and not source_spans:
         return {"success": False, "error": f"No planning sources found: {planning_dir}"}
-    parts = [section_text.rstrip()] if section_path else [f"# Context: {planning_dir.name}"]
     linked = {}
     if follow_links:
         seeds = [(section_path, section_text)] if section_path else []
+        seed_ranges = {}
+        if source_spans:
+            seeds.append((artifacts["spec"], "\n".join(source_lines)))
+            seed_ranges[artifacts["spec"].resolve()] = source_spans
         seeds.extend((path, block) for _, path, blocks, *_ in sources for _, block in blocks)
         try:
-            linked = _context_links.linked_contracts(planning_dir, seeds, known_paths=seen_paths)
+            linked = _context_links.linked_contracts(planning_dir, seeds, known_paths=seen_paths, seed_ranges=seed_ranges)
         except (OSError, ValueError, RuntimeError) as exc:
             return {"success": False, "error": f"Cannot resolve linked contracts: {exc}"}
+        if source_spans:
+            source = artifacts["spec"].resolve()
+            source_spans.extend((first, last) for first, last, _ in linked.pop(source, []))
+            merged: list[tuple[int, int]] = []
+            for first, last in sorted(source_spans):
+                if merged and first <= merged[-1][1] + 1:
+                    merged[-1] = merged[-1][0], max(merged[-1][1], last)
+                else:
+                    merged.append((first, last))
+            linked[source] = [(first, last, "\n".join(source_lines[first - 1:last])) for first, last in merged]
         for path, spans in linked.items():
             if section_path and path == section_path.resolve():
                 continue  # The complete section already includes its own anchors.
-            parts.extend(f"## contract: `{path}:{line}`\n\n{body}" for line, _, body in spans)
+            label = "source requirements" if source_spans and path == artifacts["spec"].resolve() else "contract"
+            parts.extend(f"## {label}: `{path}:{line}`\n\n{body}" for line, _, body in spans)
         remaining_sources = []
         for name, path, blocks, reference, cost, shared in sources:
             covered = [body for _, _, body in linked.get(path.resolve(), [])]
