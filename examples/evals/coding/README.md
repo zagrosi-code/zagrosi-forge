@@ -1,8 +1,10 @@
 # Coding trials
 
-[2 October observations](quality-results-2026-10-02.md): sixteen repeated Forge/plain
-attempts, blinded code review, and separate interrupted-session checks. Prior
-reports below remain unchanged.
+[Latest follow-up](quality-followup-2026-10-02.md): twelve previous/current/plain
+attempts, each arm accepted 2/4 after independent review. Two compatibility gaps
+escaped the frozen oracle; both remain in the results. This does not demonstrate
+better generated-code reliability. The [earlier sixteen-attempt experiment](quality-results-2026-10-02.md)
+and separate interruption checks remain unchanged.
 
 Nine isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
 deep discount design, a real Forge resume checkpoint, an order-dispatch godfile,

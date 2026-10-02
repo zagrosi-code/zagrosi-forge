@@ -183,7 +183,7 @@ Runtime loading verifies SHA-256 source bindings; writes are locked and atomic.
 
 [Helper benchmarks](examples/evals/performance.json) measure fixed fixtures.
 [Coding trials](examples/evals/coding/README.md) separate host/model, accepted
-completion, cleanup quality, time, and usage. [Latest observations](examples/evals/coding/quality-results-2026-10-02.md) retain failures;
+completion, cleanup quality, time, and usage. [Latest observations](examples/evals/coding/quality-followup-2026-10-02.md) retain failures;
 adapter support alone does not establish faster or better model output.
 
 ## Contribute

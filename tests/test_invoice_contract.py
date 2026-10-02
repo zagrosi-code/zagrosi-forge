@@ -58,7 +58,8 @@ def check(workspace, case="cleanup"):
 
 @pytest.mark.parametrize("mutation", [
     "read-order", "error-type", "eager-input", "second-pass", "signature", "default",
-    "ignored-option", "import", "wildcard-export", "wrapper-signature",
+    "ignored-option", "import", "wildcard-export", "wrapper-signature", "eager-count",
+    "unhashable-action-type", "unhashable-action-args", "unhashable-action-consumption",
 ])
 def test_oracle_rejects_compatibility_regressions_with_passing_writer_tests(workspace, mutation):
     path = workspace / "src/ledger.py"
@@ -85,6 +86,16 @@ def test_oracle_rejects_compatibility_regressions_with_passing_writer_tests(work
         source = source.replace('import json', 'import json as _json').replace('json.dumps', '_json.dumps')
     elif mutation == "wildcard-export":
         source += '\n__all__ = ["invoice", "InvoiceManager"]\n'
+    elif mutation == "eager-count":
+        source = SHARED.replace('        if count_items:\n            count += quantity',
+                                '        count += quantity')
+    elif mutation == "unhashable-action-type":
+        source = SHARED.replace('not in ("total", "json", "receipt", "summary")',
+                                'not in {"total", "json", "receipt", "summary"}')
+    elif mutation in {"unhashable-action-args", "unhashable-action-consumption"}:
+        action = 'raise ValueError("Unknown action")' if mutation.endswith("args") else 'list(items)'
+        source = SHARED.replace('    if action not in',
+            f'    if isinstance(action, (list, dict)):\n        {action}\n    if action not in')
     else:
         source = source.replace('def total(self, items):', 'def total(self, items, required):')
         # Candidate tests do not cover the public wrapper.

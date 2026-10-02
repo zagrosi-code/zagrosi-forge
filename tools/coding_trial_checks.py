@@ -12,6 +12,13 @@ from pathlib import Path
 FIXTURE = Path(__file__).resolve().parents[1] / "examples/evals/coding/fixture/src/ledger.py"
 
 
+class CountingGuard(int):
+    """Legacy pricing multiplies quantities; only the new summary counts them."""
+
+    def __radd__(self, other):
+        raise AssertionError("Legacy actions must not add quantities")
+
+
 def load(path, name):
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
@@ -69,6 +76,7 @@ def caller_contract(baseline, candidate, case):
     assert wrapper_parameters == parameters(baseline.InvoiceManager.total), "InvoiceManager signature changed"
     assertions = 4
     items = [{"price": 101, "quantity": 2}, {"price": 3, "quantity": 3}]
+    guarded_items = [{"price": 100, "quantity": CountingGuard(2)}]
     malformed = [None, [{}], [{"price": 1}], [{"quantity": 2}], [None],
                  [{"price": None, "quantity": 2}], [{"price": 1, "quantity": "two"}]]
     for action in ("total", "json", "receipt"):
@@ -81,11 +89,12 @@ def caller_contract(baseline, candidate, case):
             expected = observed_call(baseline.invoice, action, cart)
             assert observed_call(candidate.invoice, action, cart) == expected, "Input access/consumption changed"
             assertions += 1
-        expected = baseline.invoice(action, deepcopy(items))
-        assertions += compare(lambda cart: candidate.invoice(action, cart, unused_option="ignored"), expected, items)
-    for action in ("missing", None, 42):
+        for cart in (items, guarded_items):
+            expected = baseline.invoice(action, deepcopy(cart))
+            assertions += compare(lambda value: candidate.invoice(action, value, unused_option="ignored"), expected, cart)
+    for action in ("missing", None, 42, [], {}):
         expected = observed_call(baseline.invoice, action, items)
-        assert observed_call(candidate.invoice, action, items) == expected, "Rejected action consumed input"
+        assert observed_call(candidate.invoice, action, items) == expected, "Rejected action error or input consumption changed"
         assertions += 1
     if case in {"summary", "resume"}:
         expected = json.loads(baseline.invoice("json", items))

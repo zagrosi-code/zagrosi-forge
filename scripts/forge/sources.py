@@ -61,7 +61,7 @@ TEST_MANIFEST = {
     "test_installation.py": "47a75c56bf2946ac30160cce8934bde62eaad1f24e2b68ae09489f3a48b4f32b",
     "test_installation_contract.py": "5497fbfd70310b238e2cc1e0206c51529ce2702f286afadd8243f4485f400457",
     "test_interview.py": "8e32056374b22a4247f916c3da205ceebd084ce66da0d79a2edebf4f0df4198b",
-    "test_invoice_contract.py": "de880e3b56ee640b9bcbea4a0a9d054f2726993582034add1c6c5614883a52fa",
+    "test_invoice_contract.py": "2e3ca21e6dd00c8efd134e66658cd2efe1816b32cc95ac41f78dcf3632832f23",
     "test_mutable_state.py": "c2a1bd08ce23094d4001a7e1998beac79c4c4ecf06f39dcf84a821ad86287b9e",
     "test_mutable_state_safety.py": "03b956534c4837d187dc19e43e99d673c1004a4ed7628e92abbf80c87f944f25",
     "test_native_package_identity.py": "46dd9530e9e3dfdb597741eea5bc7c7c465a355262d8952feb46c9df322be201",

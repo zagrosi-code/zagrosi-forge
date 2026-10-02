@@ -1,0 +1,1229 @@
+{
+  "schema": "forge-quality-followup-v1",
+  "date": "2026-10-02",
+  "sources": {
+    "previous": {
+      "commit": "2b7b22bbf7207a6bd7add656bdada435c748d09e",
+      "tree": "782d2fb1f1c8fb3f1088bec6d97a04780ee50877",
+      "file_count": 315,
+      "files_sha256": "f1fd4029db18ccf98de1f1c5f4c48be517555c576751c2370725febf8ca83309"
+    },
+    "frozen": {
+      "commit": "fe85ea1fb883ed606a7fff2a9d9c9ff883c00353",
+      "tree": "9bba389dccbc09026089aa2869af2417db9fdfd0",
+      "file_count": 316,
+      "files_sha256": "a3d2a618eb45cbc86a02d70c5683842db934fce8cecec983520593be0d7af9f1"
+    }
+  },
+  "settings": {
+    "host": "codex",
+    "model": "gpt-5.5",
+    "effort": "medium",
+    "jobs": 1
+  },
+  "shuffle_seed": 2102,
+  "deadline_seconds_per_attempt": 900,
+  "environment": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.7"
+  },
+  "operator_corrections": 0,
+  "comparative_review": {
+    "expected": 4,
+    "completed": 4,
+    "complete": true
+  },
+  "arms": {
+    "previous": {
+      "accepted": 2,
+      "scheduled": 4,
+      "accepted_rate": 0.5,
+      "elapsed_seconds": {
+        "observed": 1468.895,
+        "observed_attempts": 4,
+        "total": 1468.895,
+        "per_accepted": 734.4475
+      },
+      "tokens": {
+        "input_tokens": {
+          "observed": 4601680,
+          "observed_attempts": 4,
+          "total": 4601680,
+          "per_accepted": 2300840.0
+        },
+        "cached_input_tokens": {
+          "observed": 4338688,
+          "observed_attempts": 4,
+          "total": 4338688,
+          "per_accepted": 2169344.0
+        },
+        "uncached_input_tokens": {
+          "observed": 262992,
+          "observed_attempts": 4,
+          "total": 262992,
+          "per_accepted": 131496.0
+        },
+        "output_tokens": {
+          "observed": 67272,
+          "observed_attempts": 4,
+          "total": 67272,
+          "per_accepted": 33636.0
+        }
+      },
+      "reported_cost_usd": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "interventions": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "limits": "Every attempt counts, including failures. Missing observations leave totals unknown; zero accepted leaves per-accepted values undefined. Elapsed time excludes independent review. CLI cost estimates are not subscription bills."
+    },
+    "current": {
+      "accepted": 2,
+      "scheduled": 4,
+      "accepted_rate": 0.5,
+      "elapsed_seconds": {
+        "observed": 1447.728,
+        "observed_attempts": 4,
+        "total": 1447.728,
+        "per_accepted": 723.864
+      },
+      "tokens": {
+        "input_tokens": {
+          "observed": 5108246,
+          "observed_attempts": 4,
+          "total": 5108246,
+          "per_accepted": 2554123.0
+        },
+        "cached_input_tokens": {
+          "observed": 4820992,
+          "observed_attempts": 4,
+          "total": 4820992,
+          "per_accepted": 2410496.0
+        },
+        "uncached_input_tokens": {
+          "observed": 287254,
+          "observed_attempts": 4,
+          "total": 287254,
+          "per_accepted": 143627.0
+        },
+        "output_tokens": {
+          "observed": 67379,
+          "observed_attempts": 4,
+          "total": 67379,
+          "per_accepted": 33689.5
+        }
+      },
+      "reported_cost_usd": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "interventions": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "limits": "Every attempt counts, including failures. Missing observations leave totals unknown; zero accepted leaves per-accepted values undefined. Elapsed time excludes independent review. CLI cost estimates are not subscription bills."
+    },
+    "plain": {
+      "accepted": 2,
+      "scheduled": 4,
+      "accepted_rate": 0.5,
+      "elapsed_seconds": {
+        "observed": 760.7379999999999,
+        "observed_attempts": 4,
+        "total": 760.7379999999999,
+        "per_accepted": 380.36899999999997
+      },
+      "tokens": {
+        "input_tokens": {
+          "observed": 1216158,
+          "observed_attempts": 4,
+          "total": 1216158,
+          "per_accepted": 608079.0
+        },
+        "cached_input_tokens": {
+          "observed": 1117056,
+          "observed_attempts": 4,
+          "total": 1117056,
+          "per_accepted": 558528.0
+        },
+        "uncached_input_tokens": {
+          "observed": 99102,
+          "observed_attempts": 4,
+          "total": 99102,
+          "per_accepted": 49551.0
+        },
+        "output_tokens": {
+          "observed": 36826,
+          "observed_attempts": 4,
+          "total": 36826,
+          "per_accepted": 18413.0
+        }
+      },
+      "reported_cost_usd": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "interventions": {
+        "observed": null,
+        "observed_attempts": 0,
+        "total": null,
+        "per_accepted": null
+      },
+      "limits": "Every attempt counts, including failures. Missing observations leave totals unknown; zero accepted leaves per-accepted values undefined. Elapsed time excludes independent review. CLI cost estimates are not subscription bills."
+    }
+  },
+  "attempts": [
+    {
+      "id": "summary-standard-1-previous",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "previous",
+      "block": "summary-standard-1",
+      "accepted": false,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "outside_scope": [],
+      "oracle_complete": true,
+      "oracle_returncode": 0,
+      "oracle_error": null,
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "e0371eee74cdd2f1c226d4cd133269e2803e8261e1f71da189f94203506384ad",
+      "plugin_provenance": "verified",
+      "attempt_seconds": 260.274,
+      "runner_seconds": 259.774,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 881823,
+        "cached_input_tokens": 834432,
+        "output_tokens": 11322,
+        "reasoning_output_tokens": 1801,
+        "uncached_input_tokens": 47391
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 2,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 50,
+        "modules": 2,
+        "largest_function_lines": 26,
+        "branches": 8,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 57,
+        "modules": 2,
+        "largest_function_lines": 20,
+        "branches": 7,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "summary-standard-1-current",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "current",
+      "block": "summary-standard-1",
+      "accepted": false,
+      "behavior": false,
+      "workflow": true,
+      "cleanup": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "outside_scope": [],
+      "oracle_complete": false,
+      "oracle_returncode": 1,
+      "oracle_error": "Traceback (most recent call last):\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 152, in <module>\n    print(json.dumps({\"case\": sys.argv[2], \"assertions\": verify(Path(sys.argv[1]), sys.argv[2])}))\n                                                         ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 108, in verify\n    assertions = caller_contract(baseline, candidate, case)\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 78, in caller_contract\n    assert actual == expected, f\"Changed {action} error: {value!r}\"\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: Changed total error: [{}]\n",
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "4f29f235543581f1869cc5b33795399b4fa1abb006c22c280a4c9694fdbaa8a1",
+      "plugin_provenance": "verified",
+      "attempt_seconds": 253.791,
+      "runner_seconds": 253.339,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 729475,
+        "cached_input_tokens": 685440,
+        "output_tokens": 10700,
+        "reasoning_output_tokens": 1113,
+        "uncached_input_tokens": 44035
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 1,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 50,
+        "modules": 2,
+        "largest_function_lines": 26,
+        "branches": 8,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 58,
+        "modules": 2,
+        "largest_function_lines": 22,
+        "branches": 7,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "summary-standard-1-plain",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "summary-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": true,
+      "cleanup_reasons": [],
+      "outside_scope": [],
+      "oracle_complete": true,
+      "oracle_returncode": 0,
+      "oracle_error": null,
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "f83424689f66a609ee03d4050ca9b8e22bd32811163375ac1237dfd801e4db42",
+      "plugin_provenance": "not_applicable",
+      "attempt_seconds": 92.224,
+      "runner_seconds": 91.992,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 189795,
+        "cached_input_tokens": 174208,
+        "output_tokens": 4001,
+        "reasoning_output_tokens": 776,
+        "uncached_input_tokens": 15587
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 0,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 50,
+        "modules": 2,
+        "largest_function_lines": 26,
+        "branches": 8,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 64,
+        "modules": 2,
+        "largest_function_lines": 24,
+        "branches": 9,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "godfile-standard-1-current",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "current",
+      "block": "godfile-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": true,
+      "cleanup_reasons": [],
+      "outside_scope": [],
+      "oracle_complete": true,
+      "oracle_returncode": 0,
+      "oracle_error": null,
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "56b706aca4626713cf9510628917fab17912abd59286831c2869bd800eb93556",
+      "plugin_provenance": "verified",
+      "attempt_seconds": 423.337,
+      "runner_seconds": 422.959,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 1755758,
+        "cached_input_tokens": 1667968,
+        "output_tokens": 19529,
+        "reasoning_output_tokens": 2393,
+        "uncached_input_tokens": 87790
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 2,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 251,
+        "modules": 1,
+        "largest_function_lines": 33,
+        "branches": 37,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 325,
+        "modules": 5,
+        "largest_function_lines": 33,
+        "branches": 41,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "godfile-standard-1-plain",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "godfile-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": null,
+      "cleanup": true,
+      "cleanup_reasons": [],
+      "outside_scope": [],
+      "oracle_complete": true,
+      "oracle_returncode": 0,
+      "oracle_error": null,
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "6bdeb5b3eb4ff74704d565a95a8d9accb2b70247dd07462c3d55387ae426af8e",
+      "plugin_provenance": "not_applicable",
+      "attempt_seconds": 294.049,
+      "runner_seconds": 293.813,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 410073,
+        "cached_input_tokens": 377856,
+        "output_tokens": 14346,
+        "reasoning_output_tokens": 1675,
+        "uncached_input_tokens": 32217
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 0,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 251,
+        "modules": 1,
+        "largest_function_lines": 33,
+        "branches": 37,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 365,
+        "modules": 7,
+        "largest_function_lines": 33,
+        "branches": 41,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "godfile-standard-1-previous",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "previous",
+      "block": "godfile-standard-1",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": true,
+      "cleanup_reasons": [],
+      "outside_scope": [],
+      "oracle_complete": true,
+      "oracle_returncode": 0,
+      "oracle_error": null,
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "7af3f601ee0a310e0b393a60c6b5491303ef470bbbb5dca9e990dc91225f084d",
+      "plugin_provenance": "verified",
+      "attempt_seconds": 454.995,
+      "runner_seconds": 454.589,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 1323351,
+        "cached_input_tokens": 1251712,
+        "output_tokens": 21502,
+        "reasoning_output_tokens": 3207,
+        "uncached_input_tokens": 71639
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 3,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 251,
+        "modules": 1,
+        "largest_function_lines": 33,
+        "branches": 37,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 339,
+        "modules": 6,
+        "largest_function_lines": 33,
+        "branches": 41,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "summary-standard-2-plain",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "summary-standard-2",
+      "accepted": false,
+      "behavior": false,
+      "workflow": null,
+      "cleanup": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "outside_scope": [],
+      "oracle_complete": false,
+      "oracle_returncode": 1,
+      "oracle_error": "Traceback (most recent call last):\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 152, in <module>\n    print(json.dumps({\"case\": sys.argv[2], \"assertions\": verify(Path(sys.argv[1]), sys.argv[2])}))\n                                                         ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 108, in verify\n    assertions = caller_contract(baseline, candidate, case)\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 82, in caller_contract\n    assert observed_call(candidate.invoice, action, cart) == expected, \"Input access/consumption changed\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Input access/consumption changed\n",
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "8640212dc6726aa11acb019be42a91e47300ff3889901da69748d310e02969c8",
+      "plugin_provenance": "not_applicable",
+      "attempt_seconds": 58.205,
+      "runner_seconds": 57.999,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 115786,
+        "cached_input_tokens": 95872,
+        "output_tokens": 2600,
+        "reasoning_output_tokens": 327,
+        "uncached_input_tokens": 19914
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 0,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 50,
+        "modules": 2,
+        "largest_function_lines": 26,
+        "branches": 8,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 55,
+        "modules": 2,
+        "largest_function_lines": 20,
+        "branches": 7,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "summary-standard-2-previous",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "previous",
+      "block": "summary-standard-2",
+      "accepted": false,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "outside_scope": [],
+      "oracle_complete": true,
+      "oracle_returncode": 0,
+      "oracle_error": null,
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "d70bc956a2d02aeffdf24d2e2137a8d9fd71c5145149982144c16eb4b663f6b9",
+      "plugin_provenance": "verified",
+      "attempt_seconds": 250.715,
+      "runner_seconds": 250.283,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 791151,
+        "cached_input_tokens": 744576,
+        "output_tokens": 11253,
+        "reasoning_output_tokens": 1638,
+        "uncached_input_tokens": 46575
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 1,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 50,
+        "modules": 2,
+        "largest_function_lines": 26,
+        "branches": 8,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 63,
+        "modules": 2,
+        "largest_function_lines": 22,
+        "branches": 10,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "summary-standard-2-current",
+      "case": "summary",
+      "depth": "standard",
+      "arm": "current",
+      "block": "summary-standard-2",
+      "accepted": false,
+      "behavior": false,
+      "workflow": true,
+      "cleanup": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "outside_scope": [],
+      "oracle_complete": false,
+      "oracle_returncode": 1,
+      "oracle_error": "Traceback (most recent call last):\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 152, in <module>\n    print(json.dumps({\"case\": sys.argv[2], \"assertions\": verify(Path(sys.argv[1]), sys.argv[2])}))\n                                                         ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 108, in verify\n    assertions = caller_contract(baseline, candidate, case)\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/coding_trial_checks.py\", line 78, in caller_contract\n    assert actual == expected, f\"Changed {action} error: {value!r}\"\n           ^^^^^^^^^^^^^^^^^^\nAssertionError: Changed total error: [{}]\n",
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "ce5422893d74436f1481faee3d6541dd0e3e53b76d1b11b7899b31ddad627e67",
+      "plugin_provenance": "verified",
+      "attempt_seconds": 231.898,
+      "runner_seconds": 231.512,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 815153,
+        "cached_input_tokens": 747008,
+        "output_tokens": 10554,
+        "reasoning_output_tokens": 1027,
+        "uncached_input_tokens": 68145
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 2,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 50,
+        "modules": 2,
+        "largest_function_lines": 26,
+        "branches": 8,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 55,
+        "modules": 2,
+        "largest_function_lines": 20,
+        "branches": 7,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "godfile-standard-2-previous",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "previous",
+      "block": "godfile-standard-2",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": true,
+      "cleanup_reasons": [],
+      "outside_scope": [],
+      "oracle_complete": true,
+      "oracle_returncode": 0,
+      "oracle_error": null,
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "807cb77ee3dd6f1e278bccd81c80f79870d4aca4f6762746eac577a538a888e9",
+      "plugin_provenance": "verified",
+      "attempt_seconds": 502.911,
+      "runner_seconds": 502.523,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 1605355,
+        "cached_input_tokens": 1507968,
+        "output_tokens": 23195,
+        "reasoning_output_tokens": 2943,
+        "uncached_input_tokens": 97387
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 4,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 251,
+        "modules": 1,
+        "largest_function_lines": 33,
+        "branches": 37,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 346,
+        "modules": 6,
+        "largest_function_lines": 33,
+        "branches": 44,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "godfile-standard-2-current",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "current",
+      "block": "godfile-standard-2",
+      "accepted": true,
+      "behavior": true,
+      "workflow": true,
+      "cleanup": true,
+      "cleanup_reasons": [],
+      "outside_scope": [],
+      "oracle_complete": true,
+      "oracle_returncode": 0,
+      "oracle_error": null,
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "e4af14ebc6f0b1954db45b0a1481e2574bdc75cbeaf1397d2e46d2f1cde52ba2",
+      "plugin_provenance": "verified",
+      "attempt_seconds": 538.702,
+      "runner_seconds": 538.325,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 1807860,
+        "cached_input_tokens": 1720576,
+        "output_tokens": 26596,
+        "reasoning_output_tokens": 2632,
+        "uncached_input_tokens": 87284
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 5,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 251,
+        "modules": 1,
+        "largest_function_lines": 33,
+        "branches": 37,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 346,
+        "modules": 6,
+        "largest_function_lines": 33,
+        "branches": 43,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    },
+    {
+      "id": "godfile-standard-2-plain",
+      "case": "godfile",
+      "depth": "standard",
+      "arm": "plain",
+      "block": "godfile-standard-2",
+      "accepted": false,
+      "behavior": false,
+      "workflow": null,
+      "cleanup": false,
+      "cleanup_reasons": [
+        "independent review has no passing verdict"
+      ],
+      "outside_scope": [],
+      "oracle_complete": false,
+      "oracle_returncode": 1,
+      "oracle_error": "Traceback (most recent call last):\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/godfile_trial_checks.py\", line 206, in <module>\n    main()\n    ~~~~^^\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/godfile_trial_checks.py\", line 201, in main\n    assertions = check_workspace(args.workspace.resolve(), args.compatibility_only)\n  File \"docs/development/2026-10-02-quality-followup/frozen/tools/godfile_trial_checks.py\", line 87, in check_workspace\n    assert getattr(candidate, name, None) is getattr(reference, name), f\"Public import changed or missing: {name}\"\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError: Public import changed or missing: Path\n",
+      "candidate_tests_returncode": 0,
+      "candidate_sha256": "236c0ea74e1291c73d667ec2a41cfb5f84a7fa8750e6e81dbbace021f86d9200",
+      "plugin_provenance": "not_applicable",
+      "attempt_seconds": 316.26,
+      "runner_seconds": 316.005,
+      "runner_returncode": 0,
+      "timed_out": false,
+      "usage": {
+        "input_tokens": 500504,
+        "cached_input_tokens": 469120,
+        "output_tokens": 15879,
+        "reasoning_output_tokens": 1095,
+        "uncached_input_tokens": 31384
+      },
+      "cli_version": "codex-cli 0.154.0",
+      "observed_command_retries": 1,
+      "api_retries": null,
+      "reported_cost_usd": null,
+      "before": {
+        "source_lines": 251,
+        "modules": 1,
+        "largest_function_lines": 33,
+        "branches": 37,
+        "repeated_loops": 0,
+        "external_imports": []
+      },
+      "after": {
+        "source_lines": 346,
+        "modules": 7,
+        "largest_function_lines": 33,
+        "branches": 42,
+        "repeated_loops": 0,
+        "external_imports": []
+      }
+    }
+  ],
+  "independent_reviews": [
+    {
+      "block": "godfile-standard-1",
+      "valid": true,
+      "review": {
+        "reviewer": "blind_quality_boundaries",
+        "independent": true,
+        "preferred": [
+          "B"
+        ],
+        "rationale": "Reviewer disclosure: I have prior familiarity with Forge and earlier blinded trials, but did not author this follow-up or these candidates. I inspected only the two assigned current packets and did not execute their tests. Independence is my attestation; blinding remains partial. All three candidates pass the supplied behavior, oracle, candidate-test and scope checks, and each makes meaningful responsibility cleanup. Prefer B: dispatch_storage separates filesystem effects from pure text/JSON/CSV handling, dispatch_book owns summary and workflow without a cross-module cycle, and its tests explicitly protect the full legacy public surface plus exact JSON/CSV/rendering. A retains all formatting and file access together; C separates text rendering but couples summary and workflow through a delayed reverse import. All three still construct a temporary OrderBook for the free summary function and repeat confirmed-order aggregates in legacy methods.",
+        "candidates": {
+          "A": {
+            "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+            "candidate_sha256": "56b706aca4626713cf9510628917fab17912abd59286831c2869bd800eb93556",
+            "verdict": "pass",
+            "criteria": {
+              "readability": "src/dispatch.py clearly exposes the original public bindings and routes to named implementations. dispatch_workflow.py:_summary_from_orders directly shows status/date aggregation and confirmed-only totals/SKUs. summarize_orders -> OrderBook(orders).summary() is easy to trace within the same module, although the stateful detour is unnecessary for a pure aggregate; _empty_summary is a small single-use wrapper.",
+              "cohesion": "dispatch_validation.py owns normalization, dispatch_pricing.py owns monetary/shipping calculations, and dispatch_workflow.py owns state and associated summaries. CSV_FIELDS moves with dispatch_io.py and TRANSITIONS with workflow, improving ownership. dispatch_io.py still combines pure rendering/codecs and filesystem access, so that particular mixed responsibility remains.",
+              "duplication": "summarize_orders reuses OrderBook.add for validation and duplicate IDs, and _summary_from_orders reuses order_totals. This avoids a second validation implementation, but builds a complete temporary book and discards the deep copies returned by add. Confirmed SKU accumulation remains duplicated between _summary_from_orders and OrderBook.inventory_requirements, with total selection also repeated in outstanding_total.",
+              "regressions": "tests/test_dispatch.py retains the baseline quote/CSV/transition coverage and adds public constants, literal rendering/JSON, file access, error messages, nested get/list isolation, generator summaries and mutable-result isolation. test_summarize_orders_empty_and_generator uses order_totals for its expected aggregate and does not directly test duplicate summary IDs; no summary after shipping is asserted. Supplied A/checks.json reports all four booleans true; source inspection finds no task-breaking behavior change."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/dispatch.py",
+                "src/dispatch_io.py",
+                "src/dispatch_pricing.py",
+                "src/dispatch_validation.py",
+                "src/dispatch_workflow.py"
+              ],
+              "rationale": "Useful cleanup is present independently of preference: the mixed baseline implementation is split into real validation, pricing, I/O and workflow implementations behind an import-compatible facade. This repairs several encountered responsibilities even though pure formatting/file effects remain combined and confirmed-order aggregation duplication remains.",
+              "regression_evidence": "Inspected baseline/tests/test_dispatch.py covers quotation, CSV round trip and a confirmation transition. A/tests/test_dispatch.py adds test_rendering_json_and_file_outputs_are_stable, test_existing_error_messages_and_copy_isolation and summary generator/result-isolation cases. A/checks.json supplies passing candidate tests, behavior, oracle completeness and scope. I ran no baseline/candidate tests; the packet does not establish that new tests preceded refactoring."
+            },
+            "checks": {
+              "behavior_passed": true,
+              "oracle_complete": true,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          },
+          "B": {
+            "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+            "candidate_sha256": "7af3f601ee0a310e0b393a60c6b5491303ef470bbbb5dca9e990dc91225f084d",
+            "verdict": "pass",
+            "criteria": {
+              "readability": "src/dispatch.py explicitly preserves legacy public names, and dispatch_book.py:_summarize_checked uses clear local accumulators with one visible return shape. Both summary entry points lead to the same helper in the book module; validation and duplicate failures remain visible in OrderBook.add rather than a new policy layer.",
+              "cohesion": "dispatch_storage.py owns save_order/load_order file effects; dispatch_rendering.py owns pure human-readable and JSON/CSV conversion; dispatch_pricing.py and dispatch_validation.py own calculations and normalization. dispatch_book.py contains workflow and its aggregate reporting without a reverse module dependency. These are useful, coherent boundaries; further splitting every pure format is not necessary to accept this cleanup.",
+              "duplication": "summarize_orders delegates through OrderBook construction, sharing existing normalization and duplicate-ID rules, while _summarize_checked calls order_totals rather than copying tax/shipping formulas. This retains all orders and creates unused add return copies. _summarize_checked still repeats inventory_requirements' confirmed SKU loop and outstanding_total's confirmed selection; the cleanup improves responsibility ownership rather than eliminating all duplication.",
+              "regressions": "tests/test_dispatch.py:test_dispatch_facade_exports_existing_public_names checks all baseline public names, including csv/date/deepcopy/io/json/Path. Literal rendering/JSON/CSV expectations protect serialization, and tests cover Boolean price rejection, invalid region, file round trip, duplicate IDs, nested copies, confirmed-only generator summaries, SKU key order and mutable summary results. test_order_book_summary_reflects_transitions_and_is_isolated covers confirmation but not later shipping. Supplied B/checks.json reports all four booleans true."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/dispatch.py",
+                "src/dispatch_book.py",
+                "src/dispatch_pricing.py",
+                "src/dispatch_rendering.py",
+                "src/dispatch_storage.py",
+                "src/dispatch_validation.py"
+              ],
+              "rationale": "The baseline's state, validation, pricing, pure output conversion and file side effects now have separate implementation owners. In particular dispatch_storage depends on codecs without making codecs responsible for disk access. This meets useful-cleanup acceptance; the remaining aggregation duplication and temporary book are limitations in preference, not evidence that no cleanup occurred.",
+              "regression_evidence": "Inspected baseline/tests/test_dispatch.py has three scenarios: quote, CSV round trip and confirmation. B/tests/test_dispatch.py adds complete public-name checks, exact rendering/JSON/CSV, validation errors, file access, copy isolation and summary regressions, including duplicate IDs and sorted SKU output. B/checks.json supplies four passing booleans. I did not run tests and cannot determine from these files when compatibility tests were introduced."
+            },
+            "checks": {
+              "behavior_passed": true,
+              "oracle_complete": true,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          },
+          "C": {
+            "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+            "candidate_sha256": "6bdeb5b3eb4ff74704d565a95a8d9accb2b70247dd07462c3d55387ae426af8e",
+            "verdict": "pass",
+            "criteria": {
+              "readability": "src/dispatch.py explicitly lists the public surface through imports and __all__. dispatch_summary.py:summarize_checked_orders is a straightforward aggregation loop. The public summarize_orders performs a local OrderBook import, then calls a method that delegates back to the summary module; this round trip is less direct than keeping collection aggregation independent of workflow.",
+              "cohesion": "dispatch_rendering.py separates text documents from dispatch_serialization.py's JSON/CSV and file access, and validation/pricing/workflow have actual implementations in separate modules. dispatch_summary imports OrderBook lazily while dispatch_workflow imports summarize_checked_orders, creating a circular responsibility dependency. File effects also remain combined with pure codecs in dispatch_serialization.py.",
+              "duplication": "summarize_orders reuses OrderBook.add's normalization and duplicate checking, and summarize_checked_orders reuses order_totals. It still constructs a temporary book and discards add return copies. The confirmed SKU loop and total selection are repeated in dispatch_workflow.py:inventory_requirements/outstanding_total. The extracted summary module therefore does not remove those shared aggregation causes.",
+              "regressions": "tests/test_dispatch.py:test_summary_uses_validation_duplicates_and_current_book_state meaningfully checks confirmed-to-shipped transitions, excluded shipped totals/SKUs and result isolation. test_summarize_orders_empty_and_generator checks repeated SKUs and a later cancelled date. Rendering, CSV duplicates/blank rows, shipping, persistence and copy rules have regressions. However, test_json_and_file_round_trip_normalize_without_mutating never passes its source variable to production code, making that non-mutation assertion ineffective; exact JSON bytes and full legacy imports are not asserted. Supplied C/checks.json reports all four booleans true."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/dispatch.py",
+                "src/dispatch_pricing.py",
+                "src/dispatch_rendering.py",
+                "src/dispatch_serialization.py",
+                "src/dispatch_summary.py",
+                "src/dispatch_validation.py",
+                "src/dispatch_workflow.py"
+              ],
+              "rationale": "Substantive extraction repairs validation, pricing, text rendering and workflow ownership rather than hiding a monolith. That meets required useful-cleanup acceptance. The delayed summary/workflow cycle and codecs sharing file effects are remaining design weaknesses, and prevent this candidate being preferred over B.",
+              "regression_evidence": "Inspected baseline/tests/test_dispatch.py covers quote, CSV round trip and confirmation. C/tests/test_dispatch.py adds rendering, shipping validation, CSV duplicates/blank rows, persistence, copy/transition rules and completed-shipping summary coverage. Its claimed input non-mutation test has an unused source fixture and should not count as effective protection. C/checks.json reports candidate tests, behavior, oracle completeness and scope passing. No tests were run by me, and pre-refactor timing is unverified."
+            },
+            "checks": {
+              "behavior_passed": true,
+              "oracle_complete": true,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          }
+        }
+      },
+      "preferred_trials": [
+        "godfile-standard-1-previous"
+      ],
+      "labels": {
+        "A": "godfile-standard-1-current",
+        "B": "godfile-standard-1-previous",
+        "C": "godfile-standard-1-plain"
+      }
+    },
+    {
+      "block": "godfile-standard-2",
+      "valid": true,
+      "review": {
+        "reviewer": "blind_quality_boundaries",
+        "independent": true,
+        "preferred": [
+          "C"
+        ],
+        "rationale": "Reviewer disclosure: I have prior familiarity with Forge and earlier blinded trials, but did not author this follow-up or these candidates. I inspected only the two assigned current packets and did not execute their tests. Independence is my attestation; blinding remains partial. B and C pass every supplied check; A cannot be preferred because its behavior and oracle checks fail, and source inspection confirms missing legacy public imports. All three make meaningful responsibility cleanup, which is distinct from passing behavior or ranking code. Prefer C over B: dispatch_workflow.OrderBook.summary passes owned normalized records directly to a pure aggregation helper, while B sorts/deep-copies via self.list(), validates into a second collection and then aggregates. C has strong exact-output and input/result isolation regressions without B's additional public-facade metadata mutation. Both retain mixed formatting/file I/O and duplicate legacy aggregation loops.",
+        "candidates": {
+          "A": {
+            "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+            "candidate_sha256": "236c0ea74e1291c73d667ec2a41cfb5f84a7fa8750e6e81dbbace021f86d9200",
+            "verdict": "fail",
+            "criteria": {
+              "readability": "_dispatch_summary.py clearly separates generator-based normalization from _summary_from_validated accumulation, and _dispatch_workflow.py:summary delegates directly. However, src/dispatch.py's restricted imports and __all__ omit baseline public csv, io, json, deepcopy, date and Path; for example from dispatch import Path no longer succeeds. The facade looks explicit while silently narrowing compatibility.",
+              "cohesion": "_dispatch_serialization.py owns JSON/CSV, _dispatch_storage.py owns file effects, _dispatch_workflow.py owns state, and _dispatch_summary.py owns aggregation without a workflow dependency. These are meaningful boundaries. _dispatch_pricing.py still includes packing_slip/order_receipt presentation, and _dispatch_validation.py houses unrelated CSV_FIELDS/TRANSITIONS constants.",
+              "duplication": "summarize_orders streams validate_order results to _summary_from_validated, avoiding a temporary book or normalized-order list, and OrderBook.summary reuses that helper directly. Pricing formulas are reused through order_totals. The helper's SKU accumulation and confirmed-total selection still repeat inventory_requirements/outstanding_total, and _empty_status_counts is a single-use wrapper with little abstraction value.",
+              "regressions": "tests/test_dispatch.py includes literal JSON/slip output, file round trip, add/get/list nested isolation, generator/empty/duplicate summaries and test_order_book_summary_reflects_completed_transitions for confirmation then shipping. It does not check the complete legacy facade, which allows the missing bindings through. A/checks.json reports candidate_tests_passed and scope_passed true but behavior_passed and oracle_complete false; that is a fail irrespective of useful tests and cleanup."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/dispatch.py",
+                "src/_dispatch_pricing.py",
+                "src/_dispatch_serialization.py",
+                "src/_dispatch_storage.py",
+                "src/_dispatch_summary.py",
+                "src/_dispatch_validation.py",
+                "src/_dispatch_workflow.py"
+              ],
+              "rationale": "Useful cleanup exists: file side effects, codecs, workflow and summary are genuinely separated, and summary has a direct streaming validation boundary. This structural acceptance does not excuse the facade's public-import regression or yield overall acceptance. Restore all baseline public bindings before this candidate can pass behavior.",
+              "regression_evidence": "Inspected baseline/tests/test_dispatch.py has only quotation, CSV round-trip and confirmation tests. A/tests/test_dispatch.py adds exact JSON, rendering/storage, nested copy isolation and completed-shipping summaries but no full public-name regression. Supplied A/checks.json says candidate tests and scope pass while behavior fails and oracle is incomplete. I did not run tests or verify any pre-refactor test sequence."
+            },
+            "checks": {
+              "behavior_passed": false,
+              "oracle_complete": false,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          },
+          "B": {
+            "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+            "candidate_sha256": "807cb77ee3dd6f1e278bccd81c80f79870d4aca4f6762746eac577a538a888e9",
+            "verdict": "pass",
+            "criteria": {
+              "readability": "dispatch_summary.py:summarize_orders has explicit validation/duplicate and aggregation phases with readable accumulators. dispatch_workflow.py:OrderBook.summary adds a local import and routes through self.list(). src/dispatch.py also loops over globals to rewrite exported __module__ metadata: this preserves that metadata and is tested, but adds public-facade behavior beyond ordinary named re-exports.",
+              "cohesion": "dispatch_validation.py, dispatch_pricing.py, dispatch_summary.py and dispatch_workflow.py own distinct normalization, pricing, aggregation and state responsibilities. The summary has no reverse workflow dependency. dispatch_io.py retains pure rendering/codecs and filesystem effects together; the local import in OrderBook.summary is unnecessary for the observed acyclic dependency.",
+              "duplication": "summarize_orders reuses validate_order and order_totals, but materializes all checked records before aggregating. OrderBook.summary first sorts and deep-copies its already normalized state through self.list(), then the public summarizer validates/copies those records again. Confirmed SKU and total logic also remains duplicated with inventory_requirements/outstanding_total. These are avoidable traversals and duplicated aggregation responsibilities, not a behavior failure.",
+              "regressions": "tests/test_dispatch.py:test_public_dispatch_surface_keeps_legacy_names protects the full public surface, constants and chosen __module__ metadata. Literal JSON/CSV/receipt/slip output, file contents, malformed CSV/JSON, validation, workflow errors and copy isolation provide substantial compatibility protection. Generator summaries include shipped/cancelled orders and a latest shipped date. Book summary tests check confirmation/result isolation but not a completed shipping transition. B/checks.json reports all four booleans true."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/dispatch.py",
+                "src/dispatch_io.py",
+                "src/dispatch_pricing.py",
+                "src/dispatch_summary.py",
+                "src/dispatch_validation.py",
+                "src/dispatch_workflow.py"
+              ],
+              "rationale": "Real implementation extraction separates validation, pricing, collection reporting and workflow from the original monolith, so required useful cleanup is met. Formatting remains combined with filesystem effects, and the copied/sorted/revalidated book-summary path is less direct than C's helper call. Those limitations influence preference without erasing the substantial cleanup.",
+              "regression_evidence": "Inspected baseline/tests/test_dispatch.py covers quote, CSV round-trip and confirmation. B/tests/test_dispatch.py adds comprehensive import/constant checks, exact serialization and rendering, file-content checks, parser/validation/workflow errors, copy isolation and summary behavior. Supplied B/checks.json reports all four fields true. I ran no tests and cannot infer that added regressions were executed before extraction."
+            },
+            "checks": {
+              "behavior_passed": true,
+              "oracle_complete": true,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          },
+          "C": {
+            "baseline_sha256": "44715f7bab75310cb0d50a645fe690ec4a96405409fdd69f46ffb0fefe3771a1",
+            "candidate_sha256": "e4af14ebc6f0b1954db45b0a1481e2574bdc75cbeaf1397d2e46d2f1cde52ba2",
+            "verdict": "pass",
+            "criteria": {
+              "readability": "src/dispatch.py keeps the legacy public imports available through ordinary explicit re-exports. dispatch_summary.py:summarize_orders clearly normalizes and rejects duplicate IDs, then _summary_from_orders shows the aggregate result. dispatch_workflow.py:OrderBook.summary calls that helper directly on current owned records, making the free-function and book paths easy to distinguish and follow.",
+              "cohesion": "dispatch_models.py owns normalization/shared constants, dispatch_pricing.py owns calculations, dispatch_summary.py owns collection aggregation, and dispatch_workflow.py owns mutable state. Summary depends on validation/pricing without importing workflow. dispatch_io.py still combines human-readable rendering, JSON/CSV and disk access, and TRANSITIONS lives with validation rather than workflow; those are remaining coarse boundaries.",
+              "duplication": "_summary_from_orders is shared by the validated public summarizer and the already-normalized book path, avoiding B's extra list sorting/deep copy and revalidation in OrderBook.summary. Public summarize_orders still retains a checked list for a second pass and duplicate-ID checking repeats the existing book/CSV rule. Confirmed SKU and total accumulation also remains duplicated in inventory_requirements/outstanding_total; no claim of complete deduplication is warranted.",
+              "regressions": "tests/test_dispatch.py protects literal JSON/CSV/receipt/slip outputs, validation normalization and Boolean-price rejection, file access, add/list copies, valid/invalid removal and transition rules. test_summarize_orders_uses_existing_validation_duplicate_rules_and_no_mutation compares a nested input snapshot, checks duplicate IDs and invalid status. test_order_book_summary_tracks_current_state_without_exposing_state checks a later cancelled date and result mutation. Generator input includes shipped exclusion, but no summary after a confirmed-to-shipped method call is asserted. C/checks.json reports all four booleans true."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/dispatch.py",
+                "src/dispatch_io.py",
+                "src/dispatch_models.py",
+                "src/dispatch_pricing.py",
+                "src/dispatch_summary.py",
+                "src/dispatch_workflow.py"
+              ],
+              "rationale": "The baseline's validation, pricing, workflow and collection reporting are moved to coherent implementations behind a compatible facade. Sharing the pure aggregate helper lets the book report directly from owned records without a public-list detour. This meets useful-cleanup acceptance while still leaving formatting/file I/O and legacy confirmed-order aggregation duplication for possible later repair.",
+              "regression_evidence": "Inspected baseline/tests/test_dispatch.py covers only quotation, CSV round-trip and confirmation. C/tests/test_dispatch.py adds exact rendering/JSON/CSV, validation errors, file round-trip, copy/removal rules, generator/duplicate/status summary checks, a nested unchanged-input assertion and returned-summary isolation. C/checks.json supplies passing candidate tests, behavior, oracle completeness and scope. I did not execute tests or establish the timing of regression introduction."
+            },
+            "checks": {
+              "behavior_passed": true,
+              "oracle_complete": true,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          }
+        }
+      },
+      "preferred_trials": [
+        "godfile-standard-2-current"
+      ],
+      "labels": {
+        "A": "godfile-standard-2-plain",
+        "B": "godfile-standard-2-previous",
+        "C": "godfile-standard-2-current"
+      }
+    },
+    {
+      "block": "summary-standard-1",
+      "valid": true,
+      "review": {
+        "reviewer": "Codex independent reviewer /root/next_quality_priorities",
+        "independent": true,
+        "preferred": [
+          "A"
+        ],
+        "rationale": "Prefer A: the supplied behavior/scope checks pass, the calculation duplication is removed, and summary-only counting avoids changing legacy arithmetic. B also passes supplied checks but a narrow independent baseline/candidate probe exposes an added quantity operation that can break previously valid integer quantities. C fails the supplied behavior oracle and changes missing-key error order. Cleanup usefulness and safety are judged separately: all three reduce real duplication, but only A is approved. Reviewer has prior familiarity with Forge and earlier trials, did not author this follow-up or any candidate, and inspected only the two authorized blinded packet directories. Arm keys, logs, timings, usage, parent directories and planning artifacts were not inspected; blinding is partial. No broad tests were run; supplied check receipts plus four narrow in-memory baseline/candidate compatibility probes inform this review.",
+        "candidates": {
+          "A": {
+            "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+            "candidate_sha256": "f83424689f66a609ee03d4050ca9b8e22bd32811163375ac1237dfd801e4db42",
+            "verdict": "pass",
+            "criteria": {
+              "readability": "src/ledger.py keeps action dispatch and exact output formatting visible. _invoice_totals names the shared arithmetic clearly. The count_items flag has one concrete purpose: summary needs a quantity sum while legacy actions do not.",
+              "cohesion": "A single private arithmetic helper owns subtotal/tax/total and optional counting; invoice owns presentation and dispatch. No extra layers or modules; InvoiceManager and the public json binding remain.",
+              "duplication": "The three pre-existing subtotal/tax loops become one shared implementation also used for summary. Summary projection and legacy JSON projection remain explicit because their public fields differ.",
+              "regressions": "Supplied behavior_passed/oracle_complete/candidate_tests_passed/scope_passed are all true. tests/test_ledger.py retains existing tests and adds exact JSON, summary and unknown-action-before-item-access protection. Narrow probes preserve baseline ValueError for []/{} actions, KeyError price for missing fields and total 240 for an int-subclass quantity whose addition raises. Candidate tests alone do not cover all these compatibility edges."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/ledger.py"
+              ],
+              "rationale": "Useful removal of repeated invoice calculation policy while keeping formatting and legacy public entrypoints intact. The optional count prevents the newly required summary aggregation from affecting existing actions; approve this cleanup.",
+              "regression_evidence": "Inspected baseline and candidate src/ledger.py and tests/test_ledger.py; unrelated src/legacy_reports.py is unchanged. Supplied post-change check receipt reports behavior/oracle/tests/scope true. Independent in-memory baseline/candidate probes for unhashable unknown actions, missing item fields and integer quantity subclasses matched for A. No baseline full-suite execution or broader claim is asserted."
+            },
+            "checks": {
+              "behavior_passed": true,
+              "oracle_complete": true,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          },
+          "B": {
+            "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+            "candidate_sha256": "e0371eee74cdd2f1c226d4cd133269e2803e8261e1f71da189f94203506384ad",
+            "verdict": "fail",
+            "criteria": {
+              "readability": "_amounts and branch-local value dictionaries are straightforward, and tests explicitly check public names and invoice signature. However, every legacy branch now silently performs summary-only quantity arithmetic.",
+              "cohesion": "_amounts combines the public summary projection with calculations required by all actions; passing customer and accumulating item_count even for total couples unrelated needs. The useful arithmetic boundary should preserve the legacy operation set.",
+              "duplication": "Shared _amounts removes genuine repeated subtotal/tax policy, but eagerly counting for every action adds observable work. Keep one shared calculation while making counting conditional on summary.",
+              "regressions": "All four supplied check booleans are true; retain that result. A narrow independent probe nevertheless fails: with class Quantity(int) overriding __radd__ to raise RuntimeError, invoice(total, [{price: 100, quantity: Quantity(2)}]) returns 240 in the baseline but raises RuntimeError in B. _amounts adds 0 + quantity solely to count items, even for total. This is a public compatibility gap outside the supplied oracle. Public API and exact JSON tests do not cover it."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/ledger.py"
+              ],
+              "rationale": "The deduplication is substantive, but cannot be approved as behavior-preserving because _amounts introduces quantity addition into total/json/receipt. Preserve the legacy arithmetic operation set, then recheck.",
+              "regression_evidence": "Inspected baseline/candidate tests, including B public-name/signature and exact JSON assertions; supplied candidate check receipt is all true. Independent in-memory differential probe on an int-subclass quantity: baseline total 240; B raises RuntimeError unexpected quantity addition. Unknown []/{} actions and missing-key error order remain consistent in the other narrow probes. No candidate files were changed."
+            },
+            "checks": {
+              "behavior_passed": true,
+              "oracle_complete": true,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          },
+          "C": {
+            "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+            "candidate_sha256": "4f29f235543581f1869cc5b33795399b4fa1abb006c22c280a4c9694fdbaa8a1",
+            "verdict": "fail",
+            "criteria": {
+              "readability": "The helper name and dispatch are understandable, but fetching quantity before price subtly changes the legacy failure path; eager counting also changes existing actions.",
+              "cohesion": "One calculation helper is a reasonable boundary, but it does not preserve field access order or restrict new counting behavior to summary.",
+              "duplication": "The repeated arithmetic loops are genuinely removed. This structural improvement does not compensate for public error/operation regressions.",
+              "regressions": "Supplied behavior_passed and oracle_complete are false, while candidate_tests_passed and scope_passed are true. Direct baseline/candidate inspection and a narrow probe confirm invoice(total, [{}]) changes KeyError price to KeyError quantity. An int-subclass quantity also returns 240 in baseline but raises RuntimeError in C because legacy total now adds quantity. The added summary/manager/JSON happy-path tests miss both failures."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/ledger.py"
+              ],
+              "rationale": "Substantive duplicate calculation removal is present, but approval fails because reading quantity first changes the promised existing error behavior and eager item counting changes legacy arithmetic.",
+              "regression_evidence": "Original total/receipt tests remain and new tests cover summary, JSON content, manager and unknown string actions. Supplied receipt records failing/incomplete behavior oracle despite passing candidate tests and scope. Independent probes reproduce KeyError quantity versus baseline KeyError price and added quantity-addition failure. Preserve those failures; no claim of successful regression protection."
+            },
+            "checks": {
+              "behavior_passed": false,
+              "oracle_complete": false,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          }
+        }
+      },
+      "preferred_trials": [
+        "summary-standard-1-plain"
+      ],
+      "labels": {
+        "A": "summary-standard-1-plain",
+        "B": "summary-standard-1-previous",
+        "C": "summary-standard-1-current"
+      }
+    },
+    {
+      "block": "summary-standard-2",
+      "valid": true,
+      "review": {
+        "reviewer": "Codex independent reviewer /root/next_quality_priorities",
+        "independent": true,
+        "preferred": [],
+        "rationale": "No candidate is acceptable as behavior-preserving. A and C fail the supplied behavior oracle. B is closest structurally and passes all supplied checks, but introduces a concrete error-contract regression by using set membership for action validation: unknown [] or {} actions now raise TypeError rather than the baseline ValueError. All candidates remove meaningful calculation duplication; that does not grant cleanup approval when compatibility breaks. Reviewer has prior familiarity with Forge and earlier trials, did not author this follow-up or any candidate, and inspected only the two authorized blinded packet directories. Arm keys, logs, timings, usage, parent directories and planning artifacts were not inspected; blinding is partial. No broad tests were run; supplied check receipts plus four narrow in-memory baseline/candidate probes inform this review.",
+        "candidates": {
+          "A": {
+            "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+            "candidate_sha256": "8640212dc6726aa11acb019be42a91e47300ff3889901da69748d310e02969c8",
+            "verdict": "fail",
+            "criteria": {
+              "readability": "_invoice_summary makes the new output shape easy to follow, and each legacy formatter remains explicit, but every action now computes a full summary including unnecessary repeated quantity reads/counting.",
+              "cohesion": "The private summary helper removes repetition but conflates shared amount calculation with new summary-only behavior. total/json/receipt should not acquire additional quantity operations.",
+              "duplication": "Three repeated subtotal/tax loops become one; the repair is substantive. The helper also re-reads item[quantity] to count it instead of preserving the baseline one-read behavior for legacy actions.",
+              "regressions": "Supplied behavior_passed/oracle_complete are false; candidate_tests_passed/scope_passed are true. Independently, an int-subclass quantity whose __radd__ raises produces baseline total 240 but fails in A, because legacy actions now count quantities. The candidate tests add summary, parsed JSON and unknown string action coverage but do not protect the changed read/arithmetic boundary."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/ledger.py"
+              ],
+              "rationale": "Real duplication is removed, but behavior preservation is not demonstrated and the added quantity-counting operation in legacy actions is concretely incompatible. Cleanup approval fails.",
+              "regression_evidence": "Inspected existing total/receipt tests and candidate summary/JSON/unknown-action additions. Supplied receipt records failed/incomplete oracle with passing candidate tests and scope. Independent in-memory probe: baseline total 240 for integer Quantity subclass; candidate raises RuntimeError unexpected quantity addition. Other narrow probes preserve unknown []/{} ValueErrors and missing-price KeyError. No candidate or baseline files changed."
+            },
+            "checks": {
+              "behavior_passed": false,
+              "oracle_complete": false,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          },
+          "B": {
+            "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+            "candidate_sha256": "d70bc956a2d02aeffdf24d2e2137a8d9fd71c5145149982144c16eb4b663f6b9",
+            "verdict": "fail",
+            "criteria": {
+              "readability": "_invoice_amounts clearly names shared arithmetic; include_item_count preserves the legacy operation set and caches quantity once. The set-based action guard looks concise but changes the public error path.",
+              "cohesion": "Amount calculation and rendering are separated without new layers. The conditional count is justified by different action contracts. The validation container should preserve acceptance of unhashable unknown values.",
+              "duplication": "One cohesive helper removes the repeated loops and computes the requested summary count without imposing counting on legacy actions. This is useful cleanup, subject to correcting the guard regression.",
+              "regressions": "All supplied check booleans are true and are retained unchanged. Independent narrow probes find invoice([], []) and invoice({}, []) now raise TypeError from set membership, whereas baseline raises ValueError with Unknown action: [] or Unknown action: {}. Tuple/list membership would preserve this behavior. Candidate tests cover only a missing string action, exact JSON and public names, so the regression escapes them. Missing-key order and int-subclass quantity probes match baseline."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/ledger.py"
+              ],
+              "rationale": "The arithmetic boundary is a useful improvement and the strongest of these three candidates, but required behavior-preserving cleanup approval fails until the unknown-action error contract is restored. No preferred candidate is selected merely because this fix is small.",
+              "regression_evidence": "Inspected baseline/candidate tests and all supplied booleans: behavior/oracle/tests/scope true. Independent in-memory baseline/candidate probes confirm []/{} unknown actions change from ValueError to TypeError; missing-item KeyError and a valid int-subclass quantity total remain preserved. Add meaningful regression cases for unhashable unknown actions before approving the repair. No files other than review.json were written."
+            },
+            "checks": {
+              "behavior_passed": true,
+              "oracle_complete": true,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          },
+          "C": {
+            "baseline_sha256": "68d96b8327d16e103b2460f21d05c1cb815fcb1c68d5f013366bc751c60519a4",
+            "candidate_sha256": "ce5422893d74436f1481faee3d6541dd0e3e53b76d1b11b7899b31ddad627e67",
+            "verdict": "fail",
+            "criteria": {
+              "readability": "invoice unpacks named subtotal/tax/total/item_count locals and keeps output branches readable. The positional helper result is still small enough to follow, but field access order changed inside the helper.",
+              "cohesion": "_invoice_values owns arithmetic coherently, but calculates item_count for every action and reads quantity before price, changing the existing contract.",
+              "duplication": "The repeated subtotal/tax loops are removed without a new framework; the resulting simplification remains unsafe until the operation and error order are preserved.",
+              "regressions": "Supplied behavior_passed/oracle_complete are false; candidate_tests_passed/scope_passed are true. Narrow probes confirm invoice(total, [{}]) changes KeyError price to KeyError quantity, and a valid int-subclass quantity that returned 240 now raises on the added item-count sum. The candidate adds exact JSON, summary, manager and public-name tests but misses these boundary regressions."
+            },
+            "cleanup": {
+              "meaningful": true,
+              "changed_files": [
+                "src/ledger.py"
+              ],
+              "rationale": "Real shared-policy deduplication is present, but the public missing-field error order and legacy arithmetic change, so cleanup cannot be approved.",
+              "regression_evidence": "Inspected baseline/candidate source and tests; supplied failed oracle is preserved separately from passing candidate tests and scope. Independent in-memory probes reproduce KeyError quantity instead of price and RuntimeError from added quantity addition. Unknown unhashable actions retain ValueError here. No broad suite rerun or successful behavior-preservation claim."
+            },
+            "checks": {
+              "behavior_passed": false,
+              "oracle_complete": false,
+              "candidate_tests_passed": true,
+              "scope_passed": true
+            }
+          }
+        }
+      },
+      "preferred_trials": [],
+      "labels": {
+        "A": "summary-standard-2-plain",
+        "B": "summary-standard-2-previous",
+        "C": "summary-standard-2-current"
+      }
+    }
+  ],
+  "limits": [
+    "Twelve attempts across two tasks at standard depth are a targeted pilot, not general superiority evidence.",
+    "Fresh prompts explicitly require useful encountered cleanup in every arm; historical trial prompts did not. Do not pool their acceptance rates.",
+    "All arms use the same final evaluator, expanded Python caller oracle, isolated Git baseline, requested model/effort, and rotating serial schedule.",
+    "Source snapshots are immutable. The previous arm is PR21 before this follow-up, not an earlier released version.",
+    "Two reviewers did not write candidate code and received shuffled packets without arm names, timing, usage or logs. They previously reviewed Forge or earlier trials; independence is an attestation and blinding is partial.",
+    "Code preference is distinct from accepted completion; failures remain in every denominator. Forge workflow records are inapplicable to plain agents.",
+    "Times exclude independent review. Tokens are CLI-reported; cost and backend model revision remain unverified.",
+    "No operator candidate edits, corrective prompts, reruns or omitted failures. Model command retries are included; API retries are unknown. Claude/Gemini and live native cross-host acceptance remain unavailable."
+  ]
+}
