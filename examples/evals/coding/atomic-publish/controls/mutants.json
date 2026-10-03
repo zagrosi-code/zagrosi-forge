@@ -54,5 +54,37 @@
     "new": "        data = document.pop(\"data\", None)",
     "count": 1,
     "violates": "mutates input records"
+  },
+  {
+    "name": "masks-special-permission-bits",
+    "path": "src/publisher.py",
+    "old": "stat.S_IMODE(target.stat().st_mode)",
+    "new": "target.stat().st_mode & 0o777",
+    "count": 1,
+    "violates": "Existing permission bits, including supported special bits, survive publication and rollback."
+  },
+  {
+    "name": "destination-sized-temp-prefix",
+    "path": "src/publisher.py",
+    "old": "prefix=\".publish-\"",
+    "new": "prefix=f\".{name}-\"",
+    "count": 1,
+    "violates": "A filename valid for the unchanged publisher remains valid when staging and publishing."
+  },
+  {
+    "name": "registers-stage-after-write",
+    "path": "src/publisher.py",
+    "old": "            stages.append(stage)\n            with os.fdopen(descriptor, \"wb\") as stream:\n                stream.write(data)",
+    "new": "            with os.fdopen(descriptor, \"wb\") as stream:\n                stream.write(data)\n            stages.append(stage)",
+    "count": 1,
+    "violates": "An allocated stage is cleaned when writing raises after creating partial contents."
+  },
+  {
+    "name": "registers-stage-after-chmod",
+    "path": "src/publisher.py",
+    "old": "            stages.append(stage)\n            with os.fdopen(descriptor, \"wb\") as stream:\n                stream.write(data)\n            if previous[name] is not None:\n                stage.chmod(previous[name][1])",
+    "new": "            try:\n                with os.fdopen(descriptor, \"wb\") as stream:\n                    stream.write(data)\n            except Exception:\n                stage.unlink(missing_ok=True)\n                raise\n            if previous[name] is not None:\n                stage.chmod(previous[name][1])\n            stages.append(stage)",
+    "count": 1,
+    "violates": "An allocated stage is cleaned when setting its preserved permission bits raises."
   }
 ]

@@ -62,9 +62,13 @@ Parallelize only disjoint files and serialize records.
    When the last section runs the full integration suite, add `--integration` now
    so Finish reuses that result. Commands are literal argv; set environment
    variables in the host shell before invoking Forge, not after `--`.
-5. Review against the original request and section: correctness, security,
-   caller contracts, test gaps, concrete cleanup gains and justified deferrals.
-   Passing workflow records do not prove untested behavior. Fix and retest.
+5. Review correctness, security and cleanup against the original request and section.
+   Challenge changed contracts with a concrete input, call sequence or failure
+   path and a distinguishing check. Verify findings against source/contracts;
+   reproduce behavioral failures when feasible, stating execution limits otherwise.
+   Distinguish source bugs from invalid tests or environment failures. Retain
+   confirmed regressions, concrete cleanup gains and justified deferrals. Passing
+   workflow records do not prove untested behavior. Fix and retest affected checks.
 6. Record evidence; continue:
 
 ```bash

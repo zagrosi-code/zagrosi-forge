@@ -58,7 +58,7 @@ TEST_MANIFEST = {
     "test_handoff_readiness.py": "b1eb9f207136d7d397887b26a6a2fa204493f89ec3cf56e641e02412ac7b5925",
     "test_handoff_transport.py": "104517f15aa1c085e9da2fd45bb104ea1f021f77b851cb5e8fb7d592948e8cae",
     "test_handoff_wire.py": "4c2fb34168a5dae808b37dfd9d75840da93dc9ee93bc73200db80b90c7e27b72",
-    "test_heldout_contracts.py": "2e53d8edfa7dbf6cd9267b7138f646b36e5df315504aea34f1d4dab76439b14e",
+    "test_heldout_contracts.py": "fcca3c9af0a5cb85ce741015477c8d9a6555b47de45a2f061819a12002a850ab",
     "test_implementation_drift.py": "12f4cb0977c8557718015851ff1ae1a8bd7d305957d8b8e205942e453ba1fe7a",
     "test_implementation_phase_reuse.py": "f79a211e105becb4c23da1ea06a842d2fe1617bbb99fc1644195b7a6d13167db",
     "test_install_config_safety.py": "7214d15f4410b4b5d49bf1be558c83c2e713d2c2d7bb2c90f776814b53d247ba",

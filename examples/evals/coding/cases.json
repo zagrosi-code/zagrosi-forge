@@ -84,7 +84,7 @@
   "atomic-publish": {
     "fixture": "atomic-publish/fixture",
     "oracle": "tools/publication_trial_checks.py",
-    "assertions": 513,
+    "assertions": 543,
     "depth": "deep",
     "cleanup_required": true,
     "protected_paths": [

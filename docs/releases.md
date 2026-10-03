@@ -16,6 +16,8 @@
 - Require an explicit preservation decision in new mutable plans; share one compact authoring guide and retain failed attempts, actionable recovery and honest authorship limits.
 - Separate common code acceptance from Forge workflow completion. Add independently authored configuration, publication, streaming and event tasks with positive controls and deliberate regressions; retain all comparative outcomes.
 - Reject malformed verification sources with structured errors and preserve saved receipts. Document editable evidence and explicit preservation-test selection.
+- Ground reviews in concrete inputs, calls and failure paths; verify alleged defects and challenge uncertain behavior with isolated counterexamples. Share this guidance across both hosts and every depth.
+- Strengthen future publication trials against lost existing permission bits, valid long-name failures and temporary-file leaks after real staging failures; retain correct alternative implementations and frozen historical results.
 
 The plugin runtime remains Python standard-library only. Live Claude/Gemini and cross-host acceptance still require native sign-in; offline checks do not establish model access or general code-quality superiority.
 

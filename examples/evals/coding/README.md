@@ -26,6 +26,14 @@ contracts for configuration provenance, rollback, incremental decoding and event
 subscriptions. Their ordinary fixtures, independent oracles, good implementations
 and deliberate faulty controls remain separate; controls never enter writer workspaces.
 
+Fresh `atomic-publish` evaluations check full observed existing permission bits,
+baseline-valid long filenames and cleanup after staging write or metadata failure.
+Fault probes accept buffered and descriptor-based implementations, including import
+aliases. The oracle reports exercised routes and special-bit support on stderr;
+unexercised routes are coverage limits. New-file modes remain unspecified because
+the original prompt and good control are ambiguous on that point. These stronger
+checks do not regrade frozen trials or establish improved model output.
+
 `import-preview` adds a CSV batch preview across import, pricing and receipt modules.
 Its two initial tests cover only happy paths; the independent oracle also checks
 quoted/Unicode fields, empty batches, duplicate normalized rows, unknown SKUs,

@@ -1,7 +1,8 @@
 """External bundle oracle: documented transaction boundaries and legacy API."""
 from copy import deepcopy
 import builtins
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+import errno
 import importlib.util
 import inspect
 import io
@@ -44,10 +45,84 @@ def setup(root, size, existing):
         if index in existing:
             target = root / f"file-{index}"
             target.write_bytes(f"old-{index}".encode())
-            target.chmod(0o640 if index % 2 else 0o600)
+            # Compare observed modes below: Windows does not retain POSIX special bits.
+            target.chmod(0o4750 if index % 2 else 0o7640)
     (root / "untouched").write_bytes(b"leave alone")
     return [{"name": f"file-{index}", "data": f"new-{index}-caf\u00e9".encode()}
             for index in range(size)]
+
+
+@contextmanager
+def staging_failure(root, destination_names, boundary):
+    """Fail a real stage operation once, leaving subsequent recovery available."""
+    state = {"fired": False, "error": OSError("injected staging " + boundary)}
+
+    def is_stage(value):
+        if isinstance(value, int):
+            observed = os.fstat(value)
+            return any(item.name not in destination_names and
+                       (item.stat().st_dev, item.stat().st_ino) == (observed.st_dev, observed.st_ino)
+                       for item in root.iterdir() if item.is_file())
+        path = Path(os.fsdecode(value))
+        return path.parent == root and path.name not in destination_names
+
+    def write(original, descriptor, data, *args, **kwargs):
+        if not state["fired"] and is_stage(descriptor):
+            original(data[:1], *args, **kwargs)
+            state["fired"] = True
+            raise state["error"]
+        return original(data, *args, **kwargs)
+
+    class Stream:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __getattr__(self, name):
+            return getattr(self.wrapped, name)
+
+        def __iter__(self):
+            return iter(self.wrapped)
+
+        def __enter__(self):
+            self.wrapped.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.wrapped.__exit__(*args)
+
+        def write(self, data):
+            return write(self.wrapped.write, self.wrapped.fileno(), data)
+
+        def writelines(self, lines):
+            for line in lines:
+                self.write(line)
+
+    def opening(original):
+        def call(*args, **kwargs):
+            stream = original(*args, **kwargs)
+            return stream if isinstance(stream, Stream) or not stream.writable() else Stream(stream)
+        return call
+
+    def permissions(original):
+        def call(path, *args, **kwargs):
+            if not state["fired"] and is_stage(path):
+                state["fired"] = True
+                raise state["error"]
+            return original(path, *args, **kwargs)
+        return call
+
+    with ExitStack() as patches:
+        if boundary == "write":
+            original_write = os.write
+            patches.enter_context(patch.object(os, "write", lambda fd, data: write(
+                lambda value: original_write(fd, value), fd, data)))
+            for module, name in ((os, "fdopen"), (builtins, "open"), (io, "open")):
+                patches.enter_context(patch.object(module, name, opening(getattr(module, name))))
+        else:
+            for name in ("chmod", "fchmod"):
+                if hasattr(os, name):
+                    patches.enter_context(patch.object(os, name, permissions(getattr(os, name))))
+        yield state
 
 
 def verify(workspace: Path) -> int:
@@ -64,8 +139,10 @@ def verify(workspace: Path) -> int:
         return call
 
     with ExitStack() as importing:
-        for module, name in ((os, "replace"), (os, "open"), (builtins, "open"), (io, "open")):
-            importing.enter_context(patch.object(module, name, forward(module, name)))
+        for module, name in ((os, "replace"), (os, "open"), (os, "fdopen"), (os, "write"),
+                             (os, "chmod"), (os, "fchmod"), (builtins, "open"), (io, "open")):
+            if hasattr(module, name):
+                importing.enter_context(patch.object(module, name, forward(module, name)))
         candidate = load(workspace / "src/publisher.py", "publisher")
         sys.modules["publisher"] = candidate
         caller = load(workspace / "src/release.py", "candidate_release")
@@ -87,6 +164,24 @@ def verify(workspace: Path) -> int:
                    lambda root, documents, callback: candidate.BundlePublisher(root).write(documents, callback),
                    caller.publish_assets]
     real_replace = os.replace
+    # The baseline establishes that this component is valid on the actual filesystem.
+    for publish in entrypoints:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            name = "n" * 250
+            while True:
+                try:
+                    baseline.publish_files(root, [{"name": name, "data": b"old"}])
+                    break
+                except OSError as error:
+                    if len(name) == 1 or (error.errno != errno.ENAMETOOLONG and getattr(error, "winerror", None) != 206):
+                        raise
+                    name = name[:-1]
+            before = inventory(root)
+            check(outcome(lambda: publish(root, [{"name": name, "data": b"new"}], None)) == ("return", [name]),
+                  "A valid long filename stopped working")
+            check(inventory(root) == {name: (b"new", before[name][1])},
+                  "Long filename publication changed permissions or leaked files")
     # Success: input order, detached input, staging before replacement, atomic swaps,
     # callback visibility, preexisting permissions and complete cleanup.
     for publish in entrypoints:
@@ -212,6 +307,39 @@ def verify(workspace: Path) -> int:
             check(callbacks == [], "Callback ran before staging completed")
             check(inventory(root) == before, "Staging failure changed outputs")
             check(set(item.name for item in root.iterdir()) == set(before), "Staging failure leaked files")
+
+    # A creation failure precedes resource ownership. Exercise failures after the
+    # stage exists too, across buffered and descriptor APIs without naming helpers.
+    coverage = {"write": [], "permissions": []}
+    special_bits = False
+    for publish in entrypoints:
+        for boundary in coverage:
+            with TemporaryDirectory() as folder:
+                root = Path(folder)
+                documents = setup(root, 3, {0, 2})
+                before = inventory(root)
+                special_bits |= any(mode & 0o7000 for _, mode in before.values())
+                callbacks, error = [], None
+                names = set(before) | {document["name"] for document in documents}
+                with staging_failure(root, names, boundary) as injected:
+                    try:
+                        publish(root, documents, lambda *args: callbacks.append(args))
+                    except Exception as caught:
+                        error = caught
+                exercised = injected["fired"]
+                coverage[boundary].append(exercised)
+                check(error is injected["error"] if exercised else error is None,
+                      "Post-allocation failure was wrapped/swallowed or an unused probe changed behavior")
+                check(not callbacks if exercised else len(callbacks) == len(documents),
+                      "Post-allocation failure invoked a callback or unused probe changed publication")
+                check(inventory(root) == before if exercised else all(
+                    (root / document["name"]).read_bytes() == document["data"] for document in documents),
+                      "Post-allocation failure changed destinations or unused probe changed bytes")
+                check(set(item.name for item in root.iterdir()) == (set(before) if exercised else names),
+                      "Post-allocation failure leaked temporary files")
+    # Permission changes can use creation mode rather than chmod, and platforms
+    # expose different APIs. Unused injections are coverage gaps, not regressions.
+    print(json.dumps({"staging_fault_coverage": coverage, "special_permission_bits_exercised": special_bits}), file=sys.stderr)
 
     invalid = [None, {}, {"name": "../a", "data": b"x"}, {"name": "a/b", "data": b"x"},
                {"name": "a\\b", "data": b"x"}, {"name": ".", "data": b"x"},

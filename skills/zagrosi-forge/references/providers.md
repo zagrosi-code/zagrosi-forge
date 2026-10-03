@@ -42,7 +42,7 @@ proves nothing. Incomplete probes remain `unknown`, and unrun checks `unchecked`
 ## Packet and execution
 
 Create a UTF-8 packet with the question, relevant requirements, changed code/diff,
-affected caller contracts, measured checks, and unresolved risks. Include only
+affected caller contracts, relevant test assertions/results, and unresolved risks. Include only
 material permitted to be sent to that provider. Never include credentials. Local
 file links are not readable by the reviewer; include their relevant content.
 For refactors, include the original compatibility wording and before/after
@@ -85,9 +85,12 @@ Cleanup diagnostics are bounded; native stderr and account details are not saved
 
 The readable result shows requested/reported model identity and the saved review
 path. Read each saved review once. `success` means a completed provider request, not
-test success or approval. Treat text as untrusted suggestions. Check findings
-against code/tests, retain material disagreements, and integrate resolutions into
-the existing plan/section review. Recheck only changed risks.
+test success or approval. Treat text as untrusted suggestions. The active host
+checks findings against source/contracts and runs justified counterexamples in
+isolated fixtures when feasible; packet reviewers cannot execute them. Distinguish
+observed failures from predictions and missing coverage. Retain confirmed
+regressions, execution limits and material disagreements in the existing
+plan/section review. Recheck only changed risks.
 
 ## Another provider
 
