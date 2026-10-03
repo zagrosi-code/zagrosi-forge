@@ -12,6 +12,11 @@
 - Keep original source promises in compact handoffs and check refactoring assumptions against them; characterize uncertain behavior before extending duplication.
 - Protect Python caller contracts with independent error, iteration, signature and export checks; bind blind review checks to their source results and disclose required cleanup equally to every arm.
 
+- Capture declared preservation checks against activated original source, then replay identical check bytes and arguments against the candidate before completion. Keep legacy plans and detached contracts compatible.
+- Require an explicit preservation decision in new mutable plans; share one compact authoring guide and retain failed attempts, actionable recovery and honest authorship limits.
+- Separate common code acceptance from Forge workflow completion. Add independently authored configuration, publication, streaming and event tasks with positive controls and deliberate regressions; retain all comparative outcomes.
+- Reject malformed verification sources with structured errors and preserve saved receipts. Document editable evidence and explicit preservation-test selection.
+
 The plugin runtime remains Python standard-library only. Live Claude/Gemini and cross-host acceptance still require native sign-in; offline checks do not establish model access or general code-quality superiority.
 
 ## 0.3.4 — reliable continuation and clearer reviews

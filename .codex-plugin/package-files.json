@@ -23,6 +23,8 @@
   "examples/evals/coding/atomic-publish/fixture/src/publisher.py",
   "examples/evals/coding/atomic-publish/fixture/src/release.py",
   "examples/evals/coding/atomic-publish/fixture/tests/test_publisher.py",
+  "examples/evals/coding/behavior-contract-results-2026-10-02.json",
+  "examples/evals/coding/behavior-contract-results-2026-10-02.md",
   "examples/evals/coding/cases.json",
   "examples/evals/coding/config-layers/controls/good/src/settings.py",
   "examples/evals/coding/config-layers/controls/mutants.json",

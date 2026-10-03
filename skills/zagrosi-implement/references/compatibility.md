@@ -59,6 +59,7 @@ provider requirement, routine interview or reviewer quorum.
 Authorship is an attestation. Capture binds the executed command, its outcome and
 declared inputs. Review must establish that the command exercises those checks;
 capture cannot prove independence, sufficient coverage or complete correctness.
+Receipts are editable local records, not an authenticated or undeletable history.
 
 ## Capture and replay
 
@@ -76,6 +77,8 @@ python3 "{plugin_root}/scripts/zagrosi_skills.py" implement-verify --planning-di
 After the change, run the same command and unchanged checks with `--stage candidate`.
 Keep checks, helpers, fixtures and their command unchanged across the pair; compare
 asserted behavior, not incidental stdout or timing. The candidate source may change.
+Select preservation tests explicitly; keep new feature tests separate so discovery
+does not silently expand the replayed suite.
 Required pairs are enforced at completion; a baseline alone cannot close work.
 Capture ordinary feature checks and final integration using `implement-verify`
 without `--stage`, as described in [Implement](../SKILL.md).
@@ -87,6 +90,8 @@ establish a fresh baseline against the unchanged original source before retrying
 the candidate. Never reset user work or rebaseline changed code to manufacture a
 pass. Origin does not refresh automatically. If the original source is unavailable,
 report the missing evidence; do not claim compatibility or substitute an attestation.
+Retain original receipts and failed attempts; never delete or rewrite state to
+clear a mismatch.
 
 Use the existing section evidence, verification receipts and review. Summarize
 protected contracts, actual outcomes and remaining gaps; add no parallel ledger.

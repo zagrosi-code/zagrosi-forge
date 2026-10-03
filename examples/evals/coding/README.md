@@ -1,12 +1,14 @@
 # Coding trials
 
-[Latest follow-up](quality-followup-2026-10-02.md): twelve previous/current/plain
-attempts, each arm accepted 2/4 after independent review. Two compatibility gaps
-escaped the frozen oracle; both remain in the results. This does not demonstrate
-better generated-code reliability. The [earlier sixteen-attempt experiment](quality-results-2026-10-02.md)
-and separate interruption checks remain unchanged.
+[Latest comparison](behavior-contract-results-2026-10-02.md): 36 attempts across
+four independently authored task families. Previous/new Forge accepted 8/12 each;
+plain Codex accepted 9/12. The separate preservation audit records valid final
+pairs, rebuilt histories and coverage limits; no overall quality gain is established.
+The [twelve-attempt follow-up](quality-followup-2026-10-02.md),
+[earlier sixteen-attempt experiment](quality-results-2026-10-02.md) and interruption
+checks remain unchanged.
 
-Nine isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
+Isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
 deep discount design, a real Forge resume checkpoint, an order-dispatch godfile,
 an import preview across several modules, a Node summary feature, and TypeScript
 permission/transaction cleanup, and webhook retry correctness. The invoice cases preserve public APIs, exact exports, rounding, and
@@ -18,6 +20,11 @@ review judges useful changes to encountered code. Historical prompts remain unch
 `src/legacy_reports.py` is protected; editing it fails scope even if tests pass.
 The Node case uses CommonJS, `node --test`, and an independent Node oracle without
 a framework. Node must be available to run it.
+
+`config-layers`, `atomic-publish`, `stream-records` and `node-events` add caller
+contracts for configuration provenance, rollback, incremental decoding and event
+subscriptions. Their ordinary fixtures, independent oracles, good implementations
+and deliberate faulty controls remain separate; controls never enter writer workspaces.
 
 `import-preview` adds a CSV batch preview across import, pricing and receipt modules.
 Its two initial tests cover only happy paths; the independent oracle also checks
@@ -71,7 +78,7 @@ Results keep these decisions separate:
 - `workflow`: Forge admits the unique plan at or beneath `.planning` with strict checks at the
   selected trial depth, then verifies implementation completion records. A narrative
   "done" note is insufficient; competing planning roots and escaping links fail.
-- `cleanup`: for ordinary summary, import preview, cleanup, godfile and TypeScript access cases, implementation code must change, and an
+- `cleanup`: for cases marked `cleanup_required` in the [case registry](cases.json), implementation code must change, and an
   independent reviewer must confirm useful cleanup with concrete changes and
   before/after regression evidence. Existing tests and the independent oracle can
   supply sufficient coverage; add tests where coverage is weak. Test changes are

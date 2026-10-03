@@ -8,7 +8,7 @@
 </p>
 
 Forge turns requests into compact plans, clear code, and verified changes.
-One entry point handles features, fixes, and cleanup in Codex and Claude Code.
+One entry handles features, fixes, and cleanup in Codex and Claude Code.
 Lean is default: focused context, targeted checks, one integration result.
 
 [Install](#install) · [Use](#use) · [Multiple models](#multiple-models) · [Workflows](#workflows) · [Engineering](#engineering) · [Releases](docs/releases.md) · [Contribute](#contribute)
@@ -169,10 +169,11 @@ Darwin/arm64 and APFS.
 
 The [engineering standard](skills/zagrosi-implement/references/engineering.md)
 follows [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse
-code, prefer direct flow. Characterize uncertain behavior before repairing
-duplication or mixed responsibilities. Preserve public contracts; check assumptions
-against the original request and baseline tests. Run targeted regressions, then one
-integration suite. Explicit cleanup can cover a repository; PR review covers the diff and callers.
+code, prefer direct flow. Simplify duplication and responsibilities with
+regression coverage. [Preservation checks](skills/zagrosi-implement/references/compatibility.md)
+run before edits, then replay unchanged checks and commands; required pairs gate
+completion. Capture cannot prove coverage or authorship. Run feature checks and
+integration. Cleanup can cover repositories; PR review covers the diff and callers.
 
 `context-brief` and `implementation-packet` keep complete sections, mapped source
 requirements and linked contracts. Default budget: 2,000 words (`--max-words`);
@@ -182,8 +183,8 @@ blockers, recovery commands and complete reports (`--full-output`).
 Runtime loading verifies SHA-256 source bindings; writes are locked and atomic.
 
 [Helper benchmarks](examples/evals/performance.json) measure fixed fixtures.
-[Coding trials](examples/evals/coding/README.md) separate host/model, accepted
-completion, cleanup quality, time, and usage. [Latest observations](examples/evals/coding/quality-followup-2026-10-02.md) retain failures;
+[Coding trials](examples/evals/coding/README.md) separate code quality, workflow
+completion, time, and usage. [Latest observations](examples/evals/coding/behavior-contract-results-2026-10-02.md) retain failures;
 adapter support alone does not establish faster or better model output.
 
 ## Contribute

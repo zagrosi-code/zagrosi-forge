@@ -22,7 +22,7 @@ def result_error(result) -> str | None:
         command = result.get("command")
         if type(result.get("exit_code")) is not int or result["exit_code"] != 0 or not isinstance(command, list) or not command or not all(isinstance(value, str) and value for value in command):
             return "Captured verification requires a command and exit code zero."
-    elif source in {"attestation", "inspection"}:
+    elif source in ("attestation", "inspection"):
         evidence = result.get("evidence")
         if not isinstance(evidence, list) or not any(isinstance(value, str) and value.strip().lower() not in {"", "none", "n/a", "tbd", "todo", "pending"} for value in evidence):
             return "Attestation and inspection require substantive evidence."

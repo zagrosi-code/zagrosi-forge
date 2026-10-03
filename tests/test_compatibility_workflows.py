@@ -4,10 +4,12 @@ from __future__ import annotations
 import builtins
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
 
+from forge_test_helpers import ROOT
 from test_compact_plan import SECTION, forge, invoke, make_plan
 
 
@@ -54,6 +56,39 @@ def write_checks(target):
         "sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))\n"
         "from labels import normalize\nassert normalize('Ada  Lovelace') == 'Ada  Lovelace'\n"
     )
+
+
+@pytest.mark.parametrize("source", [[], {}])
+@pytest.mark.parametrize("kind", ["compatibility", "integration"])
+def test_malformed_receipt_source_is_rejected_without_execution(forge, tmp_path, capsys, source, kind):
+    planning, target = workspace(tmp_path, mode="required" if kind == "compatibility" else None)
+    assert setup(forge, capsys, planning, target)[0] == 0
+    write_checks(target)
+    marker = tmp_path / "executed"
+    checks = target / "tests/callers.py"
+    checks.write_text(checks.read_text() + f"Path({str(marker)!r}).write_text('ran')\n")
+    args = ["--planning-dir", str(planning), "--target-dir", str(target)]
+    if kind == "compatibility":
+        assert verify(forge, capsys, planning, target, "baseline")[0] == 0
+        path = forge.compatibility.receipt_path(planning, SECTION)
+        command = ["implement-verify", *args, "--section", SECTION, "--stage", "candidate",
+                   "--", sys.executable, "-B", "tests/callers.py"]
+    else:
+        assert record(forge, capsys, planning, target)[0] == 0
+        assert invoke(forge, capsys, "implement-verify", *args,
+                      "--", sys.executable, "-B", "tests/callers.py")[0] == 0
+        path = forge.verification.receipt_path(planning)
+        command = ["postflight", "--phase", "implement", *args, "--strict", "--flight", "strict"]
+    marker.unlink()
+    saved = json.loads(path.read_text())
+    (saved["baseline"] if kind == "compatibility" else saved)["source"] = source
+    path.write_text(json.dumps(saved))
+    before = path.read_bytes()
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/zagrosi_skills.py"), *command],
+                            capture_output=True, text=True)
+    assert result.returncode == 1 and not json.loads(result.stdout)["success"], result.stderr
+    assert "Traceback" not in result.stderr
+    assert path.read_bytes() == before and not marker.exists()
 
 
 def test_required_pair_cannot_be_bypassed_by_manual_completion(forge, tmp_path, capsys):
