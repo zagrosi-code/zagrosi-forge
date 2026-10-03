@@ -5,7 +5,7 @@ better generated-code reliability.** Independent review preferred previous Forge
 in one comparison, current Forge in one, plain Codex in one, and found no acceptable
 candidate in the fourth. Plain Codex used less time and fewer tokens.
 
-[Machine-readable results](quality-followup-2026-10-02.json) retain all twelve
+[Archived machine-readable results](https://github.com/zagrosi-code/zagrosi-forge/blob/75922e4c035acf04c4906d4d6a4c4525b0fbedc9/examples/evals/coding/quality-followup-2026-10-02.json) retain all twelve
 attempts, source identities, check results, reviewer judgments and usage. The
 [earlier experiment](quality-results-2026-10-02.md) remains unchanged.
 

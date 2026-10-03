@@ -5,7 +5,7 @@
 preservation mechanism.** New Forge used more time and tokens than either other
 arm. Those costs are observations, not a general performance result.
 
-[Machine-readable results](behavior-contract-results-2026-10-02.json) retain all
+[Archived machine-readable results](https://github.com/zagrosi-code/zagrosi-forge/blob/75922e4c035acf04c4906d4d6a4c4525b0fbedc9/examples/evals/coding/behavior-contract-results-2026-10-02.json) retain all
 36 attempts, source identities, independent judgments, usage and the separate
 mechanism audit. The [earlier follow-up](quality-followup-2026-10-02.md) remains
 unchanged. No candidate was repaired or rerun.

@@ -4,7 +4,7 @@
 review preferred Forge in three pairs, plain code in two, and tied three. This
 small experiment does not establish general quality or speed superiority.
 
-[Machine-readable results](quality-results-2026-10-02.json) contain every attempt,
+[Archived machine-readable results](https://github.com/zagrosi-code/zagrosi-forge/blob/75922e4c035acf04c4906d4d6a4c4525b0fbedc9/examples/evals/coding/quality-results-2026-10-02.json) contain every attempt,
 source identity, reviewer judgment, usage field and limitation. Earlier reports
 remain unchanged.
 
