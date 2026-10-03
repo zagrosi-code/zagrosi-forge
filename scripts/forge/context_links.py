@@ -18,13 +18,13 @@ MAX_CONTRACTS = 64
 MAX_SOURCE_BYTES = 1_048_576
 
 
-def local_links(text: str) -> list[str]:
-    """Scan in source order so comments and code cannot activate each other."""
+def local_links(text: str, *, line_spans: list[tuple[int, int]] | None = None) -> list[str]:
+    """Lex the full source; optional line selection cannot activate comments/code."""
     text = _markdown.visible_markdown(text)
     links = []
     offset = skip = 0
     fence = None
-    for line in text.splitlines(keepends=True):
+    for number, line in enumerate(text.splitlines(keepends=True), 1):
         start, offset = offset, offset + len(line)
         if fence:
             if _markdown.markdown_fence_closes(line, *fence):
@@ -50,7 +50,8 @@ def local_links(text: str) -> list[str]:
             else:
                 link = LINK.match(text, position)
                 if link:
-                    links.append(link[1] or link[2])
+                    if line_spans is None or any(first <= number <= last for first, last in line_spans):
+                        links.append(link[1] or link[2])
                     skip = link.end()
     return links
 
@@ -85,17 +86,18 @@ def heading_contract(text: str, anchor: str) -> tuple[int, int]:
 
 def linked_contracts(
     planning_dir: Path, seeds: list[tuple[Path, str]], *, known_paths: set[Path] | None = None,
+    seed_ranges: dict[Path, list[tuple[int, int]]] | None = None,
 ) -> dict[Path, list[tuple[int, int, str]]]:
     """Follow explicit local links; return merged source spans in discovery order."""
     root = planning_dir.resolve()
     allowed = {path.resolve() for path in known_paths or ()}
-    queue = deque(seeds)
+    queue = deque((path, body, (seed_ranges or {}).get(path.resolve())) for path, body in seeds)
     seen: set[tuple[Path, str]] = set()
     texts: dict[Path, str] = {}
     spans: dict[Path, list[tuple[int, int]]] = {}
     while queue:
-        origin, body = queue.popleft()
-        for link in local_links(body):
+        origin, body, line_spans = queue.popleft()
+        for link in local_links(body, line_spans=line_spans):
             target = urlsplit(link)
             if target.scheme or target.netloc or target.query:
                 continue
@@ -126,7 +128,7 @@ def linked_contracts(
                 raise ValueError(f"{exc} in {path} (linked from {origin})") from exc
             excerpt = "\n".join(text.splitlines()[start:end]).rstrip()
             spans.setdefault(path, []).append((start, end))
-            queue.append((path, excerpt))
+            queue.append((path, excerpt, None))
     result = {}
     for path, ranges in spans.items():
         merged: list[tuple[int, int]] = []

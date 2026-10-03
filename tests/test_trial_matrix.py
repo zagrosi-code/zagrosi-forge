@@ -5,10 +5,65 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("trial_matrix", ROOT / "tools/trial_matrix.py")
 matrix = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(matrix)
+
+
+def test_common_quality_separates_delivery_and_keeps_unknown_history(tmp_path):
+    names = ["quality-only", "failed", "historical", "pending", "timeout", "unrun"]
+    entries = [{"id": name, "case": "summary", "depth": "standard"} for name in names]
+    (tmp_path / "matrix.json").write_text(json.dumps({"trials": entries, "plugin_root": str(ROOT), "runner": ["agent"]}))
+    for name in names:
+        if name == "pending":
+            continue
+        trial = tmp_path / name
+        trial.mkdir()
+        result = {"success": name == "historical", "workflow": {"success": False},
+                  "common_quality": {"success": name != "failed"}}
+        if name == "historical":
+            result.pop("common_quality")
+        if name != "unrun":
+            result["runner"] = {"returncode": 124 if name == "timeout" else 0}
+            (trial / "attempt.json").write_text(json.dumps({"returncode": 1, "seconds": 10}))
+        (trial / "result.json").write_text(json.dumps(result))
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    result = matrix.report(tmp_path)
+    group = result["groups"][0]
+    assert group["outcomes"] == {"failed": 4, "passed": 1, "pending": 1}
+    assert group["common_quality_outcomes"] == {"passed": 1, "failed": 2, "unknown": 3}
+    assert group["accepted_common_quality"]["accepted"] == 1
+    assert group["accepted_common_quality"]["scheduled"] == 6
+    assert group["accepted_common_quality"]["elapsed_seconds"]["observed"] == 40
+    assert group["accepted_common_quality"]["elapsed_seconds"]["total"] is None
+    assert group["attempts"][0]["workflow"] is False
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
+
+
+@pytest.mark.parametrize("evidence", [None, [], True, {}, {"success": 1}, {"success": "passed"}])
+def test_unrecorded_or_malformed_common_quality_is_unknown(tmp_path, evidence):
+    (tmp_path / "matrix.json").write_text(json.dumps({"trials": [{"id": "one", "case": "cleanup", "depth": "lean"}],
+        "plugin_root": str(ROOT), "runner": ["agent"]}))
+    trial = tmp_path / "one"
+    trial.mkdir()
+    (trial / "attempt.json").write_text('{"returncode": 0}')
+    (trial / "result.json").write_text(json.dumps({"success": True, "runner": {"returncode": 0}, "common_quality": evidence}))
+    result = matrix.report(tmp_path)
+    assert result["success"]
+    assert result["groups"][0]["common_quality_outcomes"] == {"unknown": 1}
+    assert result["groups"][0]["accepted_common_quality"]["accepted"] == 0
+
+
+def test_common_quality_cost_counts_delivery_failures_too():
+    attempts = [{"status": "failed", "common_quality": quality, "attempt_seconds": seconds}
+                for quality, seconds in (("passed", 10), ("failed", 20))]
+    common = matrix.accepted_outcomes(attempts, status_key="common_quality")
+    assert common["accepted"] == 1 and common["scheduled"] == 2
+    assert common["elapsed_seconds"]["per_accepted"] == 30
+    assert matrix.accepted_outcomes(attempts)["accepted"] == 0
 
 
 def test_report_keeps_timeout_and_pending_attempts_in_denominator(tmp_path):
@@ -63,3 +118,21 @@ def test_matrix_runs_fresh_attempts_and_retains_nonzero_exits(tmp_path):
     before = (destination / "matrix.json").read_bytes()
     assert subprocess.run(command, capture_output=True).returncode != 0
     assert (destination / "matrix.json").read_bytes() == before
+
+
+def test_accepted_cost_separates_cache_usage_and_keeps_missing_observations_unknown():
+    attempts = [
+        {"status": "passed", "reported_telemetry": {"totals": {"input_tokens": 100, "cached_input_tokens": 70,
+            "uncached_input_tokens": 30, "output_tokens": 20}}},
+        {"status": "failed", "reported_telemetry": {"totals": {"input_tokens": 200, "cached_input_tokens": 120,
+            "uncached_input_tokens": 80, "output_tokens": 10}}},
+    ]
+    result = matrix.accepted_outcomes(attempts)
+    assert result["tokens"]["cached_input_tokens"]["per_accepted"] == 190
+    assert result["tokens"]["uncached_input_tokens"]["per_accepted"] == 110
+    assert result["tokens"]["output_tokens"]["per_accepted"] == 30
+    attempts[1]["reported_telemetry"]["totals"].pop("cached_input_tokens")
+    result = matrix.accepted_outcomes(attempts)
+    assert result["tokens"]["cached_input_tokens"] == {
+        "observed": 70, "observed_attempts": 1, "total": None, "per_accepted": None}
+    assert result["tokens"]["uncached_input_tokens"]["total"] == 110

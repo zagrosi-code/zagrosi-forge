@@ -60,6 +60,24 @@ def implementation_commands(planning_dir: Path, section: str | None = None, *, t
         payload["record_options"] = {"--test-file": "Repeat for actual changed test files.",
                                      "--commit": "Existing commit only; follow the user's Git authorization.",
                                      "manual_evidence": "Replace --verification-receipt with --verification-source attestation|inspection --verification-outcome passed --verification TEXT. This labels manual evidence, not captured execution."}
+        from . import compatibility
+
+        progress = compatibility.status(planning_dir, Path(target), section)
+        payload["compatibility"] = progress
+        stage = progress["stage"]
+        if stage == "activate":
+            commands["activate"] = command("implement-setup", "--sections-dir", str(planning_dir / "sections"),
+                                            "--target-dir", target, "--section", section, "--depth", depth, "--profile", profile)
+            payload["next_action"] = "activate this section before changing source, then capture caller checks against the original code"
+        elif stage in {"baseline", "candidate"}:
+            commands[f"verify_{stage}"] = command(
+                "implement-verify", "--planning-dir", str(planning_dir), "--target-dir", target,
+                "--section", section, "--stage", stage, "--", *progress.get("command", ["<command>", "<argument>"]),
+            )
+            payload["next_action"] = ("capture caller checks against the unchanged original source before implementation"
+                                      if stage == "baseline" else "implement the section, then rerun the unchanged caller checks and verify the requested change")
+        elif stage == "blocked":
+            payload["next_action"] = "resolve the compatibility evidence error before implementation or completion"
     else:
         from .verification import integration_report
 

@@ -13,7 +13,7 @@ from test_coding_trials import trials, write_cleanup, write_review
 
 def add_summary(path: Path):
     path.write_text(path.read_text().replace('    if action not in',
-        '    if action == "summary":\n        result = json.loads(invoice("json", items, customer))\n'
+        '    if action == "summary":\n        items = list(items)\n        result = json.loads(invoice("json", items, customer))\n'
         '        result["item_count"] = sum(item["quantity"] for item in items)\n'
         '        return result\n    if action not in', 1))
 
@@ -216,7 +216,7 @@ def test_resume_preserves_original_test_and_history_while_allowing_progress(tmp_
     workspace = trial / "workspace"
     source = workspace / "src/ledger.py"
     source.write_text(source.read_text().replace('        return json.loads(invoice("json", items, customer))',
-        '        result = json.loads(invoice("json", items, customer))\n'
+        '        items = list(items)\n        result = json.loads(invoice("json", items, customer))\n'
         '        result["item_count"] = sum(item["quantity"] for item in items)\n        return result', 1))
     tests = workspace / "tests/test_ledger.py"
     history = workspace / ".planning/implementation/forge-progress.json"

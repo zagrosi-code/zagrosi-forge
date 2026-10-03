@@ -238,26 +238,19 @@ def test_workflow_options_respects_explicit_depth() -> None:
     assert payload["depth"]["requires_confirmation"] is False
 
 
-def test_workflow_options_includes_recommended_interview_choices_with_rationale() -> None:
-    payload = run_cmd(
-        "workflow-options",
-        "--brief",
-        "TBD architecture tradeoff: external review, web research, or automatic PR",
-    )
-
-    option_sets = payload["interview"]["option_sets"]
-    assert option_sets
-    assert any(
-        len([option for option in option_set["options"] if option["recommended"]]) == 1
-        for option_set in option_sets
-    )
-    for option_set in option_sets:
-        recommended = [option for option in option_set["options"] if option["recommended"]]
-        assert len(recommended) <= 1
-        if recommended:
-            option = recommended[0]
-            assert option["recommended_label"].endswith("(Recommended)")
-            assert option["rationale"]
+def test_workflow_terms_are_advisory_without_repeating_preference_questions() -> None:
+    for depth in ("lean", "standard", "deep"):
+        payload = run_cmd(
+            "workflow-options", "--brief",
+            "TBD architecture tradeoff: external review, web research, or automatic PR",
+            "--depth", depth,
+        )
+        assert payload["matched_terms"]
+        assert payload["depth"]["selected"] == payload["depth"]["recommended"] == depth
+        assert payload["interview"]["required"] is False
+        assert payload["interview"]["option_sets"] == []
+        assert payload["autonomy"]["requires_explicit_opt_in"] is True
+        assert not any(payload["autonomy"][name] for name in ("auto_commit", "auto_pr", "ci_watch", "fix_watch_loop"))
 
 
 def test_planning_consistency_reports_missing_late_requirement(tmp_path: Path) -> None:

@@ -8,8 +8,8 @@
 </p>
 
 Forge turns requests into compact plans, clear code, and verified changes.
-One entry point handles features, fixes, and cleanup in Codex and Claude Code.
-Lean mode is default: focused context, targeted checks, one final integration result.
+One entry handles features, fixes, and cleanup in Codex and Claude Code.
+Lean is default: focused context, targeted checks, one integration result.
 
 [Install](#install) · [Use](#use) · [Multiple models](#multiple-models) · [Workflows](#workflows) · [Engineering](#engineering) · [Releases](docs/releases.md) · [Contribute](#contribute)
 
@@ -43,13 +43,13 @@ git clone https://github.com/zagrosi-code/zagrosi-forge.git
 cd zagrosi-forge
 ```
 
-Claude Code can load this checkout for one session:
+Load this checkout in Claude Code for one session:
 
 ```bash
 claude --plugin-dir "/absolute/path/to/zagrosi-forge"
 ```
 
-For Codex, run these from the checkout:
+From the checkout in Codex:
 
 ```bash
 python3 scripts/zagrosi_skills.py install --pretty
@@ -61,13 +61,13 @@ python3 scripts/zagrosi_skills.py update-check --pretty
 python3 scripts/zagrosi_skills.py self-update --pretty
 ```
 
-The installer preserves unrelated settings and excludes development artifacts.
+The installer preserves unrelated settings.
 
 </details>
 
 ## Use
 
-Open your repository and describe the task; request `standard` or `deep`
+Describe your task; request `standard` or `deep`
 when needed. Try the [runnable first task](examples/first-task/README.md).
 
 **Claude Code**
@@ -84,14 +84,14 @@ Use $zagrosi-forge:zagrosi-forge to add this feature and finish verification.
 Use $zagrosi-forge:zagrosi-cleanup to simplify this subsystem while preserving behavior.
 ```
 
-Both hosts share skills, runtime, and standards. Forge adds no hooks, MCP servers,
-or background processes. Use `zagrosi-project`, `zagrosi-plan`, and
-`zagrosi-implement` for direct phase control. Planning-only requests stop at the plan.
+Both hosts share skills, runtime and standards, without hooks, MCP servers or
+background processes. Use `zagrosi-project`, `zagrosi-plan`, and `zagrosi-implement`
+for individual phases. Authorized work continues through delivery; planning-only requests stop at the plan.
 
 ## Multiple models
 
 Request independent Codex, Claude, or Gemini reviews. Keep one primary writer;
-reviewers receive the same bounded packet. Try either host:
+reviewers receive the same bounded packet:
 
 **Claude Code**
 
@@ -107,10 +107,10 @@ Use $zagrosi-forge:zagrosi-forge to implement this feature with independent Code
 
 Forge reuses native CLI logins. Choose exact model IDs or use native defaults;
 missing access and unreported identity stay visible. No silent fallback.
-See [provider setup and two-reviewer example](skills/zagrosi-forge/references/providers.md).
+CLI checks use bounded help probes; add `--check-auth` for login status. See [provider setup and two-reviewer example](skills/zagrosi-forge/references/providers.md).
 
 ```bash
-python3 scripts/zagrosi_skills.py provider-status --check-auth --pretty
+python3 scripts/zagrosi_skills.py provider-status --check-cli --pretty
 ```
 
 ## Workflows
@@ -139,7 +139,7 @@ python3 scripts/zagrosi_skills.py provider-status --check-auth --pretty
 Depth changes investigation and review. Every mode retains requirements,
 ownership, acceptance, and verification without duplicate ledgers.
 
-Skills handle setup and final checks; complete draft contracts before coding. See the
+Skills handle setup and verification; complete draft contracts before coding. See
 [compact-plan format](skills/zagrosi-plan/references/plan-format.md),
 [depth standards](skills/zagrosi-plan/references/depth-standards.md), and
 [example briefs](examples/gallery/README.md).
@@ -168,21 +168,23 @@ Darwin/arm64 and APFS.
 ## Engineering
 
 The [engineering standard](skills/zagrosi-implement/references/engineering.md)
-draws on [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse
-code, prefer direct flow. Repair encountered duplication and mixed responsibilities;
-preserve public contracts. Run targeted regressions, then one integration suite.
-Explicit cleanup can cover a repository; final PR review covers the diff and callers.
+follows [Ponytail](https://github.com/DietrichGebert/ponytail): trace callers, reuse
+code, prefer direct flow. Simplify duplication and responsibilities with
+regression coverage. [Preservation checks](skills/zagrosi-implement/references/compatibility.md)
+run before edits, then replay unchanged checks and commands; required pairs gate
+completion. Capture cannot prove coverage or authorship. Run feature checks and
+integration. Cleanup can cover repositories; PR review covers the diff and callers.
 
-`context-brief` and `implementation-packet` preserve complete sections and linked
-contracts within 2,000 words (`--max-words`). Broken links fail explicitly;
-oversized sections return an adjusted retry. Readable output retains blockers
-and recovery commands; failed flights link complete reports (`--full-output`).
+`context-brief` and `implementation-packet` keep complete sections, mapped source
+requirements and linked contracts. Default budget: 2,000 words (`--max-words`);
+broken links fail and oversized sections return an adjusted retry. Failures retain
+blockers, recovery commands and complete reports (`--full-output`).
 
 Runtime loading verifies SHA-256 source bindings; writes are locked and atomic.
 
 [Helper benchmarks](examples/evals/performance.json) measure fixed fixtures.
-[Coding trials](examples/evals/coding/README.md) separate host/model, accepted
-completion, cleanup quality, time, and usage. Historical trials remain unchanged;
+[Coding trials](examples/evals/coding/README.md) separate code quality, workflow
+completion, time, and usage. [Latest observations](examples/evals/coding/behavior-contract-results-2026-10-02.md) retain failures;
 adapter support alone does not establish faster or better model output.
 
 ## Contribute
@@ -193,12 +195,12 @@ Shared workflows: `skills/`; runtime: `scripts/forge/`; checks: `tests/` and
 After runtime/test edits, run `python3 tools/update_runtime_manifest.py`.
 After adding/removing package members, stage intended files and run
 `python3 tools/update_package_manifest.py`.
-CI covers Linux/macOS/Windows and native host packaging. Optional native validators
-require their CLIs.
+CI covers Linux/macOS/Windows and native host packaging. Native validators require their CLIs.
 
 ```bash
 python3 tools/update_runtime_manifest.py --check
 python3 tools/update_package_manifest.py --check
+npm ci --prefix tools
 uv run --with pytest python -m pytest
 python3 scripts/zagrosi_skills.py doctor --plugin-root . --strict --pretty
 python3 scripts/zagrosi_skills.py release-check --plugin-root . --pretty

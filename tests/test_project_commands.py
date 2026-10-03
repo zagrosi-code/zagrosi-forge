@@ -318,10 +318,25 @@ def test_command_catalog_matches_parser_aliases() -> None:
 def test_codebase_evidence_includes_forge_surface_without_cache_noise(tmp_path: Path) -> None:
     planning = tmp_path / "planning"
     planning.mkdir()
+    target = tmp_path / "target"
+    included = (
+        "scripts/zagrosi_skills.py", "skills/zagrosi-plan/SKILL.md",
+        ".codex-plugin/plugin.json", ".claude-plugin/plugin.json", ".claude-plugin/marketplace.json",
+        ".github/workflows/validate.yml", "examples/evals/suite.json",
+    )
+    for name in included:
+        destination = target / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((ROOT / name).read_bytes())
+    for name in (".git/internal.py", ".venv/library.py", "__pycache__/cached.py", ".codex/plugins/cache/plugin.py"):
+        destination = target / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("cache noise\n")
 
-    evidence = run_cmd("codebase-evidence", "--target-dir", str(ROOT), "--planning-dir", str(planning), "--write")
+    evidence = run_cmd("codebase-evidence", "--target-dir", str(target), "--planning-dir", str(planning), "--write")
 
-    assert "scripts/zagrosi_skills.py" in evidence["source_files"]
+    assert evidence["source_files"] == ["scripts/zagrosi_skills.py"]
+    assert evidence["truncated"]["source_files"] == 0
     assert "skills/zagrosi-plan/SKILL.md" in evidence["skill_files"]
     assert ".codex-plugin/plugin.json" in evidence["plugin_metadata"]
     assert ".claude-plugin/plugin.json" in evidence["plugin_metadata"]
@@ -341,6 +356,15 @@ def test_codebase_evidence_includes_forge_surface_without_cache_noise(tmp_path: 
     assert "Source Files" in written
     assert "Skills" in written
     assert "Assumptions / Open Questions" in written
+
+    earlier_sources = [f"aaa/module_{index:02}.py" for index in range(80)]
+    for name in earlier_sources:
+        destination = target / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("")
+    bounded = run_cmd("codebase-evidence", "--target-dir", str(target))
+    assert bounded["source_files"] == earlier_sources
+    assert bounded["truncated"]["source_files"] == 1
 
 
 def test_lint_evidence_accepts_expanded_codebase_evidence(tmp_path: Path) -> None:

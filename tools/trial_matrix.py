@@ -42,9 +42,9 @@ def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool
     return items
 
 
-def accepted_outcomes(attempts: list[dict]) -> dict:
+def accepted_outcomes(attempts: list[dict], *, status_key: str = "status") -> dict:
     """Charge every scheduled attempt to accepted work; unknown is never free."""
-    accepted = sum(row["status"] == "passed" for row in attempts)
+    accepted = sum(row.get(status_key) == "passed" for row in attempts)
     def aggregate(values):
         valid = [value for value in values if type(value) in (int, float) and math.isfinite(value) and value >= 0]
         total = sum(valid) if len(valid) == len(values) and values else None
@@ -52,7 +52,7 @@ def accepted_outcomes(attempts: list[dict]) -> dict:
                 "total": total, "per_accepted": total / accepted if total is not None and accepted else None}
     totals = {key: aggregate([((row.get("reported_telemetry") or {}).get("totals") or {}).get(key)
                               for row in attempts])
-              for key in ("input_tokens", "output_tokens")}
+              for key in ("input_tokens", "cached_input_tokens", "uncached_input_tokens", "output_tokens")}
     return {"accepted": accepted, "scheduled": len(attempts),
             "accepted_rate": accepted / len(attempts) if attempts else None,
             "elapsed_seconds": aggregate([row.get("attempt_seconds") for row in attempts]),
@@ -73,8 +73,16 @@ def report(directory: Path) -> dict:
         runner = result.get("runner") or read(trial / "trial.json").get("runner") or {}
         complete = result.get("success") is True and bool(attempt) and runner.get("returncode") == 0
         status = "passed" if complete else "failed" if result or attempt else "cancelled" if manifest.get("cancelled") else "pending"
+        quality = result.get("common_quality")
+        common_status = "unknown"
+        if isinstance(quality, dict) and type(quality.get("success")) is bool:
+            if not quality["success"] or runner.get("returncode") not in (None, 0):
+                common_status = "failed"
+            elif attempt and runner.get("returncode") == 0:
+                common_status = "passed"
         groups[(item.get("arm", "current"), item["case"], item["depth"])].append({
             "id": item["id"], "status": status, "runner_seconds": runner.get("seconds"),
+            "common_quality": common_status,
             "attempt_seconds": attempt.get("seconds"), "timed_out": runner.get("timed_out"),
             "returncode": attempt.get("returncode"),
             "reported_telemetry": result.get("reported_telemetry") or read(trial / "telemetry.json") or None,
@@ -92,6 +100,8 @@ def report(directory: Path) -> dict:
                           "timed_attempts": len(times),
                           "median_runner_seconds": statistics.median(times) if times else None,
                           "accepted_outcomes": accepted_outcomes(attempts),
+                          "common_quality_outcomes": dict(Counter(row["common_quality"] for row in attempts)),
+                          "accepted_common_quality": accepted_outcomes(attempts, status_key="common_quality"),
                           "attempts": attempts})
     comparative = reviews(directory)
     expected = {item["block"] for item in manifest["trials"]} if manifest.get("comparison") else set()

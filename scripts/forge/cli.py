@@ -212,6 +212,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("implement-setup", aliases=["implement", "zagrosi-implement-setup", "deep-implement-setup"], help=command_help("implement-setup"))
     p.add_argument("--sections-dir", required=True)
     p.add_argument("--target-dir")
+    p.add_argument("--section", help="Activate a ready mutable section; defaults to the next section.")
     p.add_argument("--plugin-root")
     p.add_argument("--implementation-root", help="External state/review/evidence/pinner root; activates detached frozen-planning mode.")
     p.add_argument("--admission-pinner", help="External canonical admission pinner required with --implementation-root.")
@@ -265,6 +266,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--target-dir")
     p.add_argument("--section", help="Omit for the required final integration receipt.")
+    p.add_argument("--stage", choices=["baseline", "candidate"], help="Capture the declared caller checks before or after source changes.")
     p.add_argument("--integration", action="store_true", help="With --section, also record final integration from this same full-suite run.")
     p.add_argument("--timeout", type=float, default=600)
     p.add_argument("--source", choices=["attestation", "inspection"])
@@ -327,6 +329,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
 
 def add_utility_commands(sub: argparse._SubParsersAction) -> None:
     p = sub.add_parser("provider-status", help="Show optional reviewer availability without making model requests.")
+    p.add_argument("--check-cli", action="store_true", help="Check native CLI version and review flags using bounded offline help probes.")
     p.add_argument("--check-auth", action="store_true", help="Ask native Codex/Claude CLIs for login status; never read credential stores.")
     p.set_defaults(func=invoke_command, handler=('providers', 'provider_status'))
 

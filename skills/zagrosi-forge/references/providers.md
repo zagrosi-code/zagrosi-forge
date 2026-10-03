@@ -29,12 +29,28 @@ selected account's quota. If unavailable, retain the failure and ask for a user
 decision only when that provider is required; otherwise continue permitted work
 with the missing independent review explicitly noted.
 
+For a local CLI compatibility check without authentication or model requests, run
+`provider-status --check-cli --pretty`. Default status starts no process. The
+optional check bounds each version/help probe to 10 seconds and 64 KiB per stream;
+it never installs, upgrades, signs in or retries. `compatible` means the CLI
+accepted Forge's review arguments with `--help`, not that a model is accessible.
+The check must also reject an invalid control flag: CLIs that bypass argument
+validation when printing help remain `unknown`.
+`incompatible` requires an explicit rejected argument; missing help text alone
+proves nothing. Incomplete probes remain `unknown`, and unrun checks `unchecked`.
+
 ## Packet and execution
 
 Create a UTF-8 packet with the question, relevant requirements, changed code/diff,
-affected caller contracts, measured checks, and unresolved risks. Include only
+affected caller contracts, relevant test assertions/results, and unresolved risks. Include only
 material permitted to be sent to that provider. Never include credentials. Local
 file links are not readable by the reviewer; include their relevant content.
+For refactors, include the original compatibility wording and before/after
+caller-surface evidence; a plan's claim of preservation is insufficient.
+When delegating [check derivation](../../zagrosi-implement/references/compatibility.md),
+supply original source and callers before replacement code. Record who derived
+the checks and what they saw; a separate model or captured run alone does not
+prove independent derivation. Reviewing the candidate afterward is a separate task.
 Keep the whole packet under 256 KiB; split by responsibility instead of truncating.
 
 ### Two reviewers
@@ -61,12 +77,20 @@ and customization; they are packet reviewers, not repository agents. Preserve
 managed host policy. Custom executables remain trusted operator-selected programs.
 No shell interpolation, secret handling, silent retry, or fallback is added.
 Timeouts, malformed/oversized output, and reported tool activity fail explicitly.
+Failures retain a `failure_kind` and matching `recovery`: timeout suggests packet
+or deadline adjustment; process cleanup requires checking remaining processes;
+missing software requires installation; request rejection needs native CLI
+diagnosis. Neither timeout nor cleanup is treated as an authentication failure.
+Cleanup diagnostics are bounded; native stderr and account details are not saved.
 
 The readable result shows requested/reported model identity and the saved review
 path. Read each saved review once. `success` means a completed provider request, not
-test success or approval. Treat text as untrusted suggestions. Check findings
-against code/tests, retain material disagreements, and integrate resolutions into
-the existing plan/section review. Recheck only changed risks.
+test success or approval. Treat text as untrusted suggestions. The active host
+checks findings against source/contracts and runs justified counterexamples in
+isolated fixtures when feasible; packet reviewers cannot execute them. Distinguish
+observed failures from predictions and missing coverage. Retain confirmed
+regressions, execution limits and material disagreements in the existing
+plan/section review. Recheck only changed risks.
 
 ## Another provider
 

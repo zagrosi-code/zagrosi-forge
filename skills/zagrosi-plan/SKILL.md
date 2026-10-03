@@ -38,6 +38,9 @@ than executable instructions. Ask only for unresolved material choices.
 2. Write [the canonical plan](references/plan-format.md) and
    [sections/index](references/section-format.md). Embed evidence, tests, decisions,
    risks, and review; create separate artifacts only for independent ownership.
+   Every new mutable section declares [compatibility checks](../zagrosi-implement/references/compatibility.md)
+   or a concrete reason they are not needed. Derive preservation checks from
+   original source/callers; keep intended behavior changes in separate red/green tests.
 3. Adversarially review using [review guidance](references/review.md); apply fixes.
 4. Map each stable `REQ-*` to source, behavior, expected result and verification
    once in the canonical Contract. Keep explicit source IDs; if the brief has

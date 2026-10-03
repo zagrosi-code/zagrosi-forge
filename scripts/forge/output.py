@@ -199,6 +199,12 @@ def format_pretty(payload: dict[str, Any]) -> str:
         for provider in payload["providers"]:
             available = "available" if provider.get("available") else "unavailable"
             lines.append(f"  {provider['provider']}: {available}; authentication: {provider.get('authentication', 'unknown')}")
+            cli = provider.get("cli") or {}
+            if cli:
+                version = f" ({cli['version']})" if cli.get("version") else ""
+                lines.append(f"    CLI: {cli.get('status', 'unchecked')}{version}")
+                if cli.get("reason"):
+                    lines.append(f"    {cli['reason']}")
             if provider.get("login_argv"):
                 lines.append(f"    Login: {pretty_command(provider['login_argv'])}")
         if payload.get("note"):
@@ -209,6 +215,9 @@ def format_pretty(payload: dict[str, Any]) -> str:
                  f"Requested model: {payload.get('requested_model') or 'native default'}",
                  f"Observed models: {', '.join(payload.get('observed_models') or []) or 'unreported'}",
                  f"Model identity: {payload.get('model_identity', 'unreported')}"]
+        for key, label in (("failure_kind", "Failure"), ("recovery", "Recovery"), ("termination_error", "Process cleanup")):
+            if payload.get(key):
+                lines.append(f"{label}: {payload[key]}")
         if payload.get("output"):
             lines.append(f"Review: {payload['output']}")
         if payload.get("login_argv"):

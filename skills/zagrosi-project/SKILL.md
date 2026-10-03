@@ -42,5 +42,7 @@ Run one bundled postflight:
 python3 "{plugin_root}/scripts/zagrosi_skills.py" postflight --phase project --planning-dir "{planning_dir}" --depth lean --strict
 ```
 
-Fix blockers; diagnose narrowly. Return paths and dependency-ordered next commands.
-Do not start Zagrosi Plan unless asked.
+Fix blockers; diagnose narrowly. For a decomposition-only request, return paths
+and dependency-ordered next commands. When the user already authorized delivery,
+continue into Zagrosi Plan and Implement in dependency order, preserving their
+depth, preferences and permissions. Ask only for a new material decision.

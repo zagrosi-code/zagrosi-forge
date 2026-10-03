@@ -25,12 +25,18 @@ from coding_trial_evidence import (
 )
 from coding_trial_process import execute
 from coding_trial_resume import prepare_resume, resume_verdict
+from coding_trial_comparison import task_acceptance
 
 PACK = ROOT / "examples/evals/coding"
 CASES = json.loads((PACK / "cases.json").read_text())
 
 
 def test_command(case: dict) -> list[str]:
+    if "test_argv" in case:
+        argv = case["test_argv"]
+        if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in argv):
+            raise ValueError("test_argv must be a nonempty array of nonempty strings without NUL bytes")
+        return list(argv)
     if case.get("runtime") == "typescript":
         return ["node", "--test", "tests/access.test.ts"]
     return ["node", "--test", "tests/ledger.test.js"] if case.get("runtime") in {"node", "typescript"} else [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"]
@@ -65,21 +71,55 @@ def code_metrics(workspace: Path, runtime: str = "python") -> dict:
             "external_imports": sorted(imports - sys.stdlib_module_names - local)}
 
 
+def initialize_repository(workspace: Path, baseline: dict[str, str]) -> None:
+    """Commit trusted fixture bytes without inheriting another repository or hooks."""
+    metadata = workspace / ".git"
+    if metadata.exists() or metadata.is_symlink():
+        raise ValueError("Trial fixture must not contain Git metadata")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_ATTR_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0", GIT_AUTHOR_DATE="2000-01-01T00:00:00+00:00",
+               GIT_COMMITTER_DATE="2000-01-01T00:00:00+00:00")
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=workspace, env=env, check=True,
+                       capture_output=True, text=True, timeout=30)
+
+    try:
+        git("init", "--quiet", "--template=", "--initial-branch=trial")
+        hooks = metadata / "disabled-hooks"
+        hooks.mkdir()
+        for name, value in (("user.name", "Forge Trial"), ("user.email", "forge-trial@example.invalid"),
+                            ("core.hooksPath", hooks.as_posix()), ("commit.gpgSign", "false"),
+                            ("core.autocrlf", "false"), ("core.excludesFile", os.devnull),
+                            ("core.attributesFile", os.devnull)):
+            git("config", "--local", name, value)
+        (metadata / "info").mkdir(exist_ok=True)
+        (metadata / "info/exclude").write_text("/.planning/\n__pycache__/\n.pytest_cache/\n*.pyc\n*.pyo\n")
+        git("add", "--force", "--", *(name for name in sorted(baseline) if not name.startswith(".planning/")))
+        git("commit", "--quiet", "--no-gpg-sign", "-m", "Trial baseline")
+    except FileNotFoundError as exc:
+        raise ValueError("Git is required to prepare an isolated trial workspace") from exc
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"Git baseline preparation failed: {exc}") from exc
+
+
 def prepare(trial: Path, case: str, depth: str | None = None, *,
             plugin_root: Path | None = None, plain_agent: bool = False) -> dict:
     plugin_root = (plugin_root or ROOT).resolve()
     if plain_agent and case == "resume":
         raise ValueError("The Forge resume checkpoint has no comparable plain-agent arm")
+    tests = test_command(CASES[case])
     trial.mkdir(parents=True, exist_ok=False)
     workspace = trial / "workspace"
     fixture = PACK / CASES[case].get("fixture", "fixture")
     oracle = ROOT / CASES[case].get("oracle", "tools/coding_trial_checks.py")
     shutil.copytree(fixture, workspace, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     selected = depth or CASES[case]["depth"]
-    tests = test_command(CASES[case])
     checkpoint = prepare_resume(ROOT, workspace, selected, tests, plugin_root=plugin_root) if case == "resume" else None
+    baseline = files(workspace)
+    initialize_repository(workspace, baseline)
     displayed_command = subprocess.list2cmdline(tests) if os.name == "nt" else shlex.join(tests)
-    protected = CASES[case].get("protected_paths", [])
     workflow = ("Use your normal engineering workflow. Do not read or invoke Forge skills/tools.\n"
                 if plain_agent else
                 f"Use Forge at {selected} depth from {plugin_root}; use this exact tree for skills and CLI commands.\n"
@@ -90,15 +130,13 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
         workflow += f"Start with {entry_skill} and follow its routing and linked phase guidance.\n"
     prompt = (f"Work only in {workspace}.\n{workflow}\n"
               f"{CASES[case]['request']}\n\n"
-              "Preserve public APIs. Standard library only. If you create planning records, keep them compact under .planning/.\n"
-              "Edit only src/, tests/, and .planning/. .gitignore may list .planning/, __pycache__/, .pytest_cache/, and *.pyc.\n"
+              f"{task_acceptance(CASES[case])}"
               f"Run existing/added tests with `{displayed_command}`. Python trials require PYTHONPATH=src.\n"
-              + (f"Leave these unrelated files unchanged: {', '.join(protected)}.\n" if protected else "") +
               "Operator choices are settled: local .planning artifacts; manual Git, no commits, pushes or deployment.\n"
               "Do not read external trial checkers, other candidates, or edit plugin/evaluator infrastructure.\n"
               "Report tests, cleanup, remaining issues, and observed usage if available.\n")
     (trial / "prompt.md").write_text(prompt)
-    record = {"case": case, "depth": selected, "baseline_files": files(workspace),
+    record = {"case": case, "depth": selected, "baseline_files": baseline,
               "baseline_semantics": semantic_files(workspace), "provenance_version": 2,
               "baseline_metrics": code_metrics(workspace, CASES[case].get("runtime", "python")),
               "prepared_checkpoint": checkpoint, "oracle_sha256": hashlib.sha256(
@@ -167,10 +205,11 @@ def check(trial: Path, telemetry: Path | None = None, *, review: Path | None = N
     behavior = {"success": oracle["returncode"] == tests["returncode"] == 0 and oracle_complete
                and not evaluator_changed}
     cleanup = cleanup_verdict(record, workspace, CASES[record["case"]].get("cleanup_required", False), review)
-    result = {"success": behavior["success"] and (plain_agent or workflow["success"]) and cleanup["success"] is not False
-              and resume["success"] is not False
-              and provenance["success"] and not outside_scope and "error" not in metrics
-              and not metrics.get("external_imports") and (record.get("runner") or {}).get("returncode", 0) == 0,
+    common_quality = (behavior["success"] and cleanup["success"] is not False and provenance["success"]
+                      and not outside_scope and "error" not in metrics and not metrics.get("external_imports")
+                      and (record.get("runner") or {}).get("returncode", 0) == 0)
+    result = {"success": common_quality and (plain_agent or workflow["success"]) and resume["success"] is not False,
+              "common_quality": {"success": common_quality},
               "case": record["case"], "depth": record["depth"], "plain_agent": plain_agent,
               "runtime": case.get("runtime", "python"), "changed_files": changed, "outside_scope": outside_scope,
               "evaluator_changed": evaluator_changed, "protected_changes": protected_changes,

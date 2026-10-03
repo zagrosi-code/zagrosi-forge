@@ -26,6 +26,9 @@ implementation authorization counts; do not ask again merely for cleanup.
    Do not start a second whole-repository cleanup automatically.
 4. Establish existing test results. Add characterization tests where coverage
    cannot protect public results, errors, ordering, exports, and side effects.
+   Use [compatibility checks](../zagrosi-implement/references/compatibility.md)
+   for meaningful mutable refactors; capture the original source and passing
+   checks before changing it. Existing coverage can supply those checks.
    Report pre-existing failures separately; never describe them as a clean baseline.
 
 ## Change and prove

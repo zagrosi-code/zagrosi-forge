@@ -96,6 +96,13 @@ def test_copied_package_runs_shared_workflows_and_resumes(package, tmp_path, dep
     test_command = "python -m unittest discover -s tests"
     for path in (planning / "sections").glob("*.md"):
         path.write_text(path.read_text(encoding="utf-8").replace("uv run pytest tests/test_labels.py", test_command), encoding="utf-8")
+    section = planning / "sections" / f"{SECTION}.md"
+    compatibility = {"version": 1, "mode": "required", "source_paths": ["src/labels.py"],
+                     "check_paths": ["tests/test_labels_compatibility.py"],
+                     "check_provenance": {"source": "writer", "author": "Copied-package fixture author"}}
+    section.write_text(section.read_text(encoding="utf-8").replace(
+        "tests/test_labels.py\n", "tests/test_labels.py\ntests/test_labels_compatibility.py\n",
+    ) + "\n## Compatibility\n```json\n" + json.dumps(compatibility) + "\n```\n", encoding="utf-8")
     for name in ("src", "tests"):
         (target / name).mkdir()
     source = target / "src/labels.py"
@@ -105,6 +112,13 @@ def test_copied_package_runs_shared_workflows_and_resumes(package, tmp_path, dep
         "class LabelTests(unittest.TestCase):\n"
         "    def test_trim_edges(self):\n"
         "        self.assertEqual(normalize(' Ada  Lovelace '), 'Ada  Lovelace')\n", encoding="utf-8")
+    (target / "tests/test_labels_compatibility.py").write_text(
+        "import unittest\nfrom src.labels import normalize\n\n"
+        "class CallerTests(unittest.TestCase):\n"
+        "    def test_preserved_string_calls(self):\n"
+        "        for value in ('Ada  Lovelace', 'aDA', ''):\n"
+        "            with self.subTest(value=value):\n"
+        "                self.assertEqual(normalize(value=value), value)\n", encoding="utf-8")
 
     def follow(command):
         assert command[:2] == helper(package)
@@ -113,9 +127,16 @@ def test_copied_package_runs_shared_workflows_and_resumes(package, tmp_path, dep
     follow(plan["commands"]["verify_plan"])
     entry = follow(plan["commands"]["implement_after_pass"])
     assert entry["next_section"] == SECTION
+    compatibility_argv = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_labels_compatibility.py"]
+    baseline_command = entry["commands"]["verify_baseline"]
+    baseline = follow([*baseline_command[:baseline_command.index("--") + 1], *compatibility_argv])
+    assert baseline["outcome"] == "passed"
     test_argv = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
     assert run_process(test_argv, cwd=target).returncode != 0
     source.write_text("def normalize(value):\n    return value.strip()\n", encoding="utf-8")
+    candidate = run(helper(package, "implement-verify", "--planning-dir", planning, "--target-dir", target,
+                           "--section", SECTION, "--stage", "candidate", "--", *compatibility_argv), target)
+    assert candidate["outcome"] == "passed"
     verified = run(helper(package, "implement-verify", "--planning-dir", planning, "--target-dir", target,
                           "--section", SECTION, "--integration", "--", *test_argv), target)
     assert verified["outcome"] == "passed"
@@ -123,6 +144,11 @@ def test_copied_package_runs_shared_workflows_and_resumes(package, tmp_path, dep
     record_command = [values.get(value, value) for value in entry["commands"]["record"]]
     record = follow(record_command)
     assert record["recorded"] is True
+    pair = record["record"]["compatibility"]
+    assert pair["baseline"]["outcome"] == pair["candidate"]["outcome"] == "passed"
+    assert pair["baseline"]["checks"] == pair["candidate"]["checks"]
+    assert pair["baseline"]["command"] == pair["candidate"]["command"] == compatibility_argv
+    assert pair["baseline"]["protected_source"] != pair["candidate"]["protected_source"]
     follow(record["commands"]["postflight"])
     resumed = run(helper(package, "status", "--path", planning), target)
     assert resumed["remaining_sections"] == []

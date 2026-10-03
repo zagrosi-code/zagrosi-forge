@@ -233,7 +233,7 @@ PROMPT_TYPES = {
     "test-strategist": "Review test strategy. Identify missing tests, brittle fixtures, untestable design, and the smallest useful red/green path.",
     "section-writer": "Write one bounded implementation section: IDs, dependencies, exact owned paths, tests first, contracts, risks, rollback, and acceptance. Reference the plan; do not copy it.",
     "release-reviewer": "Review final readiness for rollout, rollback, docs, observability, migration safety, and residual risks.",
-    "implementation-reviewer": "Review changed code against the section file. Prioritize correctness, security, scope drift, and missing tests.",
+    "implementation-reviewer": "Review changed code against the original source requirements and section file. Reject assumptions that narrow the source promise. Check caller-level regressions against the unchanged baseline, concrete cleanup gains and justified deferrals. Prioritize correctness, security, scope drift, and missing tests.",
 }
 
 

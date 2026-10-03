@@ -71,6 +71,56 @@ def code_observations(target_dir: Path, paths) -> dict[str, str | None]:
     return result
 
 
+def regular_tree_observations(target_dir: Path, paths, *, allow_missing: bool = False) -> tuple[dict, set]:
+    """Observe explicit compatibility inputs, including ignored files and file modes.
+
+    Links and special files are unsupported rather than partially attested. Only
+    known cache/dependency directories are omitted while traversing a tree; all
+    regular files and explicit roots are observed. Inodes detect source/check
+    aliases in memory; portable receipts contain hashes.
+    """
+    target_dir = target_dir.resolve()
+    inodes = set()
+
+    def observe(path: Path):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise ValueError(f"Compatibility inputs must not contain symlinks: {path}")
+        if stat.S_ISDIR(info.st_mode):
+            children = {child.name: observe(child) for child in sorted(path.iterdir())
+                        if not (child.name in _IGNORED_SOURCE_DIRECTORIES
+                                and stat.S_ISDIR(child.lstat().st_mode))}
+            return {"mode": stat.S_IMODE(info.st_mode), "children": children}
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"Compatibility inputs must be regular files: {path}")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"Compatibility inputs must be regular files: {path}")
+            inodes.add((info.st_dev, info.st_ino))
+            return {"mode": stat.S_IMODE(info.st_mode), "content": hashlib.file_digest(handle, "sha256").hexdigest()}
+
+    observations = {}
+    for name in paths:
+        relative = Path(name)
+        if not name or relative.anchor or ".." in relative.parts:
+            raise ValueError(f"Compatibility inputs must stay within the target directory: {name}")
+        path = target_dir / relative
+        for parent in (path, *path.parents):
+            if parent == target_dir:
+                break
+            if parent.is_symlink():
+                raise ValueError(f"Compatibility inputs must not contain symlinks: {parent}")
+        try:
+            observations[relative.as_posix()] = digest(observe(path))
+        except FileNotFoundError as exc:
+            if not allow_missing:
+                raise ValueError(f"Compatibility input is missing: {name}") from exc
+            observations[relative.as_posix()] = None
+    return observations, inodes
+
+
 def contract_inputs(planning_dir: Path, section: str) -> tuple[dict, set[str]]:
     return session.cached_analysis("completion_contract", (planning_dir, section),
                                    lambda observe: _contract_inputs(planning_dir, section, observe))

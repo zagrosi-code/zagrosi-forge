@@ -156,28 +156,10 @@ def workflow_options(args: argparse.Namespace) -> int:
         {"value": "fast", "description": "Compatibility alias for lean."},
     ]
     depth_rationale = (
-        "Material choices may need one concise question: " + ", ".join(matched)
+        "Advisory terms; ask only about an unresolved decision that changes the work: " + ", ".join(matched)
         if matched
         else "Lean is the default; depth never escalates from generic prose."
     )
-    depth_options = [
-        recommended_option("Lean", recommended_depth in {"lean", "fast"}, depth_rationale),
-        recommended_option("Standard", recommended_depth == "standard", "Use when durable extra context materially reduces implementation risk."),
-        recommended_option("Deep", recommended_depth == "deep", "Use only when explicitly requested for audit-grade review."),
-    ]
-    privacy_options = [
-        recommended_option(
-            "Local ignored planning",
-            True,
-            "Conservative default: planning artifacts stay local/ignored unless the user opts into publishing them.",
-        ),
-        recommended_option("Commit planning records", False, "Use only when the team wants planning records in repository history."),
-    ]
-    autonomy_options = [
-        recommended_option("Manual", True, "Push, PR, CI watch, and fix loops require explicit opt-in."),
-        recommended_option("Auto commit", False, "Only enable after user approval for local commit automation."),
-        recommended_option("Auto PR and CI watch", False, "Requires remote credentials, branch policy, and explicit user approval."),
-    ]
     payload = {
         "success": True,
         "gate": "workflow-options",
@@ -190,18 +172,10 @@ def workflow_options(args: argparse.Namespace) -> int:
             "reason": depth_rationale,
         },
         "interview": {
-            "required": bool(matched),
+            "required": False,
             "use_structured_input_when_available": True,
             "fallback": "chat",
-            "option_sets": (
-                [
-                    {"id": "depth", "question": "What Forge depth should this run use?", "options": depth_options},
-                    {"id": "planning_privacy", "question": "How should Forge planning artifacts be handled?", "options": privacy_options},
-                    {"id": "autonomy", "question": "How much git/PR/CI autonomy should Forge use?", "options": autonomy_options},
-                ]
-                if matched
-                else []
-            ),
+            "option_sets": [],
         },
         "git_privacy": {
             "planning_artifacts": "local_ignored",
@@ -217,7 +191,7 @@ def workflow_options(args: argparse.Namespace) -> int:
             "requires_explicit_opt_in": True,
         },
         "recommendations": (
-            ["Ask one decision-changing question; record only its answer."]
+            ["Use existing preferences and authorization; ask only if an unresolved choice changes the work."]
             if matched
             else []
         ),

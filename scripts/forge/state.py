@@ -229,6 +229,13 @@ def completion_evidence_findings(planning_dir: Path, section: str, record: Any, 
         findings.append(_quality.finding("high", "missing-review-status", f"{section} lacks a passing review verdict.", path))
     if verification_error:
         findings.append(_quality.finding("high", "missing-verification", f"{section}: {verification_error}", path))
+    from . import compatibility, mutable_inputs
+
+    compatibility_error = compatibility.evidence_error(
+        planning_dir, mutable_inputs.target_directory(planning_dir, target_dir), section, record.get("compatibility"),
+    )
+    if compatibility_error:
+        findings.append(_quality.finding("high", "invalid-compatibility-evidence", f"{section}: {compatibility_error}", path))
     if "input_snapshot" in record:
         snapshot = record["input_snapshot"]
         from .mutable_inputs import contract_inputs

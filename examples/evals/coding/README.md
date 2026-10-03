@@ -1,16 +1,38 @@
 # Coding trials
 
-Eight isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
+[Latest comparison](behavior-contract-results-2026-10-02.md): 36 attempts across
+four independently authored task families. Previous/new Forge accepted 8/12 each;
+plain Codex accepted 9/12. The separate preservation audit records valid final
+pairs, rebuilt histories and coverage limits; no overall quality gain is established.
+The [twelve-attempt follow-up](quality-followup-2026-10-02.md),
+[earlier sixteen-attempt experiment](quality-results-2026-10-02.md) and interruption
+checks remain unchanged.
+
+Isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
 deep discount design, a real Forge resume checkpoint, an order-dispatch godfile,
 an import preview across several modules, a Node summary feature, and TypeScript
-permission/transaction cleanup. The invoice cases preserve public APIs, exact exports, rounding, and
+permission/transaction cleanup, and webhook retry correctness. The invoice cases preserve public APIs, exact exports, rounding, and
 errors. The godfile case exercises cohesive module extraction while preserving
 validation, pricing, shipping, serialization, file access, and order transitions.
-The ordinary summary request never asks for refactoring: independent review checks
-whether relevant duplication was cleaned up along the way. Its unrelated
+The ordinary summary feature request does not prescribe a refactor. Fresh writer
+and reviewer prompts disclose required cleanup equally to all arms; independent
+review judges useful changes to encountered code. Historical prompts remain unchanged. Its unrelated
 `src/legacy_reports.py` is protected; editing it fails scope even if tests pass.
 The Node case uses CommonJS, `node --test`, and an independent Node oracle without
 a framework. Node must be available to run it.
+
+`config-layers`, `atomic-publish`, `stream-records` and `node-events` add caller
+contracts for configuration provenance, rollback, incremental decoding and event
+subscriptions. Their ordinary fixtures, independent oracles, good implementations
+and deliberate faulty controls remain separate; controls never enter writer workspaces.
+
+Fresh `atomic-publish` evaluations check full observed existing permission bits,
+baseline-valid long filenames and cleanup after staging write or metadata failure.
+Fault probes accept buffered and descriptor-based implementations, including import
+aliases. The oracle reports exercised routes and special-bit support on stderr;
+unexercised routes are coverage limits. New-file modes remain unspecified because
+the original prompt and good control are ambiguous on that point. These stronger
+checks do not regrade frozen trials or establish improved model output.
 
 `import-preview` adds a CSV batch preview across import, pricing and receipt modules.
 Its two initial tests cover only happy paths; the independent oracle also checks
@@ -31,6 +53,15 @@ at every depth. For unattended trials, `run ... --runner EXECUTABLE ARGS...` sta
 an agent in the workspace, sends the prompt on stdin, times it, and checks its
 output. Use a runner that accepts this contract. Default timeout: 600 seconds.
 An existing trial is never overwritten. Use a fresh directory for each run.
+Fresh workspaces require Git and receive their own committed fixture baseline,
+so change inspection works even inside an ignored parent directory. Preparation
+isolates Git configuration, hooks, templates and signing; the surrounding
+repository remains untouched. Planning and generated caches are excluded through
+local Git metadata. Historical workspaces retain their original layout.
+Trusted evaluator case definitions may set `test_argv`, a nonempty array of
+nonempty strings without NUL bytes, to select their native test command. The
+array executes directly without shell expansion. Invalid definitions fail before
+workspace creation; candidate files cannot select or replace this command.
 Output is drained continuously; only the last 12,000 bytes of each stream are
 retained, with byte counts and truncation flags. Timeouts retain available output
 and return 124. POSIX timeouts kill the process group, including children that
@@ -43,20 +74,30 @@ computed first, and input mutation is checked separately. Reports include scope 
 loops, external imports, test output, and runner time. Python AST metrics are not
 ported by guesswork: JavaScript complexity/dependency metrics remain unknown. These structural measures
 support review; they do not establish readability or reward code golf.
+The Python invoice oracle also compares malformed-input errors, input access and
+one-shot iteration, public imports/signatures/defaults, and ignored options with
+the baseline. Known regressions fail while valid shared-calculation controls pass.
 
 ## Verdicts and cleanup review
 
-Results keep three decisions separate:
+Results keep these decisions separate:
 
 - `behavior`: the independent oracle completed and existing/added tests passed.
 - `workflow`: Forge admits the unique plan at or beneath `.planning` with strict checks at the
   selected trial depth, then verifies implementation completion records. A narrative
   "done" note is insufficient; competing planning roots and escaping links fail.
-- `cleanup`: for ordinary summary, import preview, cleanup, godfile and TypeScript access cases, implementation code must change, and an
+- `cleanup`: for cases marked `cleanup_required` in the [case registry](cases.json), implementation code must change, and an
   independent reviewer must confirm useful cleanup with concrete changes and
   before/after regression evidence. Existing tests and the independent oracle can
   supply sufficient coverage; add tests where coverage is weak. Test changes are
   reported separately. Other cases report `not_required`.
+- `common_quality.success`: behavior, allowed scope/dependencies, unchanged
+  evaluator and applicable plugin provenance, required cleanup review, and runner
+  checks, applied equally to every arm. Forge workflow and resume-history evidence
+  are excluded from this code-quality measure.
+- `success`: the existing delivery verdict, which additionally requires Forge
+  workflow completion and preserved resume evidence where applicable. Those
+  delivery requirements are unchanged.
 
 An unchanged cleanup fixture can pass behavior, but cannot pass the overall trial.
 Comments, formatting, docstrings and empty new modules do not establish useful cleanup.
@@ -125,6 +166,15 @@ python tools/trial_matrix.py report /tmp/forge-matrix
 
 Every scheduled attempt remains in the denominator, including failures, timeouts
 and pending work. A passing checker without a completed runner is insufficient.
+Groups retain delivery `outcomes` and `accepted_outcomes`, and add
+`common_quality_outcomes` and `accepted_common_quality`. Each attempt records
+common quality as `passed`, `failed`, or `unknown`; old results without the new
+field remain unknown and are never regraded from delivery success. Both cost
+aggregates include all scheduled attempts. Their acceptance rate is recorded
+acceptances divided by scheduled work, not a pass rate among checked candidates;
+read it alongside the explicit unknown count. Missing runner or attempt evidence
+cannot establish common acceptance. A nonzero checker exit caused solely by
+missing Forge workflow can coexist with accepted common code quality.
 Each trial retains its log, runner time, preparation/check time, behavior and
 workflow verdicts, code metrics and source fingerprints. Supply independent
 cleanup reviews with the existing `check --review` command; rerun checks after
@@ -193,10 +243,13 @@ python /path/to/evaluator/tools/trial_matrix.py report /tmp/forge-controlled
 ```
 
 Applying reviews validates baseline/candidate hashes against both the original
-workspace and review packet, writes the existing per-trial cleanup evidence,
+workspace and review packet, checks complete boolean evidence against the
+source-bound result, writes the existing per-trial cleanup evidence,
 rechecks candidates with the fixed evaluator, and retains comparative judgments
 in `summary.json`. Source/test changes invalidate review; stale checker output
 cannot create a blind packet. Templates grant no passing verdict.
+Preference is distinct from acceptance: a preferred candidate with passing
+behavior/scope checks can still fail required cleanup. Every judgment stays visible.
 
 The adapter saves raw `agent-events.jsonl` plus atomic partial `telemetry.json`,
 including CLI version, requested model/effort, total input/output tokens and
@@ -234,12 +287,15 @@ python3 tools/trial_matrix.py compare /tmp/forge-claude-comparison \
   --model YOUR_CLAUDE_MODEL --effort high --cases typescript-access --repeats 2
 ```
 
-The TypeScript fixture requires Node24. It exercises duplicate authorization
+The TypeScript fixture requires Node24 and the pinned tooling-only compiler
+(`npm ci --prefix tools` in the evaluator checkout). It exercises duplicate authorization
 policy across modules, public exports, validation order, tenant isolation,
 auditing and rollback through 394 independent assertions. Known-defect tests
 check that the oracle rejects authorization, transaction, ordering and export
-regressions. These checks run TypeScript through Node and compare runtime behavior;
-they do not establish static type compatibility. Source-byte changes alone do not prove useful TypeScript cleanup;
+regressions. An immutable external consumer checks exported types and function signatures
+before the runtime oracle imports candidate code. Missing or mismatched compiler,
+type erasure and incompatible signatures fail acceptance; candidate tests and
+compiler configuration cannot disable this check. The compiler emits no files. Source-byte changes alone do not prove useful TypeScript cleanup;
 independent review must explain the concrete improvement.
 
 Native writer runs use existing CLI authentication and consume the account's
@@ -248,8 +304,8 @@ with `--plugin-dir`, suppresses user/project settings, and preserves OAuth; its
 plain arm omits the plugin. Host permission controls differ. The disposable trial
 workspace and scope checker are evaluation boundaries, not a security sandbox.
 
-Reports retain every attempt and add accepted rate, elapsed time, input/output
-usage, interventions and CLI-reported cost per accepted result. Failures count
+Reports retain every attempt and add accepted rate, elapsed time, cached/uncached
+input and output usage, interventions and CLI-reported cost per accepted result. Failures count
 in totals. Missing observations stay unknown; zero accepted results leaves
 per-accepted figures undefined. Claude final-result usage is counted once;
 reported costs are estimates, not subscription charges. Independent review time
@@ -285,6 +341,12 @@ checkpoint, and fresh continuation; plus one unsupported request per host.
 It independently checks the original failing test, unchanged requirements/tests,
 saved input hashes, final behavior, admitted records and captured verification.
 These are workflow checks, not performance or general code-quality comparisons.
+
+Native `prepare` copies the selected package into a UUID namespace under the
+active Codex plugin cache (`$CODEX_HOME/plugins/cache`, default
+`~/.codex/plugins/cache`). It retains that namespace for later continuation;
+remove only the recorded namespace after finishing. Use the isolated coding-trial
+harness above when writing to the native cache is outside the authorized scope.
 
 ```bash
 # No model calls: native staging/discovery, fixed inputs and evaluator hashes.
@@ -323,3 +385,22 @@ Repeat `resume` for the standard/deep direct rows. It restores the verified red
 checkpoint at its original path and archives the prior completed candidate.
 After all desired continuations, only the recorded UUID cache namespace is
 disposable; user settings and other installed plugin directories remain separate.
+
+## Retry bug-fix fixture
+
+`retry-queue` covers synchronous webhook delivery with tenant-scoped completion,
+failed sends, repeated events, full-batch validation, audit order and nested
+payload mutation. Its 271 independent assertions run outside the editable
+workspace. The original bug and five independently broken variants fail the
+oracle; a valid fix passes. This is an in-memory journal fixture, not a claim of
+exactly-once delivery across crashes or concurrent workers.
+
+## Native package identity
+
+New matrices use versioned, path-independent hashes for every declared package
+member plus the native loading roots. Missing files, unsafe paths, or additional
+loading metadata invalidate the run before model execution; source and staged
+copies must agree. Reports identify legacy coverage explicitly. Keep historical
+matrices with their original frozen evaluator; the new evaluator rejects legacy
+continuation instead of rewriting their evidence. Compiler configuration and the
+external type consumer are also included in coding-evaluator identity.

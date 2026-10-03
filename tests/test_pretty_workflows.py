@@ -172,3 +172,23 @@ def test_verbose_readable_catalog_adds_examples_only_when_requested(forge, capsy
     assert code == 0
     assert "python3 scripts/zagrosi_skills.py next-section --planning-dir" in verbose
     assert "python3 scripts/zagrosi_skills.py implement-progress --planning-dir" in verbose
+
+
+def test_provider_recovery_keeps_reason_and_safe_cleanup_diagnostic(forge):
+    payload = {"schema": "forge-provider-review-v1", "success": False, "provider": "codex",
+               "failure_kind": "timeout", "recovery": "Use a smaller packet or a longer deadline.",
+               "termination_error": "process group termination unconfirmed"}
+    pretty = forge.output.format_pretty(payload)
+    assert "Failure: timeout" in pretty
+    assert payload["recovery"] in pretty
+    assert payload["termination_error"] in pretty
+
+
+def test_provider_preflight_keeps_uncertainty_visible(forge):
+    payload = {"success": True, "providers": [{"provider": "claude", "available": True,
+               "authentication": "unchecked", "cli": {"status": "unknown", "version": "2.1.285",
+               "reason": "Help does not validate arguments."}}]}
+    pretty = forge.output.format_pretty(payload)
+    assert "CLI: unknown (2.1.285)" in pretty
+    assert "Help does not validate arguments." in pretty
+    assert "authentication: unchecked" in pretty

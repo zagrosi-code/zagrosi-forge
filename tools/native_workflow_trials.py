@@ -19,9 +19,46 @@ from coding_trial_evidence import files, plugin_files
 from coding_trial_process import execute
 from native_plugin_smoke import codex_skills, live_flags, prepare_live
 from native_trial_session import EXPECTED_SKILLS, native_command, read_json, run_session
-from native_workflow_checks import completed, interrupted, planned
+from native_workflow_checks import completed, interrupted, planned, runtime_module
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def generated_bytecode(root, name):
+    relative = Path(name)
+    path = root / relative
+    if relative.parts[0] != "scripts" or relative.name != "__pycache__" or path.is_symlink() or not path.is_dir():
+        return False
+    return all(not child.is_symlink() and child.is_file() and child.stat().st_nlink == 1
+               and child.suffix in {".pyc", ".pyo"} for child in path.iterdir())
+
+
+def package_identity(root):
+    """Bind declared bytes and reject undeclared native inputs without reading them."""
+    cache = runtime_module(ROOT, "plugin_cache")
+    members = cache.package_members(root)
+    digest, excluded = cache.plugin_tree_inventory(root, members)
+    missing = sorted(name for name in members if not (root / name).is_file())
+    loading_roots = {".agents", ".claude-plugin", ".codex-plugin", "agents", "commands", "hooks", "scripts", "skills"}
+    unexpected = [name for name in excluded
+                  if (Path(name).parts[0] in loading_roots or name in {".mcp.json", ".lsp.json"})
+                  and not generated_bytecode(root, name)]
+    if missing or unexpected:
+        raise ValueError(f"Native package has missing members or undeclared loading inputs: {missing + unexpected}")
+    return {"version": 1, "sha256": digest}
+
+
+def require_package_provenance(record):
+    identity = record.get("package_identity")
+    if (not isinstance(identity, dict) or type(identity.get("version")) is not int or identity["version"] != 1
+            or not isinstance(identity.get("sha256"), str) or len(identity["sha256"]) != 64
+            or any(char not in "0123456789abcdef" for char in identity["sha256"])):
+        raise ValueError("Complete native package provenance is unavailable; prepare a fresh matrix")
+
+
+def package_unchanged(record, hosts):
+    paths = [record["plugin_root"], *(record["installation"][host + "_plugin"] for host in sorted(hosts))]
+    return all(package_identity(Path(path)) == record["package_identity"] for path in paths)
 
 
 def evaluator_identity():
@@ -45,8 +82,11 @@ def write(path, value):
 def prepare(directory, root, models, efforts, *, timeout=600, total_timeout=1500):
     if not 0 < timeout <= 3600 or not timeout <= total_timeout <= 10800:
         raise ValueError("Use positive bounded per-session and total-row deadlines")
+    identity = package_identity(root)
     directory.mkdir(parents=True, exist_ok=False)
     installation = prepare_live(root, directory / "native")
+    if any(package_identity(Path(installation[host + "_plugin"])) != identity for host in ("codex", "claude")):
+        raise ValueError("Staged native package changed")
     discovery = codex_skills("codex", directory, os.environ, flags=live_flags(installation),
                              plugin_id="zagrosi-forge@" + installation["marketplace_name"])
     if {row["name"] for row in discovery if row.get("enabled")} != EXPECTED_SKILLS:
@@ -54,7 +94,7 @@ def prepare(directory, root, models, efforts, *, timeout=600, total_timeout=1500
     if any(not Path(row["path"]).resolve().is_relative_to(Path(installation["codex_plugin"]).resolve()) for row in discovery):
         raise ValueError("Native skills resolved outside the exact staged package")
     rows = matrix()
-    record = {"plugin_root": str(root), "plugin_sha256": plugin_files(root), "installation": installation,
+    record = {"plugin_root": str(root), "package_identity": identity, "installation": installation,
               "evaluator_root": str(ROOT), "evaluator_sha256": evaluator_identity(),
               "models": models, "efforts": efforts, "timeout": timeout, "total_timeout": total_timeout,
               "rows": rows, "codex_discovery": [{key: row.get(key) for key in ("name", "path", "pluginId", "enabled")} for row in discovery],
@@ -104,6 +144,7 @@ def unattempted(path):
 
 def run(directory, identity, *, resume_host=None):
     record = read_json(directory / "matrix.json")
+    require_package_provenance(record)
     row = next((item for item in record["rows"] if item["id"] == identity), None)
     if row is None:
         raise ValueError("Unknown matrix row")
@@ -131,9 +172,8 @@ def run(directory, identity, *, resume_host=None):
         if evaluator_identity() != record.get("evaluator_sha256"):
             raise ValueError("Evaluator source changed; prepare a fresh matrix from frozen tools")
         for phase in (["unsupported"] if row["trigger"] == "unsupported" else ["plan", "implement", "resume"]):
-            for host in hosts:
-                if plugin_files(Path(installation[host + "_plugin"])) != record["plugin_sha256"]:
-                    raise ValueError("Staged native package changed")
+            if not package_unchanged(record, hosts):
+                raise ValueError("Native package changed")
             remaining = record["total_timeout"] - (time.monotonic() - start)
             if remaining <= 0:
                 raise ValueError("Total workflow deadline exhausted")
@@ -159,8 +199,7 @@ def run(directory, identity, *, resume_host=None):
             else:
                 check = completed(root, workspace, row["depth"], baseline, checkpoint)
             check["success"] &= native and (session["success"] if phase != "implement" else True)
-            check["package_unchanged"] = all(plugin_files(path) == record["plugin_sha256"]
-                                             for path in (root, *(Path(installation[host + "_plugin"]) for host in hosts)))
+            check["package_unchanged"] = package_unchanged(record, hosts)
             check["success"] &= check["package_unchanged"] and time.monotonic() - start <= record["total_timeout"]
             check["evaluator_unchanged"] = evaluator_identity() == record["evaluator_sha256"]
             check["success"] &= check["evaluator_unchanged"]
@@ -183,6 +222,7 @@ def run(directory, identity, *, resume_host=None):
 def resume(directory, identity, *, model=None):
     """Continue the retained exact checkpoint at its original path after native sign-in."""
     record = read_json(directory / "matrix.json")
+    require_package_provenance(record)
     row = next(item for item in record["rows"] if item["id"] == identity)
     trial = directory / identity
     prior = read_json(trial / "result.json", {})
@@ -195,8 +235,8 @@ def resume(directory, identity, *, model=None):
     installation = record["installation"]
     if evaluator_identity() != record.get("evaluator_sha256"):
         raise ValueError("Evaluator source changed; resume with the frozen tools recorded in this matrix")
-    if plugin_files(Path(installation[host + "_plugin"])) != record["plugin_sha256"]:
-        raise ValueError("Staged native package changed")
+    if not package_unchanged(record, {host}):
+        raise ValueError("Native package changed")
     evidence = read_json(trial / "checkpoint/evidence.json")
     saved = trial / "checkpoint/workspace"
     if files(saved) != evidence["workspace_sha256"]:
@@ -219,7 +259,7 @@ def resume(directory, identity, *, model=None):
             plugin_root=Path(installation[host + "_plugin"]), timeout=min(record["timeout"], record["total_timeout"] - (time.monotonic() - start)))
         checks = completed(root, workspace, row["depth"], baseline, evidence["checkpoint"])
         native = host == "codex" or set(session["registered_skills"]) == EXPECTED_SKILLS
-        unchanged = all(plugin_files(path) == record["plugin_sha256"] for path in (root, Path(installation[host + "_plugin"])))
+        unchanged = package_unchanged(record, {host})
         evaluator_unchanged = evaluator_identity() == record["evaluator_sha256"]
         success = session["success"] and native and checks["success"] and unchanged and evaluator_unchanged and time.monotonic() - start <= record["total_timeout"]
         result = {"success": success, "status": "passed" if success else "failed", "session": session, "checks": checks,
@@ -242,7 +282,14 @@ def report(directory, host=None):
         if cross:
             result.update(cross_host=cross, success=cross["success"], status=cross["status"])
         rows.append(result)
+    provenance = {"status": "legacy", "coverage": "launcher, runtime Python modules, and skill Markdown"}
+    try:
+        require_package_provenance(record)
+        provenance = {"status": "current", "version": 1, "coverage": "declared package and native loading inputs"}
+    except ValueError:
+        pass
     return {"success": all(row["success"] is True for row in rows), "host_filter": host, "rows": rows,
+            "package_provenance": provenance,
             "model_sessions": sum(len(row.get("sessions", [])) + int("session" in row.get("cross_host", {})) for row in rows),
             "limits": "A small deterministic fixture tests native workflow contracts, not general code quality. Follow-ups and continuations use fresh sessions. Native authentication remains owned by each CLI. Unsupported requests are tested once per host."}
 
@@ -268,6 +315,7 @@ def main():
         elif args.operation in {"run", "resume"}:
             directory = args.directory.resolve()
             record = read_json(directory / "matrix.json")
+            require_package_provenance(record)
             for host, model in (("codex", args.codex_model), ("claude", args.claude_model)):
                 if model:
                     if record["models"].get(host) not in (None, model):

@@ -1,0 +1,66 @@
+[
+  {
+    "name": "none-loses-provenance",
+    "path": "src/settings.py",
+    "old": "            sources[key] = {\"kind\": \"layer\", \"name\": name}",
+    "new": "            if value is not None:\n                sources[key] = {\"kind\": \"layer\", \"name\": name}",
+    "count": 1,
+    "violates": "none loses provenance"
+  },
+  {
+    "name": "equal-value-loses-provenance",
+    "path": "src/settings.py",
+    "old": "            values[key] = _value(key, value)\n            sources[key] = {\"kind\": \"layer\", \"name\": name}",
+    "new": "            previous = values[key]\n            values[key] = _value(key, value)\n            if previous != values[key]:\n                sources[key] = {\"kind\": \"layer\", \"name\": name}",
+    "count": 1,
+    "violates": "equal value loses provenance"
+  },
+  {
+    "name": "environment-wrong-kind",
+    "path": "src/settings.py",
+    "old": "sources[key] = {\"kind\": \"environment\", \"name\": variable}",
+    "new": "sources[key] = {\"kind\": \"layer\", \"name\": variable}",
+    "count": 1,
+    "violates": "environment wrong kind"
+  },
+  {
+    "name": "shared-default-source-records",
+    "path": "src/settings.py",
+    "old": "sources = {key: {\"kind\": \"default\", \"name\": None} for key in DEFAULTS}",
+    "new": "sources = dict.fromkeys(DEFAULTS, {\"kind\": \"default\", \"name\": None})",
+    "count": 1,
+    "violates": "shared default source records"
+  },
+  {
+    "name": "double-consumes-layers",
+    "path": "src/settings.py",
+    "old": "def explain_config(layers, environ=None):\n    return _resolve(layers, environ)",
+    "new": "def explain_config(layers, environ=None):\n    _resolve(layers, environ)\n    return _resolve(layers, environ)",
+    "count": 1,
+    "violates": "double consumes layers"
+  },
+  {
+    "name": "reorders-environment-access",
+    "path": "src/settings.py",
+    "old": "        for key in DEFAULTS:",
+    "new": "        for key in reversed(DEFAULTS):",
+    "count": 1,
+    "violates": "reorders environment access"
+  },
+  {
+    "name": "sorts-validation-order",
+    "path": "src/settings.py",
+    "old": "        for key, value in data.items():",
+    "new": "        for key, value in sorted(data.items()):",
+    "count": 1,
+    "violates": "sorts validation order"
+  },
+  {
+    "name": "reads-ambient-environment",
+    "path": "src/settings.py",
+    "old": "def _resolve(layers, environ):",
+    "new": "def _resolve(layers, environ):\n    import os\n    if environ is None:\n        environ = os.environ",
+    "count": 1,
+    "violates": "Omitted environ must not read process environment."
+  }
+]
