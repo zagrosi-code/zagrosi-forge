@@ -44,6 +44,8 @@ def test_windows_partitions_cover_linux_and_macos_once():
     assert {
         "tests/test_compatibility_checks.py", "tests/test_compatibility_workflows.py",
         "tests/test_compatibility_admission.py", "tests/test_heldout_contracts.py",
+        "tests/test_team_state.py", "tests/test_team_git.py", "tests/test_team_config.py",
+        "tests/test_team_collaboration.py", "tests/test_team_workflows.py", "tests/test_team_guidance.py",
     } <= selected["all"].keys()
 
 

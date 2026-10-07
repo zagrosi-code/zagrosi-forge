@@ -5,6 +5,11 @@ description: Build admitted Forge sections with minimal code, targeted TDD/revie
 
 # Zagrosi Implement
 
+For a Git target, check `team status --target-dir "{target_dir}"` with Forge’s
+helper before work or resume.
+Follow [team coordination](../zagrosi-forge/references/collaboration.md) when configured or unavailable;
+reuse the same task across phases and delegated agents.
+
 Use the least process that preserves correctness. Apply the all-depth
 [engineering standard](references/engineering.md): fix encountered bad code, update
 ownership, and verify behavior before/after refactors; prefer readability over

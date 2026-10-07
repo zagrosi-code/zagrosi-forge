@@ -8,14 +8,14 @@
 </p>
 
 Forge turns requests into compact plans, clear code, and verified changes.
-One entry handles features, fixes, and cleanup in Codex and Claude Code.
-Lean is default: focused context, targeted checks, one integration result.
+For features, fixes and cleanup in Codex and Claude Code.
+Lean by default: focused context, targeted checks, one integration result.
 
-[Install](#install) · [Use](#use) · [Multiple models](#multiple-models) · [Workflows](#workflows) · [Engineering](#engineering) · [Releases](docs/releases.md) · [Contribute](#contribute)
+[Install](#install) · [Use](#use) · [Multiple models](#multiple-models) · [Teams](#teams) · [Workflows](#workflows) · [Engineering](#engineering) · [Releases](docs/releases.md) · [Contribute](#contribute)
 
 ## Install
 
-Requires Python 3.11+ and host plugin support. On Windows, replace `python3`
+Requires Python 3.11+ and plugins. On Windows, replace `python3`
 with `python` or `py -3`. Restart after installing or updating.
 
 ### Claude Code
@@ -61,14 +61,12 @@ python3 scripts/zagrosi_skills.py update-check --pretty
 python3 scripts/zagrosi_skills.py self-update --pretty
 ```
 
-The installer preserves unrelated settings.
-
 </details>
 
 ## Use
 
 Describe your task; request `standard` or `deep`
-when needed. Try the [runnable first task](examples/first-task/README.md).
+when needed. Try the [first task](examples/first-task/README.md).
 
 **Claude Code**
 
@@ -84,34 +82,36 @@ Use $zagrosi-forge:zagrosi-forge to add this feature and finish verification.
 Use $zagrosi-forge:zagrosi-cleanup to simplify this subsystem while preserving behavior.
 ```
 
-Both hosts share skills, runtime and standards, without hooks, MCP servers or
-background processes. Use `zagrosi-project`, `zagrosi-plan`, and `zagrosi-implement`
+Both hosts share skills, runtime and standards. Use `zagrosi-project`, `zagrosi-plan`, and `zagrosi-implement`
 for individual phases. Authorized work continues through delivery; planning-only requests stop at the plan.
 
 ## Multiple models
 
-Request independent Codex, Claude, or Gemini reviews. Keep one primary writer;
-reviewers receive the same bounded packet:
-
-**Claude Code**
+Ask Forge for independent Codex, Claude or Gemini reviews. Reviewers receive the
+same bounded packet:
 
 ```text
-/zagrosi-forge:zagrosi-forge Implement this feature with independent Codex and Claude reviews. Keep one writer; report missing access.
+Implement this feature with independent Codex and Claude reviews. Keep one writer; report missing access.
 ```
 
-**Codex**
-
-```text
-Use $zagrosi-forge:zagrosi-forge to implement this feature with independent Codex and Claude reviews. Keep one writer; report missing access.
-```
-
-Forge reuses native CLI logins. Choose exact model IDs or use native defaults;
+Forge reuses native CLI logins. Choose model IDs or native defaults;
 missing access and unreported identity stay visible. No silent fallback.
-CLI checks use bounded help probes; add `--check-auth` for login status. See [provider setup and two-reviewer example](skills/zagrosi-forge/references/providers.md).
+Add `--check-auth` for login status. See [provider setup](skills/zagrosi-forge/references/providers.md).
 
 ```bash
 python3 scripts/zagrosi_skills.py provider-status --check-cli --pretty
 ```
+
+## Teams
+
+See teammates' tasks and reserve paths across clones, worktrees and both hosts.
+Ask Forge to enable collaboration through your Git remote, commit the generated
+`.forge/team.json`, then have teammates join. Independent writers use separate
+worktrees. No extra service.
+
+Reservations cover every depth and cleanup. Stale tasks retain ownership; offline
+status grants no clearance. Shared notes remain in Git history.
+See [setup, handoffs and recovery](docs/collaboration.md).
 
 ## Workflows
 
@@ -126,7 +126,7 @@ python3 scripts/zagrosi_skills.py provider-status --check-cli --pretty
 |---|---|
 | Project | `project-manifest.md` and child `spec.md` files |
 | Single-section plan | `sections/index.md` and one canonical section with tests, evidence, decisions, risks, and review |
-| Multi-section plan | One shared plan and ordered sections linking shared contracts |
+| Multi-section plan | Shared plan and ordered sections |
 | Implement | Code, tests, and machine-readable section records |
 | Cleanup | Simpler responsibilities and preserved behavior, with regression evidence |
 
@@ -139,7 +139,7 @@ python3 scripts/zagrosi_skills.py provider-status --check-cli --pretty
 Depth changes investigation and review. Every mode retains requirements,
 ownership, acceptance, and verification without duplicate ledgers.
 
-Skills handle setup and verification; complete draft contracts before coding. See
+Complete contracts before coding. See
 [compact-plan format](skills/zagrosi-plan/references/plan-format.md),
 [depth standards](skills/zagrosi-plan/references/depth-standards.md), and
 [example briefs](examples/gallery/README.md).
@@ -150,7 +150,7 @@ Continue from the planning directory in either host. Checkpoints retain progress
 ownership conflicts serialize work. Changed code/contracts require fresh verification.
 Legacy evidence cannot establish new verified completion.
 
-Run helpers **from the Forge checkout**, using absolute paths for external plans.
+Run helpers **from the Forge checkout**; use absolute plan paths.
 
 ```bash
 python3 scripts/zagrosi_skills.py status --path "/absolute/path/to/planning/01-auth" --pretty
@@ -176,7 +176,7 @@ completion. Capture cannot prove coverage or authorship. Run feature checks and
 integration. Cleanup can cover repositories; PR review covers the diff and callers.
 
 `context-brief` and `implementation-packet` keep complete sections, mapped source
-requirements and linked contracts. Default budget: 2,000 words (`--max-words`);
+requirements and linked contracts. Budget: 2,000 words (`--max-words`);
 broken links fail and oversized sections return an adjusted retry. Failures retain
 blockers, recovery commands and complete reports (`--full-output`).
 

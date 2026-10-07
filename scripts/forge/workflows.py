@@ -323,6 +323,13 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         payload["preflight"] = preflight
         payload["success"] = bool(payload["success"] and preflight.get("success"))
     if payload["success"]:
+        from . import team_workflow
+
+        team = team_workflow.guard(planning_dir, target_dir, selected)
+        if team is not None and not team["success"]:
+            return _output.print_json({**payload, **team, "team": team}, 1)
+        if team is not None:
+            payload["team"] = team
         if selected:
             compatibility.activate(planning_dir, target_dir, selected)
         if not state_path.exists():
@@ -430,6 +437,12 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
             "findings": [finding.to_dict() for finding in findings],
         }, 1)
 
+    from . import team_workflow
+
+    team = team_workflow.guard(planning_dir, target_dir, args.section,
+                               required_paths=args.files_changed + args.test_files)
+    if team is not None and not team["success"]:
+        return _output.print_json({**team, "team": team}, 1)
     completed = dict(completed)
     pending = dict(state.get("pending_sections", {}))
     candidate = {**state, "completed_sections": {**completed, args.section: section_record},
@@ -472,6 +485,8 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         "traceability_matrix": str(traceability_path) if traceability_path else None,
         **readiness,
     }
+    if team is not None:
+        payload["team"] = team
     if postflight is not None:
         payload["postflight"] = postflight
     payload["recorded"] = payload["success"]

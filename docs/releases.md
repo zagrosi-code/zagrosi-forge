@@ -1,5 +1,16 @@
 # Releases
 
+## 0.4.0 — collaboration across engineers
+
+- Share task awareness and atomic path reservations across clones and worktrees through an opt-in Git board.
+- Keep ownership, checkout identity and recovery generations separate from display names; preserve interrupted publications for exact retries.
+- Check configured mutable workflows before activation, verification and recording. Share the same task lifecycle across every skill, depth and host.
+- Support explicit handoff, scope expansion, offline status and durable delivery notes without another service or runtime dependency.
+- Preserve solo behavior and local verification evidence. Reservations coordinate participating clients; they do not lock external editors or prove semantic compatibility. Detached frozen execution uses external team checks.
+
+See [team onboarding and recovery](collaboration.md). No native model sign-in is
+required for the shared protocol; offline tests are separate from live host acceptance.
+
 ## 0.3.5 — stronger quality evidence and smoother delivery
 
 - Continue authorized delivery across phases without repeating generic preference interviews.

@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 from importlib import import_module
 
 from . import exact_handoff_cli_shape
+from .team_cli import add_team_commands
 import argparse
 import sys
 
@@ -556,6 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_plan_commands(sub)
     add_implement_commands(sub)
     add_utility_commands(sub)
+    add_team_commands(sub, invoke_command)
     return parser
 
 
