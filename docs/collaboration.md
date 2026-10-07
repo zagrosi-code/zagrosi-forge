@@ -26,10 +26,16 @@ one task reuse its reservation and coordinate their own file ownership.
 Solo repositories keep the existing workflow. A marker alone does not join you
 or authorize publication; join is an explicit local choice.
 
+Keep `.forge/team.json` tracked. Setup diagnoses repository, global and local
+ignore rules that would hide an untracked marker, before publishing a board.
+It does not edit those rules or stage files. An existing participant can still
+finish, retry or leave if discovery later becomes ignored; status warns about it.
+
 ## What teammates see
 
 The roster contains display name, host, task, state, reserved paths, branch/commit,
-last reported activity and a short note. Paths are literal repository-relative
+last reported activity and a short note. Prepared work also names its canonical
+plan, version and section. Paths are literal repository-relative
 files or directories. Parent/child paths, case and Unicode aliases conservatively
 conflict; local links are checked too. A directory reservation covers descendants.
 No glob patterns are supported.
@@ -78,6 +84,38 @@ reservation before changing additional files. Unrelated user edits stay untouche
 
 ### Bind a Forge plan
 
+For shared implementation, separate the contract from execution records:
+
+| Share through normal Git review | Keep private to each engineer |
+|---|---|
+| Team marker, source spec, canonical contract, sections and referenced decisions | Research drafts, local configuration, progress, compatibility baselines, receipts and caches |
+
+Place a shared plan in a dedicated nonignored directory, for example
+`.forge/plans/sign-in/`. Use `codex-plan.md` or `claude-plan.md` with compact-plan
+metadata naming its source and depth, plus a complete `sections/index.md` and
+sections. This format supports lean, standard and deep. Review and commit the
+contract files deliberately; Forge never automatically publishes them or copies
+private notes into the shared board. Each engineer obtains them through normal Git.
+Use a version of Forge with shared-plan support in every participating clone;
+older clients reject board entries they do not understand.
+
+```bash
+python3 scripts/zagrosi_skills.py team prepare --target-dir "{repo}" --planning-dir "{repo}/.forge/plans/sign-in"
+```
+
+Use the **returned private planning directory** in the commands below. Preparation
+reads committed UTF-8 Markdown contracts, with self-contained local references,
+into this checkout's Git administrative directory. It copies no other engineer's
+execution state. Linked worktrees get separate workspaces too. Current limits are
+128 contract files, 128 KiB per file and 512 KiB total.
+
+Ignored/untracked files, local configuration, interviews, generated reports and
+execution records are excluded. A required reference to an excluded, missing or
+external local file is rejected. Review changes and commit them before preparing;
+ordinary Windows newline conversion is supported. Existing matching workspaces
+retain progress, while new contract versions get new workspaces without deleting
+old evidence. Plan authoring stays in the canonical directory.
+
 ```bash
 python3 scripts/zagrosi_skills.py team update --target-dir "{repo}" --session "{session}" --generation "{generation}" --planning-dir "{plan}" --section section-01-auth
 python3 scripts/zagrosi_skills.py team check --target-dir "{repo}" --session "{session}" --generation "{generation}" --planning-dir "{plan}" --section section-01-auth
@@ -89,9 +127,12 @@ be the target; explicit `--path` remains relative to the Git repository root.
 Bindings identify the exact local plan, target and optional section. A full-plan
 claim covers individual sections; a section-only claim cannot authorize final
 integration. Expand to full-plan scope after colleagues finish or agree a handoff.
-Plans inside the repository also reserve their planning directory, covering
-generated progress and evidence files. Use private plans outside the repository
-when engineers implement separate sections concurrently.
+Prepared workspaces reserve source paths and share read access to the canonical
+plan. Engineers using the same plan version can work on independent sections
+without competing over generated progress files. A write claim covering an active
+reader's canonical directory, or a conflicting version of that plan, is rejected.
+Ordinary unprepared plans inside the repository still reserve their planning
+directory because their helpers write progress there.
 
 Mutable setup, section entry, verification and recording enforce those bindings.
 A returned blocked next section does not undo a preceding successful record.
@@ -102,6 +143,17 @@ The same policy applies in lean, standard and deep, and in both hosts. Detached
 frozen execution uses external team checks around edits, evidence recording and
 Git delivery; its pinned evidence protocol has no internal team enforcement.
 Another clone's receipts do not prove your checkout passed verification.
+
+Local canonical/index changes or changes to the prepared contract block further
+work and invalidate verification results. The board identifies a pinned contract;
+it does not automatically fetch application branches or detect unfetched changes
+made outside participating Forge sessions. Synchronize and review through Git.
+After a contract update, prepare its new version and explicitly rebind the task.
+
+For dependent sections, first integrate the predecessor's code and verify/record
+it locally, including any required compatibility baseline. A colleague's completed
+task does not populate your local completion state. Final integration still needs
+a full-plan claim and your own verification.
 
 ## Interrupted work and handoff
 

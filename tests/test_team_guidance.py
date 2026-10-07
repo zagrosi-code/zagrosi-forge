@@ -45,4 +45,4 @@ def test_documented_helper_examples_match_the_public_command_parser():
                 assert args.handler == ('team_cli', 'run')
                 assert args.target_dir, line
                 documented.add(args.team_action)
-    assert documented == {'init', 'join', 'status', 'start', 'update', 'check', 'finish', 'recover', 'retry', 'leave'}
+    assert documented == {'init', 'join', 'status', 'prepare', 'start', 'update', 'check', 'finish', 'recover', 'retry', 'leave'}

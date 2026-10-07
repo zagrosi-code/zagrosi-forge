@@ -179,6 +179,9 @@ def workflow_options(args: argparse.Namespace) -> int:
         },
         "git_privacy": {
             "planning_artifacts": "local_ignored",
+            "shared_plan_contracts": "explicit_reviewed_commit",
+            "team_discovery": "tracked_marker",
+            "team_execution_state": "private_per_checkout",
             "mention_planning_docs": False,
             "offer_gitignore": True,
             "commit_style": "ask",

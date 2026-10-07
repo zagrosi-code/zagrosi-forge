@@ -104,13 +104,13 @@ python3 scripts/zagrosi_skills.py provider-status --check-cli --pretty
 
 ## Teams
 
-See teammates' tasks and reserve paths across clones, worktrees and both hosts.
-Ask Forge to enable collaboration through your Git remote, commit the generated
-`.forge/team.json`, then have teammates join. Independent writers use separate
-worktrees. No extra service.
+See teammates' tasks and reserve work across clones, worktrees and both hosts.
+Ask Forge to enable collaboration, commit `.forge/team.json`, and have teammates
+join. Share reviewed plans through Git; prepare private workspaces for independent
+section work. No extra service.
 
-Reservations cover every depth and cleanup. Stale tasks retain ownership; offline
-status grants no clearance. Shared notes remain in Git history.
+Every depth and cleanup shares reservations. Stale tasks retain ownership; offline
+status grants no clearance. Notes remain in Git history.
 See [setup, handoffs and recovery](docs/collaboration.md).
 
 ## Workflows

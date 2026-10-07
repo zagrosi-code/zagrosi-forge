@@ -15,6 +15,12 @@ covers routine task announcements, scope updates, checks and delivery notes;
 it does not authorize source publication, unrelated services or taking over work.
 See the [public guide](../../../docs/collaboration.md) for onboarding and commands.
 
+Keep private research and execution records local. For a shared plan, deliberately
+review and commit its stable spec, contract and sections in a dedicated directory
+such as `.forge/plans/sign-in/`; preserve normal commit/push authorization. Keep
+`.forge/team.json` tracked. Do not blanket-ignore `.forge/` or assume teammates
+receive ignored plans. Ignored discovery is diagnosed without changing ignore rules.
+
 ## One task, one reservation
 
 Read the current roster before choosing work. Surface relevant colleagues,
@@ -34,6 +40,14 @@ Before creating planning files inside the repository, reserve those paths too.
 Keep private notes outside shared claims when appropriate; never publish their
 contents. Read-only reviews need no editing reservation.
 
+For an existing committed shared plan, run `team prepare --planning-dir …
+--target-dir …` and use its returned private planning directory for implementation.
+Preparation copies reviewed contract files from Git into this checkout's private
+workspace; it never imports another engineer's progress or verification receipts.
+Use the supported physical compact format with explicit source/depth and complete
+sections. Keep referenced contract Markdown self-contained; authoring remains in
+the canonical plan. Follow returned commands and existing admission at every depth.
+
 Before source edits, bind the task with `team update --session … --generation …
 --planning-dir …`, adding `--section …` for section-only work. A new implementation
 task can use these scope options on `team start`. Always use the returned full
@@ -41,8 +55,17 @@ session ID and generation. Paths from plans are relative to their target;
 explicit `--path` values are repository-relative literals, not globs. A full-plan
 binding can cover individual sections; final integration needs a full-plan claim
 once collaborators have finished or agreed a handoff.
-An in-repository plan also reserves its planning directory for progress/evidence
-writes. Use private external plans for concurrent section implementation.
+Prepared plans expose their version and section on the board. Matching-version
+readers can implement independent sections concurrently; contract edits conflict
+with active readers. Ordinary in-repository plans still reserve their planning
+directory, so use prepared workspaces for shared section implementation.
+
+Synchronize code and canonical plans through normal Git operations. The pinned
+contract does not prove every remote branch was fetched. If it changes, review
+and commit the change, finish/update affected reservations, and prepare again;
+old private workspaces retain evidence. Dependent sections require integrated
+predecessor code and local verification/recording, including compatibility checks;
+a teammate's completion note never unlocks a local dependency by itself.
 
 Refresh with `team check` before editing, after a material pause, on scope changes,
 and before commits/PR delivery. Use plan scope options and actual changed paths,

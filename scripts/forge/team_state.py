@@ -146,7 +146,7 @@ def _branch(value) -> bool:
 
 
 def validate_session(value) -> dict:
-    if not isinstance(value, dict) or set(value) != _FIELDS:
+    if not isinstance(value, dict) or set(value) not in (_FIELDS, _FIELDS | {"plan"}):
         _invalid("Session fields do not match the collaboration schema.")
     if not all(_token(value[key]) for key in ("participant_id", "checkout_id", "generation")):
         _invalid("Session identities must be opaque 32-digit hexadecimal values.")
@@ -164,7 +164,54 @@ def validate_session(value) -> dict:
         _invalid("Session timestamp must be a finite nonnegative UTC epoch value.")
     result = dict(value)
     result["paths"] = normalize_paths(value["paths"])
+    if "plan" in value:
+        plan = value["plan"]
+        if (not isinstance(plan, dict) or set(plan) != {"path", "digest", "commit", "section"}
+                or not isinstance(plan["digest"], str) or not re.fullmatch(r"[a-f0-9]{64}", plan["digest"])
+                or not isinstance(plan["commit"], str) or not re.fullmatch(r"(?:[a-f0-9]{40}|[a-f0-9]{64})", plan["commit"])
+                or plan["section"] is not None and (not isinstance(plan["section"], str)
+                    or not re.fullmatch(r"section-\d{2}-[a-z0-9]+(?:-[a-z0-9]+)*", plan["section"]))):
+            _invalid("Shared plan identity must contain its directory, digest, commit and optional section.")
+        path = _path(plan["path"])
+        if path == ".":
+            _invalid("A shared plan requires its own canonical directory.")
+        result["plan"] = {**plan, "path": path}
     return result
+
+
+def _overlapping_claim(claimed, keys, key):
+    parents = ["."] + ["/".join(key.split("/")[:i]) for i in range(1, len(key.split("/")) + 1)]
+    conflict = next((claimed[parent] for parent in parents if parent in claimed), None)
+    position = bisect_left(keys, key + "/")
+    if conflict is None and keys and key == ".":
+        conflict = claimed[keys[0]]
+    if conflict is None and position < len(keys) and keys[position].startswith(key + "/"):
+        conflict = claimed[keys[position]]
+    return conflict
+
+
+def _assert_plan_readers(sessions, claimed, keys, inodes, root):
+    readers, reader_keys = {}, []
+    for identity, entry in sessions.items():
+        plan = entry.get("plan")
+        if plan is None:
+            continue
+        scopes = normalize_paths([plan["path"]], root)
+        for path in scopes:
+            key = _portable(path)
+            conflict = _overlapping_claim(claimed, keys, key) or inodes.get(_inode(root, path))
+            if conflict is not None:
+                raise TeamError("team-conflict", "A task reserves writes to a shared plan in use.",
+                                session_id=conflict, path=path, conflict="plan-write")
+            other = _overlapping_claim(readers, reader_keys, key)
+            if other is not None:
+                previous = sessions[other]["plan"]
+                if key not in readers or previous["digest"] != plan["digest"]:
+                    raise TeamError("team-conflict", "Another task uses a different shared plan revision.",
+                                    session_id=other, path=path, conflict="plan-revision")
+        for path in scopes:
+            readers.setdefault(_portable(path), identity)
+        reader_keys = sorted(readers)
 
 
 def _assert_claims(sessions: dict, root: Path | None = None):
@@ -180,13 +227,7 @@ def _assert_claims(sessions: dict, root: Path | None = None):
         scopes = normalize_paths(entry["paths"], root)
         for path in scopes:
             key = _portable(path)
-            parents = ["."] + ["/".join(key.split("/")[:i]) for i in range(1, len(key.split("/")) + 1)]
-            conflict = next((claimed[parent] for parent in parents if parent in claimed), None)
-            position = bisect_left(keys, key + "/")
-            if conflict is None and keys and key == ".":
-                conflict = claimed[keys[0]]
-            if conflict is None and position < len(keys) and keys[position].startswith(key + "/"):
-                conflict = claimed[keys[position]]
+            conflict = _overlapping_claim(claimed, keys, key)
             inode = _inode(root, path)
             if conflict is None and inode is not None:
                 conflict = inodes.get(inode)
@@ -200,6 +241,7 @@ def _assert_claims(sessions: dict, root: Path | None = None):
             if inode is not None:
                 inodes[inode] = session_id
         keys = sorted(claimed)
+    _assert_plan_readers(sessions, claimed, keys, inodes, root)
 
 
 def validate_board(value) -> dict:

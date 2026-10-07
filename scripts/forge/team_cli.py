@@ -11,6 +11,7 @@ def add_team_commands(sub, invoke_command):
         "init": "Create a shared work board and discovery file.",
         "join": "Opt this clone into an existing board.",
         "status": "Read active tasks and visibility freshness.",
+        "prepare": "Prepare a committed shared plan in a private execution workspace.",
         "start": "Announce work and atomically reserve its paths.",
         "update": "Refresh your task, scope or handoff note.",
         "check": "Check current ownership before work.",
@@ -38,6 +39,8 @@ def add_team_commands(sub, invoke_command):
             command.add_argument("--path", action="append")
             command.add_argument("--planning-dir")
             command.add_argument("--section")
+        if action == "prepare":
+            command.add_argument("--planning-dir", required=True)
         if action == "start":
             command.add_argument("--task", required=True)
         if action in {"start", "update", "recover"}:
@@ -57,6 +60,10 @@ def _dispatch(args):
     from .team_workflow import plan_scope
 
     action = args.team_action
+    if action == "prepare":
+        from . import team_plans
+
+        return team_plans.prepare(Path(args.planning_dir), Path(args.target_dir))
     if action == "status" and not team._team_hint(Path(args.target_dir).resolve()):
         return team.roster(None)
     with team.workspace(args.target_dir) as context:
@@ -75,16 +82,27 @@ def _dispatch(args):
         if action == "retry":
             return team.retry(context)
         paths, binding = getattr(args, "path", None), None
+        plan_fields = {}
         if getattr(args, "section", None) and not args.planning_dir:
             raise TeamError("team-invalid-plan", "A section selector requires --planning-dir.")
         if getattr(args, "planning_dir", None):
+            from . import team_plans
+
             binding, declared = plan_scope(Path(args.planning_dir), Path(args.target_dir), context["repo"].root, args.section)
             paths = sorted(set((paths or []) + declared))
+            prepared = team_plans.validate(Path(args.planning_dir), Path(args.target_dir))
+            plan_fields["plan"] = {**prepared, "section": args.section} if prepared is not None else None
         if action == "check":
-            return team.check(context, args.session, generation=args.generation, paths=paths or [])
+            result = team.check(context, args.session, generation=args.generation, paths=paths or [])
+            if plan_fields.get("plan") is not None:
+                current, expected = result["session"].get("plan"), plan_fields["plan"]
+                if current not in (expected, {**expected, "section": None}):
+                    raise TeamError("team-plan-binding", "Bind this prepared plan revision before continuing.")
+            return result
         fields = {key: getattr(args, key) for key in ("generation", "task", "host", "state", "note", "expect", "reason")
                   if hasattr(args, key)}
-        return team.mutate(context, action, identity=getattr(args, "session", None), paths=paths, binding=binding, **fields)
+        return team.mutate(context, action, identity=getattr(args, "session", None), paths=paths,
+                           binding=binding, **plan_fields, **fields)
 
 
 def run(args):
@@ -106,6 +124,8 @@ def run(args):
             scope = ", ".join(row["paths"]) or "no paths reserved"
             lines.append(f"{row['name']} · {row['id'][:8]} · {row['host']} · {row['state']}: {row['task']} [{scope}]"
                          + (" — stale; reservation retained" if row["stale"] else ""))
+            if plan := row.get("plan"):
+                lines.append(f"  Plan: {plan['path']} · {plan['digest'][:12]} · {plan['section'] or 'whole plan'}")
         lines.extend(result[key] for key in ("error", "next_action", "note") if result.get(key))
         lines.append("Editing clearance: " + ("current reservation checked" if result["clearance"] else "not established"))
         print("\n".join(lines))

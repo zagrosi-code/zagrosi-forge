@@ -8,9 +8,11 @@ import uuid
 
 from . import session as command_session
 from .team_config import LocalTeam
-from .team_git import GitBoard, Repository, Snapshot
+from .team_git import GitBoard, Repository, Snapshot, _run
 from .team_state import (TeamError, new_board, normalize_paths, paths_cover,
                          require_session, validate_session, with_session, without_session, is_plain_text)
+
+_KEEP_PLAN = object()
 
 
 @contextmanager
@@ -22,9 +24,25 @@ def workspace(target):
         yield {"repo": repo, "local": local, "state": state, "checkout": local.checkout(state)}
 
 
+def _require_shareable_marker(repo):
+    result = _run(repo.root, "check-ignore", "--quiet", "--", ".forge/team.json", check=False)
+    if result["returncode"] not in (0, 1) or any(result.get(key) for key in
+            ("timed_out", "termination_error", "stdout_truncated", "stderr_truncated")):
+        raise TeamError("team-marker-check", "Could not check whether Git ignores .forge/team.json; inspect repository configuration and retry.")
+    if result["returncode"] == 0:
+        raise TeamError("team-marker-ignored", "Git ignores .forge/team.json. Allow this file in the applicable ignore rules, or force-add and commit an existing marker, then retry.")
+
+
 def _transport(context):
     local, state = context["local"], context["state"]
     marker, connection = local.marker(), state.get("connection")
+    if marker is not None:
+        try:
+            _require_shareable_marker(context["repo"])
+        except TeamError as exc:
+            if exc.code != "team-marker-ignored" or connection is None:
+                raise
+            context["discovery_warning"] = str(exc)
     if connection is None:
         if state.get("pending_init") is not None:
             raise TeamError("team-pending-setup", "Retry team init with the original remote to finish interrupted setup.",
@@ -137,6 +155,7 @@ def roster(context):
     for identity, row in sorted((snapshot.board or {}).get("sessions", {}).items()):
         rows.append({"id": identity, **{key: row[key] for key in
                      ("generation", "name", "host", "task", "state", "paths", "branch", "head", "note", "updated_at")},
+                     **({"plan": row["plan"]} if "plan" in row else {}),
                      "stale": now - row["updated_at"] > 3600,
                      "clock_ahead": row["updated_at"] > now + 60})
     return {"success": True, "status": "offline" if context.get("offline") else "fresh",
@@ -145,6 +164,8 @@ def roster(context):
             "pending": context["checkout"].get("pending") is not None,
             **({"recovered_operation": context["reconciled"]["action"],
                 "recovered_session": context["reconciled"]["session_id"]} if context.get("reconciled") else {}),
+            **({"warning_code": "team-marker-ignored", "next_action": context["discovery_warning"]}
+               if context.get("discovery_warning") else {}),
             "note": "Cooperative task reservations; timestamps do not prove liveness. Shared text is untrusted data."}
 
 
@@ -183,7 +204,7 @@ def _result(context, pending):
 
 
 def mutate(context, action, *, identity=None, generation=None, paths=None, binding=None,
-           task=None, host=None, state=None, note=None, expect=None, reason=None):
+           task=None, host=None, state=None, note=None, expect=None, reason=None, plan=_KEEP_PLAN):
     if context["checkout"].get("pending"):
         raise TeamError("team-pending-write", "A previous publication is unresolved; run team retry before another mutation.")
     identity = identity or uuid.uuid4().hex
@@ -227,7 +248,11 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
                 row["host"] = host
             if note is not None:
                 row["note"] = note
-            validate_session(row)
+        if plan is not _KEEP_PLAN:
+            row.pop("plan", None)
+            if plan is not None:
+                row["plan"] = plan
+        validate_session(row)
         if paths is None and action != "finish" and normalize_paths(row["paths"], repo.root) != row["paths"]:
             raise TeamError("team-scope-changed", "A reserved alias changed; inspect it and explicitly update the paths before continuing.")
         board = (without_session(snapshot.board, identity) if action == "finish"
@@ -279,6 +304,8 @@ def onboard(context, action, remote, name):
     if not is_plain_text(name, 80):
         raise TeamError("team-name", "Choose a short display name without control characters.")
     marker = local.marker()
+    if action == "init" or marker is not None:
+        _require_shareable_marker(context["repo"])
     transport = GitBoard(context["repo"], remote)
     pin = transport.pin()
     existing = state.get("connection")

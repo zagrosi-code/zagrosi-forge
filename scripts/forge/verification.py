@@ -110,6 +110,7 @@ def implement_verify(args) -> int:
             storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
                                              "outcome": "pending", "snapshot": snapshot})
         if command:
+            mutable_inputs.prepared_contract(planning, target)
             result = _capture(command, target, args.timeout)
         else:
             result = {"source": args.source, "outcome": args.outcome,

@@ -254,6 +254,161 @@ def test_invalid_display_name_never_publishes_board(team, repositories, name):
     assert not (first / '.forge/team.json').exists()
 
 
+def ignore_discovery_marker(root, tmp_path, monkeypatch, source):
+    pattern = '.forge/team.json\n'
+    if source == 'global':
+        ignored = tmp_path / 'global-ignore'
+        configuration = tmp_path / 'global-gitconfig'
+        git(root, 'config', '--file', str(configuration), 'core.excludesFile', str(ignored))
+        monkeypatch.setenv('GIT_CONFIG_GLOBAL', str(configuration))
+    elif source == 'info':
+        ignored = root / '.git/info/exclude'
+    elif source == 'nested':
+        ignored = root / '.forge/.gitignore'
+        ignored.parent.mkdir(exist_ok=True)
+        pattern = 'team.json\n'
+    else:
+        ignored = root / '.gitignore'
+        if source == 'parent':
+            pattern = '.forge/\n!.forge/team.json\n'
+    ignored.write_text(pattern, encoding='utf-8')
+    return ignored
+
+
+def discovery_files(root):
+    return {path.relative_to(root): path.read_bytes() for path in root.rglob('*')
+            if path.is_file() and path.relative_to(root).parts[0] != '.git'}
+
+
+@pytest.mark.parametrize('source', ['user', 'parent', 'info', 'global', 'nested'])
+def test_ignored_discovery_marker_blocks_init_before_publication(repositories, capsys, tmp_path, monkeypatch, source):
+    first, _, remote = repositories
+    forge = load_zagrosi_module()
+    ignored = ignore_discovery_marker(first, tmp_path, monkeypatch, source)
+    preserved = {path: path.read_bytes() for path in (ignored, first / '.git/config', first / '.git/index')}
+    if (configuration := tmp_path / 'global-gitconfig').exists():
+        preserved[configuration] = configuration.read_bytes()
+    before = discovery_files(first)
+    code = forge.entrypoint.main(['team', 'init', '--target-dir', str(first), '--name', 'Alex'])
+    result = json.loads(capsys.readouterr().out)
+    assert not git(remote, 'for-each-ref', 'refs/heads/forge/team'), result
+    assert code == 1 and result['error_code'] == 'team-marker-ignored', result
+    assert '.forge/team.json' in result['error'] and 'ignore' in result['error']
+    assert discovery_files(first) == before
+    assert preserved == {path: path.read_bytes() for path in preserved}
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(first))
+    assert local.load()['pending_init'] is None
+    assert not git(first, 'for-each-ref', 'refs/forge/team-pending')
+
+
+@pytest.mark.parametrize('source', ['parent', 'info', 'global'])
+def test_committed_discovery_marker_remains_usable_when_ignore_rules_match(team, repositories, tmp_path, monkeypatch, source):
+    first, _, _ = repositories
+    team(first, 'init', '--name', 'Alex')
+    git(first, 'add', '.forge/team.json')
+    git(first, 'commit', '-m', 'Share team discovery')
+    ignored = ignore_discovery_marker(first, tmp_path, monkeypatch, source)
+    preserved = {path: path.read_bytes() for path in (ignored, first / '.git/config', first / '.git/index')}
+    if (configuration := tmp_path / 'global-gitconfig').exists():
+        preserved[configuration] = configuration.read_bytes()
+    assert 'warning_code' not in team(first, 'status')
+    assert team(first, 'join', '--name', 'Alex')['joined']
+    assert preserved == {path: path.read_bytes() for path in preserved}
+
+
+@pytest.mark.parametrize('action', ['status', 'join'])
+def test_ignored_marker_reports_discovery_problem_before_join(team, repositories, tmp_path, monkeypatch, action):
+    first, second, remote = repositories
+    team(first, 'init', '--name', 'Alex')
+    (second / '.forge').mkdir()
+    (second / '.forge/team.json').write_bytes((first / '.forge/team.json').read_bytes())
+    ignore_discovery_marker(second, tmp_path, monkeypatch, 'parent')
+    before = discovery_files(second)
+    revision = git(remote, 'rev-parse', 'refs/heads/forge/team')
+    arguments = ['--name', 'Blair'] if action == 'join' else []
+    result = team(second, action, *arguments, ok=False)
+    assert result['error_code'] == 'team-marker-ignored', result
+    assert discovery_files(second) == before
+    assert git(remote, 'rev-parse', 'refs/heads/forge/team') == revision
+
+
+def test_ignored_existing_marker_warns_without_stranding_finish_or_leave(team, repositories, tmp_path, monkeypatch):
+    first, _, _ = repositories
+    team(first, 'init', '--name', 'Alex')
+    owned = team(first, 'start', '--task', 'Current owner', '--path', 'src')['session']
+    ignored = ignore_discovery_marker(first, tmp_path, monkeypatch, 'info')
+    preserved = {path: path.read_bytes() for path in
+                 (ignored, first / '.forge/team.json', first / '.git/config', first / '.git/index')}
+    status = team(first, 'status')
+    assert status['warning_code'] == 'team-marker-ignored'
+    assert '.forge/team.json' in status['next_action']
+    joined = team(first, 'join', '--name', 'Alex', ok=False)
+    assert joined['error_code'] == 'team-marker-ignored'
+    finished = team(first, 'finish', '--session', owned['id'], '--note', 'Work complete')
+    assert finished['published'] and finished['warning_code'] == 'team-marker-ignored'
+    assert team(first, 'leave')['status'] == 'left'
+    assert preserved == {path: path.read_bytes() for path in preserved}
+
+
+@pytest.mark.parametrize('published', [False, True])
+def test_ignored_marker_preserves_pending_init_until_user_repairs_ignore(repositories, capsys, tmp_path, monkeypatch, published):
+    first, _, remote = repositories
+    forge = load_zagrosi_module()
+    original_marker = forge.team_config.LocalTeam.write_marker
+    original_push = forge.team_git.GitBoard._push
+    if published:
+        monkeypatch.setattr(forge.team_config.LocalTeam, 'write_marker',
+                            lambda *args: (_ for _ in ()).throw(OSError('injected')))
+    else:
+        monkeypatch.setattr(forge.team_git.GitBoard, '_push', lambda *args:
+                            {'returncode': 124, 'stdout': '', 'stderr': '', 'timed_out': True})
+    arguments = ['team', 'init', '--target-dir', str(first), '--name', 'Alex']
+    assert forge.entrypoint.main(arguments) == 1
+    capsys.readouterr()
+    monkeypatch.setattr(forge.team_config.LocalTeam, 'write_marker', original_marker)
+    monkeypatch.setattr(forge.team_git.GitBoard, '_push', original_push)
+    remote_before = git(remote, 'for-each-ref', '--format=%(objectname)', 'refs/heads/forge/team')
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(first))
+    pending = local.path.read_bytes()
+    attempted = json.loads(pending)['pending_init']['receipt']['revision']
+    assert remote_before == (attempted if published else '')
+    retained = git(first, 'for-each-ref', 'refs/forge/team-pending')
+    ignored = ignore_discovery_marker(first, tmp_path, monkeypatch, 'parent')
+    code = forge.entrypoint.main(arguments)
+    result = json.loads(capsys.readouterr().out)
+    assert code == 1 and result['error_code'] == 'team-marker-ignored', result
+    assert local.path.read_bytes() == pending
+    assert git(remote, 'for-each-ref', '--format=%(objectname)', 'refs/heads/forge/team') == remote_before
+    assert git(first, 'for-each-ref', 'refs/forge/team-pending') == retained
+    assert not (first / '.forge/team.json').exists()
+    ignored.unlink()
+    assert forge.entrypoint.main(arguments) == 0
+    assert json.loads(capsys.readouterr().out)['joined']
+    assert git(remote, 'rev-parse', 'refs/heads/forge/team') == attempted
+    assert local.load()['pending_init'] is None
+
+
+def test_ignored_marker_does_not_strand_pending_publication_retry(repositories, capsys, tmp_path, monkeypatch):
+    first, _, _ = repositories
+    forge = load_zagrosi_module()
+    def call(action, *args):
+        code = forge.entrypoint.main(['team', action, '--target-dir', str(first), *args])
+        return code, json.loads(capsys.readouterr().out)
+    assert call('init', '--name', 'Alex')[0] == 0
+    original = forge.team_git.GitBoard._push
+    monkeypatch.setattr(forge.team_git.GitBoard, '_push', lambda *args:
+                        {'returncode': 124, 'stdout': '', 'stderr': '', 'timed_out': True})
+    code, pending = call('start', '--task', 'Delayed task', '--path', 'src')
+    assert code == 1 and pending['error_code'] == 'team-write-unknown'
+    ignored = ignore_discovery_marker(first, tmp_path, monkeypatch, 'info')
+    ignore_bytes = ignored.read_bytes()
+    monkeypatch.setattr(forge.team_git.GitBoard, '_push', original)
+    code, recovered = call('retry')
+    assert code == 0 and recovered['published'], recovered
+    assert recovered['warning_code'] == 'team-marker-ignored'
+    assert ignored.read_bytes() == ignore_bytes
+
+
 def test_interrupted_setup_resumes_the_created_board(repositories, capsys, monkeypatch):
     first, _, remote = repositories
     forge = load_zagrosi_module()

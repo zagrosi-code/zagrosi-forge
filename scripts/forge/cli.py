@@ -16,8 +16,15 @@ from . import policy as _policy
 from . import session as _session
 
 def invoke_command(args: argparse.Namespace) -> int:
-    module, handler = args.handler
-    return getattr(import_module(f".{module}", __package__), handler)(args)
+    from . import team_state, team_workflow
+
+    try:
+        team_workflow.command_guard(args)
+        module, handler = args.handler
+        return getattr(import_module(f".{module}", __package__), handler)(args)
+    except team_state.TeamError as exc:
+        return _output.print_json({"success": False, "error_code": exc.code,
+                                   "error": str(exc), "details": exc.details}, 1)
 
 
 def command_catalog(args: argparse.Namespace) -> int:

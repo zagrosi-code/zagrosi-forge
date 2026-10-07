@@ -6,6 +6,8 @@
 - Keep ownership, checkout identity and recovery generations separate from display names; preserve interrupted publications for exact retries.
 - Check configured mutable workflows before activation, verification and recording. Share the same task lifecycle across every skill, depth and host.
 - Support explicit handoff, scope expansion, offline status and durable delivery notes without another service or runtime dependency.
+- Prepare committed shared contracts into private workspaces so engineers can implement independent sections without sharing mutable progress or verification receipts. Coordinate canonical plan readers, edits and version changes through the same board.
+- Diagnose ignored discovery before setup publishes a board; retain existing participants' recovery operations and leave ignore rules unchanged.
 - Preserve solo behavior and local verification evidence. Reservations coordinate participating clients; they do not lock external editors or prove semantic compatibility. Detached frozen execution uses external team checks.
 
 See [team onboarding and recovery](collaboration.md). No native model sign-in is

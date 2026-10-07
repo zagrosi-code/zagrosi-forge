@@ -262,7 +262,7 @@ EVIDENCE_IGNORE_PARTS = {
 COMMAND_CATALOG = [
     {
         "name": "team", "phase": "utility",
-        "summary": "Coordinate task ownership across engineers and Git clones.",
+        "summary": "Coordinate tasks and shared plans across engineers and Git clones.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py team status"],
     },
     {
