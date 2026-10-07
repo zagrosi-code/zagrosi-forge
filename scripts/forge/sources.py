@@ -105,7 +105,7 @@ TEST_MANIFEST = {
     "test_team_plan_claims.py": "4b895c63de64d3330a4f64df8678ab645be50e879851de1c341d66df85388bcb",
     "test_team_plan_integration.py": "82008dbd1206b31f6f533c46cacf1ccaedb8f18901a1ffad89354c94b2ea0daa",
     "test_team_plan_workflows.py": "c81f98c75b048af0f369ecc13feaf2fb9ed727029d619a1c1c0b274b621fb92e",
-    "test_team_plans.py": "84cc228e55241d37bbe87123864eadc9870c52a8f2b18a9d67679fd39766fad7",
+    "test_team_plans.py": "15da66d414646731204c336f1e9c351f8b400f2e7af346fd2dff7f9af10f1dad",
     "test_team_state.py": "748f3d1d93e48b6d54440d03f976167bc64acc1ee00fa53779cc3bdea337821a",
     "test_team_workflows.py": "5810935854b5ab091a7fc4eee4d475bcce7df76ef7dc2460f3d2c0a2d70e2068",
     "test_test_binding.py": "d08862ff2eee423190dd6878e12da54b2af6e47080848f1655a14cbe703a7723",

@@ -1,6 +1,7 @@
 """Committed shared contracts prepare private, immutable execution workspaces."""
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -12,6 +13,16 @@ from test_team_git import git, repositories
 @pytest.fixture
 def forge():
     return load_zagrosi_module()
+
+
+@pytest.fixture(params=[b'\n', b'\r\n'], ids=['checkout-lf', 'checkout-crlf'])
+def worktree_newlines(repositories, request):
+    _, (root, _) = repositories
+    git(root, 'config', 'core.autocrlf', 'input')
+    def rewrite(planning):
+        for path in planning.rglob('*.md'):
+            path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', request.param))
+    return rewrite
 
 
 def commit_plan(root, depth='lean'):
@@ -26,6 +37,12 @@ def commit_plan(root, depth='lean'):
     return planning
 
 
+def committed_bytes(root, path):
+    return subprocess.run(['git', '-C', str(root), 'cat-file', 'blob',
+                           f'HEAD:{path.relative_to(root).as_posix()}'],
+                          capture_output=True, text=False, check=True, timeout=15).stdout
+
+
 def prepare(forge, root, planning):
     result = forge.team_plans.prepare(planning, root)
     assert result['success'], result
@@ -33,11 +50,13 @@ def prepare(forge, root, planning):
 
 
 @pytest.mark.parametrize('depth', ['lean', 'standard', 'deep'])
-def test_prepare_committed_physical_contract_preserves_source_and_runs_only_git(forge, repositories, monkeypatch, depth):
+def test_prepare_committed_physical_contract_preserves_source_and_runs_only_git(forge, repositories, monkeypatch, worktree_newlines, depth):
     _, (root, _) = repositories
     planning = commit_plan(root, depth)
+    worktree_newlines(planning)
     repo = forge.team_git.Repository.discover(root)
     before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    committed = {path.relative_to(planning): committed_bytes(root, path) for path in planning.rglob('*.md')}
     execute = forge.team_git.execute
     calls = []
     def only_git(argv, *args, **kwargs):
@@ -56,7 +75,7 @@ def test_prepare_committed_physical_contract_preserves_source_and_runs_only_git(
     assert (workspace / '.forge-team-plan.json').is_file()
     assert {path.relative_to(workspace) for path in workspace.rglob('*.md')} == {
         path.relative_to(planning) for path in planning.rglob('*.md')}
-    assert all((workspace / path.relative_to(planning)).read_bytes() == path.read_bytes() for path in planning.rglob('*.md'))
+    assert {name: (workspace / name).read_bytes() for name in committed} == committed
     assert before == {path: path.read_bytes() for path in before}
     assert any('ls-tree' in call for call in calls) and any('cat-file' in call and '--batch' in call for call in calls)
 
@@ -111,7 +130,7 @@ def test_contract_link_closure_ignores_code_examples_and_keeps_references(forge,
     ('rules one.md', '[Reference rule][rule]\n[rule]: <details/rules one.md> "Reviewed rule"'),
     ('rules.md', '[Titled rule](details/rules.md "Reviewed rule")'),
 ])
-def test_prepare_preserves_full_source_and_link_paths_with_spaces(forge, repositories, name, link):
+def test_prepare_preserves_full_source_and_link_paths_with_spaces(forge, repositories, worktree_newlines, name, link):
     _, (root, _) = repositories
     planning = commit_plan(root)
     source = planning / 'source specification.md'
@@ -124,10 +143,14 @@ def test_prepare_preserves_full_source_and_link_paths_with_spaces(forge, reposit
     plan.write_text(text + '\n' + link + '\n', encoding='utf-8')
     git(root, 'add', '.forge/plans/shared')
     git(root, 'commit', '-m', 'Review spaced source and titled contract link')
+    worktree_newlines(planning)
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    committed = {path.relative_to(planning): committed_bytes(root, path) for path in (source, dependency)}
     _, workspace = prepare(forge, root, planning)
-    assert (workspace / source.name).read_bytes() == source.read_bytes()
-    assert (workspace / 'details' / name).read_bytes() == dependency.read_bytes()
+    assert {name: (workspace / name).read_bytes() for name in committed} == committed
     assert forge.team_plans.validate(workspace, root)
+    assert before == {path: path.read_bytes() for path in before}
 
 
 @pytest.mark.parametrize('link', ['[Missing](missing.md)', '[Missing][required]\n[required]: missing.md'])
@@ -178,15 +201,27 @@ def test_prepare_rejects_unreviewed_or_incomplete_contract_without_creating_work
     assert not managed.exists() or not list(managed.iterdir())
 
 
-def test_equivalent_crlf_is_accepted_but_copies_preserve_committed_bytes(forge, repositories):
+def test_equivalent_crlf_is_accepted_but_copies_preserve_committed_bytes(forge, repositories, worktree_newlines):
     _, (root, _) = repositories
     planning = commit_plan(root)
+    worktree_newlines(planning)
     source = planning / 'spec.md'
-    committed = source.read_bytes()
-    source.write_bytes(committed.replace(b'\n', b'\r\n'))
+    committed = committed_bytes(root, source)
+    source.write_bytes(committed.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n'))
+    assert b'\r\n' not in committed
+    assert b'\r\n' in source.read_bytes() and b'\r\r\n' not in source.read_bytes()
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
     _, workspace = prepare(forge, root, planning)
     assert (workspace / 'spec.md').read_bytes() == committed
     assert forge.team_plans.validate(workspace, root)
+    assert before == {path: path.read_bytes() for path in before}
+    source.write_bytes(committed.replace(b'\n', b'\r\r\n'))
+    before[source] = source.read_bytes()
+    with pytest.raises(forge.team_state.TeamError) as failed:
+        forge.team_plans.prepare(planning, root)
+    assert failed.value.code == 'team-plan-stale'
+    assert before == {path: path.read_bytes() for path in before}
 
 
 def test_reuse_preserves_progress_and_new_contract_keeps_old_evidence(forge, repositories):
