@@ -609,6 +609,66 @@ def test_historical_session_capacity_does_not_strand_new_or_pending_publication(
     assert team(first, 'leave')['status'] == 'left'
 
 
+@pytest.mark.parametrize('published', [False, True], ids=['before-push', 'after-push'])
+def test_clone_relocation_preserves_exact_pending_publication(team, repositories, monkeypatch, published):
+    first, _, remote = repositories
+    forge = team.forge
+    team(first, 'init', '--name', 'Alex')
+    with monkeypatch.context() as patch:
+        if published:
+            patch.setattr(forge.team, '_accept_pending', lambda *args:
+                          (_ for _ in ()).throw(OSError('crash after publication')))
+        else:
+            patch.setattr(forge.team_git.GitBoard, '_push', lambda *args:
+                          {'returncode': 124, 'stdout': '', 'stderr': '', 'timed_out': True})
+        failed = team(first, 'start', '--task', 'Retain across move', '--path', 'src', ok=False)
+        assert failed['error_code'] == ('team-local-error' if published else 'team-write-unknown')
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(first))
+    retained = local.load()['checkouts'][local.key]
+    pending = retained['pending']
+    assert pending is not None
+    relocated = first.with_name('relocated')
+    first.rename(relocated)
+    # Offline observation must expose the durable receipt without reconciling it.
+    assert team(relocated, 'status', '--offline')['pending'] is True
+    recovered = team(relocated, 'retry')
+    assert recovered['published'] and recovered['recovered_operation']
+    row = recovered['session']
+    assert (row['id'], row['generation']) == (pending['session_id'], pending['generation'])
+    assert len(recovered['sessions']) == 1
+    assert git(remote, 'rev-parse', 'refs/heads/forge/team') == pending['revision']
+    moved = forge.team_config.LocalTeam(forge.team_git.Repository.discover(relocated))
+    state = moved.load()
+    assert len(state['checkouts']) == 1
+    assert state['checkouts'][moved.key]['checkout_id'] == retained['checkout_id']
+    assert state['checkouts'][moved.key]['pending'] is None
+    team(relocated, 'finish', '--session', row['id'], '--note', 'Delivered')
+    assert team(relocated, 'leave')['status'] == 'left'
+
+
+def test_recreated_worktree_does_not_inherit_retained_checkout_ownership(team, repositories):
+    first, _, _ = repositories
+    forge = team.forge
+    team(first, 'init', '--name', 'Alex')
+    linked = linked_team_checkout(first, 'recreated-owner')
+    row = team(linked, 'start', '--task', 'Original owner', '--path', 'src')['session']
+    original = forge.team_config.LocalTeam(forge.team_git.Repository.discover(linked))
+    retained = original.load()['checkouts'][original.key]
+    git(first, 'worktree', 'remove', '--force', str(linked))
+    # Reuse the same administrative basename, branch and HEAD. Ownership must
+    # still require recovery because this is a distinct physical checkout.
+    git(first, 'worktree', 'add', str(linked), 'recreated-owner')
+    (linked / '.forge').mkdir()
+    (linked / '.forge/team.json').write_bytes((first / '.forge/team.json').read_bytes())
+    team(linked, 'status')
+    recreated = forge.team_config.LocalTeam(forge.team_git.Repository.discover(linked))
+    state = recreated.load()
+    assert state['checkouts'][recreated.key]['checkout_id'] != retained['checkout_id']
+    assert state['checkouts'][original.key] == retained
+    failed = team(linked, 'check', '--session', row['id'], '--generation', row['generation'], ok=False)
+    assert failed['error_code'] == 'team-ownership-lost'
+
+
 def test_retired_checkout_capacity_preserves_registered_unavailable_worktrees(team, repositories):
     first, _, _ = repositories
     forge = load_zagrosi_module()
@@ -633,9 +693,9 @@ def test_retired_checkout_capacity_preserves_registered_unavailable_worktrees(te
                 'checkout_id': f'{index + 1000:032x}', 'sessions': {}, 'bindings': {}, 'pending': None}
         local.save(state)
     newcomer = linked_team_checkout(first, 'newcomer')
+    assert team(newcomer, 'status')['status'] == 'fresh'
     newcomer_local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(newcomer))
     keep.add(newcomer_local.key)
-    assert team(newcomer, 'status')['status'] == 'fresh'
     assert set(local.load()['checkouts']) == keep
     assert team(first.parent / 'registered-zoë', 'status')['status'] == 'fresh'
 

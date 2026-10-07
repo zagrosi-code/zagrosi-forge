@@ -57,7 +57,7 @@ def add_team_commands(sub, invoke_command):
 def _dispatch(args):
     from . import team
     from .team_state import TeamError
-    from .team_workflow import plan_scope
+    from .team_workflow import _plan_scope
 
     action = args.team_action
     if action == "prepare":
@@ -88,9 +88,10 @@ def _dispatch(args):
         if getattr(args, "planning_dir", None):
             from . import team_plans
 
-            binding, declared = plan_scope(Path(args.planning_dir), Path(args.target_dir), context["repo"].root, args.section)
-            paths = sorted(set((paths or []) + declared))
             prepared = team_plans.validate(Path(args.planning_dir), Path(args.target_dir))
+            binding, declared = _plan_scope(Path(args.planning_dir), Path(args.target_dir), context["repo"].root,
+                                            args.section, prepared=prepared)
+            paths = sorted(set((paths or []) + declared))
             plan_fields["plan"] = {**prepared, "section": args.section} if prepared is not None else None
         if action == "check":
             result = team.check(context, args.session, generation=args.generation, paths=paths or [])

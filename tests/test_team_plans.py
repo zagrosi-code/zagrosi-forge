@@ -1,4 +1,5 @@
 """Committed shared contracts prepare private, immutable execution workspaces."""
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -360,6 +361,209 @@ def test_targets_and_linked_checkouts_get_independent_private_workspaces(forge, 
     _, other = prepare(forge, linked, linked / '.forge/plans/shared')
     assert len({first, scoped, other}) == 3
     assert other.parent == forge.team_git.Repository.discover(linked).git_dir / 'forge-plans'
+
+
+def legacy_prepared_workspace(forge, root, planning):
+    """Recreate the original unpinned v1 storage layout for upgrade coverage."""
+    before_refs = set(git(root, 'for-each-ref', '--format=%(refname)').stdout.splitlines())
+    result, workspace = prepare(forge, root, planning)
+    after_refs = set(git(root, 'for-each-ref', '--format=%(refname)').stdout.splitlines())
+    for ref in after_refs - before_refs:
+        git(root, 'update-ref', '-d', ref)
+    source = result['source']
+    identity = json.dumps([source['path'], source['digest'], '.'],
+                          sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    legacy = workspace.parent / hashlib.sha256(identity.encode()).hexdigest()
+    if workspace != legacy:
+        workspace.rename(legacy)
+    return result, legacy
+
+
+def workspace_bytes(workspace):
+    return {path.relative_to(workspace): path.read_bytes()
+            for path in workspace.rglob('*') if path.is_file()}
+
+
+@pytest.mark.parametrize('checkout', ['linked', 'clone'])
+@pytest.mark.parametrize('layout', ['current', 'legacy'])
+def test_prepare_after_checkout_move_keeps_original_evidence(forge, repositories, checkout, layout):
+    _, (root, _) = repositories
+    primary = root
+    commit_plan(root)
+    if checkout == 'linked':
+        linked = root.parent / 'linked-plan'
+        git(root, 'worktree', 'add', '-b', 'linked-plan', str(linked))
+        root = linked
+    planning = root / '.forge/plans/shared'
+    prepare_workspace = legacy_prepared_workspace if layout == 'legacy' else prepare
+    original, workspace = prepare_workspace(forge, root, planning)
+    repo = forge.team_git.Repository.discover(root)
+    private_relative = workspace.relative_to(repo.git_dir)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"review":"old checkout only"}\n', encoding='utf-8')
+    private_before = workspace_bytes(workspace)
+    source_before = workspace_bytes(planning)
+    index_before = (repo.git_dir / 'index').read_bytes()
+    moved = root.with_name('moved-checkout')
+    if checkout == 'linked':
+        git(primary, 'worktree', 'move', str(root), str(moved))
+    else:
+        root.rename(moved)
+    moved_repo = forge.team_git.Repository.discover(moved)
+    preserved = moved_repo.git_dir / private_relative
+    current_planning = moved / '.forge/plans/shared'
+    result, fresh = prepare(forge, moved, current_planning)
+    assert fresh != preserved
+    assert result['source'] == original['source']
+    assert not (fresh / 'implementation').exists()
+    assert workspace_bytes(preserved) == private_before
+    assert workspace_bytes(current_planning) == source_before
+    assert (moved_repo.git_dir / 'index').read_bytes() == index_before
+    marker = json.loads((fresh / '.forge-team-plan.json').read_text(encoding='utf-8'))
+    assert (marker['root'], marker['git_dir'], marker['target']) == (
+        str(moved_repo.root), str(moved_repo.git_dir), str(moved.resolve()))
+    assert forge.team_plans.validate(fresh, moved) == result['source']
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(preserved, moved)
+    _, reused = prepare(forge, moved, current_planning)
+    assert reused == fresh and workspace_bytes(preserved) == private_before
+
+
+@pytest.mark.parametrize('layout', ['current', 'legacy'])
+def test_prepared_source_survives_history_rewrite_and_gc(forge, repositories, layout):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    application_refs = git(root, 'for-each-ref', 'refs/heads', 'refs/remotes', 'refs/tags').stdout
+    prepare_workspace = legacy_prepared_workspace if layout == 'legacy' else prepare
+    original, workspace = prepare_workspace(forge, root, planning)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"work":"retained"}\n', encoding='utf-8')
+    private_before = workspace_bytes(workspace)
+    # Reusing an older valid workspace must adopt its recorded source as well.
+    adopted, reused = prepare(forge, root, planning)
+    assert reused == workspace and adopted['source'] == original['source']
+    assert git(root, 'for-each-ref', 'refs/heads', 'refs/remotes', 'refs/tags').stdout == application_refs
+    git(root, 'commit', '--amend', '-m', 'Rewrite metadata with identical contract tree')
+    assert git(root, 'rev-parse', 'HEAD').stdout.strip() != original['source']['commit']
+    git(root, 'reflog', 'expire', '--expire=now', '--all')
+    git(root, 'gc', '--prune=now')
+    assert git(root, 'cat-file', '-e', original['source']['commit'] + '^{commit}', check=False).returncode == 0
+    result, current = prepare(forge, root, planning)
+    assert current == workspace and result['source'] == original['source']
+    assert workspace_bytes(workspace) == private_before
+
+
+def test_prepare_recovers_missing_legacy_source_without_rewriting_evidence(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    original, workspace = legacy_prepared_workspace(forge, root, planning)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"verification":"original source"}\n', encoding='utf-8')
+    private_before = workspace_bytes(workspace)
+    git(root, 'commit', '--amend', '-m', 'Rewrite an unpinned legacy source')
+    git(root, 'reflog', 'expire', '--expire=now', '--all')
+    git(root, 'gc', '--prune=now')
+    assert git(root, 'cat-file', '-e', original['source']['commit'], check=False).returncode != 0
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    result, fresh = prepare(forge, root, planning)
+    assert fresh != workspace and result['source']['commit'] == repo.head
+    assert result['source']['digest'] == original['source']['digest']
+    assert not (fresh / 'implementation').exists()
+    assert workspace_bytes(workspace) == private_before
+    assert before == {path: path.read_bytes() for path in before}
+    assert forge.team_plans.validate(fresh, root) == result['source']
+    recovery_progress = fresh / 'implementation/progress.json'
+    recovery_progress.parent.mkdir()
+    recovery_progress.write_text('{"work":"new source generation"}\n', encoding='utf-8')
+    git(root, 'commit', '--allow-empty', '-m', 'Unrelated work after recovery')
+    repeated, reused = prepare(forge, root, planning)
+    assert reused == fresh and repeated['source'] == result['source']
+    assert recovery_progress.read_text(encoding='utf-8') == '{"work":"new source generation"}\n'
+    assert workspace_bytes(workspace) == private_before
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(workspace, root)
+
+
+def test_legacy_source_git_failure_is_not_missing_object_recovery(forge, repositories, monkeypatch):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    original, workspace = legacy_prepared_workspace(forge, root, planning)
+    git(root, 'commit', '--amend', '-m', 'Keep the previous source object available')
+    assert git(root, 'cat-file', '-e', original['source']['commit'], check=False).returncode == 0
+    before = workspace_bytes(workspace)
+    published = set(workspace.parent.iterdir())
+    tree = forge.team_plans._tree
+    def unavailable(repo, canonical, commit):
+        if commit == original['source']['commit']:
+            raise forge.team_state.TeamError('team-unavailable', 'Injected Git read failure')
+        return tree(repo, canonical, commit)
+    monkeypatch.setattr(forge.team_plans, '_tree', unavailable)
+    with pytest.raises(forge.team_state.TeamError) as failed:
+        forge.team_plans.prepare(planning, root)
+    assert failed.value.code == 'team-unavailable'
+    assert set(workspace.parent.iterdir()) == published
+    assert workspace_bytes(workspace) == before
+
+
+@pytest.mark.parametrize('layout', ['new', 'legacy'])
+def test_prepare_does_not_succeed_when_source_retention_fails(forge, repositories, monkeypatch, layout):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    workspace = None
+    if layout == 'legacy':
+        _, workspace = legacy_prepared_workspace(forge, root, planning)
+    before = workspace_bytes(workspace) if workspace else None
+    run = forge.team_git._run
+    def unavailable(repo, *args, **kwargs):
+        if 'update-ref' in args:
+            raise forge.team_state.TeamError('team-unavailable', 'Injected source-retention failure')
+        return run(repo, *args, **kwargs)
+    monkeypatch.setattr(forge.team_git, '_run', unavailable)
+    with pytest.raises(forge.team_state.TeamError) as failed:
+        forge.team_plans.prepare(planning, root)
+    assert failed.value.code == 'team-unavailable'
+    if workspace:
+        assert workspace_bytes(workspace) == before
+
+
+@pytest.mark.parametrize('layout', ['current', 'legacy'])
+@pytest.mark.parametrize('object_type', ['tree', 'tag'])
+def test_prepared_source_requires_commit_object_without_rewriting_evidence(forge, repositories, layout, object_type):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    prepare_workspace = legacy_prepared_workspace if layout == 'legacy' else prepare
+    _, workspace = prepare_workspace(forge, root, planning)
+    if object_type == 'tree':
+        oid = git(root, 'rev-parse', 'HEAD^{tree}').stdout.strip()
+    else:
+        git(root, 'tag', '-a', 'prepared-source-tag', '-m', 'Tag the same contract commit')
+        oid = git(root, 'rev-parse', 'refs/tags/prepared-source-tag').stdout.strip()
+    marker = workspace / '.forge-team-plan.json'
+    value = json.loads(marker.read_text(encoding='utf-8'))
+    value['commit'] = oid
+    marker.write_text(json.dumps(value) + '\n', encoding='utf-8')
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"verification":"preserve for inspection"}\n', encoding='utf-8')
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    private_before = workspace_bytes(workspace)
+    published = set(workspace.parent.iterdir())
+    refs = git(root, 'for-each-ref').stdout
+    with pytest.raises(forge.team_state.TeamError) as validation:
+        forge.team_plans.validate(workspace, root)
+    assert validation.value.code == 'team-plan-invalid'
+    with pytest.raises(forge.team_state.TeamError) as preparation:
+        forge.team_plans.prepare(planning, root)
+    assert preparation.value.code == 'team-plan-invalid'
+    assert workspace_bytes(workspace) == private_before
+    assert set(workspace.parent.iterdir()) == published
+    assert before == {path: path.read_bytes() for path in before}
+    assert git(root, 'for-each-ref').stdout == refs
 
 
 @pytest.mark.parametrize('location', ['source', 'copy', 'marker'])

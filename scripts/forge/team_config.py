@@ -104,7 +104,8 @@ def _state_valid(value):
             or not isinstance(pending.get("name"), str)
             or ("receipt" in pending and not _receipt(pending["receipt"]))):
         return False
-    return all(_hex(key, 64) and _checkout_valid(checkout) for key, checkout in value["checkouts"].items())
+    return all((_hex(key) or _hex(key, 64)) and _checkout_valid(checkout)
+               for key, checkout in value["checkouts"].items())
 
 
 def _directory(path):
@@ -126,6 +127,10 @@ def _write(path, value):
         raw = _encoded(value)
     if len(raw) > _LIMIT:
         raise TeamError("team-local-state", "Team metadata exceeds the local size limit.")
+    _replace(path, raw)
+
+
+def _replace(path, raw):
     _read(path)
     descriptor, name = tempfile.mkstemp(prefix=".team-", dir=path.parent)
     try:
@@ -150,12 +155,36 @@ class LocalTeam:
         self.repo = repo
         self.directory = repo.common_dir / "forge-team"
         self.path = self.directory / "state.json"
-        self.key = self._checkout_key(repo.git_dir)
+        self.key = self._identity(repo.git_dir) or self._checkout_key(repo.git_dir)
         self._held = False
 
     @staticmethod
     def _checkout_key(directory):
         return hashlib.sha256(os.fsencode(str(directory))).hexdigest()
+
+    @staticmethod
+    def _identity(directory):
+        value = _read(directory / "forge-team-checkout.json", limit=4096)
+        if value is None:
+            return None
+        if (not isinstance(value, dict) or set(value) != {"version", "key"}
+                or type(value["version"]) is not int or value["version"] != 1 or not _hex(value["key"])):
+            raise TeamError("team-checkout-identity", "The checkout identity is invalid; preserve it and inspect Git administrative metadata.")
+        return value["key"]
+
+    def _registered_keys(self):
+        directory = self.repo.common_dir / "worktrees"
+        try:
+            entries = list(directory.iterdir())
+        except FileNotFoundError:
+            entries = []
+        directories = [self.repo.common_dir, *(path.resolve() for path in entries if path.is_dir())]
+        registered = {self.key}
+        for path in directories:
+            registered.add(self._checkout_key(path))
+            if identity := self._identity(path):
+                registered.add(identity)
+        return registered
 
     def compact(self, state, board=None):
         """Retire known former ownership; never discard unresolved or registered work."""
@@ -174,13 +203,7 @@ class LocalTeam:
                                         if binding["session_id"] in board["sessions"]}
         # Administrative registration survives a locked or unmounted worktree.
         # Merely missing its working directory is not evidence of retirement.
-        registered = {self.key, self._checkout_key(self.repo.common_dir)}
-        directory = self.repo.common_dir / "worktrees"
-        try:
-            entries = list(directory.iterdir())
-        except FileNotFoundError:
-            entries = []
-        registered.update(self._checkout_key(path.resolve()) for path in entries if path.is_dir())
+        registered = self._registered_keys()
         observed = board if board is not None else (state.get("cache") or {}).get("board")
         active = {row["checkout_id"] for row in (observed or {}).get("sessions", {}).values()
                   if row["participant_id"] == state["participant_id"]}
@@ -263,11 +286,48 @@ class LocalTeam:
         _write(self.path, state)
 
     def checkout(self, state, *, defer=False):
+        if not self._held:
+            raise TeamError("team-local-state", "Checkout identity must be saved while holding the team lock.")
+        # Re-read under the lock: another invocation may have created the
+        # identity after this LocalTeam object was constructed.
+        identity = self._identity(self.repo.git_dir)
+        legacy_key = self._checkout_key(self.repo.git_dir)
+        self.key = identity or legacy_key
+        value = state["checkouts"].get(self.key)
+        migrated_key = None
+        if identity is not None and value is None:
+            # Legacy migration writes the identity before replacing state.
+            # The durable identity is proof of the matching original record,
+            # even if the clone moved before that state replacement completed.
+            matches = [(key, checkout) for key, checkout in state["checkouts"].items()
+                       if _hex(key, 64) and checkout["checkout_id"] == identity]
+            if len(matches) > 1:
+                raise TeamError("team-checkout-recovery", "The checkout identity matches multiple legacy records; preserve them and inspect local team state.")
+            if matches:
+                migrated_key, value = matches[0]
+        elif identity is None and value is not None:
+            migrated_key = legacy_key
+            self.key = value["checkout_id"]
+            if self.key in state["checkouts"]:
+                raise TeamError("team-checkout-recovery", "The legacy checkout identity conflicts with another record; preserve both before recovery.")
         self.compact(state)
-        value = state["checkouts"].get(self.key, {"checkout_id": uuid.uuid4().hex,
-                    "sessions": {}, "bindings": {}, "pending": None})
+        if value is None:
+            if not defer and len(state["checkouts"]) >= _MAX_CHECKOUTS:
+                raise TeamError("team-local-capacity", "Local checkout capacity is full; resolve retained work before joining another checkout.")
+            if identity is None:
+                registered = self._registered_keys()
+                if any(_hex(key, 64) and key not in registered and
+                       (checkout["pending"] is not None or checkout["sessions"] or checkout["bindings"])
+                       for key, checkout in state["checkouts"].items()):
+                    raise TeamError("team-checkout-recovery", "Retained legacy checkout work cannot be identified at this location. Restore the original repository location and run team status once before moving it again; do not discard its state.")
+                self.key = uuid.uuid4().hex
+            value = {"checkout_id": uuid.uuid4().hex, "sessions": {}, "bindings": {}, "pending": None}
         if not _checkout_valid(value):
             raise TeamError("team-local-state", "The checkout's team state is invalid; preserve it before recovery.")
+        if identity is None:
+            _replace(self.repo.git_dir / "forge-team-checkout.json", _encoded({"version": 1, "key": self.key}))
+        if migrated_key is not None:
+            state["checkouts"].pop(migrated_key, None)
         # A fresh observation may free historical ownership at the capacity limit.
         # Keep a new checkout transient until that observation can admit it.
         if not defer or len(state["checkouts"]) < _MAX_CHECKOUTS:

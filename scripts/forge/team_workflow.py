@@ -69,6 +69,11 @@ def plan_scope(planning: Path, target: Path, repo_root: Path, section: str | Non
     from . import team_plans
 
     prepared = team_plans.validate(planning, target)
+    return _plan_scope(planning, target, repo_root, section, prepared=prepared)
+
+
+def _plan_scope(planning: Path, target: Path, repo_root: Path, section: str | None, *, prepared) -> tuple[str, list[str]]:
+    """Derive scope using the contract validated in this same observation."""
     planning, target, repo_root = planning.resolve(), target.resolve(), repo_root.resolve()
     progress = sections.check_section_progress(planning)
     known = progress.get('sections', [])
@@ -104,19 +109,37 @@ def guard(planning: Path, target: Path, section: str | None = None, *, required_
             return None
         repo, checkout = context['repo'], context['checkout']
         snapshot = context['snapshot']
-        key, required = plan_scope(planning, target, repo.root, section)
+        key, required = _plan_scope(planning, target, repo.root, section, prepared=prepared)
+        extra_paths = _repo_paths(target, repo.root, required_paths)
         bindings = checkout.get('bindings', {})
         binding = bindings.get(key)
         binding_args = scope_args
         bound_section = section
         if binding is None and section is not None:
-            full_key, _ = plan_scope(planning, target, repo.root)
+            full_key, _ = _plan_scope(planning, target, repo.root, None, prepared=prepared)
             binding = bindings.get(full_key)
             binding_args = ['--planning-dir', str(planning)]
             bound_section = None
         if binding is None:
-            commands['team_start'] = command('start', '--task', '<task>', '--host', 'other', *scope_args)
-            raise team_state.TeamError('team-binding-required', 'Start or bind a team session for this plan and target before working.')
+            candidates = [{'id': identity, **row} for identity, row in snapshot.board['sessions'].items()
+                          if (row['participant_id'], row['checkout_id'], row['generation']) == (
+                              context['state']['participant_id'], checkout['checkout_id'],
+                              checkout['sessions'].get(identity))]
+            if candidates:
+                for row in candidates:
+                    name = 'team_update' if len(candidates) == 1 else f"team_update_{row['id']}"
+                    paths = sorted(set(row['paths'] + extra_paths))
+                    path_args = [value for path in paths for value in ('--path', path)]
+                    commands[name] = command('update', '--session', row['id'], '--generation', row['generation'],
+                                             *scope_args, *path_args)
+                message = ('Bind the existing task to this plan and target before working.' if len(candidates) == 1 else
+                           'Choose which existing task to bind to this plan and target before working.')
+                raise team_state.TeamError('team-binding-required', message,
+                                          candidates=[{key: row[key] for key in ('id', 'generation', 'host', 'task', 'state')}
+                                                      for row in candidates])
+            path_args = [value for path in extra_paths for value in ('--path', path)]
+            commands['team_start'] = command('start', '--task', '<task>', '--host', 'other', *scope_args, *path_args)
+            raise team_state.TeamError('team-binding-required', 'Start a team session for this plan and target before working.')
         if not isinstance(binding, dict) or any(
             not isinstance(binding.get(name), str) or not re.fullmatch(r'[a-f0-9]{32}', binding[name])
             for name in ('session_id', 'generation')
@@ -124,12 +147,24 @@ def guard(planning: Path, target: Path, section: str | None = None, *, required_
             raise team_state.TeamError('team-local-state', 'The saved plan binding is invalid; preserve local state before recovery.')
         session_id, generation = binding['session_id'], binding['generation']
         identity = ['--session', session_id, '--generation', generation]
-        extra_paths = _repo_paths(target, repo.root, required_paths)
         path_args = [value for path in extra_paths for value in ('--path', path)]
         commands['team_check'] = command('check', *identity, *scope_args, *path_args)
         commands['team_update'] = command('update', *identity, *binding_args, *path_args)
         required = sorted(set(required + extra_paths))
-        checked = team.check(context, session_id, generation=generation, paths=required)
+        try:
+            checked = team.check(context, session_id, generation=generation, paths=required)
+        except team_state.TeamError as exc:
+            if exc.code == 'team-no-reservation':
+                # This error follows the ownership and checkout checks. Binding
+                # alone must not resume a handoff; offer an explicit user choice.
+                row = snapshot.board['sessions'][session_id]
+                if row['state'] == 'handoff':
+                    paths = sorted(set(row['paths'] + extra_paths))
+                    resume_paths = [value for path in paths for value in ('--path', path)]
+                    commands['team_resume'] = command('update', *identity, *binding_args, *resume_paths,
+                                                      '--state', 'working')
+                    raise team_state.TeamError(exc.code, 'This task is handed off. If you choose to resume it, run team_resume before working.') from exc
+            raise
         if prepared is not None and checked['session'].get('plan') != {**prepared, 'section': bound_section}:
             raise team_state.TeamError('team-plan-binding', 'Update the team session to bind this prepared contract and section before working.')
         return {'success': True, 'session_id': session_id, 'generation': generation,

@@ -1,5 +1,6 @@
 """Team reservations gate mutable work without changing solo evidence contracts."""
 import json
+from pathlib import Path
 import sys
 
 import pytest
@@ -146,6 +147,88 @@ def test_joined_entry_requires_binding_and_returns_start_arguments(forge, capsys
     assert result['commands']['team_start']
     assert 'record' not in result['commands']
     assert not (planning / 'implementation').exists()
+
+
+@pytest.mark.parametrize('host', ['codex', 'claude'])
+@pytest.mark.parametrize('shared', [False, True], ids=['ordinary-plan', 'prepared-plan'])
+def test_missing_binding_reuses_owned_task_without_losing_identity_or_scope(
+        forge, capsys, repositories, tmp_path, host, shared):
+    first, _, _ = repositories
+    configure(forge, capsys, first)
+    if shared:
+        from test_team_plans import commit_plan
+        canonical = commit_plan(first)
+        planning = Path(team(forge, capsys, first, 'prepare', '--planning-dir', canonical)['planning_dir'])
+    else:
+        planning = make_plan(tmp_path / 'plan')
+    session = team(forge, capsys, first, 'start', '--task', 'Existing feature task', '--host', host,
+                   '--path', 'src', '--path', 'tests', '--path', 'notes')['session']
+    before = files(planning)
+    revision = team(forge, capsys, first, 'status')['revision']
+
+    code, blocked = setup(forge, capsys, planning, first)
+
+    assert code == 1 and blocked['error_code'] == 'team-binding-required', blocked
+    assert files(planning) == before
+    assert team(forge, capsys, first, 'status')['revision'] == revision
+    assert 'team_start' not in blocked['commands']
+    repair = blocked['commands']['team_update']
+    assert repair[repair.index('--session') + 1] == session['id']
+    assert repair[repair.index('--generation') + 1] == session['generation']
+    assert '--host' not in repair
+    code, repaired = call(forge, capsys, *repair[2:])
+    assert code == 0, repaired
+    current = repaired['session']
+    assert {key: current[key] for key in ('id', 'generation', 'host', 'task')} == {
+        key: session[key] for key in ('id', 'generation', 'host', 'task')}
+    assert set(session['paths']) <= set(current['paths'])
+    assert len(repaired['sessions']) == 1
+    assert setup(forge, capsys, planning, first)[0] == 0
+
+
+def test_missing_binding_offers_explicit_choices_for_multiple_owned_tasks(
+        forge, capsys, repositories, tmp_path):
+    first, _, _ = repositories
+    configure(forge, capsys, first)
+    planning = make_plan(tmp_path / 'plan')
+    sessions = [team(forge, capsys, first, 'start', '--task', task, '--host', host)['session']
+                for task, host in [('Implement labels', 'codex'), ('Review labels', 'claude')]]
+    before = files(planning)
+
+    code, blocked = setup(forge, capsys, planning, first)
+
+    assert code == 1 and blocked['error_code'] == 'team-binding-required', blocked
+    assert files(planning) == before
+    assert 'team_start' not in blocked['commands']
+    repairs = [argv for argv in blocked['commands'].values() if argv[2:4] == ['team', 'update']]
+    assert {argv[argv.index('--session') + 1] for argv in repairs} == {row['id'] for row in sessions}
+    candidates = blocked['details']['candidates']
+    assert {(row['id'], row['generation'], row['host'], row['task']) for row in candidates} == {
+        (row['id'], row['generation'], row['host'], row['task']) for row in sessions}
+    selected = sessions[1]
+    repair = next(argv for argv in repairs if argv[argv.index('--session') + 1] == selected['id'])
+    code, repaired = call(forge, capsys, *repair[2:])
+    assert code == 0 and repaired['session']['generation'] == selected['generation'], repaired
+    assert repaired['session']['host'] == selected['host']
+    untouched = next(row for row in repaired['sessions'] if row['id'] == sessions[0]['id'])
+    assert untouched['paths'] == [] and untouched['state'] == 'planning'
+    assert setup(forge, capsys, planning, first)[0] == 0
+
+
+def test_missing_binding_does_not_offer_a_peer_task_as_local_repair(forge, capsys, repositories, tmp_path):
+    first, second, _ = repositories
+    configure(forge, capsys, first)
+    (second / '.forge').mkdir()
+    (second / '.forge/team.json').write_bytes((first / '.forge/team.json').read_bytes())
+    team(forge, capsys, second, 'join', '--name', 'Blair')
+    peer = team(forge, capsys, second, 'start', '--task', 'Peer planning', '--host', 'claude')['session']
+    planning = make_plan(tmp_path / 'plan')
+
+    code, blocked = setup(forge, capsys, planning, first)
+
+    assert code == 1 and blocked['error_code'] == 'team-binding-required', blocked
+    assert blocked['commands']['team_start']
+    assert all(peer['id'] not in argv for argv in blocked['commands'].values())
 
 
 @pytest.mark.parametrize('depth', ['lean', 'standard', 'deep'])
@@ -334,6 +417,70 @@ def test_announced_or_handed_off_work_has_no_editing_clearance(forge, capsys, re
     before = files(planning)
     code, result = setup(forge, capsys, planning, root)
     assert code == 1 and result['error_code'] == 'team-no-reservation'
+    assert files(planning) == before
+
+
+def test_binding_repair_identifies_handoff_without_resuming(forge, capsys, repositories, tmp_path):
+    root, _, _ = repositories
+    configure(forge, capsys, root)
+    planning = make_plan(tmp_path / 'plan')
+    session = team(forge, capsys, root, 'start', '--task', 'Handed-off implementation', '--host', 'claude',
+                   '--path', 'src', '--path', 'tests')['session']
+    team(forge, capsys, root, 'update', '--session', session['id'], '--generation', session['generation'],
+         '--state', 'handoff')
+    before = files(planning)
+
+    code, blocked = setup(forge, capsys, planning, root)
+
+    assert code == 1 and blocked['error_code'] == 'team-binding-required', blocked
+    assert blocked['details']['candidates'] == [{key: session[key] for key in ('id', 'generation', 'host', 'task')}
+                                               | {'state': 'handoff'}]
+    assert 'team_resume' not in blocked['commands']
+    repair = blocked['commands']['team_update']
+    assert '--state' not in repair
+    code, repaired = call(forge, capsys, *repair[2:])
+    assert code == 0 and repaired['session']['state'] == 'handoff', repaired
+    assert repaired['session']['generation'] == session['generation']
+    code, still_blocked = setup(forge, capsys, planning, root)
+    assert code == 1 and still_blocked['error_code'] == 'team-no-reservation', still_blocked
+    assert files(planning) == before
+
+
+def test_handoff_requires_explicit_resume_and_rejects_replaced_generation(forge, capsys, repositories, tmp_path):
+    root, _, _ = repositories
+    configure(forge, capsys, root)
+    planning = make_plan(tmp_path / 'plan')
+    session = team(forge, capsys, root, 'start', '--task', 'Resume reviewed handoff', '--host', 'claude',
+                   '--planning-dir', planning, '--path', 'notes')['session']
+    team(forge, capsys, root, 'update', '--session', session['id'], '--generation', session['generation'],
+         '--state', 'handoff')
+    before = files(planning)
+
+    code, blocked = setup(forge, capsys, planning, root)
+
+    assert code == 1 and blocked['error_code'] == 'team-no-reservation', blocked
+    assert files(planning) == before
+    assert 'resume' in blocked['next_action'].lower()
+    resume = blocked['commands']['team_resume']
+    assert resume[resume.index('--state') + 1] == 'working'
+    assert resume[resume.index('--session') + 1] == session['id']
+    assert resume[resume.index('--generation') + 1] == session['generation']
+    assert '--host' not in resume
+    code, resumed = call(forge, capsys, *resume[2:])
+    assert code == 0 and resumed['clearance'], resumed
+    assert {key: resumed['session'][key] for key in ('id', 'generation', 'host', 'paths')} == {
+        key: session[key] for key in ('id', 'generation', 'host', 'paths')}
+    assert setup(forge, capsys, planning, root)[0] == 0
+
+    status = team(forge, capsys, root, 'status')
+    recovered = team(forge, capsys, root, 'recover', '--session', session['id'], '--expect', status['revision'],
+                     '--reason', 'Explicit handoff generation change')['session']
+    team(forge, capsys, root, 'update', '--session', recovered['id'], '--generation', recovered['generation'],
+         '--state', 'handoff')
+    before = files(planning)
+    code, replaced = setup(forge, capsys, planning, root)
+    assert code == 1 and replaced['error_code'] == 'team-ownership-lost', replaced
+    assert 'team_resume' not in replaced['commands']
     assert files(planning) == before
 
 

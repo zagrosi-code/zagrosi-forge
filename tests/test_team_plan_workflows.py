@@ -10,7 +10,7 @@ from forge_test_helpers import load_zagrosi_module
 from test_compact_plan import SECTION, make_plan
 from test_compatibility_checks import block, contract
 from test_team_git import git
-from test_team_workflows import call, record, setup, verify
+from test_team_workflows import call, configure, record, repositories, reserve, setup, team, verify
 
 
 @pytest.fixture
@@ -218,6 +218,59 @@ def test_matching_prepared_binding_and_full_plan_binding_cover_section(prepared,
     descriptor = {**current['descriptor'], 'section': None if full else SECTION}
     bind_guard(forge, planning, target, monkeypatch, descriptor, full=full)
     assert forge.team_workflow.guard(planning, target, SECTION)['success']
+
+
+@pytest.mark.parametrize('full', [False, True], ids=['section-binding', 'full-plan-fallback'])
+def test_guard_validates_once_and_rechecks_the_next_observation(prepared, monkeypatch, full):
+    forge, planning, target, current = prepared
+    descriptor = {**current['descriptor'], 'section': None if full else SECTION}
+    bind_guard(forge, planning, target, monkeypatch, descriptor, full=full)
+    validate = forge.package.team_plans.validate
+    calls = []
+
+    def observed(*args):
+        calls.append(args)
+        return validate(*args)
+
+    monkeypatch.setattr(forge.package.team_plans, 'validate', observed)
+    assert forge.team_workflow.guard(planning, target, SECTION)['success']
+    assert calls == [(planning, target)]
+    current['stale'] = True
+    result = forge.team_workflow.guard(planning, target, SECTION)
+    assert not result['success'] and result['error_code'] == 'team-plan-stale', result
+    assert calls == [(planning, target), (planning, target)]
+
+
+def test_public_plan_check_validates_once_and_rejects_a_changed_contract(
+        repositories, capsys, monkeypatch):
+    from test_team_plans import commit_plan
+
+    forge = load_zagrosi_module()
+    target, _, _ = repositories
+    configure(forge, capsys, target)
+    canonical = commit_plan(target)
+    planning = Path(team(forge, capsys, target, 'prepare', '--planning-dir', canonical)['planning_dir'])
+    session = reserve(forge, capsys, target, planning)
+    validate = forge.team_plans.validate
+    calls = []
+
+    def observed(*args):
+        calls.append(args)
+        return validate(*args)
+
+    monkeypatch.setattr(forge.team_plans, 'validate', observed)
+    args = ['team', 'check', '--target-dir', target, '--planning-dir', planning,
+            '--session', session['id'], '--generation', session['generation']]
+    code, checked = call(forge, capsys, *args)
+    assert code == 0 and checked['clearance'], checked
+    assert calls == [(planning, target)]
+    spec = canonical / 'spec.md'
+    spec.write_text(spec.read_text(encoding='utf-8') + '\nChanged contract.\n', encoding='utf-8')
+    before = inventory(planning)
+    code, blocked = call(forge, capsys, *args)
+    assert code == 1 and blocked['error_code'] == 'team-plan-stale', blocked
+    assert calls == [(planning, target), (planning, target)]
+    assert inventory(planning) == before
 
 
 def test_prepared_contract_changes_invalidate_completion_snapshot(prepared):

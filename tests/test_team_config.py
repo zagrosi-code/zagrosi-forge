@@ -1,5 +1,6 @@
 """Clone-local opt-in and checkout identity preserve user-owned configuration."""
 from copy import deepcopy
+import hashlib
 import json
 
 import pytest
@@ -160,3 +161,98 @@ def test_mandatory_byte_overflow_preserves_durable_state_and_required_records(re
             local.save(state)
         assert failed.value.code == 'team-local-state'
         assert local.path.read_bytes() == persisted and state == before
+
+
+def legacy_checkout_state(forge, root):
+    """Create the pre-identity-file state without invoking checkout migration."""
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(root))
+    legacy_key = hashlib.sha256(str(local.repo.git_dir).encode()).hexdigest()
+    checkout = {
+        'checkout_id': 'a' * 32, 'sessions': {'b' * 32: 'c' * 32},
+        'bindings': {'d' * 64: {'session_id': 'b' * 32, 'generation': 'c' * 32}},
+        'pending': {'revision': 'f' * 40, 'expected': None, 'board_id': 'e' * 32,
+                    'action': 'start', 'session_id': 'b' * 32,
+                    'generation': 'c' * 32, 'binding': 'd' * 64},
+    }
+    with local.locked():
+        state = local.load()
+        state['checkouts'][legacy_key] = deepcopy(checkout)
+        local.save(state)
+    return local, checkout
+
+
+@pytest.mark.parametrize('save_migration', [False, True], ids=['interrupted-mapping-save', 'saved-mapping'])
+def test_legacy_checkout_migration_survives_clone_relocation(repositories, save_migration):
+    _, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    local, retained = legacy_checkout_state(forge, alice)
+    with local.locked():
+        state = local.load()
+        assert local.checkout(state) == retained
+        if save_migration:
+            local.save(state)
+        # Otherwise model interruption after durable identity publication but
+        # before replacing the original legacy-keyed state file.
+    relocated = alice.with_name('relocated')
+    alice.rename(relocated)
+    moved = forge.team_config.LocalTeam(forge.team_git.Repository.discover(relocated))
+    with moved.locked():
+        state = moved.load()
+        assert moved.checkout(state) == retained
+        moved.save(state)
+    assert list(moved.load()['checkouts'].values()) == [retained]
+
+
+def test_already_moved_legacy_checkout_requires_evidence_before_adoption(repositories):
+    _, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    local, retained = legacy_checkout_state(forge, alice)
+    original_bytes = local.path.read_bytes()
+    relocated = alice.with_name('relocated')
+    alice.rename(relocated)
+    moved = forge.team_config.LocalTeam(forge.team_git.Repository.discover(relocated))
+    with moved.locked():
+        state = moved.load()
+        with pytest.raises(forge.team_state.TeamError) as failed:
+            moved.checkout(state)
+        assert failed.value.code == 'team-checkout-recovery'
+        assert 'original' in str(failed.value).lower()
+        assert moved.path.read_bytes() == original_bytes
+        assert state == moved.load()
+    # The diagnostic must offer a concrete safe route: return once to the
+    # known legacy path, migrate, then move without losing the retained work.
+    relocated.rename(alice)
+    restored = forge.team_config.LocalTeam(forge.team_git.Repository.discover(alice))
+    with restored.locked():
+        state = restored.load()
+        assert restored.checkout(state) == retained
+        restored.save(state)
+    alice.rename(relocated)
+    moved = forge.team_config.LocalTeam(forge.team_git.Repository.discover(relocated))
+    with moved.locked():
+        assert moved.checkout(moved.load()) == retained
+
+
+@pytest.mark.parametrize('invalid', ['malformed', 'symlink'])
+def test_checkout_identity_rejects_invalid_evidence_without_replacement(repositories, tmp_path, invalid):
+    _, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(alice))
+    identity_path = local.repo.git_dir / 'forge-team-checkout.json'
+    assert not identity_path.exists()  # Construction must remain read-only.
+    outside = tmp_path / 'unrelated-identity.json'
+    outside.write_text('private')
+    if invalid == 'malformed':
+        identity_path.write_text('{"version":1,"key":false}')
+    else:
+        try:
+            identity_path.symlink_to(outside)
+        except OSError:
+            pytest.skip('symlinks unavailable')
+    before = identity_path.read_bytes()
+    with pytest.raises(forge.team_state.TeamError):
+        rejected = forge.team_config.LocalTeam(forge.team_git.Repository.discover(alice))
+        with rejected.locked():
+            rejected.checkout(rejected.load())
+    assert identity_path.read_bytes() == before
+    assert outside.read_text() == 'private'

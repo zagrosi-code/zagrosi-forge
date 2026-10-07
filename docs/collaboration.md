@@ -118,12 +118,22 @@ ordinary Windows newline conversion is supported. Existing matching workspaces
 retain progress, while new contract versions get new workspaces without deleting
 old evidence. Plan authoring stays in the canonical directory.
 
+Prepared source commits are retained locally through history rewriting and Git
+cleanup. After moving a checkout, run `team prepare` again and rebind using its
+returned path. A fresh workspace preserves previous evidence without carrying
+old verification into the new location; it also recovers older unpinned plans
+whose source commit has already been removed.
+
 ```bash
 python3 scripts/zagrosi_skills.py team update --target-dir "{repo}" --session "{session}" --generation "{generation}" --planning-dir "{plan}" --section section-01-auth
 python3 scripts/zagrosi_skills.py team check --target-dir "{repo}" --session "{session}" --generation "{generation}" --planning-dir "{plan}" --section section-01-auth
 ```
 
 These options also work on `start`. Omit `--section` for a full-plan binding.
+If a task already exists, use the returned binding repair to update it; when
+several tasks are available, select the intended task from the returned choices.
+Binding a handoff task keeps it paused; use the separately returned resume command
+only when you intend to continue that work.
 Plan ownership is relative to `--target-dir`, so a package inside a monorepo can
 be the target; explicit `--path` remains relative to the Git repository root.
 Bindings identify the exact local plan, target and optional section. A full-plan
@@ -188,6 +198,11 @@ Interrupted initialization resumes with `team init` using the original remote.
 Pending commits stay under private Git refs so local garbage collection cannot
 erase retry data. Normal `leave` refuses unresolved publications in any worktree;
 explicit abandonment drops local retry state while remote outcomes may remain unknown.
+
+Checkout identity moves with its Git metadata, so pending work remains retryable
+after relocation. For older state moved before identity migration, Forge may ask
+you to restore the original location once and run `team status` before moving
+again. Preserve that state; Forge does not guess ownership from orphaned records.
 
 Reservations never expire automatically. Timestamps are activity reports, not
 proof that a paused process stopped. `finish` releases a task and retains its

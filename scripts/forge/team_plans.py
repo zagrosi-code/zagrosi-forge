@@ -45,6 +45,25 @@ def _key(canonical, digest, target):
     return hashlib.sha256(_json([canonical, digest, target]).encode()).hexdigest()
 
 
+def _bound_key(repo, canonical, digest, target):
+    return hashlib.sha256(_json([canonical, digest, str(repo.root), str(repo.git_dir), str(target)]).encode()).hexdigest()
+
+
+def _source_exists(repo, commit):
+    # Batch lookup reports absence successfully; other Git failures must propagate.
+    fields = team_git._run(repo.root, 'cat-file', '--batch-check', prompt=commit + '\n')['stdout'].split()
+    if fields == [commit, 'missing']:
+        return False
+    if len(fields) != 3 or fields[:2] != [commit, 'commit'] or not fields[2].isdigit():
+        _fail('Git returned an invalid prepared source commit.')
+    return True
+
+
+def _retain_source(repo, commit):
+    # A marker alone is not a Git reachability root after history is rewritten.
+    team_git._run(repo.root, 'update-ref', '--no-deref', 'refs/forge/plan-sources/' + commit, commit)
+
+
 def _name(value):
     if not isinstance(value, str) or team_state.normalize_paths([value]) != [value] or value == '.':
         _fail('Shared contract paths must be portable relative file names.')
@@ -283,7 +302,7 @@ def _workspace_files(planning, files):
                 _fail('An added or linked artifact could shadow the prepared contract; preserve it before recovery.')
 
 
-def _validate(planning, target):
+def _validate(planning, target, *, recover_legacy=False):
     marker = planning / MARKER
     if not marker.exists() and not marker.is_symlink():
         if planning.parent.name != 'forge-plans':
@@ -309,24 +328,38 @@ def _validate(planning, target):
             _fail('The prepared plan file identities are malformed; preserve the workspace before recovery.')
     target = Path(target or value['target']).resolve()
     repo = team_git.Repository.discover(target)
-    if (value['root'] != str(repo.root) or value['git_dir'] != str(repo.git_dir) or value['target'] != str(target)
-            or value['canonical'] != team_state.normalize_paths([value['canonical']])[0]):
-        _fail('The prepared plan belongs to a different repository, checkout or target.')
-    key = _key(value['canonical'], value['digest'], target.relative_to(repo.root).as_posix())
-    if planning != repo.git_dir / 'forge-plans' / key:
+    relative_target = target.relative_to(repo.root).as_posix()
+    base = repo.git_dir / 'forge-plans'
+    legacy = base / _key(value['canonical'], value['digest'], relative_target)
+    bound = base / _bound_key(repo, value['canonical'], value['digest'], target)
+    if planning not in {legacy, bound}:
         _fail('The prepared plan is outside its bound private workspace.')
+    recover_legacy = recover_legacy and planning == legacy
+    relocated = value['root'] != str(repo.root) or value['git_dir'] != str(repo.git_dir) or value['target'] != str(target)
+    if (value['canonical'] != team_state.normalize_paths([value['canonical']])[0]
+            or relocated and (not recover_legacy
+                or any(not Path(value[key]).is_absolute() or '..' in Path(value[key]).parts for key in ('root', 'git_dir', 'target'))
+                or Path(value['target']).relative_to(value['root']).as_posix() != relative_target)):
+        _fail('The prepared plan belongs to a different repository, checkout or target.')
     _no_links(planning, repo.git_dir)
     files, content = _bundle(repo, value['canonical'])
     if value['files'] != files or value['digest'] != _digest(files):
         _fail('The shared contract changed; prepare its reviewed current version.', 'team-plan-stale')
-    original = _tree(repo, value['canonical'], value['commit'])
-    if any(original.get(name) != item for name, item in files.items()):
-        _fail('The prepared marker does not identify its recorded source commit.')
+    missing = not _source_exists(repo, value['commit'])
+    if missing:
+        if not recover_legacy:
+            _fail('The recorded source commit is missing; prepare its reviewed current version.')
+    else:
+        original = _tree(repo, value['canonical'], value['commit'])
+        if any(original.get(name) != item for name, item in files.items()):
+            _fail('The prepared marker does not identify its recorded source commit.')
     _workspace_files(planning, files)
     for name in files:
         if _read(planning / name) != content[name]:
             _fail('An immutable prepared contract copy changed; preserve the workspace before recovery.')
     _contract(planning)
+    if relocated or missing:
+        return None
     return {'path': value['canonical'], 'digest': value['digest'], 'commit': value['commit'], 'section': None}
 
 
@@ -351,12 +384,22 @@ def prepare(planning, target):
         files, content = _bundle(repo, canonical)
         digest = _digest(files)
         base = repo.git_dir / 'forge-plans'
-        workspace = base / _key(canonical, digest, target.relative_to(repo.root).as_posix())
+        if base.is_symlink() or base.exists() and not base.is_dir():
+            _fail('The private prepared-plan directory cannot be redirected.')
+        workspace = base / _bound_key(repo, canonical, digest, target)
+        legacy = base / _key(canonical, digest, target.relative_to(repo.root).as_posix())
+        descriptor = None
         if workspace.exists() or workspace.is_symlink():
+            _no_links(workspace, repo.git_dir)
             descriptor = validate(workspace, target)
+        elif legacy.exists() or legacy.is_symlink():
+            _no_links(legacy, repo.git_dir)
+            descriptor = _validate(legacy, target, recover_legacy=True)
+            if descriptor is not None:
+                workspace = legacy
+        if descriptor is not None:
+            _retain_source(repo, descriptor['commit'])
         else:
-            if base.is_symlink() or base.exists() and not base.is_dir():
-                _fail('The private prepared-plan directory cannot be redirected.')
             with tempfile.TemporaryDirectory(prefix='forge-plan-', dir=repo.git_dir) as temporary:
                 stage = Path(temporary) / 'workspace'
                 stage.mkdir()
@@ -368,6 +411,7 @@ def prepare(planning, target):
                 record = {'version': 1, 'root': str(repo.root), 'git_dir': str(repo.git_dir), 'target': str(target),
                           'canonical': canonical, 'commit': repo.head, 'digest': digest, 'files': files}
                 (stage / MARKER).write_text(_json(record) + '\n', encoding='utf-8')
+                _retain_source(repo, repo.head)
                 base.mkdir(exist_ok=True)
                 try:
                     stage.rename(workspace)
@@ -375,6 +419,8 @@ def prepare(planning, target):
                     if not workspace.exists():
                         raise
                 descriptor = validate(workspace, target)
+                if descriptor['commit'] != repo.head:
+                    _retain_source(repo, descriptor['commit'])
         return {'success': True, 'status': 'prepared', 'planning_dir': str(workspace),
                 'sections_dir': str(workspace / 'sections'), 'source': descriptor,
                 'commands': {
