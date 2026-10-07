@@ -118,7 +118,7 @@ TEST_MANIFEST = {
     "test_verification_repositories.py": "f3b16d6c3a8a41eb4876dafe542e8d6a0e56c8e8cf33f6b93929765bfd3cd603",
     "test_verification_symlinks.py": "c722812b7b97b365765a0e33789d3c0c767ae6d2faf9785741fce66dbbb0a3a2",
     "test_workflow_admission.py": "a02a13a709a13c8553891a8431a0b7c11063cf72d9bb321f397d5e121b111cba",
-    "test_workflow_efficiency.py": "2027dd50adac459168ae9d18334e2121b136a1d8addc8dc84c8884abd3411f48",
+    "test_workflow_efficiency.py": "e259443b0f4d4bc1ada9affba22f975c54f888dfc1e651f05ef01a93b0b3a209",
     "test_workflow_handoff.py": "df05ed94edf06bdd4b36c9bde177461d6da73ae23d6c92127c5d13b30ba5c3a2",
     "test_workflow_sequences.py": "7a9fd3be2278fc3f3f97739aa438cf73380fc92261ca42fa59a4d8dd72353672",
     "test_zagrosi_skills.py": "d2e0e0c6c4d1f2efb620ccadb0377473aa2f1898bb58d0b78b7cfbfa3c686cf0"

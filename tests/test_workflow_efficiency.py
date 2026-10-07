@@ -34,12 +34,19 @@ def test_every_cli_command_resolves_its_lazy_handler():
     forge = load_zagrosi_module()
     cli = forge.cli
     parser = cli.build_parser()
-    commands = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
-    for command, parser in commands.choices.items():
-        handler = parser.get_default("handler")
-        assert isinstance(handler, tuple) and len(handler) == 2, command
+    pending = [parser]
+    while pending:
+        command = pending.pop()
+        children = [action for action in command._actions if isinstance(action, argparse._SubParsersAction)]
+        if children:
+            for action in children:
+                assert action.required, command.prog
+                pending.extend(action.choices.values())
+            continue
+        handler = command.get_default("handler")
+        assert isinstance(handler, tuple) and len(handler) == 2, command.prog
         module = importlib.import_module(f".{handler[0]}", cli.__package__)
-        assert callable(getattr(module, handler[1])), command
+        assert callable(getattr(module, handler[1])), command.prog
 
 
 @pytest.mark.parametrize("depth", ["lean", "fast", "standard", "deep"])
