@@ -65,7 +65,9 @@ python3 scripts/zagrosi_skills.py team start --target-dir "{repo}" --task "Impro
 ```
 
 Keep the full returned session ID and generation; check, update and finish require
-both. The generation prevents an old caller from changing a recovered reservation.
+both. Readable output (`--pretty`) includes both identifiers and the board revision;
+plan preparation also shows its private workspace. The generation prevents an old
+caller from changing a recovered reservation.
 
 ```bash
 python3 scripts/zagrosi_skills.py team check --target-dir "{repo}" --session "{session}" --generation "{generation}" --path src/auth
@@ -197,7 +199,10 @@ history, and a committed marker still invites future clones to join.
 
 The current board lives at `refs/heads/forge/team` as bounded `board.json` data;
 local connection pins, bindings and retry state live in Git's administrative
-directory. The marker contains board identity and ref, without endpoint credentials.
+directory. Confirmed completed tasks and retired, unused checkout records are
+cleared locally. At the local size limit, Forge can omit its optional board cache
+while preserving bindings and pending publications; offline status then has no
+cached roster and grants no clearance. The marker contains board identity and ref, without endpoint credentials.
 Forge does not automatically publish source, transcripts, prompts, email addresses
 or absolute local paths. Choose task descriptions, names and notes accordingly:
 **metadata and finish notes remain in repository history**, visible to anyone

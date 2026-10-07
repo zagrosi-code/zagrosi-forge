@@ -14,9 +14,11 @@ import time
 import uuid
 
 from .team_git import TEAM_REF, decode_json
-from .team_state import TeamError, validate_board
+from .team_state import MAX_SESSIONS, TeamError, validate_board
 
 _LIMIT = 8 * 1024 * 1024
+_MAX_CHECKOUTS = 128
+_MAX_BINDINGS = 512
 
 
 def _read(path, limit=_LIMIT):
@@ -54,7 +56,8 @@ def _receipt(value):
 def _checkout_valid(value):
     if (not isinstance(value, dict) or set(value) != {"checkout_id", "sessions", "bindings", "pending"}
             or not _hex(value["checkout_id"]) or not isinstance(value["sessions"], dict)
-            or len(value["sessions"]) > 128 or not isinstance(value["bindings"], dict) or len(value["bindings"]) > 512):
+            or len(value["sessions"]) > MAX_SESSIONS or not isinstance(value["bindings"], dict)
+            or len(value["bindings"]) > _MAX_BINDINGS):
         return False
     if any(not _hex(key) or not _hex(generation) for key, generation in value["sessions"].items()):
         return False
@@ -84,7 +87,7 @@ def _cache_valid(cache):
 def _state_valid(value):
     if (not isinstance(value, dict) or set(value) != {"version", "participant_id", "connection", "pending_init", "checkouts", "cache"}
             or type(value["version"]) is not int or value["version"] != 1 or not _hex(value["participant_id"])
-            or not isinstance(value["checkouts"], dict) or len(value["checkouts"]) > 128 or not _cache_valid(value["cache"])):
+            or not isinstance(value["checkouts"], dict) or len(value["checkouts"]) > _MAX_CHECKOUTS or not _cache_valid(value["cache"])):
         return False
     connection = value["connection"]
     if connection is not None and (not isinstance(connection, dict)
@@ -112,8 +115,15 @@ def _directory(path):
         raise TeamError("team-local-state", "Team metadata requires a directory.")
 
 
+def _encoded(value):
+    return (json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
 def _write(path, value):
-    raw = (json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    raw = _encoded(value)
+    if len(raw) > _LIMIT and value["cache"] is not None:
+        value["cache"] = None
+        raw = _encoded(value)
     if len(raw) > _LIMIT:
         raise TeamError("team-local-state", "Team metadata exceeds the local size limit.")
     _read(path)
@@ -140,8 +150,56 @@ class LocalTeam:
         self.repo = repo
         self.directory = repo.common_dir / "forge-team"
         self.path = self.directory / "state.json"
-        self.key = hashlib.sha256(os.fsencode(str(repo.git_dir))).hexdigest()
+        self.key = self._checkout_key(repo.git_dir)
         self._held = False
+
+    @staticmethod
+    def _checkout_key(directory):
+        return hashlib.sha256(os.fsencode(str(directory))).hexdigest()
+
+    def compact(self, state, board=None):
+        """Retire known former ownership; never discard unresolved or registered work."""
+        if board is not None:
+            for checkout in state["checkouts"].values():
+                if checkout["pending"] is not None:
+                    continue
+                owned = {identity: row["generation"] for identity, row in board["sessions"].items()
+                         if row["participant_id"] == state["participant_id"]
+                         and row["checkout_id"] == checkout["checkout_id"]}
+                checkout["sessions"] = {identity: generation for identity, generation in checkout["sessions"].items()
+                                        if owned.get(identity) == generation}
+                # Retain the old generation until explicit rebinding or finish:
+                # existing callers must still receive ownership-lost fencing.
+                checkout["bindings"] = {key: binding for key, binding in checkout["bindings"].items()
+                                        if binding["session_id"] in board["sessions"]}
+        # Administrative registration survives a locked or unmounted worktree.
+        # Merely missing its working directory is not evidence of retirement.
+        registered = {self.key, self._checkout_key(self.repo.common_dir)}
+        directory = self.repo.common_dir / "worktrees"
+        try:
+            entries = list(directory.iterdir())
+        except FileNotFoundError:
+            entries = []
+        registered.update(self._checkout_key(path.resolve()) for path in entries if path.is_dir())
+        observed = board if board is not None else (state.get("cache") or {}).get("board")
+        active = {row["checkout_id"] for row in (observed or {}).get("sessions", {}).values()
+                  if row["participant_id"] == state["participant_id"]}
+        state["checkouts"] = {key: checkout for key, checkout in state["checkouts"].items()
+                              if key in registered or checkout["checkout_id"] in active
+                              or checkout["pending"] is not None or checkout["sessions"] or checkout["bindings"]}
+
+    def admit_checkout(self, state, checkout):
+        if self.key not in state["checkouts"]:
+            if len(state["checkouts"]) >= _MAX_CHECKOUTS:
+                raise TeamError("team-local-capacity", "Local checkout capacity is full; resolve retained work before joining another checkout.")
+            state["checkouts"][self.key] = checkout
+
+    @staticmethod
+    def require_capacity(checkout, identity, binding):
+        if (identity not in checkout["sessions"] and len(checkout["sessions"]) >= MAX_SESSIONS
+                or binding is not None and binding not in checkout["bindings"]
+                and len(checkout["bindings"]) >= _MAX_BINDINGS):
+            raise TeamError("team-local-capacity", "Local task or plan binding capacity is full; finish retained work before adding another binding.")
 
     @contextmanager
     def locked(self, timeout=5):
@@ -204,11 +262,16 @@ class LocalTeam:
             raise TeamError("team-local-state", "Refusing to save invalid local team state.")
         _write(self.path, state)
 
-    def checkout(self, state):
-        value = state["checkouts"].setdefault(self.key, {"checkout_id": uuid.uuid4().hex,
+    def checkout(self, state, *, defer=False):
+        self.compact(state)
+        value = state["checkouts"].get(self.key, {"checkout_id": uuid.uuid4().hex,
                     "sessions": {}, "bindings": {}, "pending": None})
         if not _checkout_valid(value):
             raise TeamError("team-local-state", "The checkout's team state is invalid; preserve it before recovery.")
+        # A fresh observation may free historical ownership at the capacity limit.
+        # Keep a new checkout transient until that observation can admit it.
+        if not defer or len(state["checkouts"]) < _MAX_CHECKOUTS:
+            self.admit_checkout(state, value)
         return value
 
     def marker(self):

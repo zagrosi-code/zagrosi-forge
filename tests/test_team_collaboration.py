@@ -56,6 +56,7 @@ def team(capsys):
             row = data['session']
             generations[(root, row['id'])] = row['generation']
         return data
+    call.forge = forge
     return call
 
 
@@ -526,3 +527,305 @@ def test_service_never_substitutes_latest_generation_for_stale_caller(repositori
                 forge.team.mutate(context, 'finish', identity=original['id'], generation=generation, note='Stale caller')
         assert context['transport'].read().revision == before
         assert forge.team.check(context, original['id'], generation=recovered['generation'])['clearance']
+
+
+def linked_team_checkout(first, name):
+    linked = first.parent / name
+    git(first, 'worktree', 'add', '-b', name, str(linked))
+    (linked / '.forge').mkdir()
+    (linked / '.forge/team.json').write_bytes((first / '.forge/team.json').read_bytes())
+    return linked
+
+
+@pytest.mark.parametrize('handoff', ['peer', 'peer-finished', 'same-checkout'])
+def test_fresh_observation_retires_former_ownership_and_bindings(team, repositories, handoff):
+    first, second = join_pair(team, repositories)
+    forge = load_zagrosi_module()
+    original = team(first, 'start', '--task', 'Transfer me', '--path', 'src')['session']
+    retained = team(first, 'start', '--task', 'Still planning')['session']
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(first))
+    with local.locked():
+        state = local.load()
+        checkout = state['checkouts'][local.key]
+        checkout['bindings'] = {
+            'a' * 64: {'session_id': original['id'], 'generation': original['generation']},
+            'b' * 64: {'session_id': retained['id'], 'generation': retained['generation']},
+        }
+        local.save(state)
+    recipient = first if handoff == 'same-checkout' else second
+    recovered = team(recipient, 'recover', '--session', original['id'],
+                     '--expect', team(recipient, 'status')['revision'], '--reason', 'Agreed handoff')['session']
+    if handoff == 'peer-finished':
+        team(recipient, 'finish', '--session', recovered['id'], '--note', 'Delivered')
+    team(first, 'status')
+    checkout = local.load()['checkouts'][local.key]
+    expected = {retained['id']: retained['generation']}
+    if recipient == first:
+        expected[recovered['id']] = recovered['generation']
+    assert checkout['sessions'] == expected
+    expected_bindings = {'b' * 64: {'session_id': retained['id'], 'generation': retained['generation']}}
+    if handoff != 'peer-finished':
+        expected_bindings['a' * 64] = {'session_id': original['id'], 'generation': original['generation']}
+        fenced = team(first, 'check', '--session', original['id'],
+                      '--generation', original['generation'], ok=False)
+        assert fenced['error_code'] == 'team-ownership-lost'
+    assert checkout['bindings'] == expected_bindings
+
+
+@pytest.mark.parametrize('published_pending', [False, True], ids=['new-start', 'old-pending'])
+def test_historical_session_capacity_does_not_strand_new_or_pending_publication(
+        team, repositories, monkeypatch, published_pending):
+    first, _, _ = repositories
+    forge = team.forge
+    team(first, 'init', '--name', 'Alex')
+    if published_pending:
+        with monkeypatch.context() as patch:
+            patch.setattr(forge.team, '_accept_pending', lambda *args:
+                          (_ for _ in ()).throw(OSError('crash after publication')))
+            failed = team(first, 'start', '--task', 'Already published', '--path', 'src', ok=False)
+            assert failed['error_code'] == 'team-local-error'
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(first))
+    with local.locked():
+        state = local.load()
+        checkout = state['checkouts'][local.key]
+        # Recreate the accumulated records observed after 128 real peer-finished
+        # handoffs, without repeating that four-minute fixture in every CI run.
+        checkout['sessions'] = {f'{index + 1:032x}': 'a' * 32 for index in range(128)}
+        checkout['bindings'] = {f'{index + 1:064x}': {
+            'session_id': f'{index % 128 + 1:032x}', 'generation': 'a' * 32} for index in range(512)}
+        local.save(state)
+    before_offline = local.path.read_bytes()
+    assert team(first, 'status', '--offline')['clearance'] is False
+    assert local.path.read_bytes() == before_offline
+    result = (team(first, 'retry') if published_pending else
+              team(first, 'start', '--task', 'Next task', '--path', 'src'))
+    assert result['published'] and result['clearance']
+    row = result['session']
+    checkout = local.load()['checkouts'][local.key]
+    assert checkout['sessions'] == {row['id']: row['generation']}
+    assert checkout['bindings'] == {} and checkout['pending'] is None
+    assert team(first, 'status')['pending'] is False
+    team(first, 'finish', '--session', row['id'], '--note', 'Delivered')
+    assert team(first, 'leave')['status'] == 'left'
+
+
+def test_retired_checkout_capacity_preserves_registered_unavailable_worktrees(team, repositories):
+    first, _, _ = repositories
+    forge = load_zagrosi_module()
+    team(first, 'init', '--name', 'Alex')
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(first))
+    keep = {local.key}
+    for name in ('registered-zoë', 'unavailable', 'retired'):
+        linked = linked_team_checkout(first, name)
+        team(linked, 'status')
+        linked_local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(linked))
+        if name == 'retired':
+            git(first, 'worktree', 'remove', '--force', str(linked))
+        else:
+            keep.add(linked_local.key)
+            if name == 'unavailable':
+                git(first, 'worktree', 'lock', str(linked), '--reason', 'Temporarily unmounted')
+                linked.rename(linked.with_name('temporarily-unmounted'))
+    with local.locked():
+        state = local.load()
+        for index in range(128 - len(state['checkouts'])):
+            state['checkouts'][f'{index + 1:064x}'] = {
+                'checkout_id': f'{index + 1000:032x}', 'sessions': {}, 'bindings': {}, 'pending': None}
+        local.save(state)
+    newcomer = linked_team_checkout(first, 'newcomer')
+    newcomer_local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(newcomer))
+    keep.add(newcomer_local.key)
+    assert team(newcomer, 'status')['status'] == 'fresh'
+    assert set(local.load()['checkouts']) == keep
+    assert team(first.parent / 'registered-zoë', 'status')['status'] == 'fresh'
+
+
+@pytest.mark.parametrize('pending', [False, True], ids=['active-claim', 'unknown-publication'])
+def test_retired_checkout_retains_active_or_pending_evidence(team, repositories, monkeypatch, pending):
+    first, _, _ = repositories
+    forge = team.forge
+    team(first, 'init', '--name', 'Alex')
+    linked = linked_team_checkout(first, 'retired-owner')
+    if pending:
+        with monkeypatch.context() as patch:
+            patch.setattr(forge.team_git.GitBoard, '_push', lambda *args:
+                          {'returncode': 124, 'stdout': '', 'stderr': '', 'timed_out': True})
+            result = team(linked, 'start', '--task', 'Unknown publication', '--path', 'src', ok=False)
+            assert result['error_code'] == 'team-write-unknown'
+    else:
+        team(linked, 'start', '--task', 'Retained ownership', '--path', 'src')
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(linked))
+    retained = local.load()['checkouts'][local.key]
+    references = git(first, 'for-each-ref', 'refs/forge/team-pending')
+    git(first, 'worktree', 'remove', '--force', str(linked))
+    team(first, 'status')
+    assert local.load()['checkouts'][local.key] == retained
+    assert git(first, 'for-each-ref', 'refs/forge/team-pending') == references
+    failed = team(first, 'leave', ok=False)
+    assert failed['error_code'] == ('team-pending-write' if pending else 'team-active-sessions')
+
+
+def test_full_live_binding_capacity_rejects_before_remote_publication(team, repositories):
+    first, _, _ = repositories
+    forge = load_zagrosi_module()
+    team(first, 'init', '--name', 'Alex')
+    row = team(first, 'start', '--task', 'Bound task', '--path', 'src')['session']
+    with forge.team.workspace(first) as context:
+        forge.team._observe(context)
+        bindings = {f'{index + 1:064x}': {'session_id': row['id'], 'generation': row['generation']}
+                    for index in range(512)}
+        context['checkout']['bindings'] = bindings
+        context['local'].save(context['state'])
+        before = context['snapshot'].revision
+        with pytest.raises(forge.team_state.TeamError) as failed:
+            forge.team.mutate(context, 'update', identity=row['id'], generation=row['generation'],
+                              binding='f' * 64, note='Another binding')
+        assert context['transport'].read().revision == before
+        assert failed.value.code == 'team-local-capacity'
+        saved = context['local'].load()['checkouts'][context['local'].key]
+        assert saved['pending'] is None and saved['bindings'] == bindings
+    assert not git(first, 'for-each-ref', 'refs/forge/team-pending')
+
+
+def encoded_local_state(state):
+    return (json.dumps(state, ensure_ascii=True, allow_nan=False, sort_keys=True,
+                       separators=(',', ':')) + '\n').encode()
+
+
+def near_limit_live_state(forge, root):
+    """Compress existing live work into the independently reproduced 8 MiB boundary."""
+    with forge.team.workspace(root) as context:
+        forge.team._observe(context)
+        state = context['state']
+        board = forge.team_state.new_board(context['snapshot'].board['board_id'])
+        generation = 'b' * 32
+        for index in range(110):
+            identity, checkout_id = f'{index + 1000:032x}', f'{index + 2000:032x}'
+            board['sessions'][identity] = {
+                'participant_id': state['participant_id'], 'checkout_id': checkout_id,
+                'generation': generation, 'name': 'Alex', 'host': 'other',
+                'task': f'Live planning task {index}', 'state': 'planning', 'paths': [],
+                'branch': context['repo'].branch, 'head': context['repo'].head,
+                'updated_at': 0, 'note': '',
+            }
+            state['checkouts'][f'{index + 3000:064x}'] = {
+                'checkout_id': checkout_id, 'sessions': {identity: generation}, 'bindings': {}, 'pending': None}
+        published = context['transport'].write(board, context['snapshot'].revision, lambda receipt: None)
+        forge.team._cache(context, published)
+        size = len(encoded_local_state(state))
+        for index in range(110):
+            checkout = state['checkouts'][f'{index + 3000:064x}']
+            for bound in range(512):
+                key = f'{bound + 1:064x}'
+                value = {'session_id': f'{index + 1000:032x}', 'generation': generation}
+                added = len(json.dumps({key: value}, separators=(',', ':')).encode()) - 2 + bool(checkout['bindings'])
+                if size + added > forge.team_config._LIMIT - 2048:
+                    break
+                checkout['bindings'][key] = value
+                size += added
+        assert size == len(encoded_local_state(state))
+        assert forge.team_config._LIMIT - 2300 < size < forge.team_config._LIMIT
+        context['local'].save(state)
+        return context['local']
+
+
+@pytest.mark.parametrize('published_pending', [False, True], ids=['new-start', 'old-published-retry'])
+def test_local_byte_capacity_omits_only_cache_and_recovers_publication(
+        team, repositories, monkeypatch, published_pending):
+    first, _, _ = repositories
+    forge = team.forge
+    team(first, 'init', '--name', 'Alex')
+    local = near_limit_live_state(forge, first)
+    before = local.load()
+    paths = [f'path-{index:03d}-' + 'x' * 180 for index in range(256)]
+    args = ['--task', 'Near-limit next task', *[value for path in paths for value in ('--path', path)]]
+    if published_pending:
+        with monkeypatch.context() as patch:
+            patch.setattr(forge.team, '_accept_pending', lambda *args:
+                          (_ for _ in ()).throw(OSError('crash after publication')))
+            failed = team(first, 'start', *args, ok=False)
+            assert failed['error_code'] == 'team-local-error'
+        pending = local.load()['checkouts'][local.key]['pending']
+        assert pending is not None
+        result = team(first, 'retry')
+        assert result['session']['id'] == pending['session_id']
+    else:
+        result = team(first, 'start', *args)
+    assert result['published'] and result['clearance'] and result['status'] == 'fresh'
+    assert result['revision'] and isinstance(result['observed_at'], (int, float))
+    saved = local.load()
+    assert saved['cache'] is None
+    assert local.path.stat().st_size <= forge.team_config._LIMIT
+    assert set(saved['checkouts']) == set(before['checkouts'])
+    for key, checkout in before['checkouts'].items():
+        if key != local.key:
+            assert saved['checkouts'][key] == checkout
+    current = saved['checkouts'][local.key]
+    assert current['sessions'] == {result['session']['id']: result['session']['generation']}
+    assert current['bindings'] == before['checkouts'][local.key]['bindings']
+    assert current['pending'] is None
+    persisted = local.path.read_bytes()
+    offline = team(first, 'status', '--offline')
+    assert offline['status'] == 'offline' and offline['clearance'] is False
+    assert offline['sessions'] == [] and offline['revision'] is None and offline['observed_at'] is None
+    assert 'cache' in offline['note'].lower() and 'unknown' in offline['note'].lower()
+    assert local.path.read_bytes() == persisted
+    team(first, 'finish', '--session', result['session']['id'], '--note', 'Delivered')
+
+
+@pytest.mark.parametrize('advanced', ['none', 'handoff', 'finished', 'bindings-finished'])
+def test_confirmed_over_capacity_binding_retains_existing_work_and_allows_finish(
+        team, repositories, monkeypatch, advanced):
+    first, second = join_pair(team, repositories)
+    forge = team.forge
+    row = team(first, 'start', '--task', 'Bound task', '--path', 'src')['session']
+    bound = (team(first, 'start', '--task', 'Other bound task')['session']
+             if advanced == 'bindings-finished' else row)
+    bindings = {f'{index + 1:064x}': {'session_id': bound['id'], 'generation': bound['generation']}
+                for index in range(512)}
+    with forge.team.workspace(first) as context:
+        forge.team._observe(context)
+        context['checkout']['bindings'] = bindings
+        context['local'].save(context['state'])
+        local = context['local']
+        # Recreate an already-published receipt from before capacity preflight.
+        with monkeypatch.context() as patch:
+            patch.setattr(forge.team_config.LocalTeam, 'require_capacity', lambda *args: None)
+            patch.setattr(forge.team, '_accept_pending', lambda *args:
+                          (_ for _ in ()).throw(OSError('crash after publication')))
+            with pytest.raises(OSError, match='crash after publication'):
+                forge.team.mutate(context, 'update', identity=row['id'], generation=row['generation'],
+                                  binding='f' * 64, note='Published extra binding')
+    assert local.load()['checkouts'][local.key]['pending']['binding'] == 'f' * 64
+    if advanced != 'none':
+        recovered = team(second, 'recover', '--session', bound['id'],
+                         '--expect', team(second, 'status')['revision'], '--reason', 'Agreed handoff')['session']
+        if advanced in {'finished', 'bindings-finished'}:
+            team(second, 'finish', '--session', recovered['id'], '--note', 'Delivered')
+    if advanced == 'bindings-finished':
+        result = team(first, 'retry')
+        assert result['published'] and result['session']['id'] == row['id']
+        saved = local.load()['checkouts'][local.key]
+        assert saved['bindings'] == {'f' * 64: {'session_id': row['id'], 'generation': row['generation']}}
+        assert saved['sessions'] == {row['id']: row['generation']} and saved['pending'] is None
+        team(first, 'finish', '--session', row['id'], '--note', 'Delivered')
+        return
+    failed = team(first, 'retry', ok=False)
+    if advanced in {'handoff', 'finished'}:
+        expected = 'team-ownership-lost' if advanced == 'handoff' else 'team-session-missing'
+        assert failed['error_code'] == expected and failed['published'] is True
+        saved = local.load()['checkouts'][local.key]
+        assert saved['pending'] is None and saved['sessions'] == {}
+        assert saved['bindings'] == (bindings if advanced == 'handoff' else {})
+        assert team(first, 'status')['pending'] is False
+        return
+    assert failed['error_code'] == 'team-local-capacity' and failed['published'] is True
+    assert failed['session_id'] == row['id'] and failed['generation'] == row['generation']
+    assert failed['binding'] == 'f' * 64 and failed['binding_saved'] is False
+    assert 'finish' in failed['error'].lower()
+    saved = local.load()['checkouts'][local.key]
+    assert saved['bindings'] == bindings and saved['pending'] is None
+    assert saved['sessions'] == {row['id']: row['generation']}
+    assert team(first, 'status')['pending'] is False
+    team(first, 'finish', '--session', row['id'], '--note', 'Delivered')
+    assert team(first, 'leave')['status'] == 'left'

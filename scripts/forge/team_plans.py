@@ -103,7 +103,7 @@ def _tree(repo, canonical, commit):
     rows = output.split('\0')
     if rows[-1] or len(rows) - 1 > FILE_COUNT:
         _fail('The canonical plan tree is malformed or exceeds 128 files.')
-    result = {}
+    result, portable_paths = {}, {}
     prefix = '' if canonical == '.' else canonical + '/'
     for row in rows[:-1]:
         header, path = row.split('\t', 1)
@@ -111,16 +111,25 @@ def _tree(repo, canonical, commit):
         if not path.startswith(prefix) or not _OID.fullmatch(oid):
             _fail('Git returned an invalid shared plan tree.')
         name = _name(path[len(prefix):])
-        if name in result:
-            _fail('Git returned duplicate shared plan paths.')
+        parts = name.split('/')
+        for length in range(1, len(parts) + 1):
+            component_path = '/'.join(parts[:length])
+            identity = (component_path, length == len(parts))
+            portable = team_state._portable(component_path)
+            previous = portable_paths.get(portable)
+            # Reused directories keep one spelling and cannot also be files.
+            if previous is not None and (previous != identity or identity[1]):
+                _fail('Shared plan paths must not collide on portable filesystems.')
+            portable_paths[portable] = identity
         result[name] = {'mode': mode, 'oid': oid, 'size': int(size) if kind == 'blob' else -1}
     return result
 
 
 def _eligible(name, entries):
-    parts = name.split('/')
+    portable = team_state._portable(name)
+    parts = portable.split('/')
     if (not name.endswith('.md') or any(part in _EXCLUDED_DIRS for part in parts)
-            or 'interview' in parts[-1].casefold() or name in _MUTABLE_FILES or name.startswith('.forge/')):
+            or 'interview' in parts[-1] or portable in _MUTABLE_FILES or portable.startswith('.forge/')):
         _fail('A shared contract links to an excluded private or generated artifact.')
     item = entries.get(name)
     if item is None or item['mode'] not in {'100644', '100755'} or not 0 <= item['size'] <= FILE_LIMIT:

@@ -165,6 +165,108 @@ def test_real_inline_and_reference_contract_links_require_committed_targets(forg
         forge.team_plans.prepare(planning, root)
 
 
+@pytest.mark.parametrize('name', [
+    'Implementation/contract.md', '.FORGE/packets/contract.md',
+    'Compatibility/contract.md', 'Baselines/contract.md',
+    'Traceability.md', 'Forge-report.md', 'Assumption-ledger.md',
+])
+def test_reserved_path_aliases_reject_before_publication_and_preserve_progress(forge, repositories, name):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    _, workspace = prepare(forge, root, planning)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"work":"retained"}\n', encoding='utf-8')
+    dependency = planning / name
+    dependency.parent.mkdir(parents=True, exist_ok=True)
+    dependency.write_text('# Private or generated contract\n\nPreserve these bytes.\n', encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    plan.write_text(plan.read_text(encoding='utf-8') + f'\n[Dependency]({name})\n', encoding='utf-8')
+    git(root, 'add', '.forge/plans/shared')
+    git(root, 'commit', '-m', 'Commit a reserved-path alias')
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md'),
+                                                   *(path for path in workspace.rglob('*') if path.is_file())]}
+    published = set(workspace.parent.iterdir())
+    alias = planning / name.lower()
+    if alias.exists():
+        assert alias.samefile(dependency)
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+    assert set(workspace.parent.iterdir()) == published
+    assert before == {path: path.read_bytes() for path in before}
+
+
+@pytest.mark.parametrize('names', [
+    ('rules.md', 'Rules.md'),
+    ('r\u00e8gles.md', 're\u0300gles.md'),
+    ('Details/rule-a.md', 'details/rule-b.md'),
+    ('R\u00e8gles/rule-a.md', 'Re\u0300gles/rule-b.md'),
+], ids=['case-alias', 'unicode-alias', 'directory-case-alias', 'directory-unicode-alias'])
+def test_portable_contract_aliases_reject_before_publishing(forge, repositories, names):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    details = planning / 'details'
+    details.mkdir()
+    contents = '# Reviewed contract\n\nBoth Git entries have identical bytes.\n'
+    for name in names:
+        (details / name).parent.mkdir(parents=True, exist_ok=True)
+        (details / name).write_text(contents, encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    plan.write_text(plan.read_text(encoding='utf-8') + '\n' + ''.join(
+        f'[Dependency](details/{name})\n' for name in names), encoding='utf-8')
+    git(root, 'add', str(plan))
+    oid = git(root, 'hash-object', '-w', '--stdin', input=contents).stdout.strip()
+    for name in names:
+        # Seed both exact Git names even when the host filesystem merges them.
+        git(root, '-c', 'core.precomposeunicode=false', 'update-index', '--add', '--cacheinfo',
+            f'100644,{oid},.forge/plans/shared/details/{name}')
+    git(root, 'commit', '-m', 'Commit portable filename aliases')
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+    managed = repo.git_dir / 'forge-plans'
+    assert not managed.exists() or not list(managed.iterdir())
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_portable_file_directory_alias_is_rejected_from_committed_tree(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    oid = git(root, 'hash-object', '-w', '--stdin', input='# Reviewed contract\n').stdout.strip()
+    for name in ('rules.md', 'Rules.md/extra.md'):
+        git(root, 'update-index', '--add', '--cacheinfo',
+            f'100644,{oid},.forge/plans/shared/details/{name}')
+    git(root, 'commit', '-m', 'Commit a portable file-directory collision')
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    # Git can store this tree even when a host cannot materialize both paths.
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans._tree(repo, planning.relative_to(root).as_posix(), repo.head)
+    assert not (repo.git_dir / 'forge-plans').exists()
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_prepare_preserves_single_spelling_unicode_contract_paths(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    name = 'D\u00e9tails/r\u00e8gles.md'
+    dependency = planning / name
+    dependency.parent.mkdir()
+    dependency.write_text('# Reviewed contract\n\nPr\u00e9server la casse.\n', encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    plan.write_text(plan.read_text(encoding='utf-8') + f'\n[Dependency]({name})\n', encoding='utf-8')
+    git(root, 'add', '.forge/plans/shared')
+    git(root, 'commit', '-m', 'Commit one portable Unicode spelling')
+    committed = committed_bytes(root, dependency)
+    before = dependency.read_bytes()
+    _, workspace = prepare(forge, root, planning)
+    assert (workspace / name).read_bytes() == committed
+    assert dependency.read_bytes() == before
+    assert forge.team_plans.validate(workspace, root)
+
+
 @pytest.mark.parametrize('defect', ['worktree', 'index', 'untracked-link', 'outside-link', 'excluded-link', 'missing-section', 'ambiguous-plan'])
 def test_prepare_rejects_unreviewed_or_incomplete_contract_without_creating_workspace(forge, repositories, defect):
     _, (root, _) = repositories

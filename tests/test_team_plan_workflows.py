@@ -1,5 +1,6 @@
 """Prepared contract validation protects the existing mutable workflow boundaries."""
 import json
+from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 from forge_test_helpers import load_zagrosi_module
 from test_compact_plan import SECTION, make_plan
 from test_compatibility_checks import block, contract
+from test_team_git import git
 from test_team_workflows import call, record, setup, verify
 
 
@@ -40,6 +42,80 @@ def prepared(tmp_path, monkeypatch):
 def inventory(path):
     return {str(item.relative_to(path)): item.read_bytes() if item.is_file() else None
             for item in path.rglob('*')}
+
+
+def authoring_plan(path):
+    planning = make_plan(path)
+    index = planning / 'sections/index.md'
+    marker, body = index.read_text(encoding='utf-8').split('END_FORGE_META -->\n', 1)
+    section = planning / 'sections' / f'{SECTION}.md'
+    (planning / 'claude-plan.md').write_text(
+        marker + 'END_FORGE_META -->\n' + section.read_text(encoding='utf-8'), encoding='utf-8')
+    index.write_text(body, encoding='utf-8')
+    return planning
+
+
+@pytest.fixture
+def committed_prepared(tmp_path, capsys):
+    forge = load_zagrosi_module()
+    target = tmp_path / 'repo'
+    git(tmp_path, 'init', str(target))
+    git(target, 'config', 'commit.gpgsign', 'false')
+    canonical = authoring_plan(target / '.forge/plans/shared')
+    git(target, 'add', '.')
+    git(target, 'commit', '-m', 'Review shared contract')
+    code, result = call(forge, capsys, 'team', 'prepare', '--planning-dir', canonical,
+                        '--target-dir', target)
+    assert code == 0 and result['success'], result
+    return forge, canonical, Path(result['planning_dir']), target
+
+
+@pytest.mark.parametrize('command', ['write-governance-stubs', 'migrate'])
+def test_prepared_authoring_helpers_reject_without_mutation(committed_prepared, capsys, command):
+    forge, canonical, planning, target = committed_prepared
+    canonical_before, prepared_before = inventory(canonical), inventory(planning)
+
+    code, result = call(forge, capsys, command, '--planning-dir', planning)
+
+    assert code == 1 and result['error_code'] == 'team-plan-readonly', result
+    assert inventory(canonical) == canonical_before
+    assert inventory(planning) == prepared_before
+    code, result = call(forge, capsys, 'lint-plan', '--planning-dir', planning, '--strict')
+    assert code == 0 and result['success'], result
+    code, result = call(forge, capsys, 'team', 'prepare', '--planning-dir', canonical,
+                        '--target-dir', target)
+    assert code == 0 and result['planning_dir'] == str(planning), result
+
+
+@pytest.mark.parametrize('command', ['write-governance-stubs', 'migrate'])
+def test_ordinary_authoring_helpers_remain_available(tmp_path, capsys, command):
+    forge = load_zagrosi_module()
+    planning = authoring_plan(tmp_path / 'ordinary-plan')
+    before = inventory(planning)
+
+    code, result = call(forge, capsys, command, '--planning-dir', planning)
+
+    assert code == 0 and result['success'], result
+    for name in ('decisions.md', 'risk-register.md', 'traceability.md', 'quality-gates.md'):
+        assert (planning / name).read_text(encoding='utf-8').strip()
+    assert all(inventory(planning)[name] == content for name, content in before.items())
+    if command == 'migrate':
+        assert (planning / 'codex-plan.md').read_bytes() == (planning / 'claude-plan.md').read_bytes()
+
+
+def test_prepared_generated_output_remains_available(committed_prepared, capsys):
+    forge, canonical, planning, _ = committed_prepared
+    canonical_before, prepared_before = inventory(canonical), inventory(planning)
+    output = planning / 'implementation/context.md'
+
+    code, result = call(forge, capsys, 'context-brief', '--planning-dir', planning, '--output', output)
+
+    assert code == 0 and result['success'], result
+    assert output.read_text(encoding='utf-8').strip()
+    assert inventory(canonical) == canonical_before
+    assert all(inventory(planning)[name] == content for name, content in prepared_before.items())
+    code, result = call(forge, capsys, 'lint-plan', '--planning-dir', planning, '--strict')
+    assert code == 0 and result['success'], result
 
 
 @pytest.mark.parametrize('command', ['setup', 'progress', 'verify', 'packet', 'status'])

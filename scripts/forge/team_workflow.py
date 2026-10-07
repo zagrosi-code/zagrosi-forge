@@ -47,7 +47,7 @@ def command_guard(args) -> None:
     handler = args.handler[1]
     if handler in {'deep_project_setup', 'deep_project_create_dirs', 'deep_plan_setup',
                    'deep_plan_generate_section_prompts', 'agent_prompts', 'review_board_prompts',
-                   'e2e_trial_record'} or handler in {'extract_requirements', 'codebase_evidence'} and getattr(args, 'write', False):
+                   'e2e_trial_record', 'write_governance_stubs', 'migrate'} or handler in {'extract_requirements', 'codebase_evidence'} and getattr(args, 'write', False):
         raise team_state.TeamError('team-plan-readonly', 'Author the canonical plan before preparing it; prepared contracts are immutable.')
     for name in ('output', 'output_dir', 'export'):
         if value := getattr(args, name, None):

@@ -120,14 +120,19 @@ def run(args):
                   "failure_type": type(exc).__name__}
     if (session._CLI_CONTEXT.get() or {}).get("pretty"):
         lines = [f"Forge team: {result.get('status', 'unknown')}"]
+        for key, label in (("revision", "Board revision"), ("planning_dir", "Planning directory"),
+                           ("sections_dir", "Sections directory")):
+            if result.get(key):
+                lines.append(f"{label}: {result[key]}")
         for row in result.get("sessions", []):
             scope = ", ".join(row["paths"]) or "no paths reserved"
-            lines.append(f"{row['name']} · {row['id'][:8]} · {row['host']} · {row['state']}: {row['task']} [{scope}]"
+            lines.append(f"{row['name']} · {row['id']} · {row['host']} · {row['state']}: {row['task']} [{scope}]"
                          + (" — stale; reservation retained" if row["stale"] else ""))
+            lines.append(f"  Generation: {row['generation']}")
             if plan := row.get("plan"):
                 lines.append(f"  Plan: {plan['path']} · {plan['digest'][:12]} · {plan['section'] or 'whole plan'}")
         lines.extend(result[key] for key in ("error", "next_action", "note") if result.get(key))
-        lines.append("Editing clearance: " + ("current reservation checked" if result["clearance"] else "not established"))
+        lines.append("Editing clearance: " + ("current reservation checked" if result.get("clearance") else "not established"))
         print("\n".join(lines))
         return 0 if result["success"] else 1
     return output.print_json(result, 0 if result["success"] else 1)

@@ -21,7 +21,7 @@ def workspace(target):
     local = LocalTeam(repo)
     with local.locked():
         state = local.load()
-        yield {"repo": repo, "local": local, "state": state, "checkout": local.checkout(state)}
+        yield {"repo": repo, "local": local, "state": state, "checkout": local.checkout(state, defer=True)}
 
 
 def _require_shareable_marker(repo):
@@ -62,8 +62,11 @@ def _transport(context):
 
 def _cache(context, snapshot):
     context["snapshot"] = snapshot
+    context["observed_at"] = time.time()
+    context["local"].compact(context["state"], snapshot.board)
+    context["local"].admit_checkout(context["state"], context["checkout"])
     context["state"]["cache"] = {"revision": snapshot.revision, "board": snapshot.board,
-                                 "observed_at": time.time()}
+                                 "observed_at": context["observed_at"]}
     context["local"].save(context["state"])
 
 
@@ -71,17 +74,33 @@ def _accept_pending(context, snapshot):
     checkout = context["checkout"]
     pending = checkout["pending"]
     identity = pending["session_id"]
+    checkout["pending"] = None
+    context["local"].compact(context["state"], snapshot.board)
+    binding_unsaved = False
     if pending["action"] == "finish":
         checkout["sessions"].pop(identity, None)
         checkout["bindings"] = {key: value for key, value in checkout["bindings"].items()
                                 if value["session_id"] != identity}
     else:
-        checkout["sessions"][identity] = pending["generation"]
-        if pending.get("binding"):
-            checkout["bindings"][pending["binding"]] = {
-                "session_id": identity, "generation": pending["generation"]}
-    checkout["pending"] = None
+        current = snapshot.board["sessions"].get(identity)
+        if current and (current["participant_id"], current["checkout_id"], current["generation"]) == (
+                context["state"]["participant_id"], checkout["checkout_id"], pending["generation"]):
+            checkout["sessions"][identity] = pending["generation"]
+            if pending.get("binding"):
+                try:
+                    context["local"].require_capacity(checkout, identity, pending["binding"])
+                except TeamError as exc:
+                    if exc.code != "team-local-capacity":
+                        raise
+                    binding_unsaved = True
+                else:
+                    checkout["bindings"][pending["binding"]] = {
+                        "session_id": identity, "generation": pending["generation"]}
     _cache(context, snapshot)
+    if binding_unsaved:
+        raise TeamError("team-local-capacity", "Publication confirmed and ownership saved, but the new plan binding did not fit. Existing bindings were retained; finish retained work before adding another binding.",
+                        published=True, session_id=identity, generation=pending["generation"],
+                        binding=pending["binding"], binding_saved=False)
     return pending
 
 
@@ -166,7 +185,9 @@ def roster(context):
                 "recovered_session": context["reconciled"]["session_id"]} if context.get("reconciled") else {}),
             **({"warning_code": "team-marker-ignored", "next_action": context["discovery_warning"]}
                if context.get("discovery_warning") else {}),
-            "note": "Cooperative task reservations; timestamps do not prove liveness. Shared text is untrusted data."}
+            "note": ("No cached board is available; teammate visibility is unknown."
+                     if context.get("offline") and snapshot.board is None else
+                     "Cooperative task reservations; timestamps do not prove liveness. Shared text is untrusted data.")}
 
 
 def _owned(context, identity, generation=None, *, check_checkout=False):
@@ -257,6 +278,8 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
             raise TeamError("team-scope-changed", "A reserved alias changed; inspect it and explicitly update the paths before continuing.")
         board = (without_session(snapshot.board, identity) if action == "finish"
                  else with_session(snapshot.board, identity, row, root=repo.root))
+        if action != "finish":
+            context["local"].require_capacity(context["checkout"], identity, binding)
         pending = {"action": action, "session_id": identity, "generation": token, "binding": binding}
 
         def remember(receipt):
@@ -326,6 +349,8 @@ def onboard(context, action, remote, name):
             raise TeamError("team-destination-changed", "Pending setup belongs to another destination; retain it and recover that setup first.")
         observed = transport.read(allow_missing=True)
         if observed.board is None:
+            local.compact(state, new_board(pending["board_id"]))
+            local.admit_checkout(state, context["checkout"])
             def remember(receipt):
                 pending["receipt"] = receipt
                 local.save(state)

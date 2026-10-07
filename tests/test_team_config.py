@@ -1,4 +1,5 @@
 """Clone-local opt-in and checkout identity preserve user-owned configuration."""
+from copy import deepcopy
 import json
 
 import pytest
@@ -116,3 +117,46 @@ def test_malformed_local_state_is_rejected_without_replacing_evidence(repositori
             local.load()
         assert failed.value.code == "team-local-state"
         assert local.path.read_bytes() == invalid_bytes
+
+
+def test_full_checkout_registry_preserves_pending_recovery_before_admission(repositories):
+    _, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(alice))
+    with local.locked():
+        state = local.load()
+        for index in range(128):
+            state['checkouts'][f'{index + 1:064x}'] = {
+                'checkout_id': f'{index + 1:032x}', 'sessions': {}, 'bindings': {},
+                'pending': {'revision': 'f' * 40, 'expected': None, 'board_id': 'a' * 32,
+                            'action': 'start', 'session_id': f'{index + 1:032x}',
+                            'generation': 'c' * 32, 'binding': None}}
+        local.save(state)
+        before, persisted = deepcopy(state), local.path.read_bytes()
+        with pytest.raises(forge.team_state.TeamError) as failed:
+            local.checkout(state)
+        assert failed.value.code == 'team-local-capacity'
+        assert state == before
+        assert local.path.read_bytes() == persisted
+
+
+def test_mandatory_byte_overflow_preserves_durable_state_and_required_records(repositories):
+    _, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(alice))
+    with local.locked():
+        state = local.load()
+        local.save(state)
+        persisted = local.path.read_bytes()
+        for index in range(128):
+            identity = f'{index + 1:032x}'
+            state['checkouts'][f'{index + 1:064x}'] = {
+                'checkout_id': identity, 'sessions': {identity: 'a' * 32}, 'pending': None,
+                'bindings': {f'{bound + 1:064x}': {'session_id': identity, 'generation': 'a' * 32}
+                             for bound in range(512)}}
+        before = deepcopy(state)
+        assert forge.team_config._state_valid(state)
+        with pytest.raises(forge.team_state.TeamError) as failed:
+            local.save(state)
+        assert failed.value.code == 'team-local-state'
+        assert local.path.read_bytes() == persisted and state == before

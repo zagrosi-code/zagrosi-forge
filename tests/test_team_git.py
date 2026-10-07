@@ -370,3 +370,44 @@ def test_user_push_policy_refusal_is_reported_without_raw_error(repositories):
     assert failed.value.code == "team-unavailable"
     assert "secret-credential" not in str(failed.value)
     assert transport.read(allow_missing=True).board is None
+
+
+def test_persisted_pending_bytes_bound_accepted_required_state(repositories, monkeypatch):
+    import json
+
+    _, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    with forge.team.workspace(alice) as context:
+        forge.team.onboard(context, 'init', 'origin', 'Alice')
+    local = forge.team_config.LocalTeam(forge.team_git.Repository.discover(alice))
+    before_push = []
+    original = forge.team_git.GitBoard._push
+    def mandatory_size(state):
+        return len((json.dumps({**state, 'cache': None}, ensure_ascii=True, allow_nan=False,
+                               sort_keys=True, separators=(',', ':')) + '\n').encode())
+    def inspect_pending(transport, receipt):
+        state = local.load()
+        pending = state['checkouts'][local.key]['pending']
+        assert pending['revision'] == receipt['revision']
+        before_push.append((pending['action'], mandatory_size(state)))
+        return original(transport, receipt)
+    monkeypatch.setattr(forge.team_git.GitBoard, '_push', inspect_pending)
+    with forge.team.workspace(alice) as context:
+        forge.team._observe(context)
+        row = None
+        for action in ('start', 'update', 'recover', 'finish'):
+            fields = ({'task': 'Byte-bound task', 'binding': 'a' * 64} if action == 'start' else
+                      {'identity': row['id'], 'generation': row['generation']})
+            if action == 'update':
+                fields['binding'] = 'b' * 64
+            if action == 'recover':
+                fields.update(expect=context['snapshot'].revision, reason='Agreed recovery', binding='c' * 64)
+            if action == 'finish':
+                fields['note'] = 'Delivered'
+            result = forge.team.mutate(context, action, **fields)
+            saved = local.load()
+            assert saved['checkouts'][local.key]['pending'] is None
+            assert before_push[-1][0] == action
+            assert mandatory_size(saved) <= before_push[-1][1]
+            row = result.get('session')
+    assert len(before_push) == 4
