@@ -115,13 +115,13 @@ def _team_hint(target):
         if admin.is_file():
             # Git owns these tiny path files; discovery validates them if opted in.
             try:
-                raw = admin.read_text() if admin.stat().st_size < 4096 else ""
+                raw = admin.read_text(encoding="utf-8") if admin.stat().st_size < 4096 else ""
                 if not raw.startswith("gitdir: "):
                     return False
                 directory = (parent / raw[8:].strip()).resolve()
                 common = directory / "commondir"
                 if common.is_file() and common.stat().st_size < 4096:
-                    directory = (directory / common.read_text().strip()).resolve()
+                    directory = (directory / common.read_text(encoding="utf-8").strip()).resolve()
                 return (directory / "forge-team/state.json").exists()
             except (OSError, UnicodeError, RuntimeError):
                 return True  # Let explicit repository validation explain the failure.

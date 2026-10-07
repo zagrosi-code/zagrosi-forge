@@ -14,7 +14,7 @@ GUIDE = ROOT / 'docs/collaboration.md'
 
 
 def links(path):
-    return re.findall(r'\[[^\]]*\]\(([^)]+)\)', path.read_text())
+    return re.findall(r'\[[^\]]*\]\(([^)]+)\)', path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize('name', SKILLS)
@@ -35,7 +35,7 @@ def test_documented_helper_examples_match_the_public_command_parser():
     parser = load_zagrosi_module().cli.build_parser()
     documented = set()
     for path in (GUIDE, REFERENCE):
-        for block in re.findall(r'```bash\n(.*?)```', path.read_text(), re.S):
+        for block in re.findall(r'```bash\n(.*?)```', path.read_text(encoding="utf-8"), re.S):
             for line in block.replace('\\\n', ' ').splitlines():
                 argv = shlex.split(line)
                 if not argv:

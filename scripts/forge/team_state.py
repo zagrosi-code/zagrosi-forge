@@ -56,18 +56,33 @@ def _path(value) -> str:
     return "/".join(parts) or "."
 
 
+def _resolve(path: Path) -> Path:
+    try:
+        return path.resolve(strict=True)
+    except FileNotFoundError:
+        # A missing child can mask an invalid ancestor on Windows. Only missing
+        # paths are allowed; strict resolution must still surface loops/errors.
+        for parent in path.parents:
+            try:
+                parent.resolve(strict=True)
+                break
+            except FileNotFoundError:
+                continue
+        return path.resolve()
+
+
 def normalize_paths(paths, root: Path | None = None) -> list[str]:
     """Keep declared paths and their local symlink targets; never leave the repository."""
     if not isinstance(paths, (list, tuple)) or len(paths) > MAX_PATHS:
         raise TeamError("team-invalid-path", "At most 256 literal paths may be reserved.")
     result = set()
     try:
-        root = Path(root).resolve() if root is not None else None
+        root = _resolve(Path(root)) if root is not None else None
         for value in paths:
             path = _path(value)
             result.add(path)
             if root is not None:
-                resolved = (root / path).resolve()
+                resolved = _resolve(root / path)
                 result.add(_path(resolved.relative_to(root).as_posix()))
     except (OSError, RuntimeError, ValueError):
         raise TeamError("team-invalid-path", "Path cannot be resolved safely inside the repository.") from None

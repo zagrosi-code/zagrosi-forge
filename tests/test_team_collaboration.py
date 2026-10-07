@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from forge_test_helpers import SCRIPT, load_zagrosi_module
+from test_compact_plan import make_plan
 
 
 def git(root, *args):
@@ -167,6 +168,41 @@ def test_linked_worktrees_share_awareness_with_independent_writer_scopes(team, r
     rows = team(first, 'status')['sessions']
     assert {row['task'] for row in rows} == {'First', 'Second'}
     assert len({row['branch'] for row in rows}) == 2
+
+
+@pytest.mark.parametrize('surface', ['hint', 'status', 'setup'])
+def test_non_utf8_locale_cannot_hide_linked_checkout_participation(repositories, capsys, monkeypatch, surface):
+    first, _, _ = repositories
+    forge = load_zagrosi_module()
+    renamed = first.with_name('r\u00e9po')
+    first.rename(renamed)
+    first = renamed
+    assert forge.entrypoint.main(['team', 'init', '--target-dir', str(first), '--name', 'Alex']) == 0
+    capsys.readouterr()
+    linked = first.parent / 'linked'
+    git(first, 'worktree', 'add', '-b', 'encoding-check', str(linked))
+    administrative_path = (linked / '.git').read_bytes()
+    assert administrative_path.decode('utf-8').startswith('gitdir: ')
+    assert any(byte >= 128 for byte in administrative_path)
+    assert not (linked / '.forge/team.json').exists()
+    planning = make_plan(first.parent / 'private-plan')
+    if surface == 'setup':
+        with forge.storage.file_lock(planning / 'implementation' / '.mutable-state'):
+            pass  # The existing workflow creates its administrative lock before dispatch.
+    before = {path.relative_to(planning): path.read_bytes() for path in planning.rglob('*') if path.is_file()}
+    original_read_text = Path.read_text
+    def locale_read_text(path, encoding=None, *args, **kwargs):
+        return original_read_text(path, encoding or 'cp1252', *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', locale_read_text)
+    if surface == 'hint':
+        assert forge.team._team_hint(linked)
+        return
+    arguments = (['team', 'status'] if surface == 'status' else
+                 ['implement-setup', '--sections-dir', str(planning / 'sections'), '--flight', 'off'])
+    code = forge.entrypoint.main([*arguments, '--target-dir', str(linked)])
+    result = json.loads(capsys.readouterr().out)
+    assert code == 1 and result['error_code'] == 'team-config-changed', result
+    assert before == {path.relative_to(planning): path.read_bytes() for path in planning.rglob('*') if path.is_file()}
 
 
 def test_check_revalidates_all_claimed_aliases_without_explicit_scope(team, repositories):

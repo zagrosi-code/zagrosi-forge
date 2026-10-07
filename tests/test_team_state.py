@@ -1,5 +1,6 @@
 """Portable task claims retain ownership across aliases, contention and recovery."""
 from copy import deepcopy
+import errno
 import os
 
 import pytest
@@ -149,6 +150,40 @@ def test_outside_symlink_and_loop_do_not_grant_ownership(team, tmp_path):
         pytest.skip("symlink unavailable")
     with pytest.raises(team.TeamError):
         team.normalize_paths(["loop/file"], root=tmp_path)
+
+
+@pytest.mark.parametrize("missing_child", [False, True], ids=["loop-error", "missing-child-before-loop"])
+def test_nonstrict_resolution_cannot_hide_a_loop_ancestor(team, tmp_path, monkeypatch, missing_child):
+    loop = tmp_path.resolve() / "loop"
+    original = team.Path.resolve
+    def windows_resolve(path, strict=False):
+        if path == loop or loop in path.parents:
+            if strict:
+                if missing_child and path != loop:
+                    raise FileNotFoundError(errno.ENOENT, "Missing descendant", str(path))
+                raise OSError(errno.ELOOP, "Cannot resolve symlink loop", str(path))
+            return path
+        return original(path, strict=strict)
+    monkeypatch.setattr(team.Path, "resolve", windows_resolve)
+    for operation in (
+        lambda: team.normalize_paths(["loop/missing/file"], root=tmp_path),
+        lambda: team.paths_cover(["."], ["loop/missing/file"], root=tmp_path),
+        lambda: team.with_session(board(), FIRST, session(paths=["loop/missing/file"]), root=tmp_path),
+    ):
+        with pytest.raises(team.TeamError) as error:
+            operation()
+        assert error.value.code == "team-invalid-path"
+
+
+def test_nonexistent_future_paths_remain_reservable(team, tmp_path):
+    assert team.normalize_paths(["future/nested/new.py"], root=tmp_path) == ["future/nested/new.py"]
+    assert team.paths_cover(["future"], ["future/nested/new.py"], root=tmp_path)
+
+
+def test_dangling_internal_symlink_retains_future_target(team, tmp_path):
+    make_link(tmp_path / "alias.py", tmp_path / "future.py")
+    assert team.normalize_paths(["alias.py"], root=tmp_path) == ["alias.py", "future.py"]
+    assert team.paths_cover(["alias.py", "future.py"], ["alias.py"], root=tmp_path)
 
 
 def test_local_hardlink_aliases_overlap_and_cover(team, tmp_path):
