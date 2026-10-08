@@ -5,6 +5,11 @@ description: Produce compact, reviewed implementation contracts and ordered sect
 
 # Zagrosi Plan
 
+For a Git target, check `team status --target-dir "{target_dir}"` with Forge’s
+helper before work or resume.
+Follow [team coordination](../zagrosi-forge/references/collaboration.md) when configured or unavailable;
+reuse the same task across phases and delegated agents.
+
 Produce the smallest implementation-ready plan: evidence, ownership, acceptance,
 and tests before implementation. Apply the all-depth
 [engineering standard](../zagrosi-implement/references/engineering.md): trace callers,

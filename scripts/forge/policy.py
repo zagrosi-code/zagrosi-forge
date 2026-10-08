@@ -261,6 +261,11 @@ EVIDENCE_IGNORE_PARTS = {
 
 COMMAND_CATALOG = [
     {
+        "name": "team", "phase": "utility",
+        "summary": "Coordinate tasks and shared plans across engineers and Git clones.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py team status"],
+    },
+    {
         "name": "provider-status", "phase": "utility",
         "summary": "Show reviewer availability and login.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py provider-status --check-auth"],

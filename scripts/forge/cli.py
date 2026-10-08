@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 from importlib import import_module
 
 from . import exact_handoff_cli_shape
+from .team_cli import add_team_commands
 import argparse
 import sys
 
@@ -15,8 +16,15 @@ from . import policy as _policy
 from . import session as _session
 
 def invoke_command(args: argparse.Namespace) -> int:
-    module, handler = args.handler
-    return getattr(import_module(f".{module}", __package__), handler)(args)
+    from . import team_state, team_workflow
+
+    try:
+        team_workflow.command_guard(args)
+        module, handler = args.handler
+        return getattr(import_module(f".{module}", __package__), handler)(args)
+    except team_state.TeamError as exc:
+        return _output.print_json({"success": False, "error_code": exc.code,
+                                   "error": str(exc), "details": exc.details}, 1)
 
 
 def command_catalog(args: argparse.Namespace) -> int:
@@ -556,6 +564,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_plan_commands(sub)
     add_implement_commands(sub)
     add_utility_commands(sub)
+    add_team_commands(sub, invoke_command)
     return parser
 
 

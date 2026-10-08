@@ -123,6 +123,7 @@ def _validate_pair(pair, identity: dict) -> None:
 
 def activate(planning: Path, target: Path, section: str) -> dict | None:
     """Anchor the selected section once. The setup caller holds the mutable lock."""
+    mutable_inputs.prepared_contract(planning, target)
     declared = declaration(planning, section)
     if not declared or declared["mode"] == "not_required":
         return declared
@@ -134,6 +135,7 @@ def activate(planning: Path, target: Path, section: str) -> dict | None:
         return pair
     source, _ = _observations(target, declared, allow_missing_checks=True)
     pair = {**identity, "origin": {"source": source, "captured_at": storage.now_iso()}, "prior_attempts": []}
+    mutable_inputs.prepared_contract(planning, target)
     storage.write_json(path, pair)
     return pair
 
@@ -193,6 +195,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
         raise ValueError("Compatibility capture needs baseline|candidate and an explicit command array.")
     if not 0 < timeout <= 86400:
         raise ValueError("Compatibility timeout must be positive and at most 86400 seconds.")
+    mutable_inputs.prepared_contract(planning, target)
     with storage.file_lock(planning / "implementation" / ".mutable-state"):
         pair = _load_pair(planning, target, section)
         source, checks = _observations(target, pair["declaration"])
@@ -217,6 +220,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
         path = receipt_path(planning, section)
         storage.write_json(path, pair)
         try:
+            mutable_inputs.prepared_contract(planning, target)
             result = {**pending, **_capture(command, target, timeout), "completed_at": storage.now_iso()}
             error = result_error(result)
             if (snapshot != mutable_inputs.verification_snapshot(planning, target, section)

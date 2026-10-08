@@ -18,6 +18,16 @@ def digest(value) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def prepared_contract(planning_dir: Path, target_dir: Path | None = None) -> dict | None:
+    """Revalidate outside analysis caches; stale contracts invalidate saved evidence."""
+    from . import team_plans, team_state
+
+    try:
+        return team_plans.validate(planning_dir, target_dir)
+    except team_state.TeamError as exc:
+        raise ValueError(str(exc)) from exc
+
+
 def target_directory(planning_dir: Path, target_dir: Path | None = None) -> Path:
     from .state import load_implementation_config
 
@@ -122,8 +132,14 @@ def regular_tree_observations(target_dir: Path, paths, *, allow_missing: bool = 
 
 
 def contract_inputs(planning_dir: Path, section: str) -> tuple[dict, set[str]]:
-    return session.cached_analysis("completion_contract", (planning_dir, section),
-                                   lambda observe: _contract_inputs(planning_dir, section, observe))
+    return _bound_contract_inputs(planning_dir, section, prepared_contract(planning_dir))
+
+
+def _bound_contract_inputs(planning_dir: Path, section: str, prepared: dict | None) -> tuple[dict, set[str]]:
+    """Share one freshly validated descriptor within a single input observation."""
+    contract, owned = session.cached_analysis("completion_contract", (planning_dir, section),
+                                             lambda observe: _contract_inputs(planning_dir, section, observe))
+    return ({**contract, "shared_plan": digest(prepared)} if prepared is not None else contract), owned
 
 
 def _contract_inputs(planning_dir: Path, section: str, observe) -> tuple[dict, set[str]]:
@@ -180,8 +196,8 @@ def _contract_inputs(planning_dir: Path, section: str, observe) -> tuple[dict, s
 
 def contract_snapshot(planning_dir: Path, section: str, *, target_dir=None, files=()) -> dict:
     """Separate contract freshness from code observations changed by later sections."""
-    contract, owned = contract_inputs(planning_dir, section)
     target = target_directory(planning_dir, target_dir)
+    contract, owned = _bound_contract_inputs(planning_dir, section, prepared_contract(planning_dir, target))
     return {"version": 1, "contract": contract, "target_dir": str(target),
             "code": code_observations(target, owned | set(files))}
 
@@ -247,10 +263,11 @@ def source_paths(target_dir: Path) -> dict[Path, list[str]]:
 
 def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | None = None) -> dict:
     """Bind verification to source files and link identities, without traversing linked directories."""
+    prepared = prepared_contract(planning_dir, target_dir)
     names = sections.check_section_progress(planning_dir).get("sections", [])
     if not names or (section and section not in names):
         raise ValueError("Verification requires a complete section index.")
-    contracts = {name: contract_inputs(planning_dir, name)[0] for name in names}
+    contracts = {name: _bound_contract_inputs(planning_dir, name, prepared)[0] for name in names}
     sources = artifacts.planning_artifacts(planning_dir)
     sources["spec"] = artifacts.requirement_source_spec(planning_dir)
     authoritative = {

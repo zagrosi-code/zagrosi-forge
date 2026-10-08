@@ -238,6 +238,9 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
 def _mutable_lifecycle(args: argparse.Namespace, operation) -> int:
     planning_dir = _storage.resolve_path(args.sections_dir).parent
     try:
+        from . import mutable_inputs
+
+        mutable_inputs.prepared_contract(planning_dir, mutable_inputs.target_directory(planning_dir, args.target_dir))
         with _storage.file_lock(planning_dir / "implementation" / ".mutable-state"):
             args.profile = _actions.implementation_profile(planning_dir, args.profile)
             return operation(args)
@@ -323,8 +326,16 @@ def _mutable_implement_setup(args: argparse.Namespace) -> int:
         payload["preflight"] = preflight
         payload["success"] = bool(payload["success"] and preflight.get("success"))
     if payload["success"]:
+        from . import team_workflow
+
+        team = team_workflow.guard(planning_dir, target_dir, selected)
+        if team is not None and not team["success"]:
+            return _output.print_json({**payload, **team, "team": team}, 1)
+        if team is not None:
+            payload["team"] = team
         if selected:
             compatibility.activate(planning_dir, target_dir, selected)
+        mutable_inputs.prepared_contract(planning_dir, target_dir)
         if not state_path.exists():
             _storage.write_json(state_path, state)
         _storage.write_json(config_path, config)
@@ -430,6 +441,12 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
             "findings": [finding.to_dict() for finding in findings],
         }, 1)
 
+    from . import team_workflow
+
+    team = team_workflow.guard(planning_dir, target_dir, args.section,
+                               required_paths=args.files_changed + args.test_files)
+    if team is not None and not team["success"]:
+        return _output.print_json({**team, "team": team}, 1)
     completed = dict(completed)
     pending = dict(state.get("pending_sections", {}))
     candidate = {**state, "completed_sections": {**completed, args.section: section_record},
@@ -447,6 +464,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         # Publish evidence as pending first: interruptions and failed gates cannot unlock successors.
         state["completed_sections"] = completed
         state["pending_sections"] = {**pending, args.section: section_record}
+        mutable_inputs.prepared_contract(planning_dir, target_dir)
         _storage.write_json(state_path, state)
         postflight = _flights.implement_postflight_report(planning_dir, args, candidate_state=candidate)
         if not postflight["success"]:
@@ -455,6 +473,7 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
             state = candidate
     else:
         state = candidate
+    mutable_inputs.prepared_contract(planning_dir, target_dir)
     _storage.write_json(state_path, state)
     traceability_path = None
     if not compact and not _artifacts.compact_plan_descriptor(planning_dir):
@@ -472,6 +491,8 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
         "traceability_matrix": str(traceability_path) if traceability_path else None,
         **readiness,
     }
+    if team is not None:
+        payload["team"] = team
     if postflight is not None:
         payload["postflight"] = postflight
     payload["recorded"] = payload["success"]

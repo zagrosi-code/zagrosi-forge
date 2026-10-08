@@ -1,0 +1,720 @@
+"""Committed shared contracts prepare private, immutable execution workspaces."""
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+
+import pytest
+
+from forge_test_helpers import load_zagrosi_module
+from test_compact_plan import SECTION, make_plan
+from test_team_git import git, repositories
+
+
+@pytest.fixture
+def forge():
+    return load_zagrosi_module()
+
+
+@pytest.fixture(params=[b'\n', b'\r\n'], ids=['checkout-lf', 'checkout-crlf'])
+def worktree_newlines(repositories, request):
+    _, (root, _) = repositories
+    git(root, 'config', 'core.autocrlf', 'input')
+    def rewrite(planning):
+        for path in planning.rglob('*.md'):
+            path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n').replace(b'\n', request.param))
+    return rewrite
+
+
+def commit_plan(root, depth='lean'):
+    planning = make_plan(root / '.forge/plans/shared', depth)
+    index = planning / 'sections/index.md'
+    marker, rest = index.read_text(encoding='utf-8').split('END_FORGE_META -->\n', 1)
+    section = planning / 'sections' / f'{SECTION}.md'
+    (planning / 'codex-plan.md').write_text(marker + 'END_FORGE_META -->\n' + section.read_text(encoding='utf-8'), encoding='utf-8')
+    index.write_text(rest, encoding='utf-8')
+    git(root, 'add', '.forge/plans/shared')
+    git(root, 'commit', '-m', 'Review shared contract')
+    return planning
+
+
+def committed_bytes(root, path):
+    return subprocess.run(['git', '-C', str(root), 'cat-file', 'blob',
+                           f'HEAD:{path.relative_to(root).as_posix()}'],
+                          capture_output=True, text=False, check=True, timeout=15).stdout
+
+
+def prepare(forge, root, planning):
+    result = forge.team_plans.prepare(planning, root)
+    assert result['success'], result
+    return result, Path(result['planning_dir'])
+
+
+@pytest.mark.parametrize('depth', ['lean', 'standard', 'deep'])
+def test_prepare_committed_physical_contract_preserves_source_and_runs_only_git(forge, repositories, monkeypatch, worktree_newlines, depth):
+    _, (root, _) = repositories
+    planning = commit_plan(root, depth)
+    worktree_newlines(planning)
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    committed = {path.relative_to(planning): committed_bytes(root, path) for path in planning.rglob('*.md')}
+    execute = forge.team_git.execute
+    calls = []
+    def only_git(argv, *args, **kwargs):
+        assert argv[0] == 'git'
+        calls.append(argv)
+        return execute(argv, *args, **kwargs)
+    monkeypatch.setattr(forge.team_git, 'execute', only_git)
+    result, workspace = prepare(forge, root, planning)
+    assert workspace.parent == repo.git_dir / 'forge-plans'
+    assert Path(result['sections_dir']) == workspace / 'sections'
+    descriptor = forge.team_plans.validate(workspace, root)
+    assert descriptor == result['source']
+    assert descriptor['path'] == '.forge/plans/shared' and descriptor['section'] is None
+    assert len(descriptor['digest']) == 64 and descriptor['commit'] == repo.head
+    assert result['commands']['team_start'] and result['commands']['implement_setup']
+    assert (workspace / '.forge-team-plan.json').is_file()
+    assert {path.relative_to(workspace) for path in workspace.rglob('*.md')} == {
+        path.relative_to(planning) for path in planning.rglob('*.md')}
+    assert {name: (workspace / name).read_bytes() for name in committed} == committed
+    assert before == {path: path.read_bytes() for path in before}
+    assert any('ls-tree' in call for call in calls) and any('cat-file' in call and '--batch' in call for call in calls)
+
+
+def test_prepare_follows_normalized_contract_links_and_active_artifacts_only(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    (planning / 'details').mkdir()
+    (planning / 'details/rules.md').write_text('[Source](../spec.md)\n', encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    plan.write_text(plan.read_text(encoding='utf-8') + '\n[Rules](sections/../details/rules.md)\n', encoding='utf-8')
+    (planning / 'risk-register.md').write_text('# Risks\n\nA reviewed source contract.\n', encoding='utf-8')
+    (planning / 'codex-interview.md').write_text('Private discussion\n', encoding='utf-8')
+    (planning / 'traceability.md').write_text('Imported passing evidence must not be copied\n', encoding='utf-8')
+    (planning / 'local.json').write_text('{"private": true}\n', encoding='utf-8')
+    git(root, 'add', '.forge/plans/shared')
+    git(root, 'commit', '-m', 'Review linked contract')
+    (planning / 'untracked-notes.md').write_text('Uncommitted private notes\n', encoding='utf-8')
+    _, workspace = prepare(forge, root, planning)
+    assert (workspace / 'details/rules.md').is_file()
+    assert (workspace / 'risk-register.md').is_file()
+    for name in ('codex-interview.md', 'traceability.md', 'local.json', 'untracked-notes.md'):
+        assert not (workspace / name).exists()
+
+
+def test_contract_link_closure_ignores_code_examples_and_keeps_references(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    (planning / 'details').mkdir()
+    for name in ('rules.md', 'referenced.md'):
+        (planning / 'details' / name).write_text('# Reviewed contract\n', encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    examples = ('\n`[example](missing-example.md)`\n'
+                '```markdown\n[fenced](missing-fenced.md)\n```\n'
+                '``example\n[code-reference]: missing-code-reference.md\n``\n'
+                '<!-- [hidden](missing-comment.md) -->\n'
+                '![Diagram](diagram.png)\n'
+                '[Rules](details/rules.md)\n'
+                '[Additional contract][reviewed]\n[reviewed]: details/referenced.md\n')
+    plan.write_text(plan.read_text(encoding='utf-8') + examples, encoding='utf-8')
+    git(root, 'add', '.forge/plans/shared')
+    git(root, 'commit', '-m', 'Review literal examples and contract links')
+    _, workspace = prepare(forge, root, planning)
+    assert (workspace / 'details/rules.md').is_file()
+    assert (workspace / 'details/referenced.md').is_file()
+    assert not list(workspace.glob('missing-*'))
+
+
+@pytest.mark.parametrize('name,link', [
+    ('rules one.md', '[Spaced rule](<details/rules one.md>)'),
+    ('rules one.md', '[Titled rule](<details/rules one.md> "Reviewed rule")'),
+    ('rules one.md', '[Reference rule][rule]\n[rule]: <details/rules one.md> "Reviewed rule"'),
+    ('rules.md', '[Titled rule](details/rules.md "Reviewed rule")'),
+])
+def test_prepare_preserves_full_source_and_link_paths_with_spaces(forge, repositories, worktree_newlines, name, link):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    source = planning / 'source specification.md'
+    (planning / 'spec.md').rename(source)
+    (planning / 'details').mkdir()
+    dependency = planning / 'details' / name
+    dependency.write_text('# Reviewed rule\n', encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    text = plan.read_text(encoding='utf-8').replace('"source": "spec.md"', '"source": "source specification.md"')
+    plan.write_text(text + '\n' + link + '\n', encoding='utf-8')
+    git(root, 'add', '.forge/plans/shared')
+    git(root, 'commit', '-m', 'Review spaced source and titled contract link')
+    worktree_newlines(planning)
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    committed = {path.relative_to(planning): committed_bytes(root, path) for path in (source, dependency)}
+    _, workspace = prepare(forge, root, planning)
+    assert {name: (workspace / name).read_bytes() for name in committed} == committed
+    assert forge.team_plans.validate(workspace, root)
+    assert before == {path: path.read_bytes() for path in before}
+
+
+@pytest.mark.parametrize('link', ['[Missing](missing.md)', '[Missing][required]\n[required]: missing.md'])
+def test_real_inline_and_reference_contract_links_require_committed_targets(forge, repositories, link):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    plan = planning / 'codex-plan.md'
+    plan.write_text(plan.read_text(encoding='utf-8') + '\n' + link + '\n', encoding='utf-8')
+    git(root, 'add', str(plan))
+    git(root, 'commit', '-m', 'Review missing dependency declaration')
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+
+
+@pytest.mark.parametrize('name', [
+    'Implementation/contract.md', '.FORGE/packets/contract.md',
+    'Compatibility/contract.md', 'Baselines/contract.md',
+    'Traceability.md', 'Forge-report.md', 'Assumption-ledger.md',
+])
+def test_reserved_path_aliases_reject_before_publication_and_preserve_progress(forge, repositories, name):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    _, workspace = prepare(forge, root, planning)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"work":"retained"}\n', encoding='utf-8')
+    dependency = planning / name
+    dependency.parent.mkdir(parents=True, exist_ok=True)
+    dependency.write_text('# Private or generated contract\n\nPreserve these bytes.\n', encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    plan.write_text(plan.read_text(encoding='utf-8') + f'\n[Dependency]({name})\n', encoding='utf-8')
+    git(root, 'add', '.forge/plans/shared')
+    git(root, 'commit', '-m', 'Commit a reserved-path alias')
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md'),
+                                                   *(path for path in workspace.rglob('*') if path.is_file())]}
+    published = set(workspace.parent.iterdir())
+    alias = planning / name.lower()
+    if alias.exists():
+        assert alias.samefile(dependency)
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+    assert set(workspace.parent.iterdir()) == published
+    assert before == {path: path.read_bytes() for path in before}
+
+
+@pytest.mark.parametrize('names', [
+    ('rules.md', 'Rules.md'),
+    ('r\u00e8gles.md', 're\u0300gles.md'),
+    ('Details/rule-a.md', 'details/rule-b.md'),
+    ('R\u00e8gles/rule-a.md', 'Re\u0300gles/rule-b.md'),
+], ids=['case-alias', 'unicode-alias', 'directory-case-alias', 'directory-unicode-alias'])
+def test_portable_contract_aliases_reject_before_publishing(forge, repositories, names):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    details = planning / 'details'
+    details.mkdir()
+    contents = '# Reviewed contract\n\nBoth Git entries have identical bytes.\n'
+    for name in names:
+        (details / name).parent.mkdir(parents=True, exist_ok=True)
+        (details / name).write_text(contents, encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    plan.write_text(plan.read_text(encoding='utf-8') + '\n' + ''.join(
+        f'[Dependency](details/{name})\n' for name in names), encoding='utf-8')
+    git(root, 'add', str(plan))
+    oid = git(root, 'hash-object', '-w', '--stdin', input=contents).stdout.strip()
+    for name in names:
+        # Seed both exact Git names even when the host filesystem merges them.
+        git(root, '-c', 'core.precomposeunicode=false', 'update-index', '--add', '--cacheinfo',
+            f'100644,{oid},.forge/plans/shared/details/{name}')
+    git(root, 'commit', '-m', 'Commit portable filename aliases')
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+    managed = repo.git_dir / 'forge-plans'
+    assert not managed.exists() or not list(managed.iterdir())
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_portable_file_directory_alias_is_rejected_from_committed_tree(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    oid = git(root, 'hash-object', '-w', '--stdin', input='# Reviewed contract\n').stdout.strip()
+    for name in ('rules.md', 'Rules.md/extra.md'):
+        git(root, 'update-index', '--add', '--cacheinfo',
+            f'100644,{oid},.forge/plans/shared/details/{name}')
+    git(root, 'commit', '-m', 'Commit a portable file-directory collision')
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    # Git can store this tree even when a host cannot materialize both paths.
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans._tree(repo, planning.relative_to(root).as_posix(), repo.head)
+    assert not (repo.git_dir / 'forge-plans').exists()
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_prepare_preserves_single_spelling_unicode_contract_paths(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    name = 'D\u00e9tails/r\u00e8gles.md'
+    dependency = planning / name
+    dependency.parent.mkdir()
+    dependency.write_text('# Reviewed contract\n\nPr\u00e9server la casse.\n', encoding='utf-8')
+    plan = planning / 'codex-plan.md'
+    plan.write_text(plan.read_text(encoding='utf-8') + f'\n[Dependency]({name})\n', encoding='utf-8')
+    git(root, 'add', '.forge/plans/shared')
+    git(root, 'commit', '-m', 'Commit one portable Unicode spelling')
+    committed = committed_bytes(root, dependency)
+    before = dependency.read_bytes()
+    _, workspace = prepare(forge, root, planning)
+    assert (workspace / name).read_bytes() == committed
+    assert dependency.read_bytes() == before
+    assert forge.team_plans.validate(workspace, root)
+
+
+@pytest.mark.parametrize('defect', ['worktree', 'index', 'untracked-link', 'outside-link', 'excluded-link', 'missing-section', 'ambiguous-plan'])
+def test_prepare_rejects_unreviewed_or_incomplete_contract_without_creating_workspace(forge, repositories, defect):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    source = planning / 'spec.md'
+    plan = planning / 'codex-plan.md'
+    if defect in {'worktree', 'index'}:
+        source.write_text(source.read_text(encoding='utf-8') + 'Unreviewed change\n', encoding='utf-8')
+        if defect == 'index':
+            git(root, 'add', str(source))
+    elif defect == 'missing-section':
+        git(root, 'rm', str(planning / 'sections' / f'{SECTION}.md'))
+        git(root, 'commit', '-m', 'Incomplete contract')
+    elif defect == 'ambiguous-plan':
+        (planning / 'claude-plan.md').write_bytes(plan.read_bytes())
+        git(root, 'add', str(planning / 'claude-plan.md'))
+        git(root, 'commit', '-m', 'Ambiguous plan')
+    else:
+        name = {'untracked-link': 'untracked.md', 'outside-link': '../../../outside.md',
+                'excluded-link': 'codex-interview.md'}[defect]
+        plan.write_text(plan.read_text(encoding='utf-8') + f'\n[Dependency]({name})\n', encoding='utf-8')
+        if defect == 'excluded-link':
+            (planning / name).write_text('Private interview\n', encoding='utf-8')
+            git(root, 'add', str(planning / name))
+        git(root, 'add', str(plan))
+        git(root, 'commit', '-m', 'Review dependency declaration')
+        if defect == 'untracked-link':
+            (planning / name).write_text('Private unreviewed note\n', encoding='utf-8')
+    before = {path: path.read_bytes() for path in planning.rglob('*') if path.is_file()}
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+    assert before == {path: path.read_bytes() for path in before}
+    managed = forge.team_git.Repository.discover(root).git_dir / 'forge-plans'
+    assert not managed.exists() or not list(managed.iterdir())
+
+
+def test_equivalent_crlf_is_accepted_but_copies_preserve_committed_bytes(forge, repositories, worktree_newlines):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    worktree_newlines(planning)
+    source = planning / 'spec.md'
+    committed = committed_bytes(root, source)
+    source.write_bytes(committed.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n'))
+    assert b'\r\n' not in committed
+    assert b'\r\n' in source.read_bytes() and b'\r\r\n' not in source.read_bytes()
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    _, workspace = prepare(forge, root, planning)
+    assert (workspace / 'spec.md').read_bytes() == committed
+    assert forge.team_plans.validate(workspace, root)
+    assert before == {path: path.read_bytes() for path in before}
+    source.write_bytes(committed.replace(b'\n', b'\r\r\n'))
+    before[source] = source.read_bytes()
+    with pytest.raises(forge.team_state.TeamError) as failed:
+        forge.team_plans.prepare(planning, root)
+    assert failed.value.code == 'team-plan-stale'
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_reuse_preserves_progress_and_new_contract_keeps_old_evidence(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    first, workspace = prepare(forge, root, planning)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"work":"retained"}\n', encoding='utf-8')
+    git(root, 'commit', '--allow-empty', '-m', 'Unrelated application work')
+    again, reused = prepare(forge, root, planning)
+    assert reused == workspace and again['source'] == first['source']
+    assert progress.read_text(encoding='utf-8') == '{"work":"retained"}\n'
+    source = planning / 'spec.md'
+    source.write_text(source.read_text(encoding='utf-8') + 'Additional reviewed constraint.\n', encoding='utf-8')
+    git(root, 'add', str(source))
+    git(root, 'commit', '-m', 'Review revised contract')
+    latest, changed = prepare(forge, root, planning)
+    assert changed != workspace and latest['source']['digest'] != first['source']['digest']
+    assert progress.is_file() and not (changed / 'implementation').exists()
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(workspace, root)
+
+
+def test_targets_and_linked_checkouts_get_independent_private_workspaces(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    _, first = prepare(forge, root, planning)
+    target = root / 'packages/api'
+    target.mkdir(parents=True)
+    _, scoped = prepare(forge, target, planning)
+    linked = root.parent / 'linked-plan'
+    git(root, 'worktree', 'add', '-b', 'linked-plan', str(linked))
+    _, other = prepare(forge, linked, linked / '.forge/plans/shared')
+    assert len({first, scoped, other}) == 3
+    assert other.parent == forge.team_git.Repository.discover(linked).git_dir / 'forge-plans'
+
+
+def legacy_prepared_workspace(forge, root, planning):
+    """Recreate the original unpinned v1 storage layout for upgrade coverage."""
+    before_refs = set(git(root, 'for-each-ref', '--format=%(refname)').stdout.splitlines())
+    result, workspace = prepare(forge, root, planning)
+    after_refs = set(git(root, 'for-each-ref', '--format=%(refname)').stdout.splitlines())
+    for ref in after_refs - before_refs:
+        git(root, 'update-ref', '-d', ref)
+    source = result['source']
+    identity = json.dumps([source['path'], source['digest'], '.'],
+                          sort_keys=True, ensure_ascii=True, separators=(',', ':'))
+    legacy = workspace.parent / hashlib.sha256(identity.encode()).hexdigest()
+    if workspace != legacy:
+        workspace.rename(legacy)
+    return result, legacy
+
+
+def workspace_bytes(workspace):
+    return {path.relative_to(workspace): path.read_bytes()
+            for path in workspace.rglob('*') if path.is_file()}
+
+
+@pytest.mark.parametrize('checkout', ['linked', 'clone'])
+@pytest.mark.parametrize('layout', ['current', 'legacy'])
+def test_prepare_after_checkout_move_keeps_original_evidence(forge, repositories, checkout, layout):
+    _, (root, _) = repositories
+    primary = root
+    commit_plan(root)
+    if checkout == 'linked':
+        linked = root.parent / 'linked-plan'
+        git(root, 'worktree', 'add', '-b', 'linked-plan', str(linked))
+        root = linked
+    planning = root / '.forge/plans/shared'
+    prepare_workspace = legacy_prepared_workspace if layout == 'legacy' else prepare
+    original, workspace = prepare_workspace(forge, root, planning)
+    repo = forge.team_git.Repository.discover(root)
+    private_relative = workspace.relative_to(repo.git_dir)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"review":"old checkout only"}\n', encoding='utf-8')
+    private_before = workspace_bytes(workspace)
+    source_before = workspace_bytes(planning)
+    index_before = (repo.git_dir / 'index').read_bytes()
+    moved = root.with_name('moved-checkout')
+    if checkout == 'linked':
+        git(primary, 'worktree', 'move', str(root), str(moved))
+    else:
+        root.rename(moved)
+    moved_repo = forge.team_git.Repository.discover(moved)
+    preserved = moved_repo.git_dir / private_relative
+    current_planning = moved / '.forge/plans/shared'
+    result, fresh = prepare(forge, moved, current_planning)
+    assert fresh != preserved
+    assert result['source'] == original['source']
+    assert not (fresh / 'implementation').exists()
+    assert workspace_bytes(preserved) == private_before
+    assert workspace_bytes(current_planning) == source_before
+    assert (moved_repo.git_dir / 'index').read_bytes() == index_before
+    marker = json.loads((fresh / '.forge-team-plan.json').read_text(encoding='utf-8'))
+    assert (marker['root'], marker['git_dir'], marker['target']) == (
+        str(moved_repo.root), str(moved_repo.git_dir), str(moved.resolve()))
+    assert forge.team_plans.validate(fresh, moved) == result['source']
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(preserved, moved)
+    _, reused = prepare(forge, moved, current_planning)
+    assert reused == fresh and workspace_bytes(preserved) == private_before
+
+
+@pytest.mark.parametrize('layout', ['current', 'legacy'])
+def test_prepared_source_survives_history_rewrite_and_gc(forge, repositories, layout):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    application_refs = git(root, 'for-each-ref', 'refs/heads', 'refs/remotes', 'refs/tags').stdout
+    prepare_workspace = legacy_prepared_workspace if layout == 'legacy' else prepare
+    original, workspace = prepare_workspace(forge, root, planning)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"work":"retained"}\n', encoding='utf-8')
+    private_before = workspace_bytes(workspace)
+    # Reusing an older valid workspace must adopt its recorded source as well.
+    adopted, reused = prepare(forge, root, planning)
+    assert reused == workspace and adopted['source'] == original['source']
+    assert git(root, 'for-each-ref', 'refs/heads', 'refs/remotes', 'refs/tags').stdout == application_refs
+    git(root, 'commit', '--amend', '-m', 'Rewrite metadata with identical contract tree')
+    assert git(root, 'rev-parse', 'HEAD').stdout.strip() != original['source']['commit']
+    git(root, 'reflog', 'expire', '--expire=now', '--all')
+    git(root, 'gc', '--prune=now')
+    assert git(root, 'cat-file', '-e', original['source']['commit'] + '^{commit}', check=False).returncode == 0
+    result, current = prepare(forge, root, planning)
+    assert current == workspace and result['source'] == original['source']
+    assert workspace_bytes(workspace) == private_before
+
+
+def test_prepare_recovers_missing_legacy_source_without_rewriting_evidence(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    original, workspace = legacy_prepared_workspace(forge, root, planning)
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"verification":"original source"}\n', encoding='utf-8')
+    private_before = workspace_bytes(workspace)
+    git(root, 'commit', '--amend', '-m', 'Rewrite an unpinned legacy source')
+    git(root, 'reflog', 'expire', '--expire=now', '--all')
+    git(root, 'gc', '--prune=now')
+    assert git(root, 'cat-file', '-e', original['source']['commit'], check=False).returncode != 0
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    result, fresh = prepare(forge, root, planning)
+    assert fresh != workspace and result['source']['commit'] == repo.head
+    assert result['source']['digest'] == original['source']['digest']
+    assert not (fresh / 'implementation').exists()
+    assert workspace_bytes(workspace) == private_before
+    assert before == {path: path.read_bytes() for path in before}
+    assert forge.team_plans.validate(fresh, root) == result['source']
+    recovery_progress = fresh / 'implementation/progress.json'
+    recovery_progress.parent.mkdir()
+    recovery_progress.write_text('{"work":"new source generation"}\n', encoding='utf-8')
+    git(root, 'commit', '--allow-empty', '-m', 'Unrelated work after recovery')
+    repeated, reused = prepare(forge, root, planning)
+    assert reused == fresh and repeated['source'] == result['source']
+    assert recovery_progress.read_text(encoding='utf-8') == '{"work":"new source generation"}\n'
+    assert workspace_bytes(workspace) == private_before
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(workspace, root)
+
+
+def test_legacy_source_git_failure_is_not_missing_object_recovery(forge, repositories, monkeypatch):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    original, workspace = legacy_prepared_workspace(forge, root, planning)
+    git(root, 'commit', '--amend', '-m', 'Keep the previous source object available')
+    assert git(root, 'cat-file', '-e', original['source']['commit'], check=False).returncode == 0
+    before = workspace_bytes(workspace)
+    published = set(workspace.parent.iterdir())
+    tree = forge.team_plans._tree
+    def unavailable(repo, canonical, commit):
+        if commit == original['source']['commit']:
+            raise forge.team_state.TeamError('team-unavailable', 'Injected Git read failure')
+        return tree(repo, canonical, commit)
+    monkeypatch.setattr(forge.team_plans, '_tree', unavailable)
+    with pytest.raises(forge.team_state.TeamError) as failed:
+        forge.team_plans.prepare(planning, root)
+    assert failed.value.code == 'team-unavailable'
+    assert set(workspace.parent.iterdir()) == published
+    assert workspace_bytes(workspace) == before
+
+
+@pytest.mark.parametrize('layout', ['new', 'legacy'])
+def test_prepare_does_not_succeed_when_source_retention_fails(forge, repositories, monkeypatch, layout):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    workspace = None
+    if layout == 'legacy':
+        _, workspace = legacy_prepared_workspace(forge, root, planning)
+    before = workspace_bytes(workspace) if workspace else None
+    run = forge.team_git._run
+    def unavailable(repo, *args, **kwargs):
+        if 'update-ref' in args:
+            raise forge.team_state.TeamError('team-unavailable', 'Injected source-retention failure')
+        return run(repo, *args, **kwargs)
+    monkeypatch.setattr(forge.team_git, '_run', unavailable)
+    with pytest.raises(forge.team_state.TeamError) as failed:
+        forge.team_plans.prepare(planning, root)
+    assert failed.value.code == 'team-unavailable'
+    if workspace:
+        assert workspace_bytes(workspace) == before
+
+
+@pytest.mark.parametrize('layout', ['current', 'legacy'])
+@pytest.mark.parametrize('object_type', ['tree', 'tag'])
+def test_prepared_source_requires_commit_object_without_rewriting_evidence(forge, repositories, layout, object_type):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    prepare_workspace = legacy_prepared_workspace if layout == 'legacy' else prepare
+    _, workspace = prepare_workspace(forge, root, planning)
+    if object_type == 'tree':
+        oid = git(root, 'rev-parse', 'HEAD^{tree}').stdout.strip()
+    else:
+        git(root, 'tag', '-a', 'prepared-source-tag', '-m', 'Tag the same contract commit')
+        oid = git(root, 'rev-parse', 'refs/tags/prepared-source-tag').stdout.strip()
+    marker = workspace / '.forge-team-plan.json'
+    value = json.loads(marker.read_text(encoding='utf-8'))
+    value['commit'] = oid
+    marker.write_text(json.dumps(value) + '\n', encoding='utf-8')
+    progress = workspace / 'implementation/progress.json'
+    progress.parent.mkdir()
+    progress.write_text('{"verification":"preserve for inspection"}\n', encoding='utf-8')
+    repo = forge.team_git.Repository.discover(root)
+    before = {path: path.read_bytes() for path in [repo.git_dir / 'index', *planning.rglob('*.md')]}
+    private_before = workspace_bytes(workspace)
+    published = set(workspace.parent.iterdir())
+    refs = git(root, 'for-each-ref').stdout
+    with pytest.raises(forge.team_state.TeamError) as validation:
+        forge.team_plans.validate(workspace, root)
+    assert validation.value.code == 'team-plan-invalid'
+    with pytest.raises(forge.team_state.TeamError) as preparation:
+        forge.team_plans.prepare(planning, root)
+    assert preparation.value.code == 'team-plan-invalid'
+    assert workspace_bytes(workspace) == private_before
+    assert set(workspace.parent.iterdir()) == published
+    assert before == {path: path.read_bytes() for path in before}
+    assert git(root, 'for-each-ref').stdout == refs
+
+
+@pytest.mark.parametrize('location', ['source', 'copy', 'marker'])
+@pytest.mark.parametrize('kind', ['symlink', 'hardlink'])
+def test_linked_contract_or_marker_is_rejected(forge, repositories, tmp_path, location, kind):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    workspace = None
+    if location == 'source':
+        path = planning / 'spec.md'
+    else:
+        _, workspace = prepare(forge, root, planning)
+        path = workspace / ('.forge-team-plan.json' if location == 'marker' else 'spec.md')
+    outside = tmp_path / 'linked-content'
+    try:
+        if kind == 'symlink':
+            outside.write_bytes(path.read_bytes())
+            path.unlink()
+            path.symlink_to(outside)
+        else:
+            outside.hardlink_to(path)
+    except OSError:
+        pytest.skip(f'{kind} unavailable')
+    retained = outside.read_bytes()
+    with pytest.raises(forge.team_state.TeamError):
+        if workspace is None:
+            forge.team_plans.prepare(planning, root)
+        else:
+            forge.team_plans.validate(workspace, root)
+    assert outside.read_bytes() == retained
+
+
+@pytest.mark.parametrize('content', [b'\xffinvalid UTF-8\n', b'x' * (128 * 1024 + 1)], ids=['invalid-utf8', 'oversized-blob'])
+def test_ineligible_committed_blob_is_rejected(forge, repositories, content):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    source = planning / 'spec.md'
+    source.write_bytes(content)
+    git(root, 'add', str(source))
+    git(root, 'commit', '-m', 'Ineligible contract bytes')
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+
+
+@pytest.mark.parametrize('corruption', ['trailing', 'wrong-hash'])
+def test_batch_objects_require_complete_framing_and_matching_git_hash(forge, repositories, monkeypatch, corruption):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    original = forge.team_git._run
+    def corrupt(repo, *args, **kwargs):
+        result = original(repo, *args, **kwargs)
+        if 'cat-file' in args and '--batch' in args:
+            raw = result['stdout']
+            return {**result, 'stdout': raw + 'unframed bytes' if corruption == 'trailing' else raw.replace('REQ-001', 'REQ-999')}
+        return result
+    monkeypatch.setattr(forge.team_git, '_run', corrupt)
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+
+
+@pytest.mark.parametrize('mutation', ['marker-missing', 'marker-replaced', 'immutable-copy', 'shadow-plan', 'shadow-config', 'canonical', 'index', 'wrong-target'])
+def test_validate_rejects_drift_without_replacing_existing_progress(forge, repositories, mutation):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    _, workspace = prepare(forge, root, planning)
+    marker = workspace / '.forge-team-plan.json'
+    if mutation == 'marker-missing':
+        marker.unlink()
+    elif mutation == 'marker-replaced':
+        value = json.loads(marker.read_text(encoding='utf-8'))
+        value['digest'] = 'a' * 64
+        marker.write_text(json.dumps(value), encoding='utf-8')
+    elif mutation == 'immutable-copy':
+        (workspace / 'spec.md').write_text('Changed copy\n', encoding='utf-8')
+    elif mutation == 'shadow-plan':
+        (workspace / 'claude-plan.md').write_text('Shadow contract\n', encoding='utf-8')
+    elif mutation == 'shadow-config':
+        (workspace / 'zagrosi_plan_config.json').write_text('{}\n', encoding='utf-8')
+    elif mutation in {'canonical', 'index'}:
+        source = planning / 'spec.md'
+        source.write_text('Changed canonical source\n', encoding='utf-8')
+        if mutation == 'index':
+            git(root, 'add', str(source))
+    target = root
+    if mutation == 'wrong-target':
+        target = root / 'subproject'
+        target.mkdir()
+    before = {path: path.read_bytes() for path in workspace.rglob('*') if path.is_file()}
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(workspace, target)
+    assert before == {path: path.read_bytes() for path in before}
+
+
+def test_ordinary_validation_is_filesystem_only_and_mutable_outputs_are_bounded(forge, tmp_path, monkeypatch):
+    ordinary = tmp_path / 'ordinary'
+    ordinary.mkdir()
+    plans = forge.team_plans
+    monkeypatch.setattr(forge.team_git.Repository, 'discover', lambda *args:
+                        (_ for _ in ()).throw(AssertionError('ordinary plan must not inspect Git')))
+    assert plans.validate(ordinary) is None
+    for name in ('implementation/check.json', 'traceability.md', 'forge-report.md', 'assumption-ledger.md',
+                 '.forge/packets', '.forge/packets/context.md', '.forge/tdd-skeletons', '.forge/tdd-skeletons/test.py',
+                 '.forge/scores/history.jsonl', '.forge/report.html'):
+        assert plans.mutable_path(ordinary, ordinary / name), name
+    for name in ('codex-plan.md', 'spec.md', '.forge-team-plan.json', 'zagrosi_plan_config.json', '../outside.md'):
+        assert not plans.mutable_path(ordinary, ordinary / name), name
+
+
+def test_ordinary_forge_plans_directory_is_not_a_managed_workspace(forge, repositories):
+    _, (root, _) = repositories
+    ordinary = root / 'docs/forge-plans/legacy'
+    ordinary.mkdir(parents=True)
+    assert forge.team_plans.validate(ordinary, root) is None
+    assert forge.team_plans.validate(ordinary) is None
+
+
+def test_missing_managed_marker_is_rejected_without_explicit_target(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    _, workspace = prepare(forge, root, planning)
+    (workspace / '.forge-team-plan.json').unlink()
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(workspace)
+
+
+def test_unhashable_compact_depth_has_a_structured_rejection(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    plan = planning / 'codex-plan.md'
+    text = plan.read_text(encoding='utf-8')
+    metadata, _ = forge.markdown.parse_forge_meta(text)
+    metadata['depth_mode'] = []
+    plan.write_text('<!-- FORGE_META\n' + json.dumps(metadata) + '\nEND_FORGE_META -->\n'
+                    + text.split('END_FORGE_META -->\n', 1)[1], encoding='utf-8')
+    git(root, 'add', str(plan))
+    git(root, 'commit', '-m', 'Malformed depth')
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)
+
+
+def test_marker_file_size_cannot_substitute_boolean_for_integer(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    (planning / 'spec.md').write_bytes(b'X')
+    git(root, 'add', str(planning / 'spec.md'))
+    git(root, 'commit', '-m', 'One byte source')
+    _, workspace = prepare(forge, root, planning)
+    marker = workspace / '.forge-team-plan.json'
+    value = json.loads(marker.read_text(encoding='utf-8'))
+    assert value['files']['spec.md']['size'] == 1
+    value['files']['spec.md']['size'] = True
+    marker.write_text(json.dumps(value), encoding='utf-8')
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(workspace, root)

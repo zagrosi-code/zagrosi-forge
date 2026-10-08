@@ -89,11 +89,16 @@ def implement_verify(args) -> int:
             raise ValueError("Provide an explicit command after --, or --source attestation|inspection with --outcome and --evidence.")
         if command and (args.outcome or args.evidence):
             raise ValueError("Captured execution determines its own outcome; omit --outcome and --evidence.")
+        if getattr(args, "stage", None) and (not args.section or args.integration or not command):
+            raise ValueError("Compatibility stages require --section and explicit argv; omit --integration and manual evidence.")
+        from . import team_workflow
+
+        team = team_workflow.guard(planning, target, None if args.integration else args.section)
+        if team is not None and not team["success"]:
+            return output.print_json({**team, "team": team}, 1)
         if getattr(args, "stage", None):
             from .compatibility import capture
 
-            if not args.section or args.integration or not command:
-                raise ValueError("Compatibility stages require --section and explicit argv; omit --integration and manual evidence.")
             result = capture(planning, target, args.section, args.stage, command, args.timeout)
             return output.print_json(result, 0 if result["success"] else 1)
         before = mutable_inputs.verification_snapshot(planning, target, args.section)
@@ -105,6 +110,7 @@ def implement_verify(args) -> int:
             storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
                                              "outcome": "pending", "snapshot": snapshot})
         if command:
+            mutable_inputs.prepared_contract(planning, target)
             result = _capture(command, target, args.timeout)
         else:
             result = {"source": args.source, "outcome": args.outcome,
