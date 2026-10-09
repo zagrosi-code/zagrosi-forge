@@ -24,6 +24,7 @@ from coding_trial_evidence import (
     cleanup_verdict, code_fingerprint, evaluator_files, files, plugin_files, plugin_provenance, review_template, semantic_files,
 )
 from coding_trial_process import execute
+from coding_trial_git import initialize_repository
 from coding_trial_resume import prepare_resume, resume_verdict
 from coding_trial_comparison import task_acceptance
 
@@ -69,39 +70,6 @@ def code_metrics(workspace: Path, runtime: str = "python") -> dict:
     return {"source_lines": lines, "modules": len(paths), "largest_function_lines": max(functions, default=0),
             "branches": branches, "repeated_loops": sum(n - 1 for n in statements.values()),
             "external_imports": sorted(imports - sys.stdlib_module_names - local)}
-
-
-def initialize_repository(workspace: Path, baseline: dict[str, str]) -> None:
-    """Commit trusted fixture bytes without inheriting another repository or hooks."""
-    metadata = workspace / ".git"
-    if metadata.exists() or metadata.is_symlink():
-        raise ValueError("Trial fixture must not contain Git metadata")
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
-               GIT_ATTR_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0", GIT_AUTHOR_DATE="2000-01-01T00:00:00+00:00",
-               GIT_COMMITTER_DATE="2000-01-01T00:00:00+00:00")
-
-    def git(*args):
-        subprocess.run(["git", *args], cwd=workspace, env=env, check=True,
-                       capture_output=True, text=True, timeout=30)
-
-    try:
-        git("init", "--quiet", "--template=", "--initial-branch=trial")
-        hooks = metadata / "disabled-hooks"
-        hooks.mkdir()
-        for name, value in (("user.name", "Forge Trial"), ("user.email", "forge-trial@example.invalid"),
-                            ("core.hooksPath", hooks.as_posix()), ("commit.gpgSign", "false"),
-                            ("core.autocrlf", "false"), ("core.excludesFile", os.devnull),
-                            ("core.attributesFile", os.devnull)):
-            git("config", "--local", name, value)
-        (metadata / "info").mkdir(exist_ok=True)
-        (metadata / "info/exclude").write_text("/.planning/\n__pycache__/\n.pytest_cache/\n*.pyc\n*.pyo\n")
-        git("add", "--force", "--", *(name for name in sorted(baseline) if not name.startswith(".planning/")))
-        git("commit", "--quiet", "--no-gpg-sign", "-m", "Trial baseline")
-    except FileNotFoundError as exc:
-        raise ValueError("Git is required to prepare an isolated trial workspace") from exc
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        raise ValueError(f"Git baseline preparation failed: {exc}") from exc
 
 
 def prepare(trial: Path, case: str, depth: str | None = None, *,
@@ -269,20 +237,37 @@ def run_sessions(trial: Path, runner: list[str], timeout: int, *, resume_runner=
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, argument_default=argparse.SUPPRESS)
     parser.add_argument("operation", choices=("prepare", "check", "run", "review-template"))
     parser.add_argument("trial", type=Path)
-    parser.add_argument("--case", choices=CASES, default="summary")
+    parser.add_argument("--case", choices=CASES)
     parser.add_argument("--depth", choices=("lean", "standard", "deep"))
-    parser.add_argument("--plugin-root", type=Path, default=ROOT, help="Source under test; evaluator stays in this checkout")
+    parser.add_argument("--plugin-root", type=Path, help="Source under test; evaluator stays in this checkout")
     parser.add_argument("--plain-agent", action="store_true", help="No Forge prompt or workflow requirement")
     parser.add_argument("--telemetry", type=Path)
     parser.add_argument("--review", type=Path, help="Independent review JSON outside the candidate workspace")
-    parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--timeout", type=int)
     parser.add_argument("--interrupt-after", type=float, help="Kill the first resume-case runner after this many seconds")
     parser.add_argument("--resume-runner", help="JSON argv array for a fresh second session, including a different host if desired")
     parser.add_argument("--runner", nargs=argparse.REMAINDER, help="Agent argv; prompt arrives on stdin, cwd is the disposable workspace")
+    parser.add_argument("--suite", type=Path, help="Frozen task/product suite manifest")
+    parser.add_argument("--task", help="Task ID from the selected suite")
+    parser.add_argument("--arm", help="Arm ID from the selected suite")
+    parser.add_argument("--auth-file", type=Path, help="Existing native credential file; contents are never copied")
+    parser.add_argument("--qualify-loading", action="store_true", help="Authorize fresh native loading qualification for suite run")
     args = parser.parse_args()
+    from coding_trial_suite_cli import dispatch
+    selected = dispatch(args, parser)
+    if selected is not None:
+        result, status = selected
+        print(json.dumps(result, indent=2, allow_nan=False))
+        return status
+    defaults = {"case": "summary", "depth": None, "plugin_root": ROOT, "plain_agent": False,
+                "telemetry": None, "review": None, "timeout": 600, "interrupt_after": None,
+                "resume_runner": None, "runner": None}
+    for name, default in defaults.items():
+        if not hasattr(args, name):
+            setattr(args, name, default)
     trial = args.trial.resolve()
     if bool(args.resume_runner) != bool(args.interrupt_after) or (args.interrupt_after is not None and not 0 < args.interrupt_after < args.timeout):
         parser.error("resume runner requires a positive interrupt-after shorter than timeout")

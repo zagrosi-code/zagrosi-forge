@@ -7,17 +7,24 @@ import random
 import shutil
 
 from coding_trial_evidence import _text, code_fingerprint, files, review_template
-
-CRITERIA = {
-    "readability": "Can an engineer follow the main behavior, names, and error paths directly?",
-    "cohesion": "Do module/helper boundaries own coherent responsibilities without speculative layers?",
-    "duplication": "Are shared causes removed without hiding distinct behavior behind flags or wrappers?",
-    "regressions": "Do meaningful tests protect behavior, compatibility, and changed boundaries?",
-}
+from coding_trial_outcomes import CRITERIA
+import coding_trial_suite_matrix as suite_matrix
 
 
 def read(path: Path) -> dict:
     return json.loads(path.read_text())
+
+
+def _suite_operation(directory, operation):
+    try:
+        manifest = read(directory / "matrix.json")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict) or "schema" not in manifest:
+        return None
+    if manifest["schema"] != "coding-trial-matrix/v1":
+        raise ValueError("suite-invalid: Unsupported saved matrix schema")
+    return getattr(suite_matrix, operation)(directory)
 
 
 def task_acceptance(case: dict) -> str:
@@ -41,6 +48,9 @@ def check_evidence(result: dict) -> dict:
 
 
 def packets(directory: Path) -> dict:
+    selected = _suite_operation(directory, "blind_suite")
+    if selected is not None:
+        return selected
     manifest = read(directory / "matrix.json")
     if not manifest.get("comparison"):
         raise ValueError("Blind comparisons require a comparison matrix")
@@ -105,7 +115,10 @@ def packets(directory: Path) -> dict:
     return {"packets": str(destination), "blocks": len(blocks), "private_key": str(directory / "blind-key.json")}
 
 
-def reviews(directory: Path, *, apply: bool = False) -> list[dict]:
+def reviews(directory: Path, *, apply: bool = False) -> list[dict] | dict:
+    selected = _suite_operation(directory, "apply_suite_reviews" if apply else "report_suite")
+    if selected is not None:
+        return selected
     key_path = directory / "blind-key.json"
     if not key_path.is_file():
         return []

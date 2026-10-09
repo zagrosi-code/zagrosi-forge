@@ -8,6 +8,199 @@ The [twelve-attempt follow-up](quality-followup-2026-10-02.md),
 [earlier sixteen-attempt experiment](quality-results-2026-10-02.md) and interruption
 checks remain unchanged.
 
+## Manifest-driven suites
+
+Suite mode compares any declared product arms, including a plain arm, on the same
+frozen task, dependencies, native tests and independent oracle. Paths such as
+`backend/app` are supported; Forge depth and workflow requirements are explicit
+arm settings. Preparation freezes the evaluator and input files. Writers receive
+fresh workspaces; assessment uses a separate frozen delivery snapshot.
+
+This is an opt-in evaluation tool. Supply a curated `coding-trial-suite/v1`
+manifest and its resources; there is no bundled, qualified prospective study.
+Synthetic fixture tests exercise the implementation. They do not establish native
+model loading, comparative code quality or performance. Historical results above
+retain their original evaluator and interpretation.
+
+### Choose a mode
+
+| Purpose | Execution and evidence |
+|---|---|
+| `synthetic` | A declared fixture command; no provider calls. Missing qualification is `unmeasured`. A fixture writer can run without isolation, but candidate assessment requires an explicit Docker profile. Tests using execution doubles establish logical behavior only. |
+| `prospective` | The v1 native recipe supports **Codex CLI 0.154.0** in a prepared, digest-pinned `docker-v1` image. It requires admitted environment/task evidence, fresh isolation checks and source-bound native loading evidence. Claude/Gemini are unsupported in this suite path; legacy Claude trials remain available below. |
+
+The evaluator controller requires Python 3.11+ and Git. Native suite loading
+and writer restoration additionally require a POSIX controller with
+descriptor-relative no-follow filesystem operations; Windows native suite
+execution is unsupported. This limit does not apply to ordinary portable
+Forge workflows or process-free suite validation.
+
+The prepared image must already contain the declared host, dependencies and
+required tools, including `/usr/local/bin/python3`; Forge workflow validation also
+needs Git. The evaluator does not pull/build images or resolve undeclared
+dependencies. Each Docker candidate invocation receives a current isolation check;
+private oracle code runs outside candidate containers and obtains observations
+through the isolated worker. Arbitrary candidate imports in the private oracle
+are unsupported. Docker limits, mounts, network and owned-container cleanup are
+checked rather than inferred from a profile file.
+
+Native images must also contain `/etc/codex/requirements.toml` with this
+exact parsed local-only marketplace policy, checked by the evaluator's
+[image readback](../../../tools/coding_trial_loading_evidence.py):
+
+```toml
+[marketplaces]
+restrict_to_allowed_sources = true
+
+[marketplaces.allowed_sources.evaluator]
+source = "local"
+path = "/marketplace"
+```
+
+### Commands
+
+Run from the frozen evaluator checkout. Every `prepare`, `run` and `compare`
+destination must be fresh. Standalone `prepare`/`run` also create a sibling
+`<destination>.study`; both paths must be absent. A prepared directory is
+inspectable setup; `run` does not resume or consume it.
+
+```bash
+# Replace the suite path and task/arm IDs with your curated inputs.
+python3 tools/coding_trials.py prepare /tmp/suite-inspect \
+  --suite /path/to/suite.json --task normalize --arm plain
+python3 tools/coding_trials.py run /tmp/suite-attempt \
+  --suite /path/to/suite.json --task normalize --arm plain
+
+# Material review follows the completed behavior assessment.
+python3 tools/coding_trials.py review-template /tmp/suite-attempt > /tmp/suite-review.json
+# An independent reviewer fills the form, preserving its source identities.
+python3 tools/coding_trials.py check /tmp/suite-attempt --review /tmp/suite-review.json
+
+# All declared tasks × repetitions × arms, scheduled before any writer starts.
+python3 tools/trial_matrix.py compare /tmp/suite-comparison --suite /path/to/suite.json
+python3 tools/trial_matrix.py blind /tmp/suite-comparison
+# Complete original blind/000001/B*/review.json forms for produced candidates.
+python3 tools/trial_matrix.py apply-reviews /tmp/suite-comparison
+python3 tools/trial_matrix.py report /tmp/suite-comparison
+```
+
+Native `run`/`compare` can explicitly add `--qualify-loading` to observe discovery,
+selected-entry reading, required tools/task actions and declared subagents before
+ordinary work. This may call the model and consume provider usage. It needs the
+other admission gates first; `prepare` never performs this model smoke. Successful
+qualification restores the owned initial workspace at the same paths and retains
+its evidence. A JSON receipt alone cannot replace actual current isolation.
+
+If the suite declares `host.credentials: "codex-native-auth"`, supply
+`--auth-file /absolute/path/to/auth.json` for native preparation/run/compare.
+The evaluator neither signs in nor copies/logs/hashes credential contents. It
+mounts that external file read-only for native execution; candidate tools sharing
+the container identity can read it. `outbound-enabled` permits broader outbound
+traffic, not provider-domain-only access. Both exposures are explicit admission
+choices. Runtime paths, versions and authentication must be qualified in the
+actual prepared image before making native-support claims.
+
+Suite commands reject explicit legacy overrides such as `--runner`, `--case`,
+`--depth`, host/model flags, jobs, timeout, repeats and seeds. Put applicable
+settings in the manifest. Suite comparisons are serial, with a fixed writer
+budget of 900 seconds and 8 MiB per output stream. `check`, `review-template`,
+`report`, `blind` and `apply-reviews` select their mode from saved records.
+`check` without `--review` executes another assessment of the frozen delivery;
+reporting, blinding and applying reviews execute no candidate/provider checks.
+
+### Manifest reference
+
+All listed fields are required unless explicitly marked optional. Nullable
+fields still require a key with `null` when no value applies. IDs are opaque
+lowercase identifiers. Resource paths are normalized relative paths under the
+manifest directory; arbitrary absolute resource paths, escaping links, hard links,
+duplicate JSON keys and unknown fields fail validation. Inventories bind file
+bytes, modes and supported relative links. Keep oracle/qualification resources
+outside every public task, product and command-resource exposure.
+
+| Object | Fields / contract |
+|---|---|
+| Suite | `schema: "coding-trial-suite/v1"`, `id`, `purpose`, `tasks`, `arms`, `host`, `repeats`, `execution_seed`, `blind_seed`. |
+| Task | `source`, `brief`, nullable `clarifications`, `scope`, `dependencies`, `checks`, `cleanup_required`, `local_commits` (`allow`/`forbid`), nullable `admission` receipt. |
+| Source | `kind` (`fixture`/`git`), `url`, `commit`, `tree`, `export`, nullable `preparation`, `baseline_sha256`. Git sources bind complete upstream IDs and prepared export bytes. Fixture upstream IDs are null. |
+| Scope | `implementation`, `tests`, `config`, `allowed_changes`, `protected`, `generated` path lists. Protected paths win. Generated/workflow exclusions cannot hide baseline or assessed code. |
+| Dependencies | Nullable `environment` qualification, `locks`, `allow_lock_changes`. Allowed lock changes also require bound task/environment admission; a boolean alone is insufficient. |
+| Checks | Disjoint `feature_ids`/`preservation_ids`, ordered `native` commands, private `oracle`, public `worker`. Each command has `id`, nullable `entry`, `support`, `argv`, `cwd`, `env`, `timeout_seconds`, `output_bytes`. Oracle/worker require an entry. |
+| Arm | Nullable `product` for plain; `entry` prompt resource; `configuration` object; `workflow` (`none`/`forge-v1`/`unmeasured`); `artifacts`; `loading`. Product fields: `source_commit`, `source_tree`, `payload`, `inventory_sha256`. |
+| Loading | `adapter` (`none`/`codex-plain-v1`/`codex-plugin-v1`), nullable `receipt`, optional nullable `selected_entry`. Scheduled native products require a nonnull payload-relative selected entry matching the installed file; plain/synthetic arms cannot select one. Omission and explicit null retain distinct input identities. |
+| Host | `adapter` (`fixture`/`codex`), `executable`, `version`, `model`, `effort`, `isolation`, `capabilities`, nonsecret `environment`, `credentials`, `fixture_argv`. Fixture model/effort/credentials are null. Native executable paths refer to the image. |
+| Isolation | Nullable object with `adapter: "docker-v1"`, `profile`, `image_digest`, nullable `probe_receipt`. The profile binds Docker executable/context/endpoint/server, image/platform, user, explicit limits, network, runtime paths and network checks. |
+| Qualification | `schema: "coding-trial-qualification/v1"`, `kind`, `bindings`, `checks`, `producer`, `execution`, `evidence`. Hashes bind actual resources and exact declared policy; curator independence remains an attestation, not authenticated identity. |
+
+The arm prompt `entry` and native `loading.selected_entry` serve different roles:
+the first is the writer instruction; the second identifies an exact file inside
+the frozen product, for example `skills/zagrosi-forge/SKILL.md`. Arm configuration
+does not become arbitrary host CLI flags. Native products use the supported
+`.codex-plugin/plugin.json` package format.
+
+Commands are literal argv arrays. Only complete-token `{workspace}`, `{entry}`,
+`{python}` substitutions apply to public checks; private oracle commands may also
+use `{assessor}`, `{assessment}`, `{receipt}`. `cwd: "."` selects the appropriate
+root. Check bounds are positive, at most 86,400 seconds / 8 MiB per stream; they
+do not override the writer budget. The private Python oracle uses the frozen
+controller with isolated interpreter settings and a bounded request/response
+protocol for candidate observations.
+
+Exact validation lives in the [manifest parser](../../../tools/coding_trial_manifest.py),
+[qualification bindings](../../../tools/coding_trial_qualification.py) and
+[native recipe](../../../tools/coding_trial_native.py). The
+[synthetic fixture builder](../../../tests/trial_suite_fixtures.py) illustrates a
+three-arm schema with non-src code and a declared dependency; its dummy checks
+and null proofs are **not a qualified runnable study**. The
+[comparison tests](../../../tests/test_trial_suite_comparison.py) document the
+full logical workflow and explicitly identify execution doubles.
+
+### Results and review authority
+
+| Field | Meaning |
+|---|---|
+| `admission_gates` | Environment/task/isolation/loading setup status: passed, missing, unmeasured or failed. Successful preparation does not authorize a model launch. Missing native runtime/image prerequisites can still fail preparation. |
+| `common_quality` | Passed/failed/pending native tests, oracle, scope, dependency and integrity checks **plus independent material review**. |
+| `workflow` | Separate passed/failed/unmeasured/not_applicable result. Only `forge-v1` arms receive Forge workflow validation. |
+| `acceptance` | Prospective acceptance requires a successful writer, common quality, required cleanup and current study eligibility. Synthetic accepted totals stay zero. |
+| `synthetic_validation` | Offline outcome, separate from prospective acceptance. Missing measurements never become evidence of native qualification. |
+| `study_complete` | All scheduled positions terminal and every produced candidate materially reviewed. A complete rejected study may still fail. Terminal no-output receipts need no fictitious code review; interrupted/unentered work remains incomplete. |
+
+Exit0 means successful setup/artifact creation, or the purpose-specific accepted
+outcome. Ordinary failed/pending run/check/compare/report/apply outcomes use exit1;
+synthetic success requires all scheduled writers/checks/reviews to pass while
+remaining study-ineligible. Syntax/preflight errors use exit2; suite failures
+retain structured JSON error codes such as `loading-unqualified`, `input-drift`,
+`receipt-invalid` and `review-stale`. Preparation may succeed with missing proof
+reported explicitly. Raw events, failed attempts and numbered assessments remain.
+
+Execution uses a seeded shuffled order rotated across blocks; blind ordering has
+its own seed. Every scheduled attempt stays in the denominator. Total time
+includes observed failed effort; unavailable usage/cost stays null. Partial stage
+telemetry is retained separately, and zero accepted results leaves per-accepted
+cost undefined. These observations do not establish general superiority.
+
+Blind packets appear under `blind/000001/B000001/` with common task/baseline,
+`C001/candidate`, public check summaries and `review.json`. Give reviewers those
+blocks; retain private maps, workflow files, prompts, timing and raw oracle records
+outside them. Every produced candidate needs readability, cohesion, duplication
+and regression evidence, including unpreferred and failed candidates. Ties/no
+preference are valid; preference cannot rescue behavior failure. An unchanged
+cleanup-required candidate can receive an honest failing review with
+`meaningful:false` and no changed files; it cannot pass cleanup.
+
+Keep each **original comparative review form** after application. Reports verify
+its bytes, mapping, code and current behavior receipts; deleting/changing a form
+invalidates effective comparison review even if a copied per-attempt review
+still passes. A fresh behavior check requires fresh blind/review evidence.
+Numbered generations/applications preserve history, including failed application
+attempts. Blinding is partial because code itself can reveal origin.
+
+## Legacy fixtures and comparisons
+
+The remaining sections describe the original case registry, host adapters and
+saved formats. Commands without `--suite` keep those contracts and defaults.
+
 Isolated cases cover an ordinary summary feature, behavior-preserving cleanup,
 deep discount design, a real Forge resume checkpoint, an order-dispatch godfile,
 an import preview across several modules, a Node summary feature, and TypeScript
@@ -78,7 +271,7 @@ The Python invoice oracle also compares malformed-input errors, input access and
 one-shot iteration, public imports/signatures/defaults, and ignored options with
 the baseline. Known regressions fail while valid shared-calculation controls pass.
 
-## Verdicts and cleanup review
+### Verdicts and cleanup review
 
 Results keep these decisions separate:
 
@@ -129,7 +322,7 @@ security sandbox. Deliberately detached process sessions may escape group cleanu
 Windows process-tree termination needs platform validation; the integration tests
 exercise POSIX process groups.
 
-## Provenance and measurements
+### Provenance and measurements
 
 Preparation fingerprints the launcher, all runtime Python modules under
 `scripts/forge`, and skill Markdown. Checking reports plugin drift separately from
@@ -151,7 +344,7 @@ tests, source changes and appended progress events are allowed. Trial metadata
 outside the workspace binds both original identities. This does not simulate killing an agent process. Runtime crash
 recovery has a separate fault-injection suite.
 
-## Repeated complete tasks
+### Repeated complete tasks
 
 `tools/trial_matrix.py` runs fresh workspaces for each case/depth/repetition.
 Use an immutable plugin checkout and the same agent configuration for comparisons.
@@ -189,12 +382,12 @@ Scope permits `.gitignore` entries only for local planning and generated Python/
 See the [2026-09-24 observations](results-2026-09-24.md) for repeated tasks across
 all three depths, including failed and cancelled attempts and comparison limits.
 
-## Controlled Forge/plain comparison
+### Controlled Forge/plain comparison
 
 [24 September controlled pilot](controlled-results-2026-09-24.md): lower observed input use, incomplete Forge outcomes, and independent review failures.
 
 The historical measurements use Codex CLI and do not cover Claude Code. The
-current adapter also supports Claude; new runs must report their own outcomes.
+legacy adapter also supports Claude; new runs must report their own outcomes.
 Other agents can use the explicit custom runner contract above.
 
 Use **one frozen evaluator checkout** for the entire experiment. `--plugin-root`
@@ -275,7 +468,7 @@ retain the incomplete block and schedule any replacement as a new attempt;
 never erase the original failure. An empty preferred-label list is allowed when
 no candidate is acceptable.
 
-## Native hosts and accepted outcomes
+### Native hosts and accepted outcomes
 
 The built-in writer adapter supports Codex and Claude Code. Compare Forge and
 plain work **within the same host, requested model and effort**; separate host
@@ -312,7 +505,7 @@ reported costs are estimates, not subscription charges. Independent review time
 is currently unmeasured. Offline stream tests are parser evidence, not live
 model-quality results. Historical reports above remain unchanged.
 
-## Deliberate interruption and a fresh session
+### Deliberate interruption and a fresh session
 
 Use the existing `resume` case and supply the second runner as a JSON argv
 array. The harness saves both process attempts, transcripts and telemetry,
@@ -332,7 +525,7 @@ If the first process finishes before interruption or cleanup is unconfirmed,
 the interruption trial fails explicitly. A successful helper-process recovery
 test does not claim that either model used a skill correctly.
 
-## Native skill acceptance matrix
+### Native skill acceptance matrix
 
 Use a frozen evaluator checkout and plugin snapshot. This separate harness uses
 the existing first-task example: twelve host/depth/directness workflows, each
@@ -386,7 +579,7 @@ checkpoint at its original path and archives the prior completed candidate.
 After all desired continuations, only the recorded UUID cache namespace is
 disposable; user settings and other installed plugin directories remain separate.
 
-## Retry bug-fix fixture
+### Retry bug-fix fixture
 
 `retry-queue` covers synchronous webhook delivery with tenant-scoped completion,
 failed sends, repeated events, full-batch validation, audit order and nested
@@ -395,7 +588,7 @@ workspace. The original bug and five independently broken variants fail the
 oracle; a valid fix passes. This is an in-memory journal fixture, not a claim of
 exactly-once delivery across crashes or concurrent workers.
 
-## Native package identity
+### Native package identity
 
 New matrices use versioned, path-independent hashes for every declared package
 member plus the native loading roots. Missing files, unsafe paths, or additional

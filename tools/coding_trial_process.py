@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 from pathlib import Path
+from threading import Event
 
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location("forge_trial_process_launcher", ROOT / "scripts/zagrosi_skills.py")
@@ -13,6 +14,11 @@ _runtime = _launcher.load_runtime()
 _execute = importlib.import_module(_runtime.MODULE_NAMES["forge/child_process.py"]).execute
 
 
-def execute(argv: list[str], workspace: Path, *, prompt: str | None = None, timeout: float = 60) -> dict:
-    return _execute(argv, workspace, prompt=prompt, timeout=timeout,
-                    env={"PYTHONPATH": str(workspace / "src"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"})
+def execute(argv: list[str], workspace: Path, *, prompt: str | None = None, timeout: float = 60,
+            env: dict[str, str] | None = None, output_limit: int = 12000,
+            inherit_env: bool = True, cancel_event: Event | None = None) -> dict:
+    if env is None:
+        env = {"PYTHONPATH": str(workspace / "src"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"}
+    options = {} if cancel_event is None else {"cancel_event": cancel_event}
+    return _execute(argv, workspace, prompt=prompt, timeout=timeout, env=env,
+                    output_limit=output_limit, inherit_env=inherit_env, **options)

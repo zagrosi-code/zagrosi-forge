@@ -13,6 +13,101 @@ import sys
 import time
 
 
+def qualify_native_loading(suite, suite_root, task_id, arm_id, roots, evidence_dir, *, auth_file=None):
+    """Explicit native bootstrap; keep suite dependencies out of legacy imports."""
+    from coding_trial_loading import qualify_native_loading as qualify
+    return qualify(suite, suite_root, task_id, arm_id, roots, evidence_dir, auth_file=auth_file)
+
+
+def run_suite_writer(suite: dict, suite_root: Path, task_id: str, arm_id: str,
+                     roots: dict, evidence_dir: Path, *, auth_file=None) -> dict:
+    """Run a suite writer with explicit inputs and controller-owned evidence."""
+    if (type(suite) is dict and type(suite.get("host")) is dict
+            and suite["host"].get("adapter") == "codex"):
+        from coding_trial_loading import run_native_writer
+        return run_native_writer(suite, suite_root, task_id, arm_id, roots, evidence_dir, auth_file=auth_file)
+    import os
+    import stat
+    from coding_trial_inventory import fingerprint
+    from coding_trial_isolation import derive_layout, execute_isolated, fresh_evidence_path, suite_context
+    from coding_trial_process import execute
+    from coding_trial_qualification import read_bytes
+
+    suite, paths = suite_context(suite, suite_root, task_id, arm_id, roots)
+    evidence_dir = fresh_evidence_path(evidence_dir, paths)
+    host = suite["host"]
+    task = suite["tasks"][task_id]
+    arm = suite["arms"][arm_id]
+    if paths["native_runtime"] is not None or auth_file is not None:
+        raise ValueError("suite-invalid: Fixtures cannot receive native runtime or credentials")
+    layout = None if host["isolation"] is None else derive_layout(
+        suite, suite_root, task_id, arm_id, roots, role="writer")
+    tokens = {"{python}": host["executable"],
+              "{workspace}": str(paths["workspace"]) if layout is None else "/workspace",
+              "{product}": str(paths["product"]) if layout is None else "/product"}
+    command = [tokens.get(argument, argument) for argument in host["fixture_argv"]]
+    environment = {**host["environment"], "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"}
+    resource_root = Path(suite_root).resolve(strict=True)
+    entry = read_bytes(resource_root, arm["entry"]).decode("utf-8")
+    entry = re.sub(r"\{(?:workspace|product)\}", lambda match: tokens[match.group()], entry)
+    materials = [entry, read_bytes(resource_root, task["brief"]).decode("utf-8")]
+    if task["clarifications"] is not None:
+        materials.append(read_bytes(resource_root, task["clarifications"]).decode("utf-8"))
+    try:
+        evidence_dir.mkdir()
+    except FileExistsError as exc:
+        raise ValueError(f"input-exists: {evidence_dir}") from exc
+    before = evidence_dir.lstat()
+    identity = (before.st_dev, before.st_ino, before.st_mode)
+    if not stat.S_ISDIR(before.st_mode) or evidence_dir.resolve() != evidence_dir:
+        raise ValueError(f"suite-invalid: Evidence directory changed before execution: {evidence_dir}")
+    directory_fd = None
+    if os.name == "posix":
+        directory_fd = os.open(evidence_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened = os.fstat(directory_fd)
+        if (opened.st_dev, opened.st_ino, opened.st_mode) != identity:
+            os.close(directory_fd)
+            raise ValueError(f"suite-invalid: Evidence directory changed before opening: {evidence_dir}")
+    try:
+        if layout is None:
+            process = execute(command, paths["workspace"], prompt="\n\n".join(materials), timeout=900,
+                              env=environment, output_limit=8388608, inherit_env=False)
+            isolation = {"adapter": None, "status": "unmeasured", "qualification": None, "container_id": None,
+                         "lifecycle": {"status": "unverified", "reason": "Host fixture has no whole-process isolation", "evidence": []}}
+        else:
+            result = execute_isolated(suite, suite_root, layout, command, roots=roots, cwd="/workspace",
+                                      env=environment, prompt="\n\n".join(materials), timeout=900, output_limit=8388608,
+                                      evidence_dir=evidence_dir / "isolation")
+            process, isolation = result["process"], result["isolation"]
+        record = {
+            "schema": "coding-trial-writer/v1", "suite_sha256": fingerprint(suite), "task": task_id, "arm": arm_id,
+            "budget": {"timeout_seconds": 900, "output_bytes": 8388608}, "command": command,
+            "environment": environment, "process": process, "telemetry": None,
+            "isolation": isolation,
+        }
+        current = evidence_dir.lstat()
+        if evidence_dir.resolve() != evidence_dir or (current.st_dev, current.st_ino, current.st_mode) != identity:
+            raise ValueError(f"suite-invalid: Evidence directory changed during execution: {evidence_dir}")
+        try:
+            if directory_fd is None:
+                stream = (evidence_dir / "writer.json").open("x", encoding="utf-8")
+            else:
+                handle = os.open("writer.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=directory_fd)
+                stream = os.fdopen(handle, "w", encoding="utf-8")
+            with stream:
+                stream.write(json.dumps(record, indent=2) + "\n")
+        except FileExistsError as exc:
+            raise ValueError(f"input-exists: {evidence_dir / 'writer.json'}") from exc
+        current = evidence_dir.lstat()
+        if evidence_dir.resolve() != evidence_dir or (current.st_dev, current.st_ino, current.st_mode) != identity:
+            raise ValueError(f"suite-invalid: Evidence directory changed during persistence: {evidence_dir}")
+        return record
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
 def command_phase(command: str) -> str:
     if re.search(r"\b(plan-setup|lint-plan|lint-evidence)\b|--phase[ =]+plan\b", command):
         return "forge_planning"
