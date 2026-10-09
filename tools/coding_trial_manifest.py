@@ -166,11 +166,17 @@ def _arm(value, root, purpose):
                  == product["inventory_sha256"], "Product inventory changed")
     else:
         _require(value["workflow"] == "none" and not value["artifacts"], "Plain arm cannot claim a product workflow")
-    _fields(value["loading"], "adapter receipt", "loading")
+    loading = value["loading"]
+    _fields(loading, "adapter receipt" + (" selected_entry" if type(loading) is dict
+                                        and "selected_entry" in loading else ""), "loading")
     adapter = "none" if purpose == "synthetic" else "codex-plain-v1" if product is None else "codex-plugin-v1"
     _require(value["loading"]["adapter"] == adapter, "Loading adapter does not match arm and purpose")
     if purpose == "synthetic":
         _require(value["loading"]["receipt"] is None, "Fixture loading cannot qualify a native host")
+    selected = loading.get("selected_entry")
+    if selected is not None:
+        _require(purpose == "prospective" and product is not None, "Only a native product may select an entry")
+        _resource(_resource(root, product["payload"], directory=True), selected)
 
 
 def _profile(value):

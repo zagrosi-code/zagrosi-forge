@@ -191,17 +191,8 @@ def _installed_payload(runtime, native, product, entries):
             "installedPath": runtime["installed"]["path"], "authPolicy": "ON_USE"}
 
 
-def _preparation(runtime, suite, arm_id, control, added):
-    fields(runtime["preparation"], "path sha256", "Native preparation reference")
-    reference = runtime["preparation"]
-    require(reference["path"] == "native-preparation.json", "Unexpected native preparation locator")
-    sha(reference["sha256"])
-    raw = _regular_bytes(control, reference["path"])
-    require(hashlib.sha256(raw).hexdigest() == reference["sha256"], "Native preparation bytes changed")
-    record = parse_json(raw)
-    fields(record, "schema image_digest executions", "Native preparation")
-    require(record["schema"] == "coding-trial-native-preparation/v1"
-            and record["image_digest"] == runtime["image_digest"], "Wrong native preparation identity")
+def _preparation_commands(runtime, suite, arm_id, added):
+    """One fixed offline sequence shared by creation and prepared readback."""
     host = suite["host"]["executable"]
     commands, observations = [[host, "--version"]], [None]
     listing = {"installed": [], "available": []}
@@ -218,25 +209,46 @@ def _preparation(runtime, suite, arm_id, control, added):
     selected = [] if added is None else ["--marketplace", "forge-evaluator"]
     commands.append([host, *_config(suite, arm_id, runtime), "plugin", "list", *selected, "--json"])
     observations.append(listing)
+    return commands, observations
+
+
+def _preparation_observation(execution, command, expected, *, discovery=False):
+    """Validate one actual readback before the next offline command can run."""
+    fields(execution, "argv returncode stdout stderr", "Native preparation execution")
+    require(execution["argv"] == command and type(execution["returncode"]) is int
+            and execution["returncode"] == 0, "Native preparation command or outcome differs")
+    require(isinstance(execution["stdout"], str) and isinstance(execution["stderr"], str), "Invalid preparation streams")
+    if expected is None:
+        require(execution["stdout"].strip() == NATIVE_VERSION, "Native version readback differs")
+        return
+    observed = parse_json(execution["stdout"])
+    if discovery and type(observed) is dict:
+        installed = observed.get("installed")
+        if (type(installed) is list and len(installed) == 1 and type(installed[0]) is dict
+                and "marketplaceSource" in installed[0]):
+            source = installed[0].pop("marketplaceSource")
+            require(source == {"sourceType": "local", "source": "/marketplace"},
+                    "Native marketplace readback differs")
+    require(fingerprint(observed) == fingerprint(expected), "Native preparation readback differs")
+
+
+def _preparation(runtime, suite, arm_id, control, added):
+    fields(runtime["preparation"], "path sha256", "Native preparation reference")
+    reference = runtime["preparation"]
+    require(reference["path"] == "native-preparation.json", "Unexpected native preparation locator")
+    sha(reference["sha256"])
+    raw = _regular_bytes(control, reference["path"])
+    require(hashlib.sha256(raw).hexdigest() == reference["sha256"], "Native preparation bytes changed")
+    record = parse_json(raw)
+    fields(record, "schema image_digest executions", "Native preparation")
+    require(record["schema"] == "coding-trial-native-preparation/v1"
+            and record["image_digest"] == runtime["image_digest"], "Wrong native preparation identity")
+    commands, observations = _preparation_commands(runtime, suite, arm_id, added)
     require(type(record["executions"]) is list and len(record["executions"]) == len(commands),
             "Wrong native preparation sequence")
     for index, (execution, command, expected) in enumerate(zip(record["executions"], commands, observations)):
-        fields(execution, "argv returncode stdout stderr", "Native preparation execution")
-        require(execution["argv"] == command and type(execution["returncode"]) is int
-                and execution["returncode"] == 0, "Native preparation command or outcome differs")
-        require(isinstance(execution["stdout"], str) and isinstance(execution["stderr"], str), "Invalid preparation streams")
-        if index == 0:
-            require(execution["stdout"].strip() == NATIVE_VERSION, "Native version readback differs")
-            continue
-        observed = parse_json(execution["stdout"])
-        if index == len(commands) - 1 and added is not None and type(observed) is dict:
-            installed = observed.get("installed")
-            if (type(installed) is list and len(installed) == 1 and type(installed[0]) is dict
-                    and "marketplaceSource" in installed[0]):
-                source = installed[0].pop("marketplaceSource")
-                require(source == {"sourceType": "local", "source": "/marketplace"},
-                        "Native marketplace readback differs")
-        require(fingerprint(observed) == fingerprint(expected), "Native preparation readback differs")
+        _preparation_observation(execution, command, expected,
+                                 discovery=index == len(commands) - 1 and added is not None)
 
 
 def read_native_runtime(suite, suite_root, task_id, arm_id, roots, *, auth_file=None):
@@ -270,6 +282,8 @@ def read_native_runtime(suite, suite_root, task_id, arm_id, roots, *, auth_file=
                     "profile_sha256": hashlib.sha256(profile_bytes).hexdigest()}
         require(all(runtime[key] == value for key, value in bindings.items()), "Native runtime binding is stale")
         require((runtime["installed"] is None) == (arm["product"] is None), "Native product selection differs")
+        if "selected_entry" in arm["loading"]:
+            require(runtime["selected_entry"] == arm["loading"]["selected_entry"], "Declared native entry differs")
         added = _installed_payload(runtime, native, paths["product"], entries)
         require(runtime["launch"] == native_recipe(suite, arm_id, runtime), "Native launch settings differ")
         _preparation(runtime, suite, arm_id, control, added)

@@ -50,8 +50,11 @@ def _admit(suite, suite_root, task_id, arm_id, roots, auth_file, *, loading_requ
 
 
 def _resources(suite, root):
-    names, receipts = {suite["host"]["isolation"]["profile"]}, []
-    receipts.append(suite["host"]["isolation"]["probe_receipt"])
+    names, receipts = set(), []
+    isolation = suite["host"]["isolation"]
+    if isolation is not None:
+        names.add(isolation["profile"])
+        receipts.append(isolation["probe_receipt"])
     for task in suite["tasks"].values():
         source = task["source"]
         names.update((source["export"], task["brief"]))

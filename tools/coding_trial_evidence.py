@@ -158,10 +158,10 @@ def planning_root(workspace: Path) -> Path:
     return next(iter(candidates), root)
 
 
-def workflow_summary(plugin_root: Path, workspace: Path, depth: str) -> int:
+def workflow_summary(plugin_root: Path, workspace: Path, depth: str | None, *, planning_dir: Path | None = None) -> int:
     """Require admitted planning at the trial depth before completed implementation."""
     try:
-        planning = planning_root(workspace)
+        planning = planning_root(workspace) if planning_dir is None else planning_dir
     except ValueError as exc:
         print(json.dumps({"success": False, "sections_recorded_complete": False,
                           "admission_success": False, "reasons": [str(exc)]}))
@@ -180,6 +180,9 @@ def workflow_summary(plugin_root: Path, workspace: Path, depth: str) -> int:
     artifacts = importlib.import_module(runtime.MODULE_NAMES["forge/artifacts.py"])
     original_print = output.print_json
     resolved_depth = artifacts.planning_depth(planning)
+    if depth is None:
+        depth = "lean" if resolved_depth == "fast" else resolved_depth
+        argv[-1] = depth
     if ("lean" if resolved_depth == "fast" else resolved_depth) != depth:
         return original_print({"success": False, "sections_recorded_complete": False,
                                "admission_success": False, "selected_depth": depth,
@@ -234,4 +237,12 @@ def workflow_summary(plugin_root: Path, workspace: Path, depth: str) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(workflow_summary(Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]))
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Validate captured Forge workflow completion.")
+    parser.add_argument("plugin_root", type=Path)
+    parser.add_argument("workspace", type=Path)
+    parser.add_argument("depth", nargs="?")
+    parser.add_argument("--planning-dir", type=Path)
+    args = parser.parse_args()
+    raise SystemExit(workflow_summary(args.plugin_root, args.workspace, args.depth, planning_dir=args.planning_dir))
