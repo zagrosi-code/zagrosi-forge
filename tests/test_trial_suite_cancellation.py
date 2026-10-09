@@ -99,7 +99,8 @@ def test_running_cancellation_retains_bounded_output_and_stops_group(tmp_path):
     child = "import time; from pathlib import Path; time.sleep(1); Path('survivor').write_text('escaped')"
     script = ("import subprocess,sys,time; from pathlib import Path; "
               + (f"subprocess.Popen([sys.executable,'-c',{child!r}]); " if os.name == "posix" else "")
-              + "print('x'*100+'READY',flush=True); print('ERR',file=sys.stderr,flush=True); "
+              + "sys.stdout.buffer.write(b'x'*100+b'READY\\n'); sys.stdout.buffer.flush(); "
+              "sys.stderr.buffer.write(b'ERR\\n'); sys.stderr.buffer.flush(); "
               "Path('ready').write_text('ready'); time.sleep(5)")
     def cancel_after_ready():
         deadline = time.monotonic() + 3

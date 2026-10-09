@@ -120,7 +120,7 @@ TEST_MANIFEST = {
     "test_trial_planning_roots.py": "e8968fb283b0de99963020fbdba3778d15dc7f72550fa893e3e9821ff4d4ab16",
     "test_trial_realism.py": "f14d4364d3525b2221e9d2ce9a814a0a671e290871a995ab300affdb597b28a7",
     "test_trial_suite_attempt_lineage.py": "1d18e5011fbb2a265e8b40d48df74bca4cacb9f898f555ef70967b3ed66ef6d9",
-    "test_trial_suite_cancellation.py": "a704ca3f18a69119e18d8acdb2493b57f5704666e1953c1e9ba40861416dd2e2",
+    "test_trial_suite_cancellation.py": "db5a6857af0a6d5673d228535e8479ab1bc5ebf09db61a1e79e254d9821a9440",
     "test_trial_suite_cleanup_guard.py": "4f6d652e45b4f19c82828ccabb80a278b89bb97e74484c49b19f2bc630ab1e6f",
     "test_trial_suite_cleanup_review.py": "e22de2df7ae6459e86e00d9e63da24ad36a93faf43f128374bb4d9234de0995a",
     "test_trial_suite_cli.py": "0982bb62ad80415e7076da2cfe2fd83cfea88d62fdd097f0d1da2c78e2241059",
