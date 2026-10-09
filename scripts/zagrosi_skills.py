@@ -157,13 +157,14 @@ def bootstrap(manifest: dict[str, str], cli_path: Path, namespace: str):
 # BEGIN RUNTIME MANIFEST
 RUNTIME_MANIFEST = {
     "forge/__init__.py": "f6b2a10e6ee7118cac49c823f53216f5952058d206db18bf681db53864afa73f",
-    "forge/actions.py": "db1a161009e8724f7868eaec5bbf1d9a1c716d65ce22c1fcbd03c47f8c4abd4b",
+    "forge/actions.py": "9e01b2dbae283e33f251bf2132ee2a4d8054d2b008f415e07a6a92e7f496530d",
     "forge/artifacts.py": "fbd866a60754a144d51c4977ef29a16510cd1b5600d14460be27123c7070d786",
     "forge/authority.py": "dc3b592eeb2deba8e5778887f68c1435c4b04a7b215bc6b7f028c8a995563b41",
     "forge/capabilities.py": "156ccf97e99dabc99c0ae5aff3671984bb9a1042d024ba24e1d18aa4cde7fcbc",
     "forge/child_process.py": "2ef8f0447fc2e75ebd6487c1c204a45bf28112363c383d09e34c2de49fef04b9",
     "forge/cli.py": "d66ce469e0fcd71d49a065a133185dc1a2d343604a15a7cafdb718bae2b5d7e2",
     "forge/codex_config.py": "e8aa857d1243b9e494eee02bb09240b8623d43cd34007e84220e905f77156f5c",
+    "forge/command_args.py": "46ec41dc6480f0a0ba5220cc4d73044c5f6ddd70d80b5b7af1c0016c9c7fa8d7",
     "forge/compatibility.py": "421c9b25b7032e87d439798852d35a6958e0e22d6bb10f3ff57edf31db208da3",
     "forge/context.py": "59a938b30049ce697eecf16c92701a21dcef4e583100122d386897a013fa643d",
     "forge/context_links.py": "0a111ee3960d0ecde2a05a180a3a62ac53e382e9ae13eaa4463faa215db7099a",

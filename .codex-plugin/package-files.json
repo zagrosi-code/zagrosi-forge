@@ -131,6 +131,7 @@
   "scripts/forge/child_process.py",
   "scripts/forge/cli.py",
   "scripts/forge/codex_config.py",
+  "scripts/forge/command_args.py",
   "scripts/forge/compatibility.py",
   "scripts/forge/context.py",
   "scripts/forge/context_links.py",

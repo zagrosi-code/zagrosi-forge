@@ -6,10 +6,7 @@ from pathlib import Path
 import sys
 
 from . import artifacts, mutable_inputs, sections, state, storage
-
-
-def command(name: str, *args: str) -> list[str]:
-    return [sys.executable, str(Path(__file__).resolve().parents[1] / "zagrosi_skills.py"), name, *args]
+from .command_args import command
 
 
 def implementation_profile(planning_dir: Path, profile: str | None = None) -> str:
