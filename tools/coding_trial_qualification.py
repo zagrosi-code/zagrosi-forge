@@ -104,19 +104,23 @@ def _identity(info):
             info.st_mtime_ns, info.st_ctime_ns)
 
 
-def read_bytes(root, name):
+def read_bytes(root, name, *, max_bytes=None):
+    if max_bytes is not None:
+        integer(max_bytes, "Resource byte limit", minimum=0)
     path = resource(root, name)
     before = path.stat()
+    require(max_bytes is None or before.st_size <= max_bytes, f"Resource exceeds byte limit: {name}")
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(descriptor, "rb") as handle:
         observed = os.fstat(handle.fileno())
         require(stat.S_ISREG(observed.st_mode) and observed.st_nlink == 1,
                 f"Resource is no longer a regular single-link file: {name}")
         require(_identity(observed) == _identity(before), f"Resource changed before reading: {name}")
-        raw = handle.read()
+        raw = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
         after = os.fstat(handle.fileno())
     require(_identity(after) == _identity(before) == _identity(path.lstat()),
             f"Resource changed during reading: {name}")
+    require(max_bytes is None or len(raw) <= max_bytes, f"Resource exceeds byte limit: {name}")
     return raw
 
 

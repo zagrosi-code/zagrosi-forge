@@ -13,6 +13,10 @@ _runtime = _launcher.load_runtime()
 _execute = importlib.import_module(_runtime.MODULE_NAMES["forge/child_process.py"]).execute
 
 
-def execute(argv: list[str], workspace: Path, *, prompt: str | None = None, timeout: float = 60) -> dict:
-    return _execute(argv, workspace, prompt=prompt, timeout=timeout,
-                    env={"PYTHONPATH": str(workspace / "src"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"})
+def execute(argv: list[str], workspace: Path, *, prompt: str | None = None, timeout: float = 60,
+            env: dict[str, str] | None = None, output_limit: int = 12000,
+            inherit_env: bool = True) -> dict:
+    if env is None:
+        env = {"PYTHONPATH": str(workspace / "src"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"}
+    return _execute(argv, workspace, prompt=prompt, timeout=timeout, env=env,
+                    output_limit=output_limit, inherit_env=inherit_env)
