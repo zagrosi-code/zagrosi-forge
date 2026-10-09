@@ -21,6 +21,8 @@ TEST_MANIFEST = {
     "detached_test_support.py": "5deabb6b1dadbc155d450981e2836e730574f41f83e3feb53d7d462681467295",
     "fault_injection_support.py": "83597a7136891f9ee6cbb38603f7e2179c602ffcbae3cf307bdeec47dc88811b",
     "forge_test_helpers.py": "94180fbdb20ebefca347f1969cf04a3f063281ed7ccc02f3f02eea8aea414db4",
+    "native_admission_fixtures.py": "f12349f1326f08096006ebf6e84fd8602c3962cfb748a3a3938a2d11ef968790",
+    "native_reservation_fixtures.py": "86cd4c6a4d0359b74629e29e8a4580dcfe051e57fdfe6b856105ea4a7921cd9a",
     "runtime_support.py": "1317eecfdb7a424b0cecefe808dce719b9d2a102a30360ef813e049f16751699",
     "test_adapter_loading.py": "d8c4086464c3cd401caa2d6887b6f4ebbb44d863620f02086507d90da60a8b7c",
     "test_benchmark_forge.py": "1436b31c5fc07824a903fb4a2f5bccf565059dbffa67151da7819b932c2383eb",
@@ -117,6 +119,20 @@ TEST_MANIFEST = {
     "test_trial_matrix.py": "54520d8161d2ec6afd20f558782cd074d7149bd7cbd89c6cc6a5c4177210ba34",
     "test_trial_planning_roots.py": "e8968fb283b0de99963020fbdba3778d15dc7f72550fa893e3e9821ff4d4ab16",
     "test_trial_realism.py": "f14d4364d3525b2221e9d2ce9a814a0a671e290871a995ab300affdb597b28a7",
+    "test_trial_suite_cancellation.py": "a704ca3f18a69119e18d8acdb2493b57f5704666e1953c1e9ba40861416dd2e2",
+    "test_trial_suite_docker.py": "e574fbaaaf77c22bce826711a6929ecaa9385ffa3288687129c2a76651c1e0df",
+    "test_trial_suite_inventory.py": "adf72d6df25437d81b8d19974a2831c64e8ba929d990342402f0769a62498115",
+    "test_trial_suite_isolation.py": "4c1e96062ecfb9c20106330ac1ca2ca9cedeb59e7308cd0f46908f25d8eb34dd",
+    "test_trial_suite_manifest.py": "70b3ee83f608643d5757df9f9c90c6be33ee041ef05e964e4f5072b535fc0f56",
+    "test_trial_suite_native_events.py": "9144ff9d34deec2b89cd16442bf70751d890dd63618e4674cb04a2de86eb53b7",
+    "test_trial_suite_native_layout.py": "8444958e4633cd5d77f75a7caaa1f77122f07abe167612140fa197191d519be9",
+    "test_trial_suite_native_loading.py": "b43d8ed625b33f5285fc1248d94a17e26c6cb4c9bcf8cd0d6c036faa42535f95",
+    "test_trial_suite_native_preflight.py": "3613732a70efeb0194a9175a78edc8a656a24ce6077852170fa5cd3d689c30be",
+    "test_trial_suite_native_runtime.py": "ecdff81fab5c32f61cb2f362191248c83bf8e4c4c9506a7f6adff8e24ee45dae",
+    "test_trial_suite_probes.py": "6371d93ac2e624fe6052fc95cdb8400955d34b940c4182d9c94922c8eb43167b",
+    "test_trial_suite_qualification.py": "09731949215b0bc81c39df5007157f3d5e2d44013ecb712e1a273943d2bb9279",
+    "test_trial_suite_reservation.py": "592f898fa34b6421f33ff800c722f1377328d475b0d76d40853fdc4f12dcb86d",
+    "test_trial_suite_resource_bounds.py": "b7d7cb09491b3d0774cd20f5687fb561ebbb5205200546e35ffc93e10d89bb9b",
     "test_trial_workspaces.py": "56f3cf95406268ec2dd6b413b1bf54ff1f6bca7f0f0b60fe9f8e3f80dc5b008d",
     "test_typescript_contract.py": "56505d33575982a78c65601b31e2791fd744e4e3de9a5652e2f1b30390ced3dc",
     "test_verification_contracts.py": "76bb8151b2e64010f25b1d7cc60a96f4b4acba65cb7da1c257140546e5977314",
@@ -127,7 +143,8 @@ TEST_MANIFEST = {
     "test_workflow_efficiency.py": "e259443b0f4d4bc1ada9affba22f975c54f888dfc1e651f05ef01a93b0b3a209",
     "test_workflow_handoff.py": "df05ed94edf06bdd4b36c9bde177461d6da73ae23d6c92127c5d13b30ba5c3a2",
     "test_workflow_sequences.py": "7a9fd3be2278fc3f3f97739aa438cf73380fc92261ca42fa59a4d8dd72353672",
-    "test_zagrosi_skills.py": "d2e0e0c6c4d1f2efb620ccadb0377473aa2f1898bb58d0b78b7cfbfa3c686cf0"
+    "test_zagrosi_skills.py": "d2e0e0c6c4d1f2efb620ccadb0377473aa2f1898bb58d0b78b7cfbfa3c686cf0",
+    "trial_suite_fixtures.py": "a0b95fec633cbea667581cb940390da37e376c42b7de70d54cba279216c85a2e"
 }
 # END TEST MANIFEST
 

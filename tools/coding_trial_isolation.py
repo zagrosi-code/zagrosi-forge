@@ -253,7 +253,7 @@ def _tree_observations(paths):
             for key in ("workspace", "product", "public", "generated")}
 
 
-def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file=None):
+def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file=None, cancel_event=None):
     """Run actual access and detached-child controls under the exact role grants."""
     import hashlib
     import json
@@ -264,7 +264,7 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
     import time
     import uuid
     from datetime import datetime, timezone
-    from coding_trial_docker import PROBE_PYTHON, preflight, run_owned, save_json
+    from coding_trial_docker import PROBE_PYTHON, _check_cancelled, preflight, run_owned, save_json
     from coding_trial_process import execute
     from coding_trial_qualification import CHECKS
 
@@ -275,7 +275,9 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
     # Availability is read-only and retained before any candidate/root mutation.
     initial = evidence_dir / "preflight"
     initial.mkdir()
-    identity = preflight(profile, initial)
+    options = {} if cancel_event is None else {"cancel_event": cancel_event}
+    identity = preflight(profile, initial, **options)
+    _check_cancelled(cancel_event, evidence_dir)
     nonce = "forge-probe-" + uuid.uuid4().hex
     scratch = paths["workspace"] / nonce
     private = evidence_dir / "private-control.txt"
@@ -296,13 +298,17 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
     outcomes, error = [], None
     try:
         # Same private bytes are readable without the Docker boundary.
+        _check_cancelled(cancel_event, evidence_dir)
         control_script = "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())"
         control = execute([sys.executable, "-I", "-B", "-c", control_script, str(private)], evidence_dir,
-                          timeout=5, output_limit=1024, env={}, inherit_env=False)
+                          timeout=5, output_limit=1024, env={}, inherit_env=False, **options)
         save_json(evidence_dir / "unrestricted-read.json", control)
+        _check_cancelled(cancel_event, evidence_dir)
         unrestricted_read = control["returncode"] == 0 and control["stdout"].strip() == nonce
         control_dir = evidence_dir / "unrestricted-child"
         control_dir.mkdir()
+        _check_cancelled(cancel_event, evidence_dir)
+        # Retain the detached control's handshake and finish it before honoring cancellation.
         detached = execute([sys.executable, "-I", "-B", "-c", DETACHED_PROBE,
                             json.dumps({"nonce": nonce, "marker": str(control_dir), "wait": False})],
                            evidence_dir, timeout=8, output_limit=4096, env={}, inherit_env=False)
@@ -315,6 +321,7 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
         while not (control_dir / "survived").exists() and time.monotonic() < deadline:
             time.sleep(.02)
         unrestricted_child = (control_dir / "survived").read_text() == nonce
+        _check_cancelled(cancel_event, evidence_dir)
         writable_target = None if writable_mount is None else writable_mount["target"] + "/" + nonce
         read_only = [mount["target"] for mount in layout["mounts"] if mount["read_only"] and mount["target"] != "/codex/auth.json"]
         spec = {"private": str(private), "scratch": "/workspace/" + nonce,
@@ -323,7 +330,7 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
         access_dir = evidence_dir / "access"
         access_dir.mkdir()
         access = run_owned(profile, layout, [PROBE_PYTHON, "-I", "-B", "-c", ACCESS_PROBE, json.dumps(spec)],
-                           cwd="/workspace", env={}, prompt=None, timeout=15, output_limit=16384, evidence_dir=access_dir)
+                           cwd="/workspace", env={}, prompt=None, timeout=15, output_limit=16384, evidence_dir=access_dir, **options)
         outcomes.append(access)
         observed = _probe_result(access)
         save_json(evidence_dir / "access-observations.json", observed)
@@ -340,6 +347,7 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
         })
         detached_ok = unrestricted_child
         for mode in ("normal", "timeout"):
+            _check_cancelled(cancel_event, evidence_dir)
             if writable is not None:
                 marker = writable / mode
                 marker.mkdir()
@@ -351,7 +359,7 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
             result = run_owned(profile, layout, [PROBE_PYTHON, "-I", "-B", "-c", DETACHED_PROBE,
                                json.dumps({"nonce": nonce, "marker": target, "wait": mode == "timeout"})],
                                cwd="/workspace", env={}, prompt=None, timeout=2 if mode == "timeout" else 8,
-                               output_limit=4096, evidence_dir=folder)
+                               output_limit=4096, evidence_dir=folder, **options)
             outcomes.append(result)
             process = result["process"]
             observed_ready = parse_json(process["stdout"])
@@ -368,6 +376,7 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
             detached_ok = detached_ok and ok
         checks["detached-child-stopped"] = bool(detached_ok)
         checks["owned-container-removed"] = all(item["lifecycle"]["status"] == "verified" for item in outcomes)
+        _check_cancelled(cancel_event, evidence_dir)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         error = exc
         save_json(evidence_dir / "probe-error.json", {"error": str(exc)})
@@ -385,8 +394,9 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
         save_json(evidence_dir / "restoration.json", {"public_roots_unchanged": unchanged})
         if not unchanged:
             checks = dict.fromkeys(checks, False)
-    if error is not None and str(error).startswith("unsupported-profile:"):
+    if error is not None and str(error).startswith(("unsupported-profile:", "execution-cancelled:")):
         raise error
+    _check_cancelled(cancel_event, evidence_dir)
     save_json(evidence_dir / "timing.json", {"started_at": started, "ended_at": datetime.now(timezone.utc).isoformat(),
               "seconds": time.monotonic() - clock_started})
     source_root = Path(__file__).resolve().parents[1]
@@ -425,11 +435,11 @@ def qualify_profile(suite, suite_root, layout, evidence_dir, *, roots, auth_file
 
 
 def execute_isolated(suite, suite_root, layout, argv, *, roots, cwd, env, prompt, timeout,
-                     output_limit, evidence_dir, auth_file=None):
+                     output_limit, evidence_dir, auth_file=None, cancel_event=None):
     """Requalify this exact exposure, then run one owned process without inheritance."""
     import hashlib
     from pathlib import PurePosixPath
-    from coding_trial_docker import run_owned
+    from coding_trial_docker import _check_cancelled, run_owned
     from coding_trial_qualification import environment, integer, positive, strings
 
     profile, _, evidence_dir = _prepared_execution(suite, suite_root, layout, roots, evidence_dir, auth_file)
@@ -446,8 +456,11 @@ def execute_isolated(suite, suite_root, layout, argv, *, roots, cwd, env, prompt
     except (ValueError, TypeError) as exc:
         raise ValueError(f"suite-invalid: {exc}") from exc
     _create_evidence(evidence_dir)
+    _check_cancelled(cancel_event, evidence_dir)
+    options = {} if cancel_event is None else {"cancel_event": cancel_event}
     qualification_path = evidence_dir / "qualification"
-    qualification = qualify_profile(suite, suite_root, layout, qualification_path, roots=roots, auth_file=auth_file)
+    qualification = qualify_profile(suite, suite_root, layout, qualification_path, roots=roots, auth_file=auth_file, **options)
+    _check_cancelled(cancel_event, evidence_dir)
     if any(check["status"] != "passed" for check in qualification["checks"]):
         raise ValueError(f"isolation-unqualified: Actual probes failed; evidence: {qualification_path}")
     # Probe scratch is gone; rederive current grants before the actual process.
@@ -456,7 +469,7 @@ def execute_isolated(suite, suite_root, layout, argv, *, roots, cwd, env, prompt
     execution = evidence_dir / "execution"
     execution.mkdir()
     result = run_owned(profile, layout, argv, cwd=cwd, env=env, prompt=prompt, timeout=timeout,
-                       output_limit=output_limit, evidence_dir=execution)
+                       output_limit=output_limit, evidence_dir=execution, **options)
     receipt = qualification_path / "qualification.json"
     timing = parse_json((qualification_path / "timing.json").read_bytes())
     return {"process": result["process"], "isolation": {"adapter": "docker-v1",

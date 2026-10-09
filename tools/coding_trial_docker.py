@@ -26,7 +26,13 @@ def save_json(path, value):
         raise ValueError(f"input-exists: {path}") from exc
 
 
-def invoke(state, args, *, prompt=None, timeout=30, output_limit=8388608, context=False):
+def _check_cancelled(cancel_event, evidence_dir):
+    if cancel_event is not None and cancel_event.is_set():
+        raise ValueError(f"execution-cancelled: Operation cancelled; evidence: {evidence_dir}")
+
+
+def invoke(state, args, *, prompt=None, timeout=30, output_limit=8388608, context=False, cancel_event=None):
+    _check_cancelled(cancel_event, state["evidence"])
     command = [state["profile"]["docker_executable"]]
     if not context:
         command += ["--host", state["profile"]["endpoint"], "--config", str(state["config"])]
@@ -34,9 +40,10 @@ def invoke(state, args, *, prompt=None, timeout=30, output_limit=8388608, contex
     environment = {"HOME": str(Path.home())} if context else {}
     started_at = datetime.now(timezone.utc).isoformat()
     path = state["evidence"] / f"docker-{len(state['invocations']):03d}.json"
+    options = {} if cancel_event is None else {"cancel_event": cancel_event}
     try:
         result = execute(command, state["evidence"], prompt=prompt, timeout=timeout,
-                         output_limit=output_limit, env=environment, inherit_env=False)
+                         output_limit=output_limit, env=environment, inherit_env=False, **options)
     except BaseException as exc:
         save_json(path, {"argv": command, "environment": environment, "interruption": type(exc).__name__,
                          "detail": str(exc), "started_at": started_at,
@@ -66,21 +73,23 @@ def _json_result(result, *, array=False):
     return value
 
 
-def preflight(profile, evidence_dir):
+def preflight(profile, evidence_dir, *, cancel_event=None):
     """Read actual local identities; never pull an image or create a container."""
     state = {"profile": profile, "evidence": Path(evidence_dir), "invocations": [],
              "config": Path(evidence_dir) / "docker-config"}
     state["config"].mkdir()
+    options = {} if cancel_event is None else {"cancel_event": cancel_event}
     try:
+        _check_cancelled(cancel_event, evidence_dir)
         require(profile["endpoint"].startswith(("unix:///", "npipe:////")), "Only local Docker endpoints are supported")
         require(PROBE_PYTHON in profile["runtime_paths"], "Prepared image must declare the fixed probe interpreter")
         executable = Path(profile["docker_executable"]).resolve(strict=True)
         state["executable_sha256"] = hashlib.sha256(executable.read_bytes()).hexdigest()
-        context = _json_result(invoke(state, ["context", "inspect", profile["context"]], context=True), array=True)
+        context = _json_result(invoke(state, ["context", "inspect", profile["context"]], context=True, **options), array=True)
         require(context.get("Name") == profile["context"], "Docker context identity changed")
         require(context.get("Endpoints", {}).get("docker", {}).get("Host") == profile["endpoint"],
                 "Docker endpoint changed")
-        version = _json_result(invoke(state, ["version", "--format", "{{json .}}"] ))
+        version = _json_result(invoke(state, ["version", "--format", "{{json .}}"], **options))
         require(version.get("Server", {}).get("Version") == profile["server_version"], "Docker server version changed")
         client = version["Client"]
         require(all(isinstance(client.get(key), str) and client[key] for key in ("Version", "Os", "Arch")),
@@ -91,10 +100,10 @@ def preflight(profile, evidence_dir):
         state["execution"].update(returncode=captured["process"]["returncode"],
                                   executable_sha256=state["executable_sha256"], version=client["Version"],
                                   platform=client["Os"] + "/" + client["Arch"])
-        info = _json_result(invoke(state, ["info", "--format", "{{json .}}"] ))
+        info = _json_result(invoke(state, ["info", "--format", "{{json .}}"], **options))
         require(info.get("ID") == profile["server_id"] and info.get("ServerVersion") == profile["server_version"],
                 "Docker server identity changed")
-        image = _json_result(invoke(state, ["image", "inspect", "--platform", profile["platform"], profile["image_digest"]]), array=True)
+        image = _json_result(invoke(state, ["image", "inspect", "--platform", profile["platform"], profile["image_digest"]], **options), array=True)
         platform = "/".join(part for part in (image.get("Os"), image.get("Architecture"), image.get("Variant")) if part)
         require(platform == profile["platform"], "Prepared image platform changed")
         digest = profile["image_digest"].split("@")[-1]
@@ -103,9 +112,11 @@ def preflight(profile, evidence_dir):
         require(re.fullmatch(r"sha256:[0-9a-f]{64}", image.get("Id", "")), "Invalid selected image identity")
         require(not image.get("Config", {}).get("Volumes"), "Prepared image declares implicit volume grants")
         state["image_id"] = image["Id"]
+        _check_cancelled(cancel_event, evidence_dir)
         return state
     except (OSError, ValueError, KeyError, TypeError) as exc:
         save_json(Path(evidence_dir) / "preflight-error.json", {"error": str(exc)})
+        _check_cancelled(cancel_event, evidence_dir)
         raise ValueError(f"unsupported-profile: {exc}; evidence: {evidence_dir}") from exc
 
 
@@ -150,9 +161,10 @@ def _grants(value, profile, layout, image_id):
     require(value["Config"].get("Healthcheck", {}).get("Test") == ["NONE"], "Container healthcheck is enabled")
 
 
-def run_owned(profile, layout, argv, *, cwd, env, prompt, timeout, output_limit, evidence_dir):
+def run_owned(profile, layout, argv, *, cwd, env, prompt, timeout, output_limit, evidence_dir, cancel_event=None):
     """Own one fresh container, retaining process and lifecycle as separate results."""
-    state = preflight(profile, evidence_dir)
+    options = {} if cancel_event is None else {"cancel_event": cancel_event}
+    state = preflight(profile, evidence_dir, **options)
     owner = uuid.uuid4().hex
     limits = profile["limits"]
     cidfile = Path(evidence_dir) / "container.cid"
@@ -169,7 +181,9 @@ def run_owned(profile, layout, argv, *, cwd, env, prompt, timeout, output_limit,
                 json.dumps({"argv": argv, "cwd": cwd, "env": env}, separators=(",", ":"))]
     lifecycle = {"status": "unverified", "reason": "Owned container has not been removed", "evidence": state["invocations"]}
     process, failure, created = None, None, None
+    _check_cancelled(cancel_event, evidence_dir)
     try:
+        # Finish bounded creation so cancellation cannot lose the daemon's exact ID.
         created = invoke(state, command)
     except BaseException as exc:
         failure = exc
@@ -200,8 +214,9 @@ def run_owned(profile, layout, argv, *, cwd, env, prompt, timeout, output_limit,
         _grants(observed, profile, layout, state["image_id"])
         if failure is not None:
             raise failure
+        _check_cancelled(cancel_event, evidence_dir)
         process = invoke(state, ["start", "--attach", "--interactive", identifier], prompt=prompt,
-                         timeout=timeout, output_limit=output_limit)
+                         timeout=timeout, output_limit=output_limit, **options)
     except BaseException as exc:
         failure = exc
     finally:
@@ -242,7 +257,7 @@ def run_owned(profile, layout, argv, *, cwd, env, prompt, timeout, output_limit,
             lifecycle.update(status="failed", reason=str(exc))
         save_json(Path(evidence_dir) / "lifecycle.json", {"container_id": identifier, "owner": owner, **lifecycle})
     if failure is not None:
-        if isinstance(failure, (KeyboardInterrupt, SystemExit)) or str(failure).startswith("unsupported-profile:"):
+        if isinstance(failure, (KeyboardInterrupt, SystemExit)) or str(failure).startswith(("unsupported-profile:", "execution-cancelled:")):
             raise failure
         raise ValueError(f"isolation-unqualified: {failure}; lifecycle {lifecycle['status']}; evidence: {evidence_dir}") from failure
     return {"process": process, "container_id": identifier, "lifecycle": lifecycle,
