@@ -10,7 +10,6 @@ import hashlib
 import json
 from pathlib import Path
 import re
-import shutil
 import sys
 
 import pytest
@@ -29,7 +28,7 @@ from trial_suite_assessment_cases import (
     RoleBoundary, assessment_fixture, codes, last_assessment, load_json,
     load_ref, process_result, review_for, save_review,
 )
-from trial_suite_fixtures import link, write_files
+from trial_suite_fixtures import link, remove_owned_tree, write_files
 from trial_suite_prepare_cases import PYTHON, bytes_at, save_manifest
 
 
@@ -262,7 +261,7 @@ class TestSuiteWorkflow:
         trial, owned, roles, first = run_workflow(tmp_path, monkeypatch)
         original = summary(trial, first)
         review = save_review(trial, review_for(trial, first))
-        shutil.rmtree(trial / "workspace")
+        remove_owned_tree(trial / "workspace")
         def forbidden(*args, **kwargs):
             pytest.fail("Review may not rerun workflow, checks or the writer")
         monkeypatch.setattr(workflow, "run_owned", forbidden)

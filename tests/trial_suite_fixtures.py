@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import stat
 
 import pytest
@@ -18,6 +20,24 @@ def write_files(root: Path, values: dict[str, str]) -> None:
         destination = root / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(text, encoding="utf-8")
+
+
+def remove_owned_tree(root: Path) -> None:
+    """Remove a temporary fixture tree, including read-only Windows Git objects."""
+    def retry_readonly(function, name, error):
+        failure = error[1]
+        if (os.name != "nt" or function not in (os.unlink, os.remove)
+                or not isinstance(failure, PermissionError)):
+            raise failure
+        path = Path(name)
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & stat.S_IWRITE:
+            raise failure
+        path.chmod(stat.S_IMODE(info.st_mode) | stat.S_IWRITE)
+        function(name)
+    # onerror retains the package's Python 3.11 compatibility.
+    shutil.rmtree(root, onerror=retry_readonly)
+    assert not os.path.lexists(root), "The fixture must actually remove its requested tree"
 
 
 def regular_entries(root: Path, names: tuple[str, ...]) -> dict:

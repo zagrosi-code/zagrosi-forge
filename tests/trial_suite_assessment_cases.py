@@ -9,7 +9,6 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
-import shutil
 import sys
 
 import pytest
@@ -19,7 +18,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import coding_trial_isolation as isolation
 from coding_trial_assessment import assess_suite
 from coding_trial_suite import run_suite
-from trial_suite_fixtures import make_suite, write_files
+from trial_suite_fixtures import make_suite, remove_owned_tree, write_files
 from trial_suite_prepare_cases import PYTHON, bytes_at, git, read_reference, save_manifest
 
 
@@ -256,7 +255,7 @@ class TestSuiteAssessment:
                 options = ["--amend"] if action == "amend" else []
                 git(workspace, "commit", "--no-gpg-sign", *options, "-m", "Candidate delivery")
             elif action == "remove-git":
-                shutil.rmtree(workspace / ".git")
+                remove_owned_tree(workspace / ".git")
         trial, _, _, verdict = run_case(tmp_path, monkeypatch, local_commits=policy,
                                        boundary=RoleBoundary(writer=mutate))
         if valid:
@@ -276,7 +275,7 @@ class TestSuiteAssessment:
         before = bytes_at(candidate)
         workspace = trial / "workspace"
         (workspace / "backend/app/service.py").write_text("raise RuntimeError('later unrelated edit')\n")
-        shutil.rmtree(workspace / ".git")
+        remove_owned_tree(workspace / ".git")
         second = assess_suite(trial)
         assert second["number"] == 2 and second["common_quality"] == "pending"
         assert bytes_at(candidate) == before

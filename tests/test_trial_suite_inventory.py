@@ -186,7 +186,10 @@ def test_relative_acyclic_directory_alias_is_retained_and_copies_as_a_link(tree,
     assert inventory(destination) == expected
     assert (destination / "current").is_symlink()
     assert os.readlink(destination / "current") == "backend/app"
-    assert (destination / "current/service.py").read_bytes() == (tree / "backend/app/service.py").read_bytes()
+    assert (destination / "backend/app/service.py").read_bytes() == (tree / "backend/app/service.py").read_bytes()
+    if os.name == "posix":
+        # Keep literal POSIX link identity on Windows; native traversal is supplementary.
+        assert (destination / "current/service.py").read_bytes() == (tree / "backend/app/service.py").read_bytes()
 
 
 def test_links_preserve_literal_targets_and_target_changes_affect_identity(tree):
