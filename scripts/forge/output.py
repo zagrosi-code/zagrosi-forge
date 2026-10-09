@@ -95,13 +95,69 @@ def pretty_findings(findings: list[dict[str, Any]], limit: int | None = 8) -> li
     lines: list[str] = []
     for item in findings[:limit]:
         location = f" - {item['path']}" if item.get("path") else ""
-        lines.append(f"  - {item.get('severity', 'unknown')}: {item.get('code', 'finding')}: {item.get('message', '')}{location}")
+        message = f": {item['message']}" if item.get("message") else ""
+        lines.append(f"  - {item.get('severity', 'unknown')}: {item.get('code', 'finding')}{message}{location}")
         for key in ("recommendation", "next_action", "next_command", "commands"):
             if item.get(key):
                 lines.append(f"    {key}: {item[key]}")
     if limit is not None and len(findings) > limit:
         lines.append(f"  - ... {len(findings) - limit} more finding(s)")
     return lines
+
+
+def _error_findings(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    errors = payload.get("errors", [])
+    errors = errors if isinstance(errors, list) else [errors]
+    errors = [*errors, payload.get("error")]
+    if payload.get("success") is False:
+        errors.append(payload.get("message"))
+    context = {key: payload[key] for key in ("path", "recommendation", "next_action", "next_command", "commands") if key in payload}
+    return [{"severity": "high", "code": payload.get("error_code", "gate-error"), "message": error, **context}
+            for error in errors if isinstance(error, str) and error.strip()]
+
+
+def _format_diagnostics(payload: dict[str, Any], label: str, *, actions_shown: bool = False) -> list[str]:
+    pending, findings, errors = [payload], [], []
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            findings.extend(value.get("findings") or [])
+            findings.extend(value.get("diagnostics") or [])
+            errors.extend(_error_findings(value))
+            pending.extend(reversed(list(value.values())))
+        elif isinstance(value, list):
+            pending.extend(reversed(value))
+    unique = {json.dumps(item, sort_keys=True): item for item in findings}
+    # A plain error can repeat a richer finding, but distinct paths/actions matter.
+    contexts = {json.dumps({key: value for key, value in item.items() if key not in ("severity", "code")}, sort_keys=True)
+                for item in findings}
+    for error in errors:
+        context = {key: value for key, value in error.items() if key not in ("severity", "code")}
+        if error["code"] != "gate-error" or json.dumps(context, sort_keys=True) not in contexts:
+            unique[json.dumps(error, sort_keys=True)] = error
+
+    shown: dict[str, set[str]] = {}
+    if actions_shown:
+        fields = {"message", "next_action", "next_command", "commands"}
+        actions = [(payload, fields), (payload.get("entry") or {}, fields)]
+        # format_actions prints only the error from an embedded packet.
+        actions.extend((action.get("packet") or {}, {"message"}) for action, _ in list(actions))
+        for action, fields in actions:
+            for finding in _error_findings({**action, "errors": [], "message": None}):
+                shown.setdefault(json.dumps(finding, sort_keys=True), set()).update(fields)
+    display = []
+    for key, item in unique.items():
+        if key in shown:
+            item = {field: value for field, value in item.items() if field not in shown[key]}
+            if item == {"severity": "high", "code": "gate-error"}:
+                continue
+        display.append(item)
+    if not display:
+        return []
+    standalone_flight = {"phase", "stage", "gates"}.issubset(payload)
+    full_output = (_session._CLI_CONTEXT.get() or {}).get("full_output")
+    limit = 8 if payload.get("full_report") and not (standalone_flight or full_output) else None
+    return [f"{label}:", *pretty_findings(display, limit=limit)]
 
 
 def format_flight(payload: dict[str, Any], indent: str = "") -> list[str]:
@@ -132,7 +188,7 @@ def format_flight(payload: dict[str, Any], indent: str = "") -> list[str]:
     return lines
 
 
-def format_quality(payload: dict[str, Any]) -> list[str]:
+def _quality_heading(payload: dict[str, Any]) -> list[str]:
     lines = [
         f"ZAGROSI FORGE GATE: {str(payload.get('gate', 'quality')).upper()}",
         f"Status: {plain_status(payload.get('success'))}   Score: {payload.get('score', 'n/a')}   Strict: {payload.get('strict', False)}",
@@ -140,13 +196,11 @@ def format_quality(payload: dict[str, Any]) -> list[str]:
     path = pretty_path(payload, "planning_dir", "plugin_root", "path")
     if path:
         lines.append(f"Path: {path}")
-    findings = payload.get("findings") or []
-    if findings:
-        lines.append("Findings:")
-        lines.extend(pretty_findings(findings))
-    else:
-        lines.append("Findings: none")
     return lines
+
+
+def format_quality(payload: dict[str, Any]) -> list[str]:
+    return [*_quality_heading(payload), *(_format_diagnostics(payload, "Findings") or ["Findings: none"])]
 
 
 def format_setup(payload: dict[str, Any]) -> list[str]:
@@ -192,6 +246,7 @@ def format_setup(payload: dict[str, Any]) -> list[str]:
 
 
 def format_pretty(payload: dict[str, Any]) -> str:
+    diagnostic_label = "Diagnostics"
     if {"phase", "stage", "gates"}.issubset(payload):
         lines = format_flight(payload)
     elif isinstance(payload.get("providers"), list):
@@ -292,7 +347,8 @@ def format_pretty(payload: dict[str, Any]) -> str:
                 lines.append(f"  - {item.get('name')}{alias_text}: {item.get('summary', '')}")
                 lines.extend(f"      {example}" for example in item.get("examples", []))
     elif "gate" in payload:
-        lines = format_quality(payload)
+        lines = _quality_heading(payload)
+        diagnostic_label = "Findings"
     elif "results" in payload and "plugin_root" in payload:
         lines = [
             "ZAGROSI FORGE RELEASE CHECK",
@@ -312,24 +368,22 @@ def format_pretty(payload: dict[str, Any]) -> str:
         ]
         progress = payload.get("section_progress", {})
         if progress:
-            lines.append(f"Sections: {progress.get('progress', 'n/a')} ({progress.get('state', 'unknown')})")
+            if payload.get("scaffold_unfinished"):
+                lines.extend(["Plan: DRAFT", f"Section files: {progress.get('progress', 'n/a')} present"])
+            else:
+                lines.append(f"Sections: {progress.get('progress', 'n/a')} ({progress.get('state', 'unknown')})")
     else:
         lines = ["ZAGROSI FORGE", f"Status: {plain_status(payload.get('success', True))}"]
         for key in ("planning_dir", "output", "state_path", "path"):
             if payload.get(key):
                 lines.append(f"{key.replace('_', ' ').title()}: {payload[key]}")
     lines.extend(format_workflow_details(payload))
-    findings = list(payload.get("diagnostics") or [])
-    admission = payload.get("admission") or {}
-    findings.extend(admission.get("diagnostics") or [])
-    for gate in admission.get("gates", []):
-        findings.extend((gate.get("payload") or {}).get("findings") or [])
-    if findings:
-        findings = list({json.dumps(item, sort_keys=True): item for item in findings}.values())
-        lines.append("Diagnostics:")
-        standalone_flight = {"phase", "stage", "gates"}.issubset(payload)
-        limit = 8 if payload.get("full_report") and not standalone_flight else None
-        lines.extend(pretty_findings(findings, limit=limit))
+    if "required_words" in payload and "max_words" in payload:
+        lines.append(f"Context words: {payload['required_words']} required; {payload['max_words']} budget")
+    diagnostics = _format_diagnostics(payload, diagnostic_label, actions_shown=True)
+    lines.extend(diagnostics or (["Findings: none"] if diagnostic_label == "Findings" else []))
+    if isinstance(payload.get("content"), str) and payload["content"]:
+        lines.extend(["", payload["content"].rstrip()])
     if payload.get("full_report"):
         lines.append(f"Full report: {payload['full_report']}")
     if payload.get("full_report_error"):
@@ -396,17 +450,8 @@ def failure_summary(payload: dict[str, Any]) -> dict[str, Any]:
             result["finding_refs"] = list(dict.fromkeys(remember(finding) for finding in value["findings"]))
         elif "findings" in value:
             result["findings"] = value["findings"]
-        errors = value.get("errors", [])
-        errors = errors if isinstance(errors, list) else [errors]
-        errors = [*errors, value.get("error")]
-        if value.get("success") is False:
-            errors.append(value.get("message"))
-        for error in errors:
-            if not isinstance(error, str) or not error.strip():
-                continue
-            context = {key: value[key] for key in ("path", "recommendation", "next_action", "next_command", "commands") if key in value}
-            reference = remember({"severity": "high", "code": value.get("error_code", "gate-error"), "message": error, **context})
-            result.setdefault("finding_refs", []).append(reference)
+        for finding in _error_findings(value):
+            result.setdefault("finding_refs", []).append(remember(finding))
         if isinstance(result.get("gates"), list):
             result["gates"] = [gate_summary(gate) for gate in result["gates"]]
         return result

@@ -253,6 +253,7 @@
   "tests/test_completion_contracts.py",
   "tests/test_completion_records.py",
   "tests/test_context_packets.py",
+  "tests/test_context_usability.py",
   "tests/test_controlled_trials.py",
   "tests/test_cross_host_resume.py",
   "tests/test_detached_authorities.py",
