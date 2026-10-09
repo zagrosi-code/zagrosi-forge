@@ -297,7 +297,13 @@ def test_reusing_the_same_directory_alias_in_one_target_is_not_a_cycle(tmp_path)
     link(tmp_path / "twice.py", "alias/../alias/value.py")
     result = inventory(tmp_path)
     assert result["twice.py"]["target"] == "alias/../alias/value.py"
-    assert (tmp_path / "twice.py").read_text() == "VALUE = 1\n"
+    copied = tmp_path.with_name(tmp_path.name + "-copy")
+    copy_snapshot(tmp_path, copied, result)
+    assert inventory(copied) == result
+    assert os.readlink(copied / "twice.py") == "alias/../alias/value.py"
+    if os.name == "posix":
+        # Native Windows traversal rejects this literal target; virtual validation is portable.
+        assert (tmp_path / "twice.py").read_text() == "VALUE = 1\n"
 
 
 def test_project_requires_a_string_content_digest():

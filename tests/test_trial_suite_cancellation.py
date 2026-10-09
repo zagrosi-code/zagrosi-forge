@@ -128,15 +128,20 @@ def test_running_cancellation_retains_bounded_output_and_stops_group(tmp_path):
 
 def test_elapsed_deadline_takes_precedence_over_simultaneous_cancellation(tmp_path, monkeypatch):
     event = threading.Event()
-    subprocess = process._execute.__globals__["subprocess"]
-    original = subprocess.Popen
+    globals_ = process._execute.__globals__
+    subprocess, clock = globals_["subprocess"], globals_["time"]
+    original, monotonic = subprocess.Popen, clock.monotonic
+    advance = 0.0
     def launch(*args, **kwargs):
+        nonlocal advance
         child = original(*args, **kwargs)
+        advance = 2.0
         event.set()
         return child
+    monkeypatch.setattr(clock, "monotonic", lambda: monotonic() + advance)
     monkeypatch.setattr(subprocess, "Popen", launch)
     result = process.execute([sys.executable, "-c", "import time; time.sleep(2)"], tmp_path,
-                             timeout=1e-9, cancel_event=event)
+                             timeout=1, cancel_event=event)
     assert result["returncode"] == 124 and result["timed_out"] is True
     assert result["cancelled"] is False
 

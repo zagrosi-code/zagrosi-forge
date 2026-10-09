@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import stat
 
-from coding_trial_inventory import fingerprint, inventory, project, relative_path
+from coding_trial_inventory import _identity, _same_file, fingerprint, inventory, project, relative_path
 
 def require(condition, message):
     if not condition:
@@ -99,11 +99,6 @@ def resource(root, name, *, directory=False):
     return path
 
 
-def _identity(info):
-    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size,
-            info.st_mtime_ns, info.st_ctime_ns)
-
-
 def read_bytes(root, name, *, max_bytes=None):
     if max_bytes is not None:
         integer(max_bytes, "Resource byte limit", minimum=0)
@@ -115,10 +110,10 @@ def read_bytes(root, name, *, max_bytes=None):
         observed = os.fstat(handle.fileno())
         require(stat.S_ISREG(observed.st_mode) and observed.st_nlink == 1,
                 f"Resource is no longer a regular single-link file: {name}")
-        require(_identity(observed) == _identity(before), f"Resource changed before reading: {name}")
+        require(_same_file(before, observed), f"Resource changed before reading: {name}")
         raw = handle.read() if max_bytes is None else handle.read(max_bytes + 1)
         after = os.fstat(handle.fileno())
-    require(_identity(after) == _identity(before) == _identity(path.lstat()),
+    require(_identity(after) == _identity(observed) and _identity(before) == _identity(path.lstat()),
             f"Resource changed during reading: {name}")
     require(max_bytes is None or len(raw) <= max_bytes, f"Resource exceeds byte limit: {name}")
     return raw

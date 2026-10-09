@@ -34,6 +34,17 @@ def _identity(info):
             info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _same_file(path_info, descriptor_info):
+    if os.name != "nt":
+        return _identity(path_info) == _identity(descriptor_info)
+    # Windows path stat adds extension-based execute bits and reports birthtime
+    # as ctime; fstat reports ChangeTime. Keep full same-API mutation checks.
+    def comparable(info):
+        return (info.st_dev, info.st_ino, info.st_mode & ~0o111, info.st_nlink,
+                info.st_size, info.st_mtime_ns, getattr(info, "st_birthtime_ns", info.st_ctime_ns))
+    return comparable(path_info) == comparable(descriptor_info)
+
+
 def _stat(parent, name):
     return (os.stat(name, dir_fd=parent, follow_symlinks=False)
             if isinstance(parent, int) else (parent / name).lstat())
@@ -65,13 +76,15 @@ def _directory(parent, name, before=None):
 def _file(parent, name, before, destination):
     if before.st_nlink != 1:
         raise ValueError(f"Hard-linked files are unsupported: {name}")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+             | getattr(os, "O_BINARY", 0))
     handle = os.open(name if isinstance(parent, int) else parent / name, flags,
                      dir_fd=parent if isinstance(parent, int) else None)
     digest = hashlib.sha256()
     output = None
     try:
-        if _identity(os.fstat(handle)) != _identity(before):
+        observed = os.fstat(handle)
+        if not _same_file(before, observed):
             raise ValueError(f"File changed before reading: {name}")
         if destination is not None:
             output = destination.open("xb")
@@ -79,7 +92,7 @@ def _file(parent, name, before, destination):
             digest.update(chunk)
             if output is not None:
                 output.write(chunk)
-        if (_identity(os.fstat(handle)) != _identity(before)
+        if (_identity(os.fstat(handle)) != _identity(observed)
                 or _identity(_stat(parent, name)) != _identity(before)):
             raise ValueError(f"File changed during reading: {name}")
     finally:

@@ -25,6 +25,16 @@ def _identity(info):
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _same_file(path_info, descriptor_info):
+    if os.name != "nt":
+        return _identity(path_info) == _identity(descriptor_info)
+    # This frozen stdlib-only client cannot import the evaluator's comparison.
+    def comparable(info):
+        return (info.st_dev, info.st_ino, info.st_mode & ~0o111, info.st_nlink,
+                info.st_size, info.st_mtime_ns, getattr(info, "st_birthtime_ns", info.st_ctime_ns))
+    return comparable(path_info) == comparable(descriptor_info)
+
+
 def _directory(path, expected=None):
     _require(path.is_absolute() and path.resolve(strict=True) == path,
              "Mailbox directory is not a regular absolute path")
@@ -44,9 +54,10 @@ def _read(path, limit=None, *, parent_identity=None):
     _require(before.st_size <= bound, "Mailbox file exceeds its byte bound")
     handle = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(handle, "rb") as stream:
-        _require(_identity(os.fstat(stream.fileno())) == _identity(before), "Mailbox file changed before read")
+        observed = os.fstat(stream.fileno())
+        _require(_same_file(before, observed), "Mailbox file changed before read")
         raw = stream.read(bound + 1)
-        _require(len(raw) <= bound and _identity(os.fstat(stream.fileno())) == _identity(before)
+        _require(len(raw) <= bound and _identity(os.fstat(stream.fileno())) == _identity(observed)
                  and _identity(path.lstat()) == _identity(before), "Mailbox file changed during read")
     _directory(path.parent, parent_identity)
     return raw
@@ -91,16 +102,25 @@ def _response(value, identifier):
 def _exclusive(mailbox):
     path = mailbox / "client.lock"
     handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    original = _identity(os.fstat(handle))
+    try:
+        original = os.fstat(handle)
+        before = path.lstat()
+        _require(_same_file(before, original), "Observation client lock changed")
+    except BaseException:
+        os.close(handle)
+        raise
     try:
         yield
     finally:
         try:
-            _directory(mailbox)
-            _require(_identity(path.lstat()) == original, "Observation client lock changed")
-            path.unlink()
+            unchanged = _identity(os.fstat(handle)) == _identity(original)
         finally:
             os.close(handle)
+        _directory(mailbox)
+        after = path.lstat()
+        _require(unchanged and _identity(after) == _identity(before) and _same_file(after, original),
+                 "Observation client lock changed")
+        path.unlink()
 
 
 def _next_directory(mailbox):
