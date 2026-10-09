@@ -9,6 +9,7 @@ import argparse
 import re
 
 from . import artifacts as _artifacts
+from . import command_args as _command_args
 from . import context_links as _context_links
 from . import markdown as _markdown
 from . import models as _models
@@ -308,6 +309,31 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
     return result
 
 
+def _context_failure(result: dict[str, Any], args: argparse.Namespace, planning_dir: Path, name: str) -> int:
+    required = result.get("required_words")
+    if type(required) is int and required > args.max_words > 0:
+        retry = _command_args.command(name, "--planning-dir", str(planning_dir), "--max-words", str(required))
+        if args.section:
+            retry.extend(["--section", args.section])
+        try:
+            if name == "context-brief":
+                retry.extend(["--lines-per-artifact", str(args.lines_per_artifact)])
+                if args.output:
+                    retry.extend(["--output", str(_storage.resolve_path(args.output))])
+            else:
+                detached_root = getattr(args, "implementation_root", None)
+                resolve = _storage.absolute_path_no_follow if detached_root else _storage.resolve_path
+                if args.output_dir:
+                    retry.extend(["--output-dir", str(resolve(args.output_dir))])
+                if detached_root:
+                    retry.extend(["--implementation-root", str(resolve(detached_root))])
+        except (OSError, RuntimeError):
+            # An optional recovery action must not replace the original failure.
+            return _output.print_json(result, 1)
+        result = {**result, "commands": {**result.get("commands", {}), "retry_context": retry}}
+    return _output.print_json(result, 1)
+
+
 def implementation_packet(args: argparse.Namespace) -> int:
     detached = bool(getattr(args, "implementation_root", None))
     if detached:
@@ -334,7 +360,7 @@ def implementation_packet(args: argparse.Namespace) -> int:
             section = args.section
             packet = build_context(planning_dir, section, args.max_words, follow_links=not detached)
             if not packet["success"]:
-                return _output.print_json(packet, 1)
+                return _context_failure(packet, args, planning_dir, "implementation-packet")
             section_path = planning_dir / "sections" / f"{section}.md"
             section_text = _storage.read_text(section_path)
             artifacts = _artifacts.planning_artifacts(planning_dir)
@@ -406,7 +432,7 @@ def context_brief(args: argparse.Namespace) -> int:
     planning_dir = _storage.resolve_path(args.planning_dir)
     brief = build_context(planning_dir, args.section, args.max_words, args.lines_per_artifact)
     if not brief["success"]:
-        return _output.print_json(brief, 1)
+        return _context_failure(brief, args, planning_dir, "context-brief")
     for key in ("requirements", "files", "tests"):
         brief.pop(key)
     brief["output"] = None

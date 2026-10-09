@@ -40,6 +40,7 @@ TEST_MANIFEST = {
     "test_completion_contracts.py": "00bc8b153463486b062ceae517d7e8499a510643dcf9120296e48631c87fed24",
     "test_completion_records.py": "616a199a130e03f1210c010a76d674d5527f19cf05d1bd7a17ea3caf8259f9e2",
     "test_context_packets.py": "2cb431f1607d3f4f1acd0d8fc5aeb20cbecbab313c20ad7590c94b1f9db689e2",
+    "test_context_usability.py": "4f38a491b9402e89ffacf8cd539449bcfdb565bab64e8a8f39b6d012296c15bf",
     "test_controlled_trials.py": "91e9f91bc55a4601c7ae1db5ccd362a19764a035528957435af0625c839493ed",
     "test_cross_host_resume.py": "b4308e20b080cb61bbce8f2a569104d7d26a0217de734630f9c2847ee1e62958",
     "test_detached_authorities.py": "9df8993eebb931d4211201f4d2d1b76fc5f35f64e147dcb7aeb4d087d8b47d3b",

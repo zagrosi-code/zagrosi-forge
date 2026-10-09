@@ -32,12 +32,15 @@ remaining work.” You can switch between Codex and Claude Code in this same cop
 the plan and records are ordinary files. Changed code or contracts require fresh
 verification. Missing coverage is addressed before claiming completion.
 
-For direct inspection, resolve `plugin_root` from the loaded Forge skill and use
-the planning directory reported by the run:
+For direct inspection, stay in the copied project directory and use its
+absolute path as `target_dir`. Resolve absolute `plugin_root` from the loaded
+Forge skill's enclosing plugin directory containing `scripts/zagrosi_skills.py`;
+use the absolute `planning_dir` reported by the run. Before implementation setup
+saves the target, `status` uses the working directory.
 
 ```bash
 python3 "{plugin_root}/scripts/zagrosi_skills.py" status --path "{planning_dir}" --pretty
-python3 "{plugin_root}/scripts/zagrosi_skills.py" next-section --planning-dir "{planning_dir}" --pretty
+python3 "{plugin_root}/scripts/zagrosi_skills.py" next-section --planning-dir "{planning_dir}" --target-dir "{target_dir}" --pretty
 ```
 
 Readable output keeps blockers and the next command visible. A saved section and
