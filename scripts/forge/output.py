@@ -121,8 +121,9 @@ def _format_diagnostics(payload: dict[str, Any], label: str, *, actions_shown: b
     while pending:
         value = pending.pop()
         if isinstance(value, dict):
-            findings.extend(value.get("findings") or [])
-            findings.extend(value.get("diagnostics") or [])
+            for key in ("findings", "diagnostics"):
+                if isinstance(value.get(key), list):
+                    findings.extend(value[key])
             errors.extend(_error_findings(value))
             pending.extend(reversed(list(value.values())))
         elif isinstance(value, list):

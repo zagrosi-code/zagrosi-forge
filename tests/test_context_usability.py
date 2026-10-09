@@ -464,3 +464,17 @@ def test_packet_error_keeps_unrendered_recovery_actions(forge, nested_entry, sum
     finally:
         if summarized:
             Path(view['full_report']).unlink()
+
+
+def test_eval_suite_pretty_accepts_numeric_finding_counts(forge, tmp_path, capsys):
+    planning = write_lean_plan_fixture(tmp_path / 'plan')
+    args = ['eval-suite', '--examples-dir', str(tmp_path)]
+    code, payload = invoke_json(forge, capsys, *args)
+    assert code == 0 and payload['success'] is True
+    assert len(payload['rows']) == 1
+    row = payload['rows'][0]
+    assert Path(row['planning_dir']) == planning
+    assert isinstance(row['findings'], int) and row['findings'] > 0
+    pretty_code, pretty = invoke(forge, capsys, *args, '--pretty')
+    assert pretty_code == code and 'Status: PASS' in pretty
+    assert invoke_json(forge, capsys, *args) == (code, payload)
