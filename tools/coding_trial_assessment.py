@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from coding_trial_comparison import CRITERIA
+from coding_trial_outcomes import CRITERIA
 from coding_trial_evidence import _text
 from coding_trial_inventory import contains_path, fingerprint, inventory, project, relative_path
 from coding_trial_observation_client import observe
@@ -97,7 +97,8 @@ def _review(form, attempt, behavior_ref, task, baseline, candidate):
     cleanup = row["cleanup"]
     if task["cleanup_required"]:
         fields(cleanup, "meaningful changed_files rationale regression_evidence", "Cleanup review")
-        strings(cleanup["changed_files"], "Cleanup paths", nonempty=True, unique=True)
+        rejected = row["verdict"] == "fail" and cleanup["meaningful"] is False
+        strings(cleanup["changed_files"], "Cleanup paths", nonempty=not rejected, unique=True)
         scope = task["scope"]
         for name in cleanup["changed_files"]:
             relative_path(name)
@@ -276,8 +277,8 @@ def assess_suite(trial: Path, *, review: Path | None = None) -> dict:
     return verdict
 
 
-def review_template(trial: Path) -> dict:
-    """Describe the latest verified behavior for an external material review."""
+def _review_context(trial: Path) -> dict:
+    """Read current review inputs and their retained evidence without execution."""
     from coding_trial_delivery import read_delivery
 
     trial = _absolute(trial, existing=True)
@@ -285,7 +286,7 @@ def review_template(trial: Path) -> dict:
     require(attempt["schema"] == "coding-trial-attempt/v1" and attempt["assessments"],
             "suite-invalid: Review template requires a completed behavior assessment")
     _, suite, suite_root = _read_study(attempt["study"])
-    read_delivery(trial, attempt, suite, suite_root)
+    candidate, baseline, _ = read_delivery(trial, attempt, suite, suite_root)
     latest = _read_ref(trial, attempt["assessments"][-1])
     require(latest["schema"] == "coding-trial-assessment/v1" and latest["identity"] == attempt["identity"]
             and latest["behavior"] is not None, "receipt-invalid: No current behavior receipt")
@@ -294,12 +295,25 @@ def review_template(trial: Path) -> dict:
     require({key: value for key, value in attempt.items() if key != "assessments"}
             == {key: value for key, value in original.items() if key != "assessments"},
             "review-stale: Attempt changed since the behavior assessment")
+    require(attempt["assessments"][:len(original["assessments"])] == original["assessments"],
+            "review-stale: Assessment history changed")
+    return {"attempt": attempt, "latest": latest, "behavior": behavior,
+            "task": suite["tasks"][attempt["identity"]["task"]], "baseline": baseline, "candidate": candidate}
+
+
+def _review_form(context: dict) -> dict:
+    attempt, latest = context["attempt"], context["latest"]
     task_id = attempt["identity"]["task"]
     cleanup = ({"meaningful": None, "changed_files": [], "rationale": "", "regression_evidence": ""}
-               if suite["tasks"][task_id]["cleanup_required"] else None)
+               if context["task"]["cleanup_required"] else None)
     return {"schema": "coding-trial-review/v1", "block": task_id, "reviewer": "", "independent": False,
             "preferred": [], "rationale": "", "candidates": {"C001": {
                 "baseline_sha256": attempt["identity"]["baseline_sha256"],
                 "candidate_sha256": attempt["candidate"]["assessed_sha256"],
                 "assessment_sha256": latest["behavior"]["sha256"], "verdict": "pending", "findings": [],
                 "criteria": {name: "" for name in CRITERIA}, "cleanup": cleanup}}}
+
+
+def review_template(trial: Path) -> dict:
+    """Describe the latest verified behavior for an external material review."""
+    return _review_form(_review_context(trial))

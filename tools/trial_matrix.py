@@ -6,7 +6,6 @@ import argparse
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import json
-import math
 from pathlib import Path
 import statistics
 import subprocess
@@ -17,6 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 from coding_trial_comparison import packets, reviews  # noqa: E402
+from coding_trial_outcomes import accepted_outcomes  # noqa: E402
+import coding_trial_suite_matrix as suite_matrix  # noqa: E402
+from coding_trial_suite_cli import _error  # noqa: E402
 
 
 def read(path: Path) -> dict:
@@ -42,28 +44,13 @@ def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool
     return items
 
 
-def accepted_outcomes(attempts: list[dict], *, status_key: str = "status") -> dict:
-    """Charge every scheduled attempt to accepted work; unknown is never free."""
-    accepted = sum(row.get(status_key) == "passed" for row in attempts)
-    def aggregate(values):
-        valid = [value for value in values if type(value) in (int, float) and math.isfinite(value) and value >= 0]
-        total = sum(valid) if len(valid) == len(values) and values else None
-        return {"observed": sum(valid) if valid else None, "observed_attempts": len(valid),
-                "total": total, "per_accepted": total / accepted if total is not None and accepted else None}
-    totals = {key: aggregate([((row.get("reported_telemetry") or {}).get("totals") or {}).get(key)
-                              for row in attempts])
-              for key in ("input_tokens", "cached_input_tokens", "uncached_input_tokens", "output_tokens")}
-    return {"accepted": accepted, "scheduled": len(attempts),
-            "accepted_rate": accepted / len(attempts) if attempts else None,
-            "elapsed_seconds": aggregate([row.get("attempt_seconds") for row in attempts]),
-            "tokens": totals,
-            "reported_cost_usd": aggregate([(row.get("reported_telemetry") or {}).get("reported_cost_usd") for row in attempts]),
-            "interventions": aggregate([(row.get("reported_telemetry") or {}).get("interventions") for row in attempts]),
-            "limits": "Every attempt counts, including failures. Missing observations leave totals unknown; zero accepted leaves per-accepted values undefined. Elapsed time excludes independent review. CLI cost estimates are not subscription bills."}
-
 
 def report(directory: Path) -> dict:
     manifest = read(directory / "matrix.json")
+    if isinstance(manifest, dict) and "schema" in manifest:
+        if manifest["schema"] != "coding-trial-matrix/v1":
+            raise ValueError("suite-invalid: Unsupported saved matrix schema")
+        return suite_matrix.report_suite(directory)
     if not manifest.get("trials"):
         raise ValueError("A nonempty matrix.json is required")
     groups = defaultdict(list)
@@ -132,25 +119,74 @@ def run_trial(directory: Path, plugin_root: Path, item: dict, runner: list[str],
         "seconds": round(time.monotonic() - start, 3)}) + "\n")
 
 
+def _suite_command(args, parser):
+    supplied = set(vars(args))
+    selected = "suite" in supplied
+    if selected and args.operation != "compare":
+        parser.error("--suite selects only compare; report/blind/apply-reviews use the saved matrix")
+    if not selected and supplied & {"auth_file", "qualify_loading"}:
+        parser.error("--auth-file and --qualify-loading require compare --suite")
+    if not selected and args.operation in {"report", "blind", "apply-reviews"}:
+        saved = read(args.directory / "matrix.json")
+        if isinstance(saved, dict) and "schema" in saved:
+            if saved["schema"] != "coding-trial-matrix/v1":
+                return _error(ValueError("suite-invalid: Unsupported saved matrix schema"))
+            selected = True
+    if not selected:
+        return None
+    overrides = supplied - {"operation", "directory", "suite", "auth_file", "qualify_loading"}
+    if overrides:
+        parser.error("Suite commands reject explicit legacy options: " + ", ".join(
+            "--" + name.replace("_", "-") for name in sorted(overrides)))
+    try:
+        directory = args.directory.absolute()
+        if args.operation == "compare":
+            result = suite_matrix.compare_suite(directory, args.suite,
+                assessor_python=Path(sys.executable).resolve(),
+                qualify_loading=getattr(args, "qualify_loading", False),
+                auth_file=getattr(args, "auth_file", None))
+        else:
+            operation = {"report": suite_matrix.report_suite, "blind": suite_matrix.blind_suite,
+                         "apply-reviews": suite_matrix.apply_suite_reviews}[args.operation]
+            result = operation(directory)
+        return result, 0 if result["success"] else 1
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        return _error(exc)
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, argument_default=argparse.SUPPRESS)
     parser.add_argument("operation", choices=("run", "compare", "report", "blind", "apply-reviews"))
     parser.add_argument("directory", type=Path)
-    parser.add_argument("--plugin-root", type=Path, default=ROOT)
+    parser.add_argument("--plugin-root", type=Path)
     parser.add_argument("--previous-root", type=Path, help="Optional third comparison arm; omit for current Forge versus plain")
     parser.add_argument("--model")
     parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh"))
-    parser.add_argument("--host", choices=("codex", "claude"), default="codex")
-    parser.add_argument("--codex", default="codex")
-    parser.add_argument("--claude", default="claude")
+    parser.add_argument("--host", choices=("codex", "claude"))
+    parser.add_argument("--codex")
+    parser.add_argument("--claude")
     parser.add_argument("--cases", nargs="+")
     parser.add_argument("--depths", nargs="+", choices=("lean", "standard", "deep"))
-    parser.add_argument("--repeats", type=int, default=2)
-    parser.add_argument("--jobs", type=int, default=1)
-    parser.add_argument("--timeout", type=int, default=900)
-    parser.add_argument("--seed", type=int, default=0, help="Reproducible blinded candidate ordering")
+    parser.add_argument("--repeats", type=int)
+    parser.add_argument("--jobs", type=int)
+    parser.add_argument("--timeout", type=int)
+    parser.add_argument("--seed", type=int, help="Reproducible blinded candidate ordering")
     parser.add_argument("--runner", nargs=argparse.REMAINDER)
+    parser.add_argument("--suite", type=Path)
+    parser.add_argument("--auth-file", type=Path)
+    parser.add_argument("--qualify-loading", action="store_true")
     args = parser.parse_args()
+    selected = _suite_command(args, parser)
+    if selected is not None:
+        result, status = selected
+        print(json.dumps(result, indent=2))
+        return status
+    for name, value in {"plugin_root": ROOT, "previous_root": None, "model": None, "effort": None,
+                        "host": "codex", "codex": "codex", "claude": "claude", "cases": None,
+                        "depths": None, "repeats": 2, "jobs": 1, "timeout": 900, "seed": 0,
+                        "runner": None}.items():
+        if not hasattr(args, name):
+            setattr(args, name, value)
     directory, root = args.directory.resolve(), args.plugin_root.resolve()
     if args.operation in {"run", "compare"}:
         comparison = args.operation == "compare"

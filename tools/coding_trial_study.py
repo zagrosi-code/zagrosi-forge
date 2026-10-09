@@ -23,6 +23,8 @@ EVALUATOR_SOURCES = tuple(sorted(set(ADAPTER_SOURCES) | {
     "tools/coding_trial_preparation.py",
     "tools/coding_trials.py", "tools/coding_trial_suite_cli.py",
     "tools/coding_trial_comparison.py", "tools/coding_trial_evidence.py",
+    "tools/trial_matrix.py", "tools/coding_trial_outcomes.py",
+    "tools/coding_trial_suite_matrix.py", "tools/coding_trial_suite_review.py",
 }))
 
 

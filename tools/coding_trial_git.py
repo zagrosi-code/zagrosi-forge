@@ -49,6 +49,7 @@ def initialize_repository(workspace: Path, baseline: dict[str, str], *,
         hooks.mkdir()
         for name, value in (("user.name", "Forge Trial"), ("user.email", "forge-trial@example.invalid"),
                             ("core.hooksPath", hooks.as_posix()), ("commit.gpgSign", "false"),
+                            ("maintenance.auto", "false"), ("gc.auto", "0"),
                             ("core.autocrlf", "false"), ("core.excludesFile", os.devnull),
                             ("core.attributesFile", os.devnull)):
             git("config", "--local", name, value)
