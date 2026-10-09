@@ -283,6 +283,7 @@
   "tests/test_native_package_identity.py",
   "tests/test_native_process.py",
   "tests/test_native_workflow_trials.py",
+  "tests/test_owned_verification.py",
   "tests/test_parallel_ownership.py",
   "tests/test_parsed_plan_reuse.py",
   "tests/test_patch_scope.py",
