@@ -97,9 +97,11 @@ Implement this feature with independent Codex and Claude reviews. Keep one write
 Forge reuses native CLI logins. Choose model IDs or native defaults;
 missing access and unreported identity stay visible. No silent fallback.
 Add `--check-auth` for login status. See [provider setup](skills/zagrosi-forge/references/providers.md).
+For direct helpers, replace `{plugin_root}` with the absolute plugin directory
+containing `scripts/zagrosi_skills.py`, resolved from the loaded Forge skill.
 
 ```bash
-python3 scripts/zagrosi_skills.py provider-status --check-cli --pretty
+python3 "{plugin_root}/scripts/zagrosi_skills.py" provider-status --check-cli --pretty
 ```
 
 ## Teams
@@ -146,16 +148,20 @@ Complete contracts before coding. See
 
 ### Resume and compatibility
 
-Continue from the planning directory in either host. Checkpoints retain progress;
+Resume the existing plan from your target project in either host.
+Checkpoints retain progress;
 ownership conflicts serialize work. Changed code/contracts require fresh verification.
 Legacy evidence cannot establish new verified completion.
 
-Run helpers **from the Forge checkout**; use absolute plan paths.
+Run helpers **from the target project directory**, using the absolute plugin
+path described above and absolute plan paths. Before implementation setup saves
+the target, `status` uses the working directory; it has no `--target-dir` option.
 
 ```bash
-python3 scripts/zagrosi_skills.py status --path "/absolute/path/to/planning/01-auth" --pretty
-python3 scripts/zagrosi_skills.py next-section --planning-dir "/absolute/path/to/planning/01-auth" --pretty
-python3 scripts/zagrosi_skills.py commands --phase implement --verbose --pretty
+cd "/absolute/path/to/target project"
+python3 "{plugin_root}/scripts/zagrosi_skills.py" status --path "/absolute/path/to/planning/01-auth" --pretty
+python3 "{plugin_root}/scripts/zagrosi_skills.py" next-section --planning-dir "/absolute/path/to/planning/01-auth" --target-dir "/absolute/path/to/target project" --pretty
+python3 "{plugin_root}/scripts/zagrosi_skills.py" commands --phase implement --verbose --pretty
 ```
 
 `fast` aliases `lean`; existing `zagrosi-*`, `deep-*`, `DEEP_META`, and migrated
