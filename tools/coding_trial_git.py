@@ -57,9 +57,12 @@ def initialize_repository(workspace: Path, baseline: dict[str, str], *,
         exclusions = ("/.planning/\n__pycache__/\n.pytest_cache/\n*.pyc\n*.pyo\n"
                       if artifact_exclusions is None else "".join(map(_literal_exclusion, artifact_exclusions)))
         (metadata / "info/exclude").write_text(exclusions)
-        git("add", "--force", "--", *(name for name in sorted(baseline)
-              if artifact_exclusions is not None or not name.startswith(".planning/")))
-        git("commit", "--quiet", "--no-gpg-sign", "-m", "Trial baseline")
+        paths = [name for name in sorted(baseline)
+                 if artifact_exclusions is not None or not name.startswith(".planning/")]
+        if paths:
+            git("add", "--force", "--", *paths)
+        commit_args = [] if paths else ["--allow-empty"]
+        git("commit", "--quiet", "--no-gpg-sign", *commit_args, "-m", "Trial baseline")
     except FileNotFoundError as exc:
         raise ValueError("Git is required to prepare an isolated trial workspace") from exc
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:

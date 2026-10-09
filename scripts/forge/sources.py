@@ -128,6 +128,7 @@ TEST_MANIFEST = {
     "test_trial_suite_comparison.py": "1c5661f4943525b81182116e2441b26fd8938b3e8d41c1754c464ec21744bc53",
     "test_trial_suite_comparison_lineage.py": "b0f6b1a8bf4e5e785ca0d19a79dac35ec496e014282e8b8af34e55992f3d81a4",
     "test_trial_suite_docker.py": "e574fbaaaf77c22bce826711a6929ecaa9385ffa3288687129c2a76651c1e0df",
+    "test_trial_suite_empty_baseline.py": "f26156c7cfab66408d5b5be2eb517f2b989d14e32a411f2663983fd4e27e7500",
     "test_trial_suite_entry_preservation.py": "e50bebfd1809fef5a8d17032248e62c77589de97856c9b6010f06b4b7db50562",
     "test_trial_suite_entry_selection.py": "7d05b4bf0e641ae40d89e0acad7233f5000733a8c16be2ae175ee1a6311692ec",
     "test_trial_suite_execution.py": "2111b197947352a8dd14c2ad643d75603f4a15c42d093e8add2381b6c33f6f6f",
