@@ -203,10 +203,15 @@ def contract_snapshot(planning_dir: Path, section: str, *, target_dir=None, file
 
 
 def filesystem_paths(target_dir: Path) -> list[Path]:
+    return _filesystem_paths(target_dir, include_directories=False)
+
+
+def _filesystem_paths(target_dir: Path, *, include_directories: bool) -> list[Path]:
     paths = []
     for directory, directories, files in os.walk(target_dir):
         directories[:] = [name for name in directories if name not in _IGNORED_SOURCE_DIRECTORIES]
-        paths.extend(Path(directory) / name for name in directories if (Path(directory) / name).is_symlink())
+        paths.extend(Path(directory) / name for name in directories
+                     if include_directories or (Path(directory) / name).is_symlink())
         paths.extend(Path(directory) / name for name in files if not name.endswith((".pyc", ".pyo")))
     return paths
 
@@ -267,7 +272,10 @@ def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | N
     names = sections.check_section_progress(planning_dir).get("sections", [])
     if not names or (section and section not in names):
         raise ValueError("Verification requires a complete section index.")
-    contracts = {name: _bound_contract_inputs(planning_dir, name, prepared)[0] for name in names}
+    contracts, owned = {}, set()
+    for name in names:
+        contracts[name], section_owned = _bound_contract_inputs(planning_dir, name, prepared)
+        owned.update(section_owned)
     sources = artifacts.planning_artifacts(planning_dir)
     sources["spec"] = artifacts.requirement_source_spec(planning_dir)
     authoritative = {
@@ -288,8 +296,28 @@ def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | N
         "zagrosi_plan_config.json", "deep_plan_config.json", "traceability.md", "forge-report.md",
     ))
     paths = source_paths(target_dir)
+    for name in sorted(owned):
+        relative = Path(name)
+        if not name or relative.anchor or ".." in relative.parts:
+            raise ValueError(f"Observed code path must stay within the target directory: {name}")
+        path = target_dir / relative
+        if path != target_dir and not path.parent.resolve().is_relative_to(target_dir):
+            raise ValueError(f"Observed code path must stay within the target directory: {name}")
+        entries = [path]
+        if not path.is_symlink() and path.is_dir():
+            entries.extend(_filesystem_paths(path, include_directories=True))
+        for entry in entries:
+            if (entry not in paths and entry != target_dir and not entry.is_symlink()
+                    and (entry / ".git").exists()):
+                for child, metadata in source_paths(entry).items():
+                    existing = paths.setdefault(child, [])
+                    existing.extend(value for value in metadata if value not in existing)
+            paths.setdefault(entry, [])
+    # Receipt/report writes may create these containers; ordinary children remain inputs.
+    containers = {planning_dir / "implementation", planning_dir / ".forge"}
     observed = [path.relative_to(target_dir).as_posix() for path in paths
-                if not any(path == excluded_path or path.is_relative_to(excluded_path) for excluded_path in excluded)]
+                if path not in containers and not any(
+                    path == excluded_path or path.is_relative_to(excluded_path) for excluded_path in excluded)]
     identities, files = {}, []
     for name in observed:
         path = target_dir / name
