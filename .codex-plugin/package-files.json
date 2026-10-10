@@ -324,6 +324,7 @@
   "tests/test_team_plan_integration.py",
   "tests/test_team_plan_workflows.py",
   "tests/test_team_plans.py",
+  "tests/test_team_protocol_upgrade.py",
   "tests/test_team_state.py",
   "tests/test_team_workflows.py",
   "tests/test_test_binding.py",
