@@ -219,6 +219,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
         pair[stage] = pending
         path = receipt_path(planning, section)
         storage.write_json(path, pair)
+        result = pending
         try:
             mutable_inputs.prepared_contract(planning, target)
             result = {**pending, **_capture(command, target, timeout), "completed_at": storage.now_iso()}
@@ -227,7 +228,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
                     or (source, checks) != _observations(target, pair["declaration"])):
                 error = "Compatibility inputs changed during execution; the result cannot establish preservation."
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            result, error = {**pending, "completed_at": storage.now_iso()}, str(exc)
+            result, error = {**result, "outcome": "failed", "completed_at": storage.now_iso()}, str(exc)
         if error:
             result.update(error=error)
             if result["outcome"] in {"passed", "pending"}:
@@ -236,7 +237,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
         storage.write_json(path, pair)
         return {"success": error is None, "receipt_path": str(path), "stage": stage, "error": error,
                 "outcome": result["outcome"],
-                **{key: result[key] for key in ("exit_code", "stdout_tail", "stderr_tail") if key in result}}
+                **{key: result[key] for key in ("seconds", "exit_code", "stdout_tail", "stderr_tail") if key in result}}
 
 
 def evidence_error(planning: Path, target: Path, section: str, evidence) -> str | None:
