@@ -8,7 +8,10 @@ Detached authority is exercised only on supported POSIX hosts, never faked.
 
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -100,7 +103,7 @@ def test_brief_budget_retry_preserves_scope_options_and_original_cwd(
     before = file_bytes(origin)
     code, failed = invoke_json(forge, capsys, *args)
     assert code == 1 and failed['required_words'] > failed['max_words'] == 1
-    assert set(failed) == {'success', 'error', 'required_words', 'max_words', 'commands'}
+    assert set(failed) == {'success', 'error', 'required_words', 'max_words', 'commands', 'context_attribution'}
     assert set(failed['commands']) == {'retry_context'}
     retry = failed['commands']['retry_context']
     assert all(isinstance(part, str) for part in retry)
@@ -156,7 +159,7 @@ def test_packet_budget_retry_preserves_section_and_destination(
     before = file_bytes(origin)
     code, failed = invoke_json(forge, capsys, *args)
     assert code == 1 and failed['required_words'] > failed['max_words'] == 1
-    assert set(failed) == {'success', 'error', 'required_words', 'max_words', 'commands'}
+    assert set(failed) == {'success', 'error', 'required_words', 'max_words', 'commands', 'context_attribution'}
     retry = failed['commands']['retry_context']
     assert retry[2] == 'implementation-packet' and retry.count('--max-words') == 1
     parsed = forge.cli.build_parser().parse_args(retry[2:])
@@ -478,3 +481,295 @@ def test_eval_suite_pretty_accepts_numeric_finding_counts(forge, tmp_path, capsy
     pretty_code, pretty = invoke(forge, capsys, *args, '--pretty')
     assert pretty_code == code and 'Status: PASS' in pretty
     assert invoke_json(forge, capsys, *args) == (code, payload)
+
+
+# Preserve the read order and counts observed before adding diagnostics.
+_ATTRIBUTION_BUILD_READS = [
+    ('sections/index.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('spec.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('spec.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('spec.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('spec.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('spec.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('spec.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/index.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('spec.md', 'r'),
+    ('sections/section-01-normalize.md', 'r'),
+    ('spec.md', 'r'),
+    ('guide.md', 'r'),
+    ('detail.md', 'r'),
+]
+
+
+def _attribution_words(text):
+    return len(re.findall(r"\b\w+\b", text))
+
+
+def _attribution_plan(tmp_path):
+    planning = make_plan(tmp_path.resolve() / 'attribution plan')
+    section = planning / 'sections' / f'{SECTION}.md'
+    guide = planning / 'guide.md'
+    detail = planning / 'detail.md'
+    guide_text = ('# Guide\n\n## Normalization\n\nKeep public spellings.\n'
+                  'See [all details](detail.md).\n\n## History\n\n' + 'historical ' * 1200 + '\n')
+    detail_text = '# Detail\n\n## Stable\n\nKeep aliases.\n\n## Other\n\nPreserve remaining names.\n'
+    guide.write_text(guide_text)
+    detail.write_text(detail_text)
+    section.write_text(section.read_text() + '\nRead [guide](../guide.md) and [stable](../detail.md#st%61ble).\n')
+    return planning, section, guide, guide_text, detail, detail_text
+
+
+def _attribution_link_row(path, body, origin, link, anchor=None):
+    return {'path': str(path), 'lines': [1, len(body.splitlines())],
+            'reason': 'linked_contract',
+            'words': _attribution_words(f'## contract: `{path}:1`\n\n{body.rstrip()}'),
+            'cause': {'origin': str(origin), 'link': link, 'anchor': anchor}}
+
+
+def test_attribution_preserves_exact_successful_public_output(forge, tmp_path, capsys):
+    planning = make_plan(tmp_path.resolve() / 'exact plan')
+    section = planning / 'sections' / f'{SECTION}.md'
+    policy = planning / 'policy.md'
+    body = '# Stable\n\nKeep every public spelling.\n'
+    policy.write_text(body)
+    section.write_text(section.read_text() + '\nRead [stable](../policy.md#stable).\n')
+    spec = planning / 'spec.md'
+    expected = (section.read_text().rstrip() + f'\n\n## contract: `{policy}:1`\n\n{body.rstrip()}'
+                + f'\n\n## spec: `{spec}:1`\n\n{spec.read_text().rstrip()}\n')
+    common = {'success': True, 'word_count': _attribution_words(expected), 'max_words': 10000,
+              'planning_dir': str(planning), 'section': SECTION}
+    args = ['--planning-dir', str(planning), '--section', SECTION, '--max-words', '10000']
+    assert invoke_json(forge, capsys, 'context-brief', *args) == (
+        0, {**common, 'content': expected, 'output': None})
+    saved = tmp_path / 'saved.md'
+    assert invoke_json(forge, capsys, 'context-brief', *args, '--output', str(saved)) == (
+        0, {**common, 'content': None, 'output': str(saved)})
+    expected_bytes = expected.replace('\n', os.linesep).encode('utf-8')
+    assert saved.read_bytes() == expected_bytes
+    directory = tmp_path / 'packets'
+    packet = directory / f'{SECTION}-packet.md'
+    assert invoke_json(forge, capsys, 'implementation-packet', *args, '--output-dir', str(directory)) == (
+        0, {**common, 'requirements': ['REQ-001'], 'files': ['src/labels.py', 'tests/test_labels.py'],
+            'tests': ['test_trim_edges'], 'output': str(packet)})
+    assert packet.read_bytes() == expected_bytes
+
+
+def test_attribution_keeps_default_resolver_identity_and_read_count(forge, tmp_path, monkeypatch):
+    planning, section, guide, guide_text, detail, detail_text = _attribution_plan(tmp_path)
+    expected = [(guide, [(1, len(guide_text.splitlines()), guide_text.rstrip())]),
+                (detail, [(1, len(detail_text.splitlines()), detail_text.rstrip())])]
+    before = forge.state.contract_snapshot(planning, SECTION, target_dir=tmp_path)
+    for path, body in ((guide, guide_text), (detail, detail_text)):
+        encoded = json.dumps([body.rstrip()], sort_keys=True, separators=(',', ':')).encode()
+        assert before['contract'][f'link:{path.name}'] == hashlib.sha256(encoded).hexdigest()
+    resolve = forge.context_links.linked_contracts
+    real_open = io.open
+    observations = []
+    reads = {'context': [], 'default': []}
+    phase = 'context'
+
+    def observe_open(file, mode='r', *args, **kwargs):
+        if phase is not None and not isinstance(file, int) and 'r' in mode:
+            path = Path(file).resolve()
+            if path.is_relative_to(planning):
+                reads[phase].append((path.relative_to(planning).as_posix(), mode))
+        return real_open(file, mode, *args, **kwargs)
+
+    def observe_resolution(root, seeds, **kwargs):
+        result = resolve(root, seeds, **kwargs)
+        observations.append((root, list(seeds), kwargs, list(result.items())))
+        return result
+
+    monkeypatch.setattr(io, 'open', observe_open)
+    monkeypatch.setattr(forge.context_links, 'linked_contracts', observe_resolution)
+    failed = forge.context.build_context(planning, SECTION, 1)
+    phase = None
+    assert reads['context'] == _ATTRIBUTION_BUILD_READS
+    assert failed['success'] is False and 'context_attribution' in failed
+    assert len(observations) == 1
+    root, seeds, kwargs, observed = observations[0]
+    phase = 'default'
+    default = resolve(root, seeds, **{key: kwargs[key] for key in ('known_paths', 'seed_ranges') if key in kwargs})
+    phase = None
+    assert observed == list(default.items()) == expected
+    linked_reads = [Counter(path for path, _mode in reads[kind] if path in {'guide.md', 'detail.md'})
+                    for kind in ('context', 'default')]
+    assert linked_reads[0] == linked_reads[1] == Counter({'guide.md': 1, 'detail.md': 1})
+    assert forge.state.contract_snapshot(planning, SECTION, target_dir=tmp_path) == before
+
+
+@pytest.mark.parametrize('command', ['context-brief', 'implementation-packet'])
+def test_attribution_explains_broad_and_overlapping_links_before_precise_recovery(
+        forge, tmp_path, capsys, command):
+    planning, section, guide, guide_text, detail, detail_text = _attribution_plan(tmp_path)
+    destination = tmp_path / 'requested output'
+    option = '--output' if command == 'context-brief' else '--output-dir'
+    args = [command, '--planning-dir', str(planning), '--section', SECTION,
+            '--max-words', '900', option, str(destination)]
+    section_text = section.read_text()
+    before = file_bytes(tmp_path)
+    code, failed = invoke_json(forge, capsys, *args)
+    assert code == 1 and failed['required_words'] > 900
+    attribution = failed['context_attribution']
+    rows = {row['path']: row for row in attribution['parts']}
+    assert len(rows) == len(attribution['parts']) == 3
+    assert rows[str(guide)] == _attribution_link_row(guide, guide_text, section, '../guide.md')
+    # The later whole-file link explains more of the rendered fragment than the
+    # already-precise direct anchor; it still does not promise marginal savings.
+    assert rows[str(detail)] == _attribution_link_row(
+        detail, detail_text, guide, 'detail.md')
+    assert rows[str(section)] == {
+        'path': str(section), 'lines': [1, len(section_text.splitlines())],
+        'reason': 'section', 'words': _attribution_words(section_text.rstrip()), 'cause': None}
+    assert attribution['omitted_parts'] == attribution['omitted_words'] == 0
+    assert sum(row['words'] for row in rows.values()) + attribution['reserved_source_words'] == failed['required_words']
+    assert failed['commands']['retry_context'].count('--max-words') == 1
+    assert file_bytes(tmp_path) == before and not destination.exists()
+    section.write_text(section.read_text().replace('../guide.md)', '../guide.md#normalization)'))
+    code, recovered = invoke_json(forge, capsys, *args)
+    assert code == 0 and recovered['word_count'] <= 900
+    assert 'context_attribution' not in recovered
+    content = (Path(recovered['output']).read_text() if recovered['output'] else recovered['content'])
+    assert 'Keep public spellings.' in content and 'historical' not in content
+    assert content.count('Keep aliases.') == content.count('Preserve remaining names.') == 1
+    assert section.read_text().rstrip() in content
+    assert guide.read_text() == guide_text and detail.read_text() == detail_text
+
+
+def test_attribution_bounds_rows_and_preserves_reserved_word_accounting(forge, tmp_path, capsys):
+    planning = mapped_source_plan(tmp_path.resolve() / 'ranked plan')
+    section = planning / 'sections' / f'{MAPPED_SECTION}.md'
+    paths = [planning / f'part-{letter}.md' for letter in 'abcdef']
+    body = '# Constraint\n\n' + 'binding ' * 180 + '\n'
+    for path in paths:
+        path.write_text(body)
+    section.write_text(section.read_text() + '\n' + ' '.join(
+        f'[{path.stem}](../{path.name})' for path in paths) + '\n')
+    rendered = [_attribution_link_row(path, body, section, f'../{path.name}') for path in paths]
+    assert len({row['words'] for row in rendered}) == 1
+    spec = planning / 'spec.md'
+    spec_text = spec.read_text()
+    mapped = '\n'.join(spec_text.splitlines()[:3])
+    source_words = _attribution_words(f'## source requirements: `{spec}:1`\n\n{mapped}')
+    section_words = _attribution_words(section.read_text().rstrip())
+    assert rendered[0]['words'] > max(section_words, source_words)
+    reserved = _attribution_words(f'Omitted plan context: `{planning / "codex-plan.md"}`.')
+    expected = {'parts': rendered[:5], 'omitted_parts': 3,
+                'omitted_words': rendered[5]['words'] + section_words + source_words,
+                'reserved_source_words': reserved}
+    output = tmp_path / 'no packet'
+    args = ['implementation-packet', '--planning-dir', str(planning), '--section', MAPPED_SECTION,
+            '--max-words', '1', '--output-dir', str(output)]
+    before = file_bytes(tmp_path)
+    code, failed = invoke_json(forge, capsys, *args)
+    assert code == 1 and failed['context_attribution'] == expected
+    assert failed['required_words'] == sum(row['words'] for row in rendered) + section_words + source_words + reserved
+    pretty_code, pretty = invoke(forge, capsys, *args, '--pretty')
+    assert pretty_code == 1 and pretty.count(failed['error']) == 1
+    for row in expected['parts']:
+        assert pretty.count(row['path']) == 1
+        assert row['cause']['link'] in pretty and row['cause']['origin'] in pretty
+        line = next(line for line in pretty.splitlines() if row['path'] in line)
+        assert re.search(rf"\b{row['words']}\b", line)
+    assert str(paths[-1]) not in pretty
+    projection = {'success': False, 'error': 'Required context is too large.', 'context_attribution': expected}
+    original = deepcopy(projection)
+    summary = forge.output.format_pretty(projection)
+    for row in expected['parts']:
+        for identifier in (row['path'], row['cause']['origin'], row['cause']['link']):
+            summary = summary.replace(identifier, '')
+    numbers = set(re.findall(r'\b\d+\b', summary))
+    assert {str(expected[key]) for key in ('omitted_parts', 'omitted_words', 'reserved_source_words')} <= numbers
+    assert projection == original
+    assert file_bytes(tmp_path) == before and not output.exists()
+    whole = forge.context.build_context(planning, None, 1)
+    heading = next(row for row in whole['context_attribution']['parts'] if row['reason'] == 'packet_heading')
+    assert heading == {'path': None, 'lines': None, 'reason': 'packet_heading',
+                       'words': _attribution_words(f'# Context: {planning.name}'), 'cause': None}
+    source = next(row for row in whole['context_attribution']['parts'] if row['path'] == str(spec))
+    assert source == {
+        'path': str(spec), 'lines': [1, len(spec_text.splitlines())],
+        'reason': 'required_source_span',
+        'words': _attribution_words(f'## source requirements: `{spec}:1`\n\n{spec_text.rstrip()}'),
+        'cause': None}
+
+
+def test_attribution_stays_in_the_failed_entry_packet_and_does_not_mutate_output(forge, tmp_path):
+    planning, section, guide, guide_text, detail, detail_text = _attribution_plan(tmp_path)
+    failed = forge.context.build_context(planning, SECTION, 1)
+    result = forge.resume.section_entry(planning, SECTION, target_dir=tmp_path, profile='enterprise', max_words=1)
+    assert result['success'] is False and result['packet'] == failed
+    assert 'context_attribution' not in result and 'retry_context' in result['commands']
+    original = deepcopy(result)
+    pretty = forge.output.format_pretty(result)
+    assert pretty.count(failed['error']) == 1
+    for row in failed['context_attribution']['parts']:
+        assert row['path'] in pretty
+    assert result == original
+    different_action = {**result, 'next_action': 'Choose a more precise source link.'}
+    assert forge.output.format_pretty(different_action).count(failed['error']) == 1
+
+
+@pytest.mark.parametrize('linked_file', ['self', 'empty'])
+def test_attribution_handles_empty_files_and_intrinsic_sections(forge, tmp_path, linked_file):
+    planning = make_plan(tmp_path.resolve() / 'edge plan')
+    section = planning / 'sections' / f'{SECTION}.md'
+    target = section if linked_file == 'self' else planning / 'empty.md'
+    link = '#goal' if linked_file == 'self' else '../empty.md'
+    if linked_file == 'empty':
+        target.write_text('')
+    section.write_text(section.read_text() + f'\nRead [contract]({link}).\n')
+    resolved = forge.context_links.linked_contracts(planning, [(section, section.read_text())])
+    packet = forge.context.build_context(planning, SECTION, 1)
+    attribution = packet['context_attribution']
+    row, = [part for part in attribution['parts'] if part['path'] == str(target)]
+    if linked_file == 'self':
+        assert row['reason'] == 'section' and row['cause'] is None
+    else:
+        assert resolved[target] == [(1, 0, '')]  # Keep the existing resolver contract.
+        assert row['lines'] is None
+        assert row['cause'] == {'origin': str(section), 'link': link, 'anchor': None}
+        assert row['words'] == _attribution_words(f'## contract: `{target}:1`\n\n')
+    assert sum(part['words'] for part in attribution['parts']) + attribution['omitted_words'] + attribution['reserved_source_words'] == packet['required_words']
+
+
+@pytest.mark.parametrize('anchors', [('alpha', 'beta'), ('beta', 'alpha')])
+def test_attribution_preserves_discovery_order_for_equal_source_spans(forge, tmp_path, anchors):
+    planning = make_plan(tmp_path.resolve() / 'tied causes')
+    section = planning / 'sections' / f'{SECTION}.md'
+    guide = planning / 'guide.md'
+    guide.write_text('# Guide\n\n## Alpha\none\n\n## Beta\ntwo\n\n')
+    section.write_text(section.read_text() + '\n' + ' '.join(
+        f'[{anchor}](../guide.md#{anchor})' for anchor in anchors) + '\n')
+    packet = forge.context.build_context(planning, SECTION, 1)
+    row, = [part for part in packet['context_attribution']['parts'] if part['path'] == str(guide)]
+    assert row['lines'] == [3, 8]
+    assert row['cause'] == {'origin': str(section), 'link': f'../guide.md#{anchors[0]}', 'anchor': anchors[0]}

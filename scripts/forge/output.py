@@ -24,14 +24,53 @@ def pretty_command(command: str | list[str]) -> str:
     return shlex.join(command)
 
 
+def _format_context_attribution(payload: dict[str, Any]) -> list[str]:
+    attribution = payload.get("context_attribution")
+    if not isinstance(attribution, dict):
+        return []
+    parts = attribution.get("parts")
+    if not isinstance(parts, list) or len(parts) > 5:
+        return []
+    lines = ["Required context contributors:"]
+    for part in parts:
+        if not isinstance(part, dict) or type(part.get("words")) is not int or part["words"] < 0:
+            continue
+        path = part.get("path")
+        if path is not None and not isinstance(path, str):
+            continue
+        location = path if path is not None else "Packet heading"
+        span = part.get("lines")
+        if isinstance(span, list) and len(span) == 2 and all(type(line) is int for line in span):
+            location += f":{span[0]}-{span[1]}"
+        reason = part.get("reason")
+        reason = f" ({reason.replace('_', ' ')})" if isinstance(reason, str) else ""
+        lines.append(f"  - {part['words']} words: {location}{reason}")
+        cause = part.get("cause")
+        if isinstance(cause, dict) and all(isinstance(cause.get(key), str) for key in ("origin", "link")):
+            anchor = cause.get("anchor")
+            selection = "whole file" if anchor is None else f"anchor: {anchor}"
+            lines.append(f"    Observed link: {cause['origin']} -> {cause['link']} ({selection})")
+    for label, key in (("Other required fragments", "omitted_parts"),
+                       ("Other required words", "omitted_words"),
+                       ("Reserved source-pointer words", "reserved_source_words")):
+        value = attribution.get(key)
+        if type(value) is int and value >= 0:
+            lines.append(f"  {label}: {value}")
+    return lines
+
+
 def format_actions(payload: dict[str, Any]) -> list[str]:
     lines = []
     for label, key in (("Error", "error"), ("Next action", "next_action"), ("Record inputs", "record_inputs")):
         if payload.get(key):
             lines.append(f"{label}: {payload[key]}")
     packet = payload.get("packet") or {}
-    if packet.get("error"):
-        lines.append(f"Context: {packet['error']}")
+    error = packet.get("error")
+    if error and not (isinstance(error, str) and any(
+            isinstance(payload.get(key), str) and error in payload[key] for key in ("error", "next_action"))):
+        lines.append(f"Context: {error}")
+    lines.extend(_format_context_attribution(payload))
+    lines.extend(_format_context_attribution(packet))
     if payload.get("next_command"):
         lines.append(f"Next command: {pretty_command(payload['next_command'])}")
     commands = payload.get("commands")
