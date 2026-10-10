@@ -34,13 +34,13 @@ def _config(suite, arm_id, runtime):
                 'cli_auth_credentials_store="file"', "features.plugins=" + str(product).lower(),
                 "features.remote_plugin=false", "features.recommended_plugins=false", "agents.enabled=" + enabled,
                 "features.multi_agent=" + enabled, "features.multi_agent_v2=false",
-                'projects."/workspace".trust_level="untrusted"']
+                'projects={"/workspace"={trust_level="untrusted"}}']
     if product:
         identifier = runtime["installed"]["plugin_id"]
         text(identifier, "Installed plugin ID")
         settings += ['marketplaces.forge-evaluator.source_type="local"',
                      'marketplaces.forge-evaluator.source="/marketplace"',
-                     "plugins." + json.dumps(identifier, ensure_ascii=False) + ".enabled=true"]
+                     "plugins={" + json.dumps(identifier, ensure_ascii=False) + "={enabled=true}}"]
     else:
         require(runtime["installed"] is None, "Plain arm cannot enable a plugin")
     return [value for setting in settings for value in ("-c", setting)]

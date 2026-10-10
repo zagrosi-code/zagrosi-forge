@@ -148,7 +148,7 @@ TEST_MANIFEST = {
     "test_trial_suite_native_loading.py": "b43d8ed625b33f5285fc1248d94a17e26c6cb4c9bcf8cd0d6c036faa42535f95",
     "test_trial_suite_native_preflight.py": "3613732a70efeb0194a9175a78edc8a656a24ce6077852170fa5cd3d689c30be",
     "test_trial_suite_native_preparation.py": "6683e17ee2eedd5dc815d6b58fcae26f416898bab8f397c62a3794a748ca63fa",
-    "test_trial_suite_native_runtime.py": "ecdff81fab5c32f61cb2f362191248c83bf8e4c4c9506a7f6adff8e24ee45dae",
+    "test_trial_suite_native_runtime.py": "e4537e69ed4b7015a67a489fefd85cc11e358a8c5b7fc2b9459eb9923997cba0",
     "test_trial_suite_probes.py": "6371d93ac2e624fe6052fc95cdb8400955d34b940c4182d9c94922c8eb43167b",
     "test_trial_suite_qualification.py": "09731949215b0bc81c39df5007157f3d5e2d44013ecb712e1a273943d2bb9279",
     "test_trial_suite_reservation.py": "592f898fa34b6421f33ff800c722f1377328d475b0d76d40853fdc4f12dcb86d",
