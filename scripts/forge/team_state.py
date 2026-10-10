@@ -288,13 +288,14 @@ def require_session(board: dict, session_id: str, *, participant_id: str, checko
     return current
 
 
-def with_session(board: dict, session_id: str, session: dict, root: Path | None = None) -> dict:
+def with_session(board: dict, session_id: str, session: dict, root: Path | None = None, *,
+                 normalize_dependencies: bool = True) -> dict:
     result = validate_board(board)
     if not _token(session_id):
         _invalid("Invalid collaboration session identity.")
     entry = validate_session(session, version=result["version"])
     entry["paths"] = normalize_paths(entry["paths"], root)
-    if "dependencies" in entry:
+    if "dependencies" in entry and normalize_dependencies:
         entry["dependencies"]["paths"] = normalize_paths(entry["dependencies"]["paths"], root)
     result["sessions"].pop(session_id, None)
     result["sessions"][session_id] = entry

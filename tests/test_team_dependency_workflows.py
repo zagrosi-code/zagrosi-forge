@@ -9,6 +9,7 @@ import pytest
 from test_compact_plan import SECTION, make_plan
 from test_compatibility_checks import block, contract
 from test_team_git import client
+from test_team_state import make_link
 from test_team_workflows import call, configure, files, forge, record, repositories, setup, team, verify
 from test_workflow_admission import two_sections
 
@@ -318,3 +319,96 @@ def test_saved_current_record_keeps_warning_separate_from_unclaimed_next_entry(
     assert saved == result['record']
     assert 'team' not in saved and 'dependency_awareness' not in saved
     assert saved['compatibility']['candidate']['outcome'] == 'passed'
+
+
+def _reader_with_input_alias(forge, capsys, root, tmp_path):
+    inputs(root, contract(source_paths=['old.py', 'new.py'], check_paths=['checks/api.py']))
+    make_link(root / 'input.py', root / 'old.py')
+    planning = make_plan(tmp_path / 'private-plan')
+    declare(planning, value=contract(source_paths=['input.py'], check_paths=['checks/api.py']))
+    row = start(forge, capsys, root, planning)['session']
+    assert row['dependencies'] == {
+        'paths': ['checks/api.py', 'input.py', 'old.py'], 'complete': True}
+    return planning, row
+
+
+
+@pytest.mark.parametrize('change', ['retarget', 'escape'])
+def test_unplanned_note_preserves_accepted_inputs_after_read_alias_changes(
+        forge, capsys, repositories, tmp_path, change):
+    root, _, _ = repositories
+    configure(forge, capsys, root)
+    _, row = _reader_with_input_alias(forge, capsys, root, tmp_path)
+    accepted = deepcopy(row['dependencies'])
+    destination = root / 'new.py' if change == 'retarget' else tmp_path / 'outside.py'
+    if change == 'escape':
+        destination.write_text('outside read input\n')
+    (root / 'input.py').unlink()
+    make_link(root / 'input.py', destination)
+
+    result = team(forge, capsys, root, 'update', '--session', row['id'],
+                  '--generation', row['generation'], '--note', 'Still working')
+
+    assert result['clearance'] is True
+    assert result['session']['dependencies'] == accepted
+    assert result['session']['paths'] == row['paths']
+    assert result['session']['generation'] == row['generation']
+    assert result['session']['note'] == 'Still working'
+    assert client(forge, root).read().board['sessions'][row['id']]['dependencies'] == accepted
+    assert result['dependency_awareness'] == {
+        'status': 'partial' if change == 'escape' else 'observed', 'reason': None,
+        'warnings': [], 'omitted_warnings': 0, 'unknown_sessions': 0,
+        'alias_issues': {'count': 1, 'first': {'session_id': row['id'], 'path': 'input.py'}}
+        if change == 'escape' else {'count': 0, 'first': None},
+    }
+
+
+
+def test_recovery_preserves_accepted_inputs_when_new_clone_read_alias_escapes(
+        forge, capsys, repositories, tmp_path):
+    root, peer_root = join_second(forge, capsys, repositories)
+    _, row = _reader_with_input_alias(forge, capsys, root, tmp_path)
+    accepted = deepcopy(row['dependencies'])
+    team(forge, capsys, root, 'update', '--session', row['id'],
+         '--generation', row['generation'], '--state', 'handoff', '--note', 'Agreed transfer')
+    inputs(peer_root, contract(source_paths=['old.py'], check_paths=['checks/api.py']))
+    outside = tmp_path / 'outside.py'
+    outside.write_text('outside read input\n')
+    make_link(peer_root / 'input.py', outside)
+    revision = team(forge, capsys, peer_root, 'status')['revision']
+
+    result = team(forge, capsys, peer_root, 'recover', '--session', row['id'],
+                  '--expect', revision, '--reason', 'Owner agreed this handoff')
+
+    assert result['session']['dependencies'] == accepted
+    assert result['session']['paths'] == row['paths']
+    assert result['session']['generation'] != row['generation']
+    assert result['session']['checkout_id'] != row['checkout_id']
+    assert client(forge, peer_root).read().board['sessions'][row['id']]['dependencies'] == accepted
+    assert result['dependency_awareness'] == {
+        'status': 'partial', 'reason': None, 'warnings': [], 'omitted_warnings': 0,
+        'unknown_sessions': 0,
+        'alias_issues': {'count': 1, 'first': {'session_id': row['id'], 'path': 'input.py'}},
+    }
+
+
+
+def test_explicit_plan_refresh_replaces_accepted_read_alias_metadata(
+        forge, capsys, repositories, tmp_path):
+    root, _, _ = repositories
+    configure(forge, capsys, root)
+    planning, row = _reader_with_input_alias(forge, capsys, root, tmp_path)
+    (root / 'input.py').unlink()
+    make_link(root / 'input.py', root / 'new.py')
+
+    result = team(forge, capsys, root, 'update', '--session', row['id'],
+                  '--generation', row['generation'], '--planning-dir', planning, '--section', SECTION)
+
+    expected = {'paths': ['checks/api.py', 'input.py', 'new.py'], 'complete': True}
+    assert result['clearance'] is True
+    assert result['session']['dependencies'] == expected
+    assert result['session']['paths'] == row['paths']
+    assert result['session']['generation'] == row['generation']
+    assert client(forge, root).read().board['sessions'][row['id']]['dependencies'] == expected
+    assert result['dependency_awareness']['status'] == 'observed'
+    assert result['dependency_awareness']['alias_issues'] == {'count': 0, 'first': None}

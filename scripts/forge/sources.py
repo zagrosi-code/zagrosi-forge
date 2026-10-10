@@ -106,7 +106,7 @@ TEST_MANIFEST = {
     "test_team_collaboration.py": "75cfcb0a4cc8764a09466c3af86b4611769ddf4d16861e2a8274bdb2a959c17e",
     "test_team_config.py": "c9d28c024567afe132bad6004a4a9e94412c89e3e87e3573564f50268db2e2ef",
     "test_team_dependencies.py": "cf88b3387082d5244874497029f00c0ef4ef7bba5981352c74e51ea503f9c60e",
-    "test_team_dependency_workflows.py": "6916f05f55781f2daccc02fe6d420240a6e11d60e1fcb73185a6316b7bd36af0",
+    "test_team_dependency_workflows.py": "094d50edcfd4ac902e9d209d22468ec377085acaa61943abedb7a84fa8f659cd",
     "test_team_git.py": "5014b7422b5d268e0a9bd71978cf1afc4a455cfe6e10025d4fed684d38deb622",
     "test_team_guidance.py": "6873006837f8ccea1c96d78275edb2a26f69488b302b47526019ec05efa7aeb9",
     "test_team_plan_claims.py": "4b895c63de64d3330a4f64df8678ab645be50e879851de1c341d66df85388bcb",

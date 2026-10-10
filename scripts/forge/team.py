@@ -296,7 +296,8 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
             raise TeamError("team-scope-changed", "A reserved alias changed; inspect it and explicitly update the paths before continuing.")
         base = {**snapshot.board, "version": 2} if upgrade_protocol else snapshot.board
         board = (without_session(base, identity) if action == "finish"
-                 else with_session(base, identity, row, root=repo.root))
+                 else with_session(base, identity, row, root=repo.root,
+                                   normalize_dependencies=dependencies is not _KEEP_DEPENDENCIES))
         if action != "finish":
             context["local"].require_capacity(context["checkout"], identity, binding)
         pending = {"action": action, "session_id": identity, "generation": token, "binding": binding}
