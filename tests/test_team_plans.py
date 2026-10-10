@@ -718,3 +718,75 @@ def test_marker_file_size_cannot_substitute_boolean_for_integer(forge, repositor
     marker.write_text(json.dumps(value), encoding='utf-8')
     with pytest.raises(forge.team_state.TeamError):
         forge.team_plans.validate(workspace, root)
+
+
+@pytest.mark.parametrize('advance_head', [False, True], ids=['equal-commit', 'distinct-commits'])
+def test_validation_enumerates_each_distinct_source_commit_once(forge, repositories, monkeypatch, advance_head):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    prepared, workspace = prepare(forge, root, planning)
+    recorded = prepared['source']['commit']
+    if advance_head:
+        (root / 'code.txt').write_text('Unrelated application change\n', encoding='utf-8')
+        git(root, 'add', 'code.txt')
+        git(root, 'commit', '-m', 'Change code without changing the contract')
+    repo = forge.team_git.Repository.discover(root)
+    assert (repo.head != recorded) is advance_head
+    before = {path.relative_to(root): (path.read_bytes(), path.stat().st_mode)
+              for path in root.rglob('*') if path.is_file()}
+    calls, run = [], forge.team_git._run
+    def observed(cwd, *args, **kwargs):
+        if args[:1] == ('ls-tree',) or args[:2] == ('cat-file', '--batch-check'):
+            calls.append((cwd, args, kwargs))
+        return run(cwd, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(forge.team_git, '_run', observed)
+        result = forge.team_plans.validate(workspace, root)
+    assert result == prepared['source']
+    assert before == {path.relative_to(root): (path.read_bytes(), path.stat().st_mode)
+                      for path in root.rglob('*') if path.is_file()}
+    canonical = prepared['source']['path']
+    expected = [(repo.root, ('ls-tree', '-rlz', repo.head, '--', canonical), {}),
+                (repo.root, ('cat-file', '--batch-check'), {'prompt': recorded + '\n'})]
+    if advance_head:
+        expected.append((repo.root, ('ls-tree', '-rlz', recorded, '--', canonical), {}))
+    assert calls == expected
+
+
+@pytest.mark.parametrize('object_kind,message', [
+    ('missing', 'The recorded source commit is missing; prepare its reviewed current version.'),
+    ('tree', 'Git returned an invalid prepared source commit.'),
+])
+def test_validation_preserves_source_object_error_order(forge, repositories, monkeypatch, object_kind, message):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    prepared, workspace = prepare(forge, root, planning)
+    repo = forge.team_git.Repository.discover(root)
+    if object_kind == 'missing':
+        oid = '0' * len(repo.head)
+        assert git(root, 'cat-file', '--batch-check', input=oid + '\n').stdout.split() == [oid, 'missing']
+    else:
+        oid = git(root, 'rev-parse', 'HEAD^{tree}').stdout.strip()
+    marker = workspace / '.forge-team-plan.json'
+    value = json.loads(marker.read_text(encoding='utf-8'))
+    value['commit'] = oid
+    marker.write_text(json.dumps(value) + '\n', encoding='utf-8')
+    before = {path.relative_to(root): (path.read_bytes(), path.stat().st_mode)
+              for path in root.rglob('*') if path.is_file()}
+    calls, run = [], forge.team_git._run
+    def observed(cwd, *args, **kwargs):
+        if args[:1] == ('ls-tree',) or args[:2] == ('cat-file', '--batch-check'):
+            calls.append((cwd, args, kwargs))
+        return run(cwd, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(forge.team_git, '_run', observed)
+        with pytest.raises(forge.team_state.TeamError) as failed:
+            forge.team_plans.validate(workspace, root)
+    assert failed.value.code == 'team-plan-invalid'
+    assert str(failed.value) == message
+    assert before == {path.relative_to(root): (path.read_bytes(), path.stat().st_mode)
+                      for path in root.rglob('*') if path.is_file()}
+    assert calls == [
+        (repo.root, ('ls-tree', '-rlz', repo.head, '--', prepared['source']['path']), {}),
+        (repo.root, ('cat-file', '--batch-check'), {'prompt': oid + '\n'}),
+    ]

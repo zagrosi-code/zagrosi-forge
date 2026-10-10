@@ -349,7 +349,7 @@ def _validate(planning, target, *, recover_legacy=False):
     if missing:
         if not recover_legacy:
             _fail('The recorded source commit is missing; prepare its reviewed current version.')
-    else:
+    elif value['commit'] != repo.head:
         original = _tree(repo, value['canonical'], value['commit'])
         if any(original.get(name) != item for name, item in files.items()):
             _fail('The prepared marker does not identify its recorded source commit.')
