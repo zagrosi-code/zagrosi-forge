@@ -44,6 +44,11 @@ def format_workflow_details(payload: dict[str, Any]) -> list[str]:
     lines = []
     if "recorded" in payload:
         lines.append(f"Recorded: {'yes' if payload['recorded'] else 'no'}")
+    if payload.get("section"):
+        lines.append(f"Section: {payload['section']}")
+    history = _compatibility_history(payload)
+    if history:
+        lines.append(f"Compatibility history: {len(history)} prior attempt(s) retained")
     admission = payload.get("admission")
     if isinstance(admission, dict):
         lines.append(f"Admission: {'READY' if admission.get('success') else 'BLOCKED'}")
@@ -116,7 +121,24 @@ def _error_findings(payload: dict[str, Any]) -> list[dict[str, Any]]:
             for error in errors if isinstance(error, str) and error.strip()]
 
 
+def _compatibility_history(payload: dict[str, Any]) -> list[Any]:
+    record = payload.get("record")
+    compatibility = record.get("compatibility") if isinstance(record, dict) else None
+    attempts = compatibility.get("prior_attempts") if isinstance(compatibility, dict) else None
+    return attempts if isinstance(attempts, list) else []
+
+
+def _current_diagnostics(payload: dict[str, Any]) -> dict[str, Any]:
+    if not _compatibility_history(payload):
+        return payload
+    record = payload["record"]
+    return {**payload, "record": {**record, "compatibility": {
+        **record["compatibility"], "prior_attempts": [],
+    }}}
+
+
 def _format_diagnostics(payload: dict[str, Any], label: str, *, actions_shown: bool = False) -> list[str]:
+    payload = _current_diagnostics(payload)
     pending, findings, errors = [payload], [], []
     while pending:
         value = pending.pop()
@@ -222,6 +244,7 @@ def format_setup(payload: dict[str, Any]) -> list[str]:
         ("Sections dir", "sections_dir"),
         ("Target dir", "target_dir"),
         ("State dir", "state_dir"),
+        ("State file", "state_path"),
         ("Config", "config_path"),
     ):
         value = payload.get(key)
@@ -392,7 +415,7 @@ def format_pretty(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def failure_summary(payload: dict[str, Any]) -> dict[str, Any]:
+def failure_summary(payload: dict[str, Any], *, pretty: bool = False) -> dict[str, Any]:
     """Deduplicate findings only after saving the complete machine report."""
     import tempfile
 
@@ -457,7 +480,12 @@ def failure_summary(payload: dict[str, Any]) -> dict[str, Any]:
             result["gates"] = [gate_summary(gate) for gate in result["gates"]]
         return result
 
-    return {**compact(payload), "diagnostics": diagnostics, "full_report": str(report),
+    summary = compact(_current_diagnostics(payload) if pretty else payload)
+    history = _compatibility_history(payload) if pretty else []
+    if history:
+        # Keep the count/evidence, without promoting historical failures as current.
+        summary["record"]["compatibility"]["prior_attempts"] = history
+    return {**summary, "diagnostics": diagnostics, "full_report": str(report),
             "output_schema": "forge-flight-summary-v1"}
 
 
@@ -470,7 +498,7 @@ def print_json(payload: dict[str, Any], exit_code: int = 0) -> int:
         flights.append(payload.get("admission"))
     if (streams is None and not (context or {}).get("full_output")
             and any(isinstance(item, dict) and item.get("success") is False and "gates" in item for item in flights)):
-        payload = failure_summary(payload)
+        payload = failure_summary(payload, pretty=pretty)
     if streams is None and pretty:
         print(format_pretty(payload))
     else:
