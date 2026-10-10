@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
@@ -48,11 +49,11 @@ def expected_config(*, product, subagents=False, effort="high"):
               "features.plugins=" + ("true" if product else "false"),
               "features.remote_plugin=false", "features.recommended_plugins=false",
               "agents.enabled=" + enabled, "features.multi_agent=" + enabled,
-              "features.multi_agent_v2=false", 'projects."/workspace".trust_level="untrusted"']
+              "features.multi_agent_v2=false", 'projects={"/workspace"={trust_level="untrusted"}}']
     if product:
         result += ['marketplaces.forge-evaluator.source_type="local"',
                    'marketplaces.forge-evaluator.source="/marketplace"',
-                   'plugins."neutral-product@forge-evaluator".enabled=true']
+                   'plugins={"neutral-product@forge-evaluator"={enabled=true}}']
     return [value for setting in result for value in ("-c", setting)]
 
 
@@ -63,6 +64,21 @@ def expected_recipe(*, product, subagents=False, environment=None, model="fictio
                      *expected_config(product=product, subagents=subagents, effort=effort), "-"],
             "environment": (environment or {}) | {"HOME": "/home/forge", "CODEX_HOME": "/codex",
                                                  "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"}}
+
+
+@pytest.mark.parametrize("plugin_id", [None, "neutral-product@forge-evaluator", "neutral.product@forge-evaluator"])
+def test_override_tables_preserve_literal_keys(tmp_path, plugin_id):
+    fixture = make_native(tmp_path, plain=plugin_id is None)
+    if plugin_id is not None:
+        fixture["runtime"]["installed"]["plugin_id"] = plugin_id
+    argv = native_recipe(fixture["suite"], fixture["arm"], fixture["runtime"])["argv"]
+    # Codex splits override paths on dots; only the value is parsed as TOML.
+    settings = dict(argv[index + 1].split("=", 1) for index, value in enumerate(argv) if value == "-c")
+    assert tomllib.loads("value=" + settings["projects"])["value"] == {"/workspace": {"trust_level": "untrusted"}}
+    if plugin_id is None:
+        assert "plugins" not in settings
+    else:
+        assert tomllib.loads("value=" + settings["plugins"])["value"] == {plugin_id: {"enabled": True}}
 
 
 @pytest.fixture(autouse=True)
