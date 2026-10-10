@@ -320,6 +320,7 @@
   "tests/test_team_collaboration.py",
   "tests/test_team_config.py",
   "tests/test_team_dependencies.py",
+  "tests/test_team_dependency_workflows.py",
   "tests/test_team_git.py",
   "tests/test_team_guidance.py",
   "tests/test_team_plan_claims.py",
