@@ -1,6 +1,7 @@
 """Declared inputs stay current across team workflow boundaries."""
 from copy import deepcopy
 import json
+import re
 from pathlib import Path
 import sys
 
@@ -412,3 +413,187 @@ def test_explicit_plan_refresh_replaces_accepted_read_alias_metadata(
     assert client(forge, root).read().board['sessions'][row['id']]['dependencies'] == expected
     assert result['dependency_awareness']['status'] == 'observed'
     assert result['dependency_awareness']['alias_issues'] == {'count': 0, 'first': None}
+
+
+@pytest.mark.parametrize('stage', [None, 'baseline'], ids=['ordinary-verification', 'compatibility-verification'])
+def test_verification_projects_awareness_without_persisting_it_in_receipts(
+        forge, capsys, repositories, tmp_path, monkeypatch, stage):
+    root, peer_root = join_second(forge, capsys, repositories)
+    planning = make_plan(tmp_path / 'private-plan')
+    declared = contract(**INPUTS)
+    declare(planning, value=declared)
+    inputs(root, declared)
+    row = start(forge, capsys, root, planning)['session']
+    writer = team(forge, capsys, peer_root, 'start', '--task', 'Edit API', '--path', 'lib/api.py')['session']
+    code, prepared = setup(forge, capsys, planning, root)
+    assert code == 0, prepared
+    assert_warning(prepared['team'], writer, 'reads_peer_writes')
+    path = (forge.compatibility.receipt_path(planning, SECTION) if stage else
+            forge.verification.receipt_path(planning, SECTION))
+    write_json = forge.storage.write_json
+    writes = []
+    def retain_write(destination, value):
+        result = write_json(destination, value)
+        if Path(destination) == path:
+            writes.append((deepcopy(value), path.read_bytes()))
+        return result
+    monkeypatch.setattr(forge.storage, 'write_json', retain_write)
+    extra = ['--stage', stage] if stage else []
+    code, result = verify(forge, capsys, planning, root, '--section', SECTION, *extra,
+                          '--', sys.executable, '-B', 'checks/api.py')
+    assert code == 0 and result['success'], result
+    assert_warning(result['team'], writer, 'reads_peer_writes')
+    assert writes and path.read_bytes() == writes[-1][1]
+    saved = json.loads(path.read_text())
+    assert saved == writes[-1][0]
+    assert 'team' not in saved and 'dependency_awareness' not in saved
+    verified = saved['baseline'] if stage else saved
+    assert verified['outcome'] == 'passed'
+    assert 'team' not in verified and 'dependency_awareness' not in verified
+    frozen = path.read_bytes()
+    team(forge, capsys, peer_root, 'update', '--session', writer['id'], '--generation', writer['generation'],
+         '--path', 'lib/unrelated.py')
+    code, checked = call(forge, capsys, *check_args(root, row, planning, SECTION))
+    assert code == 0 and checked['dependency_awareness']['warnings'] == []
+    assert path.read_bytes() == frozen  # New board observations cannot rewrite saved verification.
+
+
+def readable_awareness(status='observed', **changes):
+    return {'status': status, 'reason': None, 'warnings': [], 'omitted_warnings': 0,
+            'unknown_sessions': 0, 'alias_issues': {'count': 0, 'first': None}, **changes}
+
+
+def readable_warning(number, *, name=None, direction='reads_peer_writes'):
+    return {'session_id': f'{number:032x}', 'name': name or f'Peer-{number}', 'stale': False,
+            'direction': direction, 'dependency_path': f'lib/api-{number}.py',
+            'write_path': f'lib/api-{number}.py', 'basis': 'portable_path', 'alias_paths': None}
+
+
+def test_readable_observation_is_advisory_and_preserves_default_json(forge, capsys):
+    payload = {'success': True, 'team': {
+        'success': True, 'clearance': True, 'protocol_version': 2,
+        'dependency_awareness': readable_awareness()}}
+    before = deepcopy(payload)
+    pretty = forge.output.format_pretty(payload)
+    assert re.search(r'dependency awareness\W+observed\b', pretty, re.I)
+    assert 'declared' in pretty.lower() and 'advisory' in pretty.lower()
+    assert 'Status: PASS' in pretty
+    assert payload == before
+    assert forge.output.print_json(payload) == 0
+    assert json.loads(capsys.readouterr().out) == before
+
+
+def test_readable_partial_observation_keeps_bounded_witnesses_and_omission_counts(forge):
+    warnings = [readable_warning(number, direction=(
+        'reads_peer_writes' if number % 2 else 'writes_peer_reads')) for number in range(1, 6)]
+    warnings[0].update(stale=True, dependency_path='client-link/api-1.py', basis='local_alias',
+                       alias_paths={'dependency': 'lib/api-1.py', 'write': 'lib/api-1.py'})
+    payload = {'success': True, 'team': {
+        'success': True, 'clearance': True, 'protocol_version': 2,
+        'dependency_awareness': readable_awareness(
+            'partial', warnings=warnings, omitted_warnings=9, unknown_sessions=2,
+            alias_issues={'count': 3, 'first': {'session_id': 'f' * 32, 'path': 'broken/input.py'}})}}
+    before = deepcopy(payload)
+    pretty = forge.output.format_pretty(payload)
+    assert re.search(r'dependency awareness\W+partial\b', pretty, re.I)
+    for warning in warnings:
+        assert warning['name'] in pretty
+        assert warning['dependency_path'] in pretty and warning['write_path'] in pretty
+    assert 'stale' in pretty.lower() and 'local' in pretty.lower() and 'alias' in pretty.lower()
+    lines = pretty.lower().splitlines()
+    assert any('unknown' in line and re.search(r'\b2\b', line) for line in lines)
+    assert any('warning' in line and re.search(r'\b9\b', line)
+               and ('omitted' in line or 'more' in line) for line in lines)
+    assert 'broken/input.py' in pretty and 'f' * 32 in pretty
+    assert any('alias' in line and re.search(r'\b2\b', line)
+               and ('omitted' in line or 'more' in line) for line in lines)
+    assert 'Status: PASS' in pretty  # Unknown inputs and advisory overlaps are not write conflicts.
+    assert payload == before
+
+
+@pytest.mark.parametrize('reason,version,visible_reason,success', [
+    ('protocol-v1', 1, 'v1', True), ('offline', 2, 'offline', False),
+])
+def test_readable_unavailable_observation_does_not_invent_measured_zeroes(
+        forge, reason, version, visible_reason, success):
+    payload = {'success': success, 'team': {
+        'success': success, 'clearance': success, 'protocol_version': version,
+        'dependency_awareness': readable_awareness(
+            'unavailable', reason=reason, omitted_warnings=None, unknown_sessions=None,
+            alias_issues={'count': None, 'first': None})}}
+    before = deepcopy(payload)
+    pretty = forge.output.format_pretty(payload)
+    assert re.search(r'dependency awareness\W+unavailable\b', pretty, re.I)
+    assert visible_reason in pretty.lower()
+    assert not re.search(r'(?im)^.*(?:unknown|omitted|alias issues)[^\n]*\b0\b', pretty)
+    assert ('Status: PASS' if success else 'Status: FAIL') in pretty
+    assert payload == before
+
+
+def test_readable_saved_completion_and_blocked_next_entry_keep_separate_warnings(forge):
+    current_warning = readable_warning(1, name='Current-peer')
+    next_warning = readable_warning(2, name='Next-peer', direction='writes_peer_reads')
+    payload = {
+        'success': True, 'recorded': True, 'section': SECTION, 'next_section': SECOND,
+        'team': {'success': True, 'clearance': True, 'protocol_version': 2,
+                 'dependency_awareness': readable_awareness('partial', warnings=[current_warning],
+                                                            unknown_sessions=1)},
+        'entry': {'success': False, 'error': 'Cannot read linked contract.',
+                  'next_action': 'Repair next-section context; preceding record is saved.',
+                  'commands': {'retry_context': ['python', '/plugin with spaces/forge.py', 'next-section',
+                                                 '--planning-dir', '/private plan', '--max-words', '2500']},
+                  'team': {'success': True, 'clearance': True, 'protocol_version': 2,
+                           'dependency_awareness': readable_awareness(warnings=[next_warning])}},
+    }
+    before = deepcopy(payload)
+    pretty = forge.output.format_pretty(payload)
+    current, following = pretty.split('Next entry: BLOCKED', 1)
+    assert 'Status: PASS' in current and 'Recorded: yes' in current
+    assert 'current task' in current.lower()
+    assert re.search(r'dependency awareness\W+partial\b', current, re.I)
+    assert 'Current-peer' in current and 'Next-peer' not in current
+    assert re.search(r'dependency awareness\W+observed\b', following, re.I)
+    assert 'Next-peer' in following and 'Current-peer' not in following
+    for warning, scope in ((current_warning, current), (next_warning, following)):
+        assert warning['dependency_path'] in scope and warning['write_path'] in scope
+    assert payload['entry']['error'] in following and payload['entry']['next_action'] in following
+    for argument in payload['entry']['commands']['retry_context']:
+        assert argument in following
+    assert payload == before
+
+
+def test_public_team_check_pretty_retains_advisory_dependency_warning_and_clearance(
+        forge, capsys, repositories, tmp_path):
+    root, peer_root = join_second(forge, capsys, repositories)
+    planning = make_plan(tmp_path / 'private-plan')
+    declare(planning, value=contract(**INPUTS))
+    reader = start(forge, capsys, root, planning)['session']
+    writer = team(forge, capsys, peer_root, 'start', '--task', 'Edit API', '--path', 'lib/api.py')['session']
+    arguments = check_args(root, reader, planning, SECTION)
+    code, result = call(forge, capsys, *arguments)
+    assert code == 0 and result['clearance'], result
+    assert_warning(result, writer, 'reads_peer_writes')
+    assert forge.entrypoint.main([str(arg) for arg in arguments] + ['--pretty']) == code
+    pretty = capsys.readouterr().out
+    assert re.search(r'dependency awareness\W+partial\b', pretty, re.I)
+    assert writer['name'] in pretty and 'lib/api.py' in pretty
+    assert 'advisory' in pretty.lower()
+    assert 'Editing clearance: current reservation checked' in pretty
+
+
+def test_public_pretty_dependency_drift_keeps_copyable_refresh_command(forge, capsys, repositories, tmp_path):
+    root, _, _ = repositories
+    configure(forge, capsys, root)
+    planning = make_plan(tmp_path / 'private-plan')
+    declare(planning, value=contract(**INPUTS))
+    row = start(forge, capsys, root, planning)['session']
+    declare(planning, value=contract(source_paths=['replacement.py'], check_paths=['checks/api.py']))
+    arguments = check_args(root, row, planning, SECTION)
+    code, result = call(forge, capsys, *arguments)
+    assert code == 1 and result['error_code'] == 'team-dependency-binding', result
+    repair = result['commands']['team_update']
+    assert forge.entrypoint.main([str(arg) for arg in arguments] + ['--pretty']) == code
+    pretty = capsys.readouterr().out
+    assert result['error'] in pretty
+    assert forge.output.pretty_command(repair) in pretty
+    assert 'Editing clearance: not established' in pretty

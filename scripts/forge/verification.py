@@ -131,7 +131,8 @@ def implement_verify(args) -> int:
             from .compatibility import capture
 
             result = capture(planning, target, args.section, args.stage, command, args.timeout)
-            return output.print_json(result, 0 if result["success"] else 1)
+            return output.print_json({**result, **({"team": team} if team is not None else {})},
+                                     0 if result["success"] else 1)
         before = mutable_inputs.verification_snapshot(planning, target, args.section)
         path = receipt_path(planning, args.section)
         receipts = {path: before}
@@ -156,6 +157,7 @@ def implement_verify(args) -> int:
                                   "changed_components": changed,
                                   "integration_receipt_path": str(receipt_path(planning)) if args.integration or not args.section else None,
                                   "source": result["source"], "outcome": result["outcome"],
+                                  **({"team": team} if team is not None else {}),
                                   **{key: result[key] for key in ("seconds", "exit_code", "stdout_tail", "stderr_tail") if key in result}},
                                  0 if error is None else 1)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:

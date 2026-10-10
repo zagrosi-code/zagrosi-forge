@@ -24,6 +24,50 @@ def pretty_command(command: str | list[str]) -> str:
     return shlex.join(command)
 
 
+def format_dependency_awareness(result, *, scope: str | None = None) -> list[str]:
+    """Render the supplied live projection; do not inspect boards or saved records."""
+    awareness = result.get("dependency_awareness") if isinstance(result, dict) else None
+    if not isinstance(awareness, dict) or awareness.get("status") not in {"observed", "partial", "unavailable"}:
+        return []
+    label = f"{scope} dependency awareness" if scope else "Dependency awareness"
+    lines = [f"{label}: {awareness['status']} (advisory; declared inputs only)"]
+    if awareness["status"] == "unavailable":
+        reasons = {"offline": "Offline observation; dependency coverage was not checked.",
+                   "protocol-v1": "Protocol v1 does not advertise declared inputs.",
+                   "no-session": "No current task was selected for dependency observation."}
+        if reason := reasons.get(awareness.get("reason")):
+            lines.append(f"  {reason}")
+        return lines
+    for warning in awareness.get("warnings", []):
+        peer = f"{warning['name']} ({warning['session_id']})"
+        dependency, write = warning["dependency_path"], warning["write_path"]
+        if warning["direction"] == "reads_peer_writes":
+            line = f"  This task's input {dependency} overlaps {peer}'s reserved write {write}."
+        else:
+            line = f"  This task's reserved write {write} overlaps {peer}'s input {dependency}."
+        lines.append(line + (" [stale reservation]" if warning["stale"] else ""))
+        if warning["basis"] == "local_alias" and warning.get("alias_paths"):
+            aliases = warning["alias_paths"]
+            lines.append(f"    Local alias overlap: input {aliases['dependency']}; write {aliases['write']}.")
+        elif warning["basis"] == "local_inode":
+            lines.append("    Local inode match in this checkout.")
+    unknown = awareness.get("unknown_sessions")
+    if type(unknown) is int and unknown >= 0:
+        lines.append(f"  Unknown or partial declarations: {unknown} session(s)")
+    omitted = awareness.get("omitted_warnings")
+    if type(omitted) is int and omitted > 0:
+        lines.append(f"  Omitted warnings: {omitted}")
+    issues = awareness.get("alias_issues") or {}
+    count = issues.get("count")
+    if type(count) is int and count > 0:
+        lines.append(f"  Alias observations unavailable: {count}")
+        if first := issues.get("first"):
+            lines.append(f"    {first['session_id']}: {first['path']}")
+        if count > 1:
+            lines.append(f"    More alias issues: {count - 1}")
+    return lines
+
+
 def _format_context_attribution(payload: dict[str, Any]) -> list[str]:
     attribution = payload.get("context_attribution")
     if not isinstance(attribution, dict):
@@ -104,10 +148,12 @@ def format_workflow_details(payload: dict[str, Any]) -> list[str]:
             lines.append(f"{label}: {', '.join(resume[key])}")
     if resume.get("notes"):
         lines.append(f"Notes: {resume['notes']}")
+    lines.extend(format_dependency_awareness(payload.get("team"), scope="Current task"))
     lines.extend(format_actions(payload))
     entry = payload.get("entry")
     if isinstance(entry, dict):
         lines.append(f"Next entry: {'READY' if entry.get('success') else 'BLOCKED'}")
+        lines.extend(format_dependency_awareness(entry.get("team"), scope="Next entry"))
         lines.extend(format_actions(entry))
     return lines
 

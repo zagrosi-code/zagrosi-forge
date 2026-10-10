@@ -163,7 +163,10 @@ def run(args):
             lines.append(f"  Generation: {row['generation']}")
             if plan := row.get("plan"):
                 lines.append(f"  Plan: {plan['path']} · {plan['digest'][:12]} · {plan['section'] or 'whole plan'}")
-        lines.extend(result[key] for key in ("error", "next_action", "note") if result.get(key))
+        lines.extend(output.format_dependency_awareness(result))
+        lines.extend(output.format_actions(result))
+        if result.get("note"):
+            lines.append(result["note"])
         lines.append("Editing clearance: " + ("current reservation checked" if result.get("clearance") else "not established"))
         print("\n".join(lines))
         return 0 if result["success"] else 1
