@@ -320,6 +320,8 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
             if exc.code != "team-contention" or action == "recover" or upgrade_protocol or attempt == 2:
                 raise
             _cache(context, transport.read(snapshot.board["board_id"]))
+            if binding is not None and context["snapshot"].board["version"] != snapshot.board["version"]:
+                raise TeamError("team-contention", "The team protocol changed; repeat the same planned command to refresh its declared inputs.")
             continue
         accepted = _accept_pending(context, published)
         return _result(context, accepted)

@@ -5,6 +5,10 @@ import json
 import pytest
 
 from forge_test_helpers import load_zagrosi_module
+from test_compact_plan import SECTION, make_plan
+from test_compatibility_checks import contract
+from test_team_dependency_workflows import INPUTS, assert_warning, declare
+from test_team_workflows import call
 from test_team_collaboration import git, join_pair, repositories, team
 from test_team_git import client
 from test_team_state import BOARD, FIRST, board, session
@@ -346,3 +350,110 @@ def test_unplanned_update_and_recovery_preserve_metadata_then_finish_removes_it(
     team(second, 'finish', '--session', recovered['id'], '--note', 'Complete')
     current = transport.read().board
     assert current['version'] == 2 and row['id'] not in current['sessions']
+
+
+@pytest.mark.parametrize('action', ['start', 'update'])
+def test_plan_aware_contention_stops_on_peer_upgrade_then_reissues_fresh(
+        team, capsys, repositories, tmp_path, monkeypatch, action):
+    first, second = legacy_pair(team, repositories)
+    forge = team.forge
+    peer = team(second, 'start', '--task', 'Edit API', '--path', 'lib/api.py')['session']
+    planning = make_plan(tmp_path / 'private-plan')
+    declare(planning, value=contract(**INPUTS))
+    scope = ['--planning-dir', planning, '--section', SECTION]
+    actor = (team(first, 'start', '--task', 'Read API', *scope)['session']
+             if action == 'update' else None)
+    arguments = (['--session', actor['id'], '--generation', actor['generation'],
+                  '--note', 'Refresh declared-input work'] if actor else ['--task', 'Read API'])
+    command = ['team', action, '--target-dir', first, *arguments, *scope]
+    before = client(forge, first).read()
+    assert before.board['version'] == 1
+    local, local_before = local_state(team, first)
+    original_push = forge.team_git.GitBoard._push
+    actor_pushes, peer_publications = [], []
+
+    def contend(transport, receipt):
+        if transport.repo.root == first.resolve():
+            actor_pushes.append(receipt.copy())
+            if len(actor_pushes) == 1:
+                # Publish a real atomic peer upgrade before the stale actor push.
+                current = client(forge, second).read()
+                upgraded = team(second, 'update', '--session', peer['id'],
+                                '--note', 'Peer upgraded the board',
+                                '--upgrade-protocol', '--expect', current.revision)
+                assert upgraded['published'] and upgraded['protocol_version'] == 2
+                peer_publications.append(client(forge, second).read())
+        return original_push(transport, receipt)
+
+    monkeypatch.setattr(forge.team_git.GitBoard, '_push', contend)
+    code, failed = call(forge, capsys, *command)
+    assert code == 1 and failed['success'] is False and failed['clearance'] is False, failed
+    assert failed['error_code'] == 'team-contention'
+    message = failed['error'].lower()
+    assert 'protocol' in message and any(word in message for word in ('repeat', 'rerun', 'reissue'))
+    assert len(actor_pushes) == 1 and actor_pushes[0]['expected'] == before.revision
+    accepted = client(forge, first).read()
+    upgraded = peer_publications[0]
+    assert accepted.revision == upgraded.revision and accepted.board == upgraded.board
+    assert accepted.board['version'] == 2
+    assert set(accepted.board['sessions']) == set(before.board['sessions'])
+    if actor:
+        assert accepted.board['sessions'][actor['id']] == before.board['sessions'][actor['id']]
+    after_failure = local.load()
+    assert after_failure['checkouts'] == local_before['checkouts']
+    assert after_failure['checkouts'][local.key]['pending'] is None
+    assert after_failure['participant_id'] == local_before['participant_id']
+    assert after_failure['connection'] == local_before['connection']
+
+    # Only this explicit second invocation may derive inputs from the new protocol.
+    code, result = call(forge, capsys, *command)
+    assert code == 0 and result['published'] and result['clearance'], result
+    assert result['protocol_version'] == 2
+    assert result['session']['dependencies'] == {
+        'paths': ['checks/api.py', 'lib/api.py'], 'complete': True}
+    assert_warning(result, peer, 'reads_peer_writes')
+    final = client(forge, first).read()
+    assert result['revision'] == final.revision
+    assert final.board['sessions'][peer['id']] == upgraded.board['sessions'][peer['id']]
+    assert len(actor_pushes) == 2 and actor_pushes[1]['expected'] == upgraded.revision
+    assert local.load()['checkouts'][local.key]['pending'] is None
+    if actor:
+        assert (result['session']['id'], result['session']['generation']) == (
+            actor['id'], actor['generation'])
+
+
+def test_unplanned_note_update_still_retries_across_peer_upgrade(team, repositories, monkeypatch):
+    first, second = legacy_pair(team, repositories)
+    forge = team.forge
+    actor = team(first, 'start', '--task', 'Actor work', '--path', 'src/actor.py')['session']
+    peer = team(second, 'start', '--task', 'Peer work', '--path', 'src/peer.py')['session']
+    before = client(forge, first).read()
+    assert before.board['version'] == 1
+    original_push = forge.team_git.GitBoard._push
+    actor_pushes, peer_publications = [], []
+
+    def contend(transport, receipt):
+        if transport.repo.root == first.resolve():
+            actor_pushes.append(receipt.copy())
+            if len(actor_pushes) == 1:
+                current = client(forge, second).read()
+                team(second, 'update', '--session', peer['id'], '--note', 'Peer upgraded',
+                     '--upgrade-protocol', '--expect', current.revision)
+                peer_publications.append(client(forge, second).read())
+        return original_push(transport, receipt)
+
+    monkeypatch.setattr(forge.team_git.GitBoard, '_push', contend)
+    result = team(first, 'update', '--session', actor['id'], '--note', 'Ordinary progress')
+    assert result['published'] and result['protocol_version'] == 2
+    assert result['session']['note'] == 'Ordinary progress'
+    assert 'dependencies' not in result['session'] and 'plan' not in result['session']
+    assert result['session']['paths'] == actor['paths']
+    assert (result['session']['id'], result['session']['generation']) == (actor['id'], actor['generation'])
+    upgraded = peer_publications[0]
+    assert len(actor_pushes) == 2
+    assert [attempt['expected'] for attempt in actor_pushes] == [before.revision, upgraded.revision]
+    final = client(forge, first).read()
+    assert result['revision'] == final.revision and final.board['version'] == 2
+    assert final.board['sessions'][peer['id']] == upgraded.board['sessions'][peer['id']]
+    local, saved = local_state(team, first)
+    assert saved['checkouts'][local.key]['pending'] is None
