@@ -43,6 +43,10 @@ def add_team_commands(sub, invoke_command):
             command.add_argument("--planning-dir", required=True)
         if action == "start":
             command.add_argument("--task", required=True)
+        if action in {"start", "update"}:
+            command.add_argument("--upgrade-protocol", action="store_true",
+                                 help="Publish protocol v2; all participants need a compatible Forge client.")
+            command.add_argument("--expect", help="Exact v1 board revision reviewed for this protocol upgrade.")
         if action in {"start", "update", "recover"}:
             command.add_argument("--host", choices=["codex", "claude", "other"], default=None)
         if action == "update":
@@ -100,7 +104,7 @@ def _dispatch(args):
                 if current not in (expected, {**expected, "section": None}):
                     raise TeamError("team-plan-binding", "Bind this prepared plan revision before continuing.")
             return result
-        fields = {key: getattr(args, key) for key in ("generation", "task", "host", "state", "note", "expect", "reason")
+        fields = {key: getattr(args, key) for key in ("generation", "task", "host", "state", "note", "expect", "reason", "upgrade_protocol")
                   if hasattr(args, key)}
         return team.mutate(context, action, identity=getattr(args, "session", None), paths=paths,
                            binding=binding, **plan_fields, **fields)
