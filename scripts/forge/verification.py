@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 
 from . import markdown, mutable_inputs, output, storage
@@ -31,14 +32,41 @@ def result_error(result) -> str | None:
     return None
 
 
-def receipt_error(receipt, planning_dir: Path, target_dir: Path, section: str | None = None) -> str | None:
+def _receipt_status(receipt, planning_dir: Path, target_dir: Path,
+                    section: str | None = None) -> tuple[str | None, list[str] | None]:
     if error := result_error(receipt):
-        return error
+        return error, None
     try:
-        fresh = receipt.get("snapshot") == mutable_inputs.verification_snapshot(planning_dir, target_dir, section)
+        previous = receipt.get("snapshot")
+        current = mutable_inputs.verification_snapshot(planning_dir, target_dir, section)
+        if previous == current:
+            return None, []
+        # Classify only after full equality: diagnostics never change validity.
+        if (not isinstance(previous, dict) or previous.keys() != current.keys()
+                or type(previous.get("version")) is not int or previous["version"] != current["version"]
+                or not all(isinstance(previous.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", previous[key])
+                           for key in ("source_digest", "contract_digest"))
+                or type(previous.get("source_file_count")) is not int or previous["source_file_count"] < 0
+                or not all(isinstance(previous.get(key), str) and previous[key] for key in ("planning_dir", "target_dir"))
+                or (previous.get("section") is not None
+                    and (not isinstance(previous["section"], str) or not previous["section"]))):
+            changed = ["snapshot"]
+        else:
+            components = (
+                ("source", ("source_digest", "source_file_count")),
+                ("contract", ("contract_digest",)),
+                ("planning_dir", ("planning_dir",)),
+                ("target_dir", ("target_dir",)),
+                ("section", ("section",)),
+            )
+            changed = [name for name, fields in components if any(previous[key] != current[key] for key in fields)]
     except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
-        return f"Cannot verify current inputs: {exc}"
-    return None if fresh else "Verification inputs changed; rerun verification against the current source and contract."
+        return f"Cannot verify current inputs: {exc}", None
+    return "Verification inputs changed; rerun verification against the current source and contract.", changed or ["snapshot"]
+
+
+def receipt_error(receipt, planning_dir: Path, target_dir: Path, section: str | None = None) -> str | None:
+    return _receipt_status(receipt, planning_dir, target_dir, section)[0]
 
 
 def section_result(args, planning_dir: Path, target_dir: Path) -> dict:
@@ -58,12 +86,15 @@ def integration_report(planning_dir: Path, target_dir: Path) -> dict:
     path = receipt_path(planning_dir)
     try:
         receipt = storage.load_json(path) if path.is_file() else None
-        error = receipt_error(receipt, planning_dir, target_dir)
+        error, changed = _receipt_status(receipt, planning_dir, target_dir)
     except (OSError, ValueError) as exc:
-        receipt, error = None, str(exc)
+        receipt, error, changed = None, str(exc), None
     return {"success": error is None, "receipt_path": str(path), "error": error,
+            "changed_components": changed,
             "source": receipt.get("source") if isinstance(receipt, dict) else None,
-            "outcome": receipt.get("outcome") if isinstance(receipt, dict) else "missing"}
+            "outcome": receipt.get("outcome") if isinstance(receipt, dict) else "missing",
+            **({"seconds": receipt["seconds"]} if isinstance(receipt, dict)
+               and receipt.get("source") == "captured" and "seconds" in receipt else {})}
 
 
 def _capture(command: list[str], target: Path, timeout: float) -> dict:
@@ -73,7 +104,7 @@ def _capture(command: list[str], target: Path, timeout: float) -> dict:
     return {"source": "captured", "command": command, "exit_code": result["returncode"],
             "outcome": "timed_out" if result["timed_out"] else "passed" if result["returncode"] == 0 else "failed",
             "stdout_tail": result["stdout"], "stderr_tail": result["stderr"],
-            **{key: result[key] for key in ("stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated", "termination_error") if key in result}}
+            **{key: result[key] for key in ("seconds", "stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated", "termination_error") if key in result}}
 
 
 def implement_verify(args) -> int:
@@ -116,15 +147,16 @@ def implement_verify(args) -> int:
             result = {"source": args.source, "outcome": args.outcome,
                       "evidence": markdown.normalize_repeated(args.evidence)}
         result.update(version=1, completed_at=storage.now_iso(), snapshot=before)
-        error = receipt_error(result, planning, target, args.section)
+        error, changed = _receipt_status(result, planning, target, args.section)
         if error and result["outcome"] == "passed":
             result.update(outcome="failed", error=error)
         for destination, snapshot in receipts.items():
             storage.write_json(destination, {**result, "snapshot": snapshot})
         return output.print_json({"success": error is None, "receipt_path": str(path), "error": error,
+                                  "changed_components": changed,
                                   "integration_receipt_path": str(receipt_path(planning)) if args.integration or not args.section else None,
                                   "source": result["source"], "outcome": result["outcome"],
-                                  **{key: result[key] for key in ("exit_code", "stdout_tail", "stderr_tail") if key in result}},
+                                  **{key: result[key] for key in ("seconds", "exit_code", "stdout_tail", "stderr_tail") if key in result}},
                                  0 if error is None else 1)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return output.print_json({"success": False, "error": str(exc)}, 1)
