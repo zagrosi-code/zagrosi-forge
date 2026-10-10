@@ -40,6 +40,7 @@ TEST_MANIFEST = {
     "test_compatibility_workflows.py": "e2d20abc0c16b5e3bbb4713485cfe0729acd6e3085ffda90dd86ecd1671c830f",
     "test_complete_plan_admission.py": "388d6949bcb8b93079acb4c4a6aa33363bae663ff3ef34091108a0f4903870e3",
     "test_completion_contracts.py": "00bc8b153463486b062ceae517d7e8499a510643dcf9120296e48631c87fed24",
+    "test_completion_output.py": "bed3b361b98dc9b0da3b0691cef8e31be8a8ee14f8bad20f0b237ae23c41b90f",
     "test_completion_records.py": "616a199a130e03f1210c010a76d674d5527f19cf05d1bd7a17ea3caf8259f9e2",
     "test_context_packets.py": "2cb431f1607d3f4f1acd0d8fc5aeb20cbecbab313c20ad7590c94b1f9db689e2",
     "test_context_usability.py": "4f38a491b9402e89ffacf8cd539449bcfdb565bab64e8a8f39b6d012296c15bf",
