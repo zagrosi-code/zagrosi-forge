@@ -641,10 +641,10 @@ def test_attribution_explains_broad_and_overlapping_links_before_precise_recover
     rows = {row['path']: row for row in attribution['parts']}
     assert len(rows) == len(attribution['parts']) == 3
     assert rows[str(guide)] == _attribution_link_row(guide, guide_text, section, '../guide.md')
-    # The first direct anchor contributes to the later whole-file merged fragment.
-    # Its row is one observed cause, not a claim that this link alone costs the row.
+    # The later whole-file link explains more of the rendered fragment than the
+    # already-precise direct anchor; it still does not promise marginal savings.
     assert rows[str(detail)] == _attribution_link_row(
-        detail, detail_text, section, '../detail.md#st%61ble', 'stable')
+        detail, detail_text, guide, 'detail.md')
     assert rows[str(section)] == {
         'path': str(section), 'lines': [1, len(section_text.splitlines())],
         'reason': 'section', 'words': _attribution_words(section_text.rstrip()), 'cause': None}
@@ -758,3 +758,17 @@ def test_attribution_handles_empty_files_and_intrinsic_sections(forge, tmp_path,
         assert row['cause'] == {'origin': str(section), 'link': link, 'anchor': None}
         assert row['words'] == _attribution_words(f'## contract: `{target}:1`\n\n')
     assert sum(part['words'] for part in attribution['parts']) + attribution['omitted_words'] + attribution['reserved_source_words'] == packet['required_words']
+
+
+@pytest.mark.parametrize('anchors', [('alpha', 'beta'), ('beta', 'alpha')])
+def test_attribution_preserves_discovery_order_for_equal_source_spans(forge, tmp_path, anchors):
+    planning = make_plan(tmp_path.resolve() / 'tied causes')
+    section = planning / 'sections' / f'{SECTION}.md'
+    guide = planning / 'guide.md'
+    guide.write_text('# Guide\n\n## Alpha\none\n\n## Beta\ntwo\n\n')
+    section.write_text(section.read_text() + '\n' + ' '.join(
+        f'[{anchor}](../guide.md#{anchor})' for anchor in anchors) + '\n')
+    packet = forge.context.build_context(planning, SECTION, 1)
+    row, = [part for part in packet['context_attribution']['parts'] if part['path'] == str(guide)]
+    assert row['lines'] == [3, 8]
+    assert row['cause'] == {'origin': str(section), 'link': f'../guide.md#{anchors[0]}', 'anchor': anchors[0]}

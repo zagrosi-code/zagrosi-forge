@@ -192,9 +192,10 @@ def _context_attribution(parts: list[str], locations: list[tuple], causes: list[
     """Rank rendered fragments once; an incoming link is one cause, not marginal cost."""
     rows = []
     for text, (path, lines, reason) in zip(parts, locations, strict=True):
-        cause = next((cause for target, first, last, cause in causes
-                      if reason != "section" and target == path
-                      and (lines is None or first <= lines[1] and last >= lines[0])), None)
+        contributions = ((0 if lines is None else min(last, lines[1]) - max(first, lines[0]) + 1, cause)
+                         for target, first, last, cause in causes if reason != "section" and target == path
+                         and (lines is None or first <= lines[1] and last >= lines[0]))
+        cause = max(contributions, key=lambda item: item[0], default=(0, None))[1]
         rows.append({"path": str(path) if path else None, "lines": lines, "reason": reason,
                      "words": _markdown.word_count(text), "cause": cause})
     rows.sort(key=lambda row: row["words"], reverse=True)
