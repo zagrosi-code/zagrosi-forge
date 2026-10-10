@@ -87,6 +87,7 @@ def heading_contract(text: str, anchor: str) -> tuple[int, int]:
 def linked_contracts(
     planning_dir: Path, seeds: list[tuple[Path, str]], *, known_paths: set[Path] | None = None,
     seed_ranges: dict[Path, list[tuple[int, int]]] | None = None,
+    _causes: list[tuple[Path, int, int, dict]] | None = None,
 ) -> dict[Path, list[tuple[int, int, str]]]:
     """Follow explicit local links; return merged source spans in discovery order."""
     root = planning_dir.resolve()
@@ -128,6 +129,8 @@ def linked_contracts(
                 raise ValueError(f"{exc} in {path} (linked from {origin})") from exc
             excerpt = "\n".join(text.splitlines()[start:end]).rstrip()
             spans.setdefault(path, []).append((start, end))
+            if _causes is not None:
+                _causes.append((path, start + 1, end, {"origin": str(origin), "link": link, "anchor": anchor or None}))
             queue.append((path, excerpt, None))
     result = {}
     for path, ranges in spans.items():

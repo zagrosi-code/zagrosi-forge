@@ -188,6 +188,20 @@ def selected_context_blocks(text: str, reqs: set[str]) -> list[tuple[int, str]]:
     return selected
 
 
+def _context_attribution(parts: list[str], locations: list[tuple], causes: list[tuple], reserved: int) -> dict:
+    """Rank rendered fragments once; an incoming link is one cause, not marginal cost."""
+    rows = []
+    for text, (path, lines, reason) in zip(parts, locations, strict=True):
+        cause = next((cause for target, first, last, cause in causes
+                      if reason != "section" and target == path
+                      and (lines is None or first <= lines[1] and last >= lines[0])), None)
+        rows.append({"path": str(path) if path else None, "lines": lines, "reason": reason,
+                     "words": _markdown.word_count(text), "cause": cause})
+    rows.sort(key=lambda row: row["words"], reverse=True)
+    return {"parts": rows[:5], "omitted_parts": len(rows[5:]),
+            "omitted_words": sum(row["words"] for row in rows[5:]), "reserved_source_words": reserved}
+
+
 def build_context(planning_dir: Path, section: str | None, max_words: int, line_limit: int = 20, *, follow_links: bool = True) -> dict[str, Any]:
     if max_words <= 0 or line_limit <= 0:
         return {"success": False, "error": "Context budgets must be positive."}
@@ -208,6 +222,7 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
     artifacts = _artifacts.planning_artifacts(planning_dir)
     artifacts["spec"] = _artifacts.requirement_source_spec(planning_dir)
     parts = [section_text.rstrip()] if section_path else [f"# Context: {planning_dir.name}"]
+    locations = [(section_path, [1, len(section_text.splitlines())], "section")] if section_path else [(None, None, "packet_heading")]
     source_spans: list[tuple[int, int]] = []
     if follow_links and (compact := _artifacts.compact_plan_descriptor(planning_dir)):
         contract = _planning_contract.analyze_contract(compact["source"], _storage.read_text(compact["path"]), planning_dir)
@@ -237,6 +252,7 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
     if not section and not sources and not source_spans:
         return {"success": False, "error": f"No planning sources found: {planning_dir}"}
     linked = {}
+    causes = []
     if follow_links:
         seeds = [(section_path, section_text)] if section_path else []
         seed_ranges = {}
@@ -245,7 +261,7 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
             seed_ranges[artifacts["spec"].resolve()] = source_spans
         seeds.extend((path, block) for _, path, blocks, *_ in sources for _, block in blocks)
         try:
-            linked = _context_links.linked_contracts(planning_dir, seeds, known_paths=seen_paths, seed_ranges=seed_ranges)
+            linked = _context_links.linked_contracts(planning_dir, seeds, known_paths=seen_paths, seed_ranges=seed_ranges, _causes=causes)
         except (OSError, ValueError, RuntimeError) as exc:
             return {"success": False, "error": f"Cannot resolve linked contracts: {exc}"}
         if source_spans:
@@ -262,7 +278,10 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
             if section_path and path == section_path.resolve():
                 continue  # The complete section already includes its own anchors.
             label = "source requirements" if source_spans and path == artifacts["spec"].resolve() else "contract"
-            parts.extend(f"## {label}: `{path}:{line}`\n\n{body}" for line, _, body in spans)
+            for first, last, body in spans:
+                parts.append(f"## {label}: `{path}:{first}`\n\n{body}")
+                locations.append((path, [first, last] if first <= last else None,
+                                  "required_source_span" if label == "source requirements" else "linked_contract"))
         remaining_sources = []
         for name, path, blocks, reference, cost, shared in sources:
             covered = [body for _, _, body in linked.get(path.resolve(), [])]
@@ -279,8 +298,11 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
     used = _markdown.word_count("\n\n".join(parts))
     reserved = sum(cost for _, _, _, _, cost, _ in sources)
     if used + reserved > max_words:
-        return {"success": False, "error": "The complete section, linked contracts, and necessary source references exceed --max-words. Split the section or raise the budget; no contract was truncated.",
-                "required_words": used + reserved, "max_words": max_words}
+        result = {"success": False, "error": "The complete section, linked contracts, and necessary source references exceed --max-words. Split the section or raise the budget; no contract was truncated.",
+                  "required_words": used + reserved, "max_words": max_words}
+        if follow_links:
+            result["context_attribution"] = _context_attribution(parts, locations, causes, reserved)
+        return result
     omitted: list[str] = []
     for name, path, blocks, reference, cost, shared in sources:
         included_lines = 0
