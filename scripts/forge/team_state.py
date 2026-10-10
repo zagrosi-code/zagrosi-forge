@@ -8,7 +8,7 @@ import math
 import re
 import unicodedata
 
-VERSION = 1
+VERSION = 2
 MAX_SESSIONS = 128
 MAX_PATHS = 256
 MAX_BOARD_BYTES = 1024 * 1024
@@ -145,8 +145,9 @@ def _branch(value) -> bool:
                     for part in value.split("/")))
 
 
-def validate_session(value) -> dict:
-    if not isinstance(value, dict) or set(value) not in (_FIELDS, _FIELDS | {"plan"}):
+def validate_session(value, *, version: int = VERSION) -> dict:
+    optional = {"plan", "dependencies"} if version == 2 else {"plan"}
+    if not isinstance(value, dict) or not _FIELDS <= set(value) <= _FIELDS | optional:
         _invalid("Session fields do not match the collaboration schema.")
     if not all(_token(value[key]) for key in ("participant_id", "checkout_id", "generation")):
         _invalid("Session identities must be opaque 32-digit hexadecimal values.")
@@ -164,6 +165,14 @@ def validate_session(value) -> dict:
         _invalid("Session timestamp must be a finite nonnegative UTC epoch value.")
     result = dict(value)
     result["paths"] = normalize_paths(value["paths"])
+    if "dependencies" in value:
+        dependencies = value["dependencies"]
+        if (not isinstance(dependencies, dict) or set(dependencies) != {"paths", "complete"}
+                or not isinstance(dependencies["paths"], list) or not dependencies["paths"]
+                or type(dependencies["complete"]) is not bool):
+            _invalid("Dependencies must contain nonempty literal paths and a boolean coverage marker.")
+        result["dependencies"] = {"paths": normalize_paths(dependencies["paths"]),
+                                  "complete": dependencies["complete"]}
     if "plan" in value:
         plan = value["plan"]
         if (not isinstance(plan, dict) or set(plan) != {"path", "digest", "commit", "section"}
@@ -247,13 +256,14 @@ def _assert_claims(sessions: dict, root: Path | None = None):
 def validate_board(value) -> dict:
     if not isinstance(value, dict) or set(value) != {"version", "board_id", "sessions"}:
         _invalid("Board fields do not match the collaboration schema.")
-    if type(value["version"]) is not int or value["version"] != VERSION or not _token(value["board_id"]):
+    if type(value["version"]) is not int or value["version"] not in (1, VERSION) or not _token(value["board_id"]):
         _invalid("Unsupported collaboration schema or invalid board identity.")
     sessions = value["sessions"]
     if not isinstance(sessions, dict) or len(sessions) > MAX_SESSIONS or not all(_token(key) for key in sessions):
         _invalid("Board must contain at most 128 sessions with valid identities.")
-    result = {"version": VERSION, "board_id": value["board_id"],
-              "sessions": {key: validate_session(entry) for key, entry in sessions.items()}}
+    result = {"version": value["version"], "board_id": value["board_id"],
+              "sessions": {key: validate_session(entry, version=value["version"])
+                           for key, entry in sessions.items()}}
     if len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_BOARD_BYTES:
         _invalid("Collaboration board exceeds its 1 MiB size limit.")
     _assert_claims(result["sessions"])
@@ -278,12 +288,15 @@ def require_session(board: dict, session_id: str, *, participant_id: str, checko
     return current
 
 
-def with_session(board: dict, session_id: str, session: dict, root: Path | None = None) -> dict:
+def with_session(board: dict, session_id: str, session: dict, root: Path | None = None, *,
+                 normalize_dependencies: bool = True) -> dict:
     result = validate_board(board)
     if not _token(session_id):
         _invalid("Invalid collaboration session identity.")
-    entry = validate_session(session)
+    entry = validate_session(session, version=result["version"])
     entry["paths"] = normalize_paths(entry["paths"], root)
+    if "dependencies" in entry and normalize_dependencies:
+        entry["dependencies"]["paths"] = normalize_paths(entry["dependencies"]["paths"], root)
     result["sessions"].pop(session_id, None)
     result["sessions"][session_id] = entry
     _assert_claims(result["sessions"], root)

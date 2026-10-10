@@ -43,6 +43,10 @@ def add_team_commands(sub, invoke_command):
             command.add_argument("--planning-dir", required=True)
         if action == "start":
             command.add_argument("--task", required=True)
+        if action in {"start", "update"}:
+            command.add_argument("--upgrade-protocol", action="store_true",
+                                 help="Publish protocol v2; all participants need a compatible Forge client.")
+            command.add_argument("--expect", help="Exact v1 board revision reviewed for this protocol upgrade.")
         if action in {"start", "update", "recover"}:
             command.add_argument("--host", choices=["codex", "claude", "other"], default=None)
         if action == "update":
@@ -57,7 +61,7 @@ def add_team_commands(sub, invoke_command):
 def _dispatch(args):
     from . import team
     from .team_state import TeamError
-    from .team_workflow import _plan_scope
+    from .team_workflow import _binding_scope, _check_dependencies, _declared_dependencies, _plan_scope
 
     action = args.team_action
     if action == "prepare":
@@ -82,7 +86,7 @@ def _dispatch(args):
         if action == "retry":
             return team.retry(context)
         paths, binding = getattr(args, "path", None), None
-        plan_fields = {}
+        plan_fields, contracts = {}, {}
         if getattr(args, "section", None) and not args.planning_dir:
             raise TeamError("team-invalid-plan", "A section selector requires --planning-dir.")
         if getattr(args, "planning_dir", None):
@@ -90,7 +94,7 @@ def _dispatch(args):
 
             prepared = team_plans.validate(Path(args.planning_dir), Path(args.target_dir))
             binding, declared = _plan_scope(Path(args.planning_dir), Path(args.target_dir), context["repo"].root,
-                                            args.section, prepared=prepared)
+                                            args.section, prepared=prepared, contracts=contracts)
             paths = sorted(set((paths or []) + declared))
             plan_fields["plan"] = {**prepared, "section": args.section} if prepared is not None else None
         if action == "check":
@@ -99,8 +103,35 @@ def _dispatch(args):
                 current, expected = result["session"].get("plan"), plan_fields["plan"]
                 if current not in (expected, {**expected, "section": None}):
                     raise TeamError("team-plan-binding", "Bind this prepared plan revision before continuing.")
+            if contracts and result["protocol_version"] == 2:
+                from . import actions
+
+                planning, target = Path(args.planning_dir), Path(args.target_dir)
+                _, bound_section = _binding_scope(planning, target, args.section,
+                                                  context["checkout"].get("bindings", {}),
+                                                  actor=(args.session, args.generation))
+                if args.section is not None and bound_section is None:
+                    _plan_scope(planning, target, context["repo"].root, None,
+                                prepared=prepared, contracts=contracts)
+                try:
+                    _check_dependencies(result["session"],
+                                        _declared_dependencies(contracts, target, context["repo"].root))
+                except TeamError as exc:
+                    selection = ["--section", bound_section] if bound_section else []
+                    command = actions.command("team", "update", "--target-dir", str(target),
+                                              "--session", args.session, "--generation", args.generation,
+                                              "--planning-dir", str(planning), *selection)
+                    raise TeamError(exc.code, str(exc), **exc.details,
+                                    commands={"team_update": command}) from exc
             return result
-        fields = {key: getattr(args, key) for key in ("generation", "task", "host", "state", "note", "expect", "reason")
+        if contracts:
+            snapshot = context["snapshot"]
+            upgrading = (getattr(args, "upgrade_protocol", False) and snapshot.board["version"] == 1
+                         and getattr(args, "expect", None) == snapshot.revision)
+            if snapshot.board["version"] == 2 or upgrading:
+                plan_fields["dependencies"] = _declared_dependencies(
+                    contracts, Path(args.target_dir), context["repo"].root)
+        fields = {key: getattr(args, key) for key in ("generation", "task", "host", "state", "note", "expect", "reason", "upgrade_protocol")
                   if hasattr(args, key)}
         return team.mutate(context, action, identity=getattr(args, "session", None), paths=paths,
                            binding=binding, **plan_fields, **fields)
@@ -132,7 +163,10 @@ def run(args):
             lines.append(f"  Generation: {row['generation']}")
             if plan := row.get("plan"):
                 lines.append(f"  Plan: {plan['path']} · {plan['digest'][:12]} · {plan['section'] or 'whole plan'}")
-        lines.extend(result[key] for key in ("error", "next_action", "note") if result.get(key))
+        lines.extend(output.format_dependency_awareness(result))
+        lines.extend(output.format_actions(result))
+        if result.get("note"):
+            lines.append(result["note"])
         lines.append("Editing clearance: " + ("current reservation checked" if result.get("clearance") else "not established"))
         print("\n".join(lines))
         return 0 if result["success"] else 1

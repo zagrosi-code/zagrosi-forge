@@ -35,7 +35,7 @@ def identity(**changes):
 
 def test_new_board_and_validated_values_are_independent(team):
     value = team.new_board(BOARD)
-    assert value == board()
+    assert value == {**board(), "version": 2}
     validated = team.validate_board(board(**{FIRST: session()}))
     copied = team.validate_board(validated)
     copied["sessions"][FIRST]["paths"].append("tests")
@@ -43,7 +43,7 @@ def test_new_board_and_validated_values_are_independent(team):
 
 
 @pytest.mark.parametrize("change", [
-    {"version": True}, {"version": 2}, {"board_id": "invalid"}, {"sessions": []},
+    {"version": True}, {"version": 3}, {"board_id": "invalid"}, {"sessions": []},
     {"extra": "unsupported"}, {"sessions": {"../invalid": session()}},
 ])
 def test_invalid_boards_fail_with_structured_errors(team, change):

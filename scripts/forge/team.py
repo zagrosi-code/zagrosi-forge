@@ -6,13 +6,14 @@ from pathlib import Path
 import time
 import uuid
 
-from . import session as command_session
+from . import session as command_session, team_dependencies
 from .team_config import LocalTeam
 from .team_git import GitBoard, Repository, Snapshot, _run
 from .team_state import (TeamError, new_board, normalize_paths, paths_cover,
                          require_session, validate_session, with_session, without_session, is_plain_text)
 
 _KEEP_PLAN = object()
+_KEEP_DEPENDENCIES = object()
 
 
 @contextmanager
@@ -165,7 +166,7 @@ def _team_hint(target):
     return False
 
 
-def roster(context):
+def roster(context, *, session_id=None):
     if context is None:
         return {"success": True, "status": "unconfigured", "clearance": False, "sessions": []}
     snapshot = context["snapshot"]
@@ -179,6 +180,10 @@ def roster(context):
                      "clock_ahead": row["updated_at"] > now + 60})
     return {"success": True, "status": "offline" if context.get("offline") else "fresh",
             "clearance": False, "revision": snapshot.revision, "sessions": rows,
+            "protocol_version": snapshot.board["version"] if snapshot.board is not None else None,
+            "dependency_awareness": team_dependencies.project(
+                snapshot.board, session_id, root=context["repo"].root, now=now,
+                offline=context.get("offline", False)),
             "observed_at": context.get("observed_at", (context["state"].get("cache") or {}).get("observed_at")),
             "pending": context["checkout"].get("pending") is not None,
             **({"recovered_operation": context["reconciled"]["action"],
@@ -208,11 +213,12 @@ def check(context, identity, *, generation=None, paths=()):
         raise TeamError("team-no-reservation", "This task has no editing clearance; reserve its scope with team update.")
     if not paths_cover(row["paths"], list(paths) or row["paths"], root=context["repo"].root):
         raise TeamError("team-scope-changed", "The task's scope expanded; reserve the new paths before editing.")
-    return {**roster(context), "clearance": True, "session": {"id": identity, **row}}
+    return {**roster(context, session_id=identity), "clearance": True, "session": {"id": identity, **row}}
 
 
 def _result(context, pending):
-    result = {**roster(context), "published": True, "operation": pending["action"]}
+    actor = pending["session_id"] if pending["action"] != "finish" else None
+    result = {**roster(context, session_id=actor), "published": True, "operation": pending["action"]}
     if pending["action"] == "finish":
         return result
     identity = pending["session_id"]
@@ -225,9 +231,17 @@ def _result(context, pending):
 
 
 def mutate(context, action, *, identity=None, generation=None, paths=None, binding=None,
-           task=None, host=None, state=None, note=None, expect=None, reason=None, plan=_KEEP_PLAN):
+           task=None, host=None, state=None, note=None, expect=None, reason=None, plan=_KEEP_PLAN,
+           upgrade_protocol=False, dependencies=_KEEP_DEPENDENCIES):
     if context["checkout"].get("pending"):
         raise TeamError("team-pending-write", "A previous publication is unresolved; run team retry before another mutation.")
+    if upgrade_protocol or (action in {"start", "update"} and expect is not None):
+        snapshot = context["snapshot"]
+        if (not upgrade_protocol or action not in {"start", "update"} or not expect
+                or snapshot.board["version"] != 1):
+            raise TeamError("team-protocol-upgrade", "Upgrade a v1 board with start/update, --upgrade-protocol and its exact reviewed --expect revision. All participants need a compatible Forge client.")
+        if snapshot.revision != expect:
+            raise TeamError("team-upgrade-changed", "The board changed; review its current revision before consenting to the protocol upgrade again.")
     identity = identity or uuid.uuid4().hex
     token = uuid.uuid4().hex
     paths = normalize_paths(paths, context["repo"].root) if paths is not None else None
@@ -273,11 +287,17 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
             row.pop("plan", None)
             if plan is not None:
                 row["plan"] = plan
+        if dependencies is not _KEEP_DEPENDENCIES:
+            row.pop("dependencies", None)
+            if dependencies is not None:
+                row["dependencies"] = dependencies
         validate_session(row)
         if paths is None and action != "finish" and normalize_paths(row["paths"], repo.root) != row["paths"]:
             raise TeamError("team-scope-changed", "A reserved alias changed; inspect it and explicitly update the paths before continuing.")
-        board = (without_session(snapshot.board, identity) if action == "finish"
-                 else with_session(snapshot.board, identity, row, root=repo.root))
+        base = {**snapshot.board, "version": 2} if upgrade_protocol else snapshot.board
+        board = (without_session(base, identity) if action == "finish"
+                 else with_session(base, identity, row, root=repo.root,
+                                   normalize_dependencies=dependencies is not _KEEP_DEPENDENCIES))
         if action != "finish":
             context["local"].require_capacity(context["checkout"], identity, binding)
         pending = {"action": action, "session_id": identity, "generation": token, "binding": binding}
@@ -297,9 +317,11 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
             context["local"].save(context["state"])
             if discarded:
                 transport.release(discarded)
-            if exc.code != "team-contention" or action == "recover" or attempt == 2:
+            if exc.code != "team-contention" or action == "recover" or upgrade_protocol or attempt == 2:
                 raise
             _cache(context, transport.read(snapshot.board["board_id"]))
+            if binding is not None and context["snapshot"].board["version"] != snapshot.board["version"]:
+                raise TeamError("team-contention", "The team protocol changed; repeat the same planned command to refresh its declared inputs.")
             continue
         accepted = _accept_pending(context, published)
         return _result(context, accepted)
