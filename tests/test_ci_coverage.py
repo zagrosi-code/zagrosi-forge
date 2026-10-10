@@ -57,9 +57,10 @@ def test_windows_partitions_cover_linux_and_macos_once():
     pytest_selectors(job_steps(validation), "Run tests", "uv run --with pytest python -m pytest",
                      full_suite=True)
     rows, steps = compatibility(text)
-    assert [(row["os"], row.get("group")) for row in rows] == [
-        ("ubuntu-latest", "all"), ("macos-latest", "all"),
-        ("windows-latest", "shared"), ("windows-latest", "portable")]
+    assert [(row["os"], row["python"], row.get("group")) for row in rows] == [
+        ("ubuntu-latest", "3.11", "all"),
+        ("macos-latest", "3.12", "shared"), ("macos-latest", "3.12", "portable"),
+        ("windows-latest", "3.12", "shared"), ("windows-latest", "3.12", "portable")]
     commands = []
     for name, excluded in (
         ("Check shared host packaging and review", "portable"),
@@ -68,8 +69,9 @@ def test_windows_partitions_cover_linux_and_macos_once():
     ):
         selectors = pytest_selectors(steps, name, "python -m pytest -q", f"matrix.group != '{excluded}'")
         commands.append((excluded, selectors))
-    pytest_selectors(steps, "Check native processes on macOS", "python -m pytest -q",
-                     "runner.os == 'macOS'")
+    native = pytest_selectors(steps, "Check native processes on macOS", "python -m pytest -q",
+                              "runner.os == 'macOS' && matrix.group == 'portable'")
+    assert native == ["tests/test_native_process.py"], "Native process coverage must select its test module exactly once"
     selected = {}
     for group in {row["group"] for row in rows}:
         tests = []
@@ -80,6 +82,7 @@ def test_windows_partitions_cover_linux_and_macos_once():
     assert selected["shared"] and selected["portable"]
     assert not (selected["shared"] & selected["portable"])
     assert selected["shared"] + selected["portable"] == selected["all"]
+    assert "tests/test_native_process.py" not in selected["all"], "Native process tests must run only in their dedicated step"
     assert all(count == 1 for count in selected["all"].values())
     assert {
         "tests/test_compatibility_checks.py", "tests/test_compatibility_workflows.py",
@@ -218,4 +221,24 @@ def test_ci_guard_cannot_ignore_a_multiline_pytest_step(ci_guard_workflow):
     changed = _ci_replace_run(original, "Check explicitly owned verification inputs",
         "        run: |\n          python -m pytest -q tests/test_owned_verification.py")
     with pytest.raises(AssertionError, match=".+"):
+        check(changed)
+
+
+def test_ci_guard_requires_native_process_selection(ci_guard_workflow):
+    original, check = ci_guard_workflow
+    step = "Check native processes on macOS"
+    line = _ci_run_line(original, step)
+    assert line.count("tests/test_native_process.py") == 1
+    changed = _ci_replace_run(original, step, line.replace(
+        "tests/test_native_process.py", "tests/test_ci_coverage.py", 1))
+    with pytest.raises(AssertionError, match="Native process coverage"):
+        check(changed)
+
+
+def test_ci_guard_rejects_duplicate_native_execution(ci_guard_workflow):
+    original, check = ci_guard_workflow
+    condition = "        if: runner.os == 'macOS' && matrix.group == 'portable'"
+    assert original.count(condition) == 1
+    changed = original.replace(condition, "        if: runner.os == 'macOS'", 1)
+    with pytest.raises(AssertionError, match="Check native processes on macOS: preserve the condition"):
         check(changed)
