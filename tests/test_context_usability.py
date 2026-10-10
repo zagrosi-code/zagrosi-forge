@@ -572,13 +572,14 @@ def test_attribution_preserves_exact_successful_public_output(forge, tmp_path, c
     saved = tmp_path / 'saved.md'
     assert invoke_json(forge, capsys, 'context-brief', *args, '--output', str(saved)) == (
         0, {**common, 'content': None, 'output': str(saved)})
-    assert saved.read_bytes() == expected.encode('utf-8')
+    expected_bytes = expected.replace('\n', os.linesep).encode('utf-8')
+    assert saved.read_bytes() == expected_bytes
     directory = tmp_path / 'packets'
     packet = directory / f'{SECTION}-packet.md'
     assert invoke_json(forge, capsys, 'implementation-packet', *args, '--output-dir', str(directory)) == (
         0, {**common, 'requirements': ['REQ-001'], 'files': ['src/labels.py', 'tests/test_labels.py'],
             'tests': ['test_trim_edges'], 'output': str(packet)})
-    assert packet.read_bytes() == expected.encode('utf-8')
+    assert packet.read_bytes() == expected_bytes
 
 
 def test_attribution_keeps_default_resolver_identity_and_read_count(forge, tmp_path, monkeypatch):
