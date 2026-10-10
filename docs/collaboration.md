@@ -50,6 +50,30 @@ Planning files inside the repository need reservations before changes. Read-only
 reviewers can announce work without blocking writers. Starting a task does not
 fetch, merge or transfer anyone's application code.
 
+### Declared dependency warnings
+
+Protocol v2 advertises a bound plan's required Compatibility `source_paths` and
+`check_paths` separately from its reserved writes. These are declared inputs,
+not an inferred dependency graph or extra write reservations.
+
+Both arrival orders are covered: a reader joining an existing writer sees that
+overlap; a writer joining an existing reader sees the reverse. Each task observes
+the current board at supported Forge command boundaries. Earlier tasks receive
+no asynchronous notice: refresh your task with `team check`, including its plan
+scope, before continuing. A roster from `team status` is not a task check.
+
+| Awareness | Meaning |
+|---|---|
+| `observed` | Fresh v2 observation; all inspected tasks advertise complete declarations, with no observed alias issue. |
+| `partial` | Some declarations are missing/incomplete, or local aliases cannot be resolved safely. |
+| `unavailable` | Offline, protocol v1, or no selected task; counts are unknown, not measured zeros. |
+
+Complete declarations mean every bound section supplied a supported required
+declaration, not that every real dependency is known. Forge cannot independently
+verify another engineer's private declaration. Output shows up to five peer/direction
+warnings and the omitted count; local alias evidence does not describe a peer's
+filesystem. An empty warning list does not prove compatible changes. Integrate and test.
+
 ## Commands when you need them
 
 Ask Forge in ordinary language for routine use. These examples are for running
@@ -83,6 +107,29 @@ paths keeps the scope and refreshes activity. States include `planning`, `workin
 clearance. Notes report what an operator observed; they are not test receipts.
 Check the actual intended diff before committing or opening a PR, and expand the
 reservation before changing additional files. Unrelated user edits stay untouched.
+
+### Upgrade an existing board
+
+New boards use protocol v2. Existing v1 boards keep their reservations and normal
+operations, with dependency awareness unavailable. They never upgrade automatically.
+Arrange compatible Forge versions for all participants first: older clients cannot
+operate on v2, and Forge cannot verify everyone's installation.
+
+Resolve pending task publications with `team retry`; resume interrupted
+initialization with the original `team init` command. Read the current board
+revision, then explicitly combine the upgrade with `start` or `update`:
+
+```bash
+python3 scripts/zagrosi_skills.py team status --target-dir "{repo}" --pretty
+python3 scripts/zagrosi_skills.py team update --target-dir "{repo}" --session "{session}" --generation "{generation}" --planning-dir "{plan}" --section section-01-auth --upgrade-protocol --expect "{reviewed-revision}"
+```
+
+Use the exact freshly reviewed revision. The task update and upgrade publish
+atomically, retaining the board and peer tasks. A changed revision or competing
+publication requires fresh review; Forge never silently rebases upgrade consent.
+An uncertain outcome retains its exact saved commit for retry. Do not create a
+replacement board or downgrade. Omit plan options for an unplanned update;
+dependency metadata is published when the task is explicitly bound to a plan.
 
 ### Bind a Forge plan
 
@@ -146,8 +193,21 @@ reader's canonical directory, or a conflicting version of that plan, is rejected
 Ordinary unprepared plans inside the repository still reserve their planning
 directory because their helpers write progress there.
 
-Mutable setup, section entry, verification and recording enforce those bindings.
-A returned blocked next section does not undo a preceding successful record.
+Plan-aware `start` or `update` refreshes declared inputs for its section or full-plan
+scope. Unplanned updates and recovery preserve the accepted metadata, including
+retained aliases. They do not silently adopt changed inputs. After changing a
+declaration or its local alias, explicitly update with the appropriate plan scope.
+A plan-aware check rejects advertisement drift and returns the required update.
+
+Dependency overlaps are advisory. When observing accepted inputs, an unsafe
+read-only alias makes awareness partial. Publishing refreshed inputs still
+validates their paths; write-alias checks and canonical-plan reader protection
+remain blocking.
+
+Mutable setup, section entry, verification and recording enforce bindings and
+show dependency awareness. Current-task and next-entry observations are separate;
+a warning or blocked next section does not undo a preceding successful saved record.
+These observations are not saved into verification or Compatibility receipts.
 Changes to ownership require an updated claim. Branch switches and detached-HEAD
 moves require an explicit update; ordinary commits on the same branch do not.
 
