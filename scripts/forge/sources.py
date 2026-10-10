@@ -28,7 +28,7 @@ TEST_MANIFEST = {
     "test_benchmark_forge.py": "1436b31c5fc07824a903fb4a2f5bccf565059dbffa67151da7819b932c2383eb",
     "test_cache_publication.py": "218df403a40b42fe170ee816d0dd5de2df7f58106ac79e7d4dd55983f0698aff",
     "test_capabilities.py": "1d30df82e81ab304ae6c11991a9290bd34385bd533176704b56853243218d1e5",
-    "test_ci_coverage.py": "6b8c404d8876ecc04cfbe096777444f0fd80e434da1a2fe1d68fba860e211193",
+    "test_ci_coverage.py": "ebeea1965781ba343a62026bac388b3f8eb3dae6c34945b23ef4cb5397aed669",
     "test_claude_plugin.py": "6f4f96ba9dc7d1593da1887250afe52ce28090137a5fe213e7053550db2a1b46",
     "test_cli_helper_timeouts.py": "4ffeddf9de6eb7b8d794b6891414d204eaa3f5f71869876398e14dfca5878a5d",
     "test_coding_trials.py": "21bc89c8fd5023cfbadc664842c7c5f269b1d4088bf1297fc545956b033e2407",
