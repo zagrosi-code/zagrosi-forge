@@ -17,3 +17,16 @@ class LabelTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(TypeError, "^label must be a string$"):
                     normalize(value)
+
+    def test_non_string_methods_are_not_called(self):
+        calls = []
+
+        class StripLike:
+            def strip(self):
+                calls.append("strip")
+                return "accepted"
+
+        with self.assertRaises(TypeError) as error:
+            normalize(StripLike())
+        self.assertEqual(str(error.exception), "label must be a string")
+        self.assertEqual(calls, [])

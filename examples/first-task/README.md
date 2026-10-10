@@ -60,3 +60,18 @@ If Forge is unavailable, restart the host after installing the plugin. If Python
 is unavailable, install Python 3.11+; on Windows use `python` or `py -3`. A failed
 admission/check should show the failing requirement and recovery action; repair
 that cause and continue instead of discarding the plan.
+
+## Worked review
+
+The starter fails `test_surrounding_whitespace_only` because it returns the input
+unchanged. Calling `value.strip()` and translating `AttributeError` into the
+expected `TypeError` looks plausible, but accepts a non-string object with its
+own `strip()` method. In this constructed example, that patch passes the original
+three tests. REQ-002 forbids calling that method at all.
+
+`test_non_string_methods_are_not_called` uses such an object, records method
+calls, and requires the exact error with no calls. Keep the existing type guard
+and change the string result to `return value.strip()`. Inspect the diff for
+that boundary, then rerun the tests: the adjacent cases preserve case, internal
+whitespace, empty input and the public error. Passing these checks establishes
+the tested normalization behavior.
