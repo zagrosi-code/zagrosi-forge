@@ -91,6 +91,13 @@ other admission gates first; `prepare` never performs this model smoke. Successf
 qualification restores the owned initial workspace at the same paths and retains
 its evidence. A JSON receipt alone cannot replace actual current isolation.
 
+Declared subagents require an observed child start and that same child's completion.
+Codex 0.154.0 `exec` JSON does not expose this lifecycle for v2 agents. Model metadata
+can select v2 even with `features.multi_agent_v2=false`; repeating the unchanged
+profile cannot supply the missing events. Loading failures identify failed checks
+and point to the attempt's saved evidence; unaccepted shell wrappers and missing
+child evidence remain failures.
+
 If the suite declares `host.credentials: "codex-native-auth"`, supply
 `--auth-file /absolute/path/to/auth.json` for native preparation/run/compare.
 The evaluator neither signs in nor copies/logs/hashes credential contents. It

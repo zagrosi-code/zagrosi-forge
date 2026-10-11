@@ -17,7 +17,7 @@ from coding_trial_native import (
     FIXED_ENV, _package_identity, _preparation, _preparation_commands, _preparation_observation, _regular_bytes,
     native_recipe, read_native_runtime,
 )
-from coding_trial_qualification import _instant, fields, parse_json, read_bytes, require, sha
+from coding_trial_qualification import CHECKS, _instant, fields, parse_json, read_bytes, require, sha
 from coding_trial_reservation import MUTABLE, _anchor as _verify_anchor, _auth_identity, _git_entries
 
 BOUNDS = {"timeout_seconds": 60, "output_bytes": 1048576}
@@ -231,8 +231,17 @@ def package_loading(suite, suite_root, attempt, receipt):
     require(parse_json(_regular_bytes(source, "qualification.json")) == receipt,
             "loading-unqualified: Returned loading receipt differs from saved bytes")
     restoration = parse_json(_regular_bytes(source, "restoration.json"))
-    require(receipt["checks"] and all(item["status"] == "passed" for item in receipt["checks"])
-            and restoration["status"] == "passed", "loading-unqualified: Loading or restoration did not pass")
+    if not (receipt["checks"] and all(item["status"] == "passed" for item in receipt["checks"])
+            and restoration["status"] == "passed"):
+        known = CHECKS["loading"] | {"subagent-execution"}
+        checks = receipt["checks"] if type(receipt["checks"]) is list else []
+        failed = sorted({item["id"] for item in checks
+                         if type(item) is dict and item.get("status") == "failed"
+                         and type(item.get("id")) is str and item["id"] in known})
+        detail = "; failed checks: " + ", ".join(failed) if failed else ""
+        raise ValueError("loading-unqualified: Loading or restoration did not pass" + detail
+                         + ". See private/loading/qualification.json, private/loading/observations.json "
+                         "and private/loading/restoration.json relative to this attempt.")
     base = root / "_attempts"
     if os.path.lexists(base):
         require(attempt["scheduled_position"] > 0 and base.resolve(strict=True) == base and base.is_dir(),

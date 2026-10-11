@@ -347,7 +347,7 @@ def _native_events(process):
     return events
 
 
-def _command_ids(items, command, expected=None):
+def _command_ids(items, command, expected=None, *, shell="/bin/sh"):
     if not isinstance(command, str) or not command:
         return []
     for item in items:
@@ -357,7 +357,7 @@ def _command_ids(items, command, expected=None):
                 or not isinstance(item.get("aggregated_output"), str)):
             continue
         try:
-            matches = shlex.split(item["command"]) == ["/bin/sh", "-c", command]
+            matches = shlex.split(item["command"]) == [shell, "-c", command]
             if matches and (expected is None or item["aggregated_output"].encode("utf-8") == expected):
                 return [item["id"]]
         except (ValueError, UnicodeError):
@@ -418,9 +418,19 @@ def check_native_events(process, *, entry_command, entry_bytes, action_command, 
     plain = entry_command is None and entry_bytes is None
     items = [event["item"] for event in events if event["type"] == "item.completed"]
     entry = _command_ids(items, entry_command, entry_bytes) if type(entry_bytes) is bytes else []
+    action = _command_ids(items, action_command, action_bytes)
+    action_detail = "Exact controller action command required"
+    if (not action and type(action_bytes) is bytes
+            and _command_ids(items, action_command, action_bytes, shell="/usr/bin/sh")):
+        action_detail = ("Exact controller action and output observed under /usr/bin/sh -c; "
+                         "/bin/sh -c required. This wrapper is not accepted.")
+    children = _subagent_ids(events) if subagents else []
+    child_detail = "Spawn and later completion of the same child required"
+    if subagents and not children:
+        child_detail = ("No qualifying spawn followed by completion of the same child was observed. "
+                        "Empty waits or model claims do not establish completion.")
     return {
         "entry-routing": _observation(entry, "Exact installed-entry command and bytes required", applicable=not plain),
-        "required-tools": _observation(_command_ids(items, action_command, action_bytes), "Exact controller action command required"),
-        "subagent-execution": _observation(_subagent_ids(events) if subagents else [],
-                                           "Spawn and later completion of the same child required", applicable=subagents),
+        "required-tools": _observation(action, action_detail),
+        "subagent-execution": _observation(children, child_detail, applicable=subagents),
     }

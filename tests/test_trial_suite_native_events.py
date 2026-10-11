@@ -233,3 +233,107 @@ def test_entry_read_command_uses_explicit_installed_path_and_posix_quotes():
     runtime = {"installed": {"path": INSTALLED_PATH}, "selected_entry": SELECTED_ENTRY}
     assert entry_read_command(runtime) == ENTRY_COMMAND
     assert entry_read_command({"installed": None, "selected_entry": None}) is None
+
+
+def test_loading_diagnostic_exact_action_under_unaccepted_wrapper_is_explained():
+    expected = b"private-output-marker\n"
+    event = command_event("near", ACTION_COMMAND, expected.decode())
+    event["item"]["command"] = shlex.join(["/usr/bin/sh", "-c", ACTION_COMMAND])
+    process = process_record([event])
+    before = deepcopy(process)
+    result = check_native_events(process, entry_command=None, entry_bytes=None,
+                                 action_command=ACTION_COMMAND, action_bytes=expected, subagents=False)
+    row = result["required-tools"]
+    assert set(row) == {"status", "detail", "event_ids"}
+    assert row["status"] == "failed" and row["event_ids"] == []
+    assert "/usr/bin/sh" in row["detail"] and "/bin/sh" in row["detail"]
+    assert "not accepted" in row["detail"].lower()
+    assert "action" in row["detail"].lower() and "output" in row["detail"].lower()
+    assert ACTION_COMMAND not in row["detail"] and expected.decode().strip() not in row["detail"]
+    assert process == before
+
+
+@pytest.mark.parametrize("change", ["action", "output", "no-bytes", "nonterminal", "nonzero"])
+def test_loading_diagnostic_near_match_requires_exact_terminal_action_and_bytes(change):
+    expected = b"private-output-marker\n"
+    event = command_event("near", ACTION_COMMAND, expected.decode())
+    script = ACTION_COMMAND + "; true" if change == "action" else ACTION_COMMAND
+    event["item"]["command"] = shlex.join(["/usr/bin/sh", "-c", script])
+    if change == "output":
+        event["item"]["aggregated_output"] += "extra"
+    elif change == "nonterminal":
+        event["type"] = "item.started"
+    elif change == "nonzero":
+        event["item"]["exit_code"] = 1
+    process = process_record([event])
+    before = deepcopy(process)
+    row = check_native_events(process, entry_command=None, entry_bytes=None,
+                              action_command=ACTION_COMMAND,
+                              action_bytes=None if change == "no-bytes" else expected,
+                              subagents=False)["required-tools"]
+    assert row == {"status": "failed", "detail": "Exact controller action command required", "event_ids": []}
+    assert process == before
+
+
+def test_loading_diagnostic_accepted_witness_takes_precedence_over_earlier_near_match():
+    expected = b"controller-output\n"
+    near = command_event("near", ACTION_COMMAND, expected.decode())
+    near["item"]["command"] = shlex.join(["/usr/bin/sh", "-c", ACTION_COMMAND])
+    process = process_record([near, command_event("accepted", ACTION_COMMAND, expected.decode())])
+    before = deepcopy(process)
+    row = check_native_events(process, entry_command=None, entry_bytes=None,
+                              action_command=ACTION_COMMAND, action_bytes=expected,
+                              subagents=False)["required-tools"]
+    assert row == {"status": "passed", "detail": "Exact controller action command required",
+                   "event_ids": ["accepted"]}
+    assert process == before
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_loading_diagnostic_success_and_not_applicable_details_remain_exact(plain):
+    process = process_record(valid_events())
+    result = check(process, entry_command=None if plain else ENTRY_COMMAND,
+                   entry_bytes=None if plain else ENTRY_BYTES, subagents=not plain)
+    assert result == {
+        "entry-routing": {"status": "not_applicable" if plain else "passed",
+                          "detail": "Exact installed-entry command and bytes required",
+                          "event_ids": [] if plain else ["entry-1"]},
+        "required-tools": {"status": "passed", "detail": "Exact controller action command required",
+                           "event_ids": ["action-1"]},
+        "subagent-execution": {"status": "not_applicable" if plain else "passed",
+                               "detail": "Spawn and later completion of the same child required",
+                               "event_ids": [] if plain else ["spawn-1", "wait-1"]},
+    }
+
+
+def test_loading_diagnostic_empty_wait_and_model_claim_are_missing_child_evidence():
+    wait = collab_event("empty-wait", "wait", child_status="completed")
+    wait["item"].update(receiver_thread_ids=[], agents_states={})
+    events = [command_event("action", ACTION_COMMAND), wait,
+              {"type": "item.completed", "item": {"id": "claim", "type": "agent_message",
+               "text": "The child finished successfully."}}]
+    row = check(process_record(events), entry_command=None, entry_bytes=None)["subagent-execution"]
+    assert row["status"] == "failed" and row["event_ids"] == []
+    detail = row["detail"].lower()
+    assert "no qualifying" in detail and "spawn" in detail and "same child" in detail and "observed" in detail
+    assert "empty" in detail and "model" in detail and "completion" in detail
+    assert "no child ran" not in detail and "v2" not in detail
+
+
+@pytest.mark.parametrize("fault,message", [
+    ("truncated", "Native process evidence is incomplete"),
+    ("malformed", "Native event must be an object"),
+])
+def test_loading_diagnostic_keeps_earlier_incomplete_and_malformed_errors(fault, message):
+    event = command_event("near", ACTION_COMMAND, "expected")
+    event["item"]["command"] = shlex.join(["/usr/bin/sh", "-c", ACTION_COMMAND])
+    process = process_record([event])
+    if fault == "truncated":
+        process["stdout_truncated"] = True
+    else:
+        process["stdout"] += "[]\n"
+    before = deepcopy(process)
+    result = check_native_events(process, entry_command=None, entry_bytes=None,
+                                 action_command=ACTION_COMMAND, action_bytes=b"expected", subagents=True)
+    assert all(row == {"status": "failed", "detail": message, "event_ids": []} for row in result.values())
+    assert process == before
