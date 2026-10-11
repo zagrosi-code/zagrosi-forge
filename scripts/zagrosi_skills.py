@@ -211,7 +211,7 @@ RUNTIME_MANIFEST = {
     "forge/sections.py": "f3875f1d448afc383bae5077b010d4914534238e2d354c5ff013ab083d07f32d",
     "forge/secure_io.py": "2c529854508436ff083d3a01c1ad97de4b5e5a532c1365b28a173c0cd0401108",
     "forge/session.py": "87d35fb6a68e016f6480d7fa083842022f535e4c5385529202498f71b4bbbc02",
-    "forge/sources.py": "f27c6e87d71d96bb410a2dd72bf02766d43b62cd9c2b85c68fd0137ddb6eb640",
+    "forge/sources.py": "fdd971454ad424e2b59383085f7d47cfad188bf22dcf2270554b1f709b4ea790",
     "forge/state.py": "7114e8bb671c3adbf8de5fa6d247455ce53a3f23c75eb35612898ed443289f50",
     "forge/status.py": "da739435e3d930bdd14cd31ad42da36e500a12a772bd39505169efcca77a601c",
     "forge/storage.py": "e7c726dbfa07ec7ac4377bc780382fdcbca836935e04aad0caccfdcf0ffac2dd",
@@ -228,7 +228,7 @@ RUNTIME_MANIFEST = {
     "forge/transaction_state.py": "1ee1194d0816d63b3c4afae1ffd21408ed6251a013a50eea934f894a87fc3c8b",
     "forge/unit12_adapter.py": "6319a6178572e603a7ec4767a9650e045af1b9afc3051c697dfb2b0317df553d",
     "forge/validation.py": "af2205b0318250700e159987b8be4c20eb50054650d126b7798c5cdeb6c5065a",
-    "forge/verification.py": "81b44e81ba3262d082666f2b7565d2d3c011b3169a91497efd6cc64c7be7ba32",
+    "forge/verification.py": "19677bc8edc12e30f1db32ccbf9d508eb76ca03e28d874dd4d2c7264365c5ba0",
     "forge/workflows.py": "08a3732d3b7482c01bf049cd0eb5185438b0c3cda3794dcbc006fd5d8204671c"
 }
 # END RUNTIME MANIFEST

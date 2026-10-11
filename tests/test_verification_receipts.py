@@ -312,3 +312,124 @@ def test_failed_required_setup_gate_returns_failure_and_preserves_artifacts(work
     assert code == 1 and not result["success"]
     assert result["artifacts_created"] is True
     assert Path(result["state_dir"] if phase == "project" else result["config_path"]).exists()
+
+
+@pytest.fixture
+def serialization_lock(workspace, monkeypatch):
+    original = workspace[0].storage.file_lock
+    # Exercise the real OS lock without a five-second contention wait per case.
+    monkeypatch.setattr(workspace[0].storage, "file_lock", lambda path: original(path, timeout_seconds=0))
+    return original
+
+
+@pytest.mark.parametrize("scope", ["integration", "section", "both", "manual"])
+def test_serialization_refuses_held_state_lock_without_writes_or_execution(
+        workspace, capsys, tmp_path, serialization_lock, scope):
+    _, planning, _ = workspace
+    assert invoke(workspace, capsys, *verify_args(
+        workspace, "--section", SECTION, "--integration", "--", sys.executable, "-c", "pass"))[0] == 0
+    receipts = planning / "implementation/verification"
+    before = {path: path.read_bytes() for path in receipts.glob("*.json")}
+    marker = tmp_path / "child-ran"
+    selectors = [] if scope == "integration" else ["--section", SECTION]
+    if scope in {"both", "manual"}:
+        selectors.append("--integration")
+    evidence = (["--source", "inspection", "--outcome", "passed", "--evidence", "Manual caller inspection"]
+                if scope == "manual" else ["--", sys.executable, "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).touch(); raise SystemExit(3)", str(marker)])
+
+    with serialization_lock(planning / "implementation/.mutable-state"):
+        code, result = invoke(workspace, capsys, *verify_args(workspace, *selectors, *evidence))
+        assert code == 1 and not result["success"]
+        assert "Timed out waiting for state lock" in result["error"]
+        assert {path: path.read_bytes() for path in receipts.glob("*.json")} == before
+        assert not marker.exists()
+
+
+def test_serialization_blocks_competing_verify_and_record_during_capture(
+        workspace, capsys, monkeypatch, serialization_lock):
+    forge, planning, _ = workspace
+    capture = forge.verification._capture
+    attempted = []
+
+    def inspect_capture(*args):
+        receipt = forge.verification.receipt_path(planning, SECTION)
+        pending = receipt.read_bytes()
+        assert json.loads(pending)["outcome"] == "pending"
+        for command in (
+            verify_args(workspace, "--section", SECTION, "--source", "inspection",
+                        "--outcome", "passed", "--evidence", "Competing caller inspection"),
+            record_args(workspace, "--verification-source", "inspection", "--verification-outcome",
+                        "passed", "--verification", "Competing caller inspection"),
+        ):
+            code, result = invoke(workspace, capsys, *command)
+            attempted.append(command[0])
+            assert code == 1 and "Timed out waiting for state lock" in result["error"]
+            assert receipt.read_bytes() == pending
+        return capture(*args)
+
+    monkeypatch.setattr(forge.verification, "_capture", inspect_capture)
+    code, result = invoke(workspace, capsys, *verify_args(
+        workspace, "--section", SECTION, "--integration", "--", sys.executable, "-c", "pass"))
+    assert code == 0 and result["outcome"] == "passed"
+    assert attempted == ["implement-verify", "implement-record-section"]
+    assert forge.verification.integration_report(planning, workspace[2])["success"]
+
+
+def test_serialization_keeps_other_plans_independent(workspace, capsys, tmp_path, monkeypatch, serialization_lock):
+    forge, _, target = workspace
+    other = make_plan(tmp_path / "other-plan")
+    capture = forge.verification._capture
+
+    def inspect_capture(*args):
+        other_workspace = forge, other, target
+        code, result = invoke(other_workspace, capsys, *verify_args(
+            other_workspace, "--source", "inspection", "--outcome", "passed",
+            "--evidence", "Independent plan caller inspection"))
+        assert code == 0 and result["outcome"] == "passed"
+        return capture(*args)
+
+    monkeypatch.setattr(forge.verification, "_capture", inspect_capture)
+    assert invoke(workspace, capsys, *verify_args(workspace, "--", sys.executable, "-c", "pass"))[0] == 0
+    assert forge.verification.integration_report(other, target)["success"]
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, OSError])
+def test_serialization_releases_lock_after_capture_error(workspace, capsys, monkeypatch, serialization_lock, error):
+    forge, planning, target = workspace
+    capture = forge.verification._capture
+
+    def fail_capture(*args):
+        raise error("Interrupted capture")
+
+    monkeypatch.setattr(forge.verification, "_capture", fail_capture)
+    args = verify_args(workspace, "--", sys.executable, "-c", "pass")
+    if error is KeyboardInterrupt:
+        with pytest.raises(KeyboardInterrupt):
+            invoke(workspace, capsys, *args)
+    else:
+        assert invoke(workspace, capsys, *args)[0] == 1
+    assert forge.verification.integration_report(planning, target)["outcome"] == "pending"
+    monkeypatch.setattr(forge.verification, "_capture", capture)
+    code, result = invoke(workspace, capsys, *args)
+    assert code == 0 and result["outcome"] == "passed"
+
+
+def test_serialization_covers_both_final_receipt_writes(workspace, capsys, monkeypatch, serialization_lock):
+    forge, planning, _ = workspace
+    write = forge.storage.write_json
+    published = []
+
+    def inspect_write(path, value):
+        if path.parent == planning / "implementation/verification" and value.get("outcome") == "passed":
+            with pytest.raises(TimeoutError):
+                with serialization_lock(planning / "implementation/.mutable-state", timeout_seconds=0):
+                    pass
+            published.append(path.name)
+        return write(path, value)
+
+    monkeypatch.setattr(forge.storage, "write_json", inspect_write)
+    code, result = invoke(workspace, capsys, *verify_args(
+        workspace, "--section", SECTION, "--integration", "--", sys.executable, "-c", "pass"))
+    assert code == 0 and result["outcome"] == "passed"
+    assert published == [f"{SECTION}.json", "integration.json"]
