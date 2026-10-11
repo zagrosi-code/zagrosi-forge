@@ -156,3 +156,49 @@ def test_supported_gemini_tool_counts_keep_tool_activity_check(review, count):
     assert report["success"] is (not bool(count))
     if count:
         assert "tool activity" in report["error"]
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"], ids=["nel", "ls", "ps"])
+def test_codex_jsonl_unicode_review_is_saved(tmp_path, monkeypatch, capsys, separator):
+    forge = load_zagrosi_module()
+    packet, output = tmp_path / "packet.md", tmp_path / "review.json"
+    packet.write_text("Review the string handling contract.", encoding="utf-8")
+    text = "Preserve this literal: " + separator + " in the review."
+    events = [
+        {"type": "thread.started", "thread_id": "thread-1", "model": "selected"},
+        {"type": "turn.started"},
+        item("completed", text),
+        DONE,
+    ]
+    raw = "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n"
+    calls = []
+
+    def execute(command, workspace, **kwargs):
+        calls.append(workspace)
+        return {"returncode": 0, "timed_out": False, "seconds": .1, "stdout": raw}
+
+    monkeypatch.setattr(forge.providers.shutil, "which", lambda name: "/native/" + name)
+    monkeypatch.setattr(forge.providers, "execute", execute)
+    options = argparse.Namespace(provider="codex", model="selected", input=str(packet),
+                                 output=str(output), timeout=5, adapter=None)
+    code = forge.providers.provider_review(options)
+    report = json.loads(output.read_text(encoding="utf-8"))
+    summary = json.loads(capsys.readouterr().out)
+    assert code == 0 and report["success"] and summary["success"]
+    assert report["review"] == text and "review" not in summary
+    assert report["observed_models"] == ["selected"] and report["model_identity"] == "reported"
+    assert report["usage"] == DONE["usage"]
+    assert "failure_kind" not in report
+    assert len(calls) == 1 and not calls[0].exists()
+    assert packet.read_text(encoding="utf-8") == "Review the string handling contract."
+
+
+@pytest.mark.parametrize("delimiter", ["\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e"],
+                         ids=["lf", "crlf", "cr", "vt", "ff", "fs", "gs", "rs"])
+def test_codex_jsonl_preserves_ascii_framing_and_blank_records(delimiter):
+    forge = load_zagrosi_module()
+    text = "Escaped separators: \u0085\u2028\u2029."
+    events = [item("completed", text), DONE]
+    raw = delimiter.join(["", " \t", *(json.dumps(event) for event in events), "", " \t"])
+    result = forge.provider_output.review_output("codex", raw)
+    assert result == {"review": text, "observed_models": [], "usage": DONE["usage"]}

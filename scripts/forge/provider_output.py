@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 
 def optional_object(value, label: str) -> dict:
@@ -13,7 +14,7 @@ def optional_object(value, label: str) -> dict:
 
 
 def codex_output(raw: str) -> dict:
-    events = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    events = [json.loads(line) for line in re.split(r"[\n\r\v\f\x1c-\x1e]", raw) if line.strip()]
     if not events or any(not isinstance(event, dict) for event in events):
         raise ValueError("Expected Codex JSON event objects")
     if any(event.get("type") in {"error", "turn.failed"} for event in events):
