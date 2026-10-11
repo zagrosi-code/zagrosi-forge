@@ -87,7 +87,7 @@ TEST_MANIFEST = {
     "test_project_commands.py": "b65902d31a3e3a0ead83dbe54e54f95e1e22c78135c0b2ee4b015c04b287aae9",
     "test_project_contracts.py": "c7d695bb85222caa6c68a555f34a2de30e378f8ff04f43f23a58b905095d5af3",
     "test_project_session_validation.py": "4b0df28adbb0817d732f2b5e250c26727a15785fd9f31c2a5a2498e9de8cf3ca",
-    "test_provider_output.py": "52536a946a6abb86eb0f8b229c6a281c5285b648d5e7ce7772bd658a0ffd04c4",
+    "test_provider_output.py": "b710ffe317500cc46974c7ac6155cbe8f56c9425bbdcee4d8189c292eb9ef083",
     "test_provider_preflight.py": "a3fa436618ef71de5f5afbec5abff4831af0e0b3e4c4bb2456e5e1540fab872e",
     "test_provider_recovery.py": "337f949247894e4d2c32edd1fc1377a35a5f71429dcf7cdb66569f5cc693b60f",
     "test_providers.py": "937617e1400a89957435aafe669ee1a2b39107c7abad012182df4e847b344306",
