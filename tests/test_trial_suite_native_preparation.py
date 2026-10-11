@@ -548,3 +548,174 @@ class TestNativePreparation:
         # Assessment semantics are independently tested. Any finalization
         # observer must receive the actual failed lifecycle, never a success.
         assert all(bound(trial, record["runner"])["isolation"]["status"] == "failed" for record in observed)
+
+
+def test_loading_diagnostic_public_failure_points_to_evidence_without_writer_or_raw_changes(tmp_path, monkeypatch):
+    class WrapperBoundary(PreparedNativeBoundary):
+        def smoke(self, process, prompt):
+            super().smoke(process, prompt)
+            events = [json.loads(line) for line in process["stdout"].splitlines()]
+            actions = [event["item"] for event in events if event["item"]["id"] == "action"]
+            assert len(actions) == 1 and actions[0]["command"].startswith("/bin/sh ")
+            actions[0]["command"] = "/usr/bin/sh" + actions[0]["command"][len("/bin/sh"):]
+            process["stdout"] = "\n".join(json.dumps(event) for event in events) + "\n"
+
+    seed = inputs(tmp_path)
+    SetupBoundary(seed, monkeypatch)
+    native = WrapperBoundary(seed, monkeypatch)
+    assessments = finalization_observer(monkeypatch)
+    trial = tmp_path / "fresh"
+    raw_before = {}
+    package = preparation.package_loading
+
+    def record_before_packaging(suite, root, attempt, receipt):
+        raw_before.update(bytes_at(trial / "private/loading"))
+        return package(suite, root, attempt, receipt)
+
+    monkeypatch.setattr(preparation, "package_loading", record_before_packaging)
+    with pytest.raises(ValueError, match="loading-unqualified"):
+        run_suite(trial, seed["suite_root"] / "suite.json", "normalize", seed["arm"],
+                  assessor_python=PYTHON, qualify_loading=True)
+    record = load(trial / "trial.json")
+    assert record["status"] == "failed" and record["runner"] is None
+    assert record["error"]["code"] == "loading-unqualified"
+    assert set(record["error"]) == {"code", "message", "path"}
+    assert record["error"]["path"] == str(trial)
+    assert "required-tools" in record["error"]["message"]
+    for name in ("qualification.json", "observations.json", "restoration.json"):
+        assert "private/loading/" + name in record["error"]["message"]
+    observations = load(trial / "private/loading/observations.json")
+    assert observations["events"]["required-tools"]["status"] == "failed"
+    assert "/usr/bin/sh" in observations["events"]["required-tools"]["detail"]
+    assert load(trial / "private/loading/restoration.json")["status"] == "passed"
+    assert "writer" not in [call["stage"] for call in native.calls] and assessments == []
+    assert not (trial / "private/writer").exists()
+    assert record["native"]["loading_derived"] is None and record["native"]["execution_manifest"] is None
+    assert raw_before and bytes_at(trial / "private/loading") == raw_before
+
+
+@pytest.fixture
+def loading_diagnostic_package(tmp_path, monkeypatch):
+    # Minimal serialized failure input for the existing package_loading gate.
+    # No execution, prepared runtime or successful qualification is represented.
+    root, trial = tmp_path / "suite", tmp_path / "trial"
+    root.mkdir()
+    (trial / "workspace").mkdir(parents=True)
+    source = trial / "private/loading"
+    receipt = {"checks": [{"id": "required-tools", "status": "failed"}], "evidence": []}
+    save(source / "qualification.json", receipt)
+    save(source / "restoration.json", {"status": "passed"})
+    reads = []
+    original = preparation._regular_bytes
+
+    def fixed_read(folder, name, **kwargs):
+        assert Path(folder) == source and name in {"qualification.json", "restoration.json"}
+        reads.append(name)
+        return original(folder, name, **kwargs)
+
+    def no_packaging(*args, **kwargs):
+        pytest.fail("A failed gate must not copy or follow receipt evidence")
+
+    monkeypatch.setattr(preparation, "_regular_bytes", fixed_read)
+    monkeypatch.setattr(preparation, "_read_ref", no_packaging)
+    monkeypatch.setattr(preparation, "copy_snapshot", no_packaging)
+    attempt = {"roots": {"workspace": str(trial / "workspace")}}
+    return root, source, attempt, receipt, reads
+
+
+def test_loading_diagnostic_failure_lists_only_failed_known_checks(loading_diagnostic_package):
+    root, source, attempt, receipt, reads = loading_diagnostic_package
+    receipt["checks"] += [{"id": "subagent-execution", "status": "failed"},
+                          {"id": "native-discovery", "status": "passed"}]
+    save(source / "qualification.json", receipt)
+    before = bytes_at(source.parent.parent)
+    with pytest.raises(ValueError) as caught:
+        preparation.package_loading({}, root, attempt, receipt)
+    message = str(caught.value)
+    assert message.startswith("loading-unqualified: Loading or restoration did not pass")
+    assert "required-tools" in message and "subagent-execution" in message
+    assert "native-discovery" not in message
+    for name in ("qualification.json", "observations.json", "restoration.json"):
+        assert "private/loading/" + name in message
+    assert reads == ["qualification.json", "restoration.json"]
+    assert bytes_at(source.parent.parent) == before and not (root / "_attempts").exists()
+
+
+@pytest.mark.parametrize("checks,restoration,error", [
+    (None, {}, ValueError),
+    ([], {}, ValueError),
+    ({"unexpected": "not-a-list"}, {}, TypeError),
+    ([{"id": "required-tools", "status": "failed"}, None], {}, ValueError),
+    ([None, {"id": "required-tools", "status": "failed"}], {}, TypeError),
+    ([{"id": "required-tools", "status": "passed"}], {}, KeyError),
+])
+def test_loading_diagnostic_original_gate_short_circuit_and_errors_remain(
+        loading_diagnostic_package, checks, restoration, error):
+    root, source, attempt, receipt, reads = loading_diagnostic_package
+    receipt["checks"] = deepcopy(checks)
+    save(source / "qualification.json", receipt)
+    save(source / "restoration.json", restoration)
+    before = bytes_at(source.parent.parent)
+    with pytest.raises(error) as caught:
+        preparation.package_loading({}, root, attempt, receipt)
+    if error is ValueError:
+        assert str(caught.value).startswith("loading-unqualified: Loading or restoration did not pass")
+    elif error is KeyError:
+        assert caught.value.args == ("status",)
+    assert reads == ["qualification.json", "restoration.json"]
+    assert bytes_at(source.parent.parent) == before and not (root / "_attempts").exists()
+
+
+@pytest.mark.parametrize("identifier", ["../../operator-private-marker", {"path": "../../operator-private-marker"}])
+def test_loading_diagnostic_hostile_ids_and_evidence_do_not_become_text_or_reads(
+        loading_diagnostic_package, identifier):
+    root, source, attempt, receipt, reads = loading_diagnostic_package
+    receipt["checks"] = [{"id": identifier, "status": "failed",
+                          "evidence": ["../../operator-private-marker"]}]
+    receipt["evidence"] = [{"path": "../../operator-private-marker", "sha256": "0" * 64}]
+    save(source / "qualification.json", receipt)
+    before = bytes_at(source.parent.parent)
+    with pytest.raises(ValueError) as caught:
+        preparation.package_loading({}, root, attempt, receipt)
+    assert str(caught.value).startswith("loading-unqualified: Loading or restoration did not pass")
+    assert "operator-private-marker" not in str(caught.value)
+    assert reads == ["qualification.json", "restoration.json"]
+    assert bytes_at(source.parent.parent) == before and not (root / "_attempts").exists()
+
+
+@pytest.mark.parametrize("mismatch", [True, False])
+def test_loading_diagnostic_saved_receipt_and_missing_restoration_keep_precedence(
+        loading_diagnostic_package, mismatch):
+    root, source, attempt, receipt, reads = loading_diagnostic_package
+    (source / "restoration.json").unlink()
+    supplied = deepcopy(receipt)
+    if mismatch:
+        supplied["checks"][0]["status"] = "passed"
+    before = bytes_at(source.parent.parent)
+    with pytest.raises(ValueError if mismatch else FileNotFoundError) as caught:
+        preparation.package_loading({}, root, attempt, supplied)
+    if mismatch:
+        assert str(caught.value) == "loading-unqualified: Returned loading receipt differs from saved bytes"
+        assert reads == ["qualification.json"]
+    else:
+        assert "restoration.json" in str(caught.value)
+        assert reads == ["qualification.json", "restoration.json"]
+    assert bytes_at(source.parent.parent) == before and not (root / "_attempts").exists()
+
+
+def test_loading_diagnostic_restoration_only_failure_uses_fixed_hints_without_interpretation(
+        loading_diagnostic_package):
+    root, source, attempt, receipt, reads = loading_diagnostic_package
+    receipt["checks"][0]["status"] = "passed"
+    save(source / "qualification.json", receipt)
+    save(source / "restoration.json", {"status": "editable-status-marker"})
+    before = bytes_at(source.parent.parent)
+    with pytest.raises(ValueError) as caught:
+        preparation.package_loading({}, root, attempt, receipt)
+    message = str(caught.value)
+    assert message.startswith("loading-unqualified: Loading or restoration did not pass")
+    assert "required-tools" not in message and "editable-status-marker" not in message
+    for name in ("qualification.json", "observations.json", "restoration.json"):
+        assert "private/loading/" + name in message
+    assert reads == ["qualification.json", "restoration.json"]
+    assert bytes_at(source.parent.parent) == before and not (root / "_attempts").exists()
