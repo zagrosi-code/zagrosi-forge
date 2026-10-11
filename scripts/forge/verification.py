@@ -133,26 +133,27 @@ def implement_verify(args) -> int:
             result = capture(planning, target, args.section, args.stage, command, args.timeout)
             return output.print_json({**result, **({"team": team} if team is not None else {})},
                                      0 if result["success"] else 1)
-        before = mutable_inputs.verification_snapshot(planning, target, args.section)
-        path = receipt_path(planning, args.section)
-        receipts = {path: before}
-        if args.integration and args.section:
-            receipts[receipt_path(planning)] = {**before, "section": None}
-        for destination, snapshot in receipts.items():
-            storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
-                                             "outcome": "pending", "snapshot": snapshot})
-        if command:
-            mutable_inputs.prepared_contract(planning, target)
-            result = _capture(command, target, args.timeout)
-        else:
-            result = {"source": args.source, "outcome": args.outcome,
-                      "evidence": markdown.normalize_repeated(args.evidence)}
-        result.update(version=1, completed_at=storage.now_iso(), snapshot=before)
-        error, changed = _receipt_status(result, planning, target, args.section)
-        if error and result["outcome"] == "passed":
-            result.update(outcome="failed", error=error)
-        for destination, snapshot in receipts.items():
-            storage.write_json(destination, {**result, "snapshot": snapshot})
+        with storage.file_lock(planning / "implementation" / ".mutable-state"):
+            before = mutable_inputs.verification_snapshot(planning, target, args.section)
+            path = receipt_path(planning, args.section)
+            receipts = {path: before}
+            if args.integration and args.section:
+                receipts[receipt_path(planning)] = {**before, "section": None}
+            for destination, snapshot in receipts.items():
+                storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
+                                                 "outcome": "pending", "snapshot": snapshot})
+            if command:
+                mutable_inputs.prepared_contract(planning, target)
+                result = _capture(command, target, args.timeout)
+            else:
+                result = {"source": args.source, "outcome": args.outcome,
+                          "evidence": markdown.normalize_repeated(args.evidence)}
+            result.update(version=1, completed_at=storage.now_iso(), snapshot=before)
+            error, changed = _receipt_status(result, planning, target, args.section)
+            if error and result["outcome"] == "passed":
+                result.update(outcome="failed", error=error)
+            for destination, snapshot in receipts.items():
+                storage.write_json(destination, {**result, "snapshot": snapshot})
         return output.print_json({"success": error is None, "receipt_path": str(path), "error": error,
                                   "changed_components": changed,
                                   "integration_receipt_path": str(receipt_path(planning)) if args.integration or not args.section else None,
