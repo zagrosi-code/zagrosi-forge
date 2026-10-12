@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
+import stat
 import subprocess
 
 from . import markdown, mutable_inputs, output, storage
@@ -11,6 +13,38 @@ from . import markdown, mutable_inputs, output, storage
 
 def receipt_path(planning_dir: Path, section: str | None = None) -> Path:
     return planning_dir / "implementation" / "verification" / f"{section or 'integration'}.json"
+
+
+def _check_managed_path(root: Path, path: Path, *, directory=False, single_link=False) -> bool:
+    """Check existing components without following links; missing paths are allowed."""
+    current = root
+    for part in path.relative_to(root).parts:
+        current /= part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return False
+        expected_type = stat.S_ISDIR if current != path or directory else stat.S_ISREG
+        if (not expected_type(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400
+                or (current == path and single_link and info.st_nlink > 1)):
+            raise ValueError(f"Unsafe verification path: {current}")
+    return True
+
+
+def _archive_receipts(planning: Path, paths) -> None:
+    existing = []
+    for path in paths:
+        if _check_managed_path(planning, path):
+            existing.append(path)
+        _check_managed_path(planning, path.parent / "history" / path.stem, directory=True)
+    for path in existing:
+        raw = path.read_bytes()
+        archive = path.parent / "history" / path.stem / f"{hashlib.sha256(raw).hexdigest()}.json"
+        if _check_managed_path(planning, archive):
+            if archive.read_bytes() != raw:
+                raise ValueError(f"Verification archive differs from its receipt: {archive}")
+        else:
+            storage.write_bytes(archive, raw)
 
 
 def result_error(result) -> str | None:
@@ -133,12 +167,17 @@ def implement_verify(args) -> int:
             result = capture(planning, target, args.section, args.stage, command, args.timeout)
             return output.print_json({**result, **({"team": team} if team is not None else {})},
                                      0 if result["success"] else 1)
-        with storage.file_lock(planning / "implementation" / ".mutable-state"):
+        lock = planning / "implementation" / ".mutable-state"
+        lock_path = lock.with_name(f"{lock.name}.lock")
+        _check_managed_path(planning, lock_path, single_link=True)
+        with storage.file_lock(lock):
+            _check_managed_path(planning, lock_path, single_link=True)
             before = mutable_inputs.verification_snapshot(planning, target, args.section)
             path = receipt_path(planning, args.section)
             receipts = {path: before}
             if args.integration and args.section:
                 receipts[receipt_path(planning)] = {**before, "section": None}
+            _archive_receipts(planning, receipts)
             for destination, snapshot in receipts.items():
                 storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
                                                  "outcome": "pending", "snapshot": snapshot})
