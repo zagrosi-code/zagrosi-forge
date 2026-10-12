@@ -45,7 +45,8 @@ def test_history_failed_receipt_survives_later_pass_without_payload_growth(works
     code, result = verify(workspace, capsys, "--section", SECTION, "--integration")
     assert code == 0 and len(captured) == 2
     assert set(result) == {"success", "receipt_path", "error", "changed_components", "integration_receipt_path",
-                           "source", "outcome", "seconds", "exit_code", "stdout_tail", "stderr_tail"}
+                           "source", "outcome", "seconds", "exit_code", "stdout_tail", "stderr_tail",
+                           "stdout_truncated", "stderr_truncated"}
     for path, raw in previous.items():
         assert archive(path, raw).read_bytes() == raw
         current, old = json.loads(path.read_bytes()), json.loads(raw)

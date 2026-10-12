@@ -339,3 +339,78 @@ def test_compatibility_readback_error_retains_the_completed_process(
         assert observed["stdout_tail"] == "retained stdout"
         assert observed["stderr_tail"] == "retained stderr"
     assert receipt["command"] == COMMAND and receipt["completed_at"]
+
+
+@pytest.mark.parametrize("stage,exit_code,timed_out,outcome,truncated_stream", [
+    ("ordinary", 0, False, "passed", None),
+    ("ordinary", 3, False, "failed", "stdout"),
+    ("baseline", 0, False, "passed", None),
+    ("baseline", 124, True, "timed_out", "stderr"),
+    ("candidate", 3, False, "failed", None),
+    ("candidate", 0, False, "passed", "stdout"),
+])
+def test_output_metadata_preserves_stream_facts_in_public_response(
+        workspace, capsys, monkeypatch, stage, exit_code, timed_out, outcome, truncated_stream):
+    calls, process = fake_executor(workspace[0], monkeypatch)
+    if stage != "ordinary":
+        compatibility_inputs(workspace)
+        if stage == "candidate":
+            assert run(workspace, "baseline")["success"]
+    process.update(returncode=exit_code, timed_out=timed_out, stdout="café", stderr="",
+                   stdout_bytes=5, stderr_bytes=0, stdout_truncated=False, stderr_truncated=False)
+    if truncated_stream:
+        process[truncated_stream + "_bytes"] = 6005 if truncated_stream == "stdout" else 7007
+        process[truncated_stream + "_truncated"] = True
+        process[truncated_stream] = "retained tail"
+    options = [] if stage == "ordinary" else ["--section", SECTION, "--stage", stage]
+    code, result = invoke(workspace, capsys, *verify_args(workspace, *options, "--", *COMMAND))
+    receipt = json.loads(Path(result["receipt_path"]).read_text())
+    if stage != "ordinary":
+        receipt = receipt[stage]
+    assert code == (0 if outcome == "passed" else 1)
+    for observed in (result, receipt):
+        assert observed["outcome"] == outcome and observed["exit_code"] == exit_code
+        assert observed["seconds"] == process["seconds"]
+        assert observed["stdout_tail"] == process["stdout"] and observed["stderr_tail"] == process["stderr"]
+        for key in ("stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated"):
+            assert observed[key] == process[key] and type(observed[key]) is type(process[key])
+    assert receipt["command"] == COMMAND
+    assert len(calls) == (2 if stage == "candidate" else 1)
+
+
+@pytest.mark.parametrize("stage", ["ordinary", "baseline", "candidate"])
+def test_output_metadata_absence_does_not_invent_counts_or_completeness(workspace, capsys, monkeypatch, stage):
+    calls, process = fake_executor(workspace[0], monkeypatch)
+    if stage != "ordinary":
+        compatibility_inputs(workspace)
+        if stage == "candidate":
+            assert run(workspace, "baseline")["success"]
+    fields = ("stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated")
+    for key in fields:
+        process.pop(key)
+    process.update(returncode=127, stdout="", stderr="fixture command could not launch")
+    options = [] if stage == "ordinary" else ["--section", SECTION, "--stage", stage]
+    code, result = invoke(workspace, capsys, *verify_args(workspace, *options, "--", *COMMAND))
+    receipt = json.loads(Path(result["receipt_path"]).read_text())
+    if stage != "ordinary":
+        receipt = receipt[stage]
+    assert code == 1 and not result["success"]
+    for observed in (result, receipt):
+        assert observed["outcome"] == "failed" and observed["exit_code"] == 127
+        assert observed["stdout_tail"] == "" and observed["stderr_tail"] == process["stderr"]
+        assert not any(key in observed for key in fields)
+    assert len(calls) == (2 if stage == "candidate" else 1)
+
+
+def test_output_metadata_counts_utf8_bytes_and_distinguishes_stream_truncation(workspace, capsys):
+    program = "import sys; sys.stdout.buffer.write(('é' * 1200).encode('utf-8')); sys.stderr.buffer.write('Ω!'.encode('utf-8'))"
+    command = [COMMAND[0], "-c", program]
+    code, result = invoke(workspace, capsys, *verify_args(workspace, "--timeout", "10", "--", *command))
+    receipt = json.loads(Path(result["receipt_path"]).read_text())
+    assert code == 0 and result["success"]
+    for observed in (result, receipt):
+        assert observed["outcome"] == "passed" and observed["exit_code"] == 0
+        assert observed["stdout_bytes"] == 2400 and observed["stderr_bytes"] == 3
+        assert observed["stdout_truncated"] is True and observed["stderr_truncated"] is False
+        assert observed["stdout_tail"] == "é" * 1000 and observed["stderr_tail"] == "Ω!"
+    assert receipt["command"] == command

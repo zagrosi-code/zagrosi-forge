@@ -154,6 +154,13 @@ def _capture(command: list[str], target: Path, timeout: float) -> dict:
             **{key: result[key] for key in ("seconds", "stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated", "termination_error") if key in result}}
 
 
+def _capture_summary(result: dict) -> dict:
+    return {key: result[key] for key in (
+        "seconds", "exit_code", "stdout_tail", "stderr_tail",
+        "stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated",
+    ) if key in result}
+
+
 def implement_verify(args) -> int:
     planning = storage.resolve_path(args.planning_dir)
     target = mutable_inputs.target_directory(planning, getattr(args, "target_dir", None))
@@ -220,7 +227,7 @@ def implement_verify(args) -> int:
                                   "source": result["source"], "outcome": result["outcome"],
                                   **(allowance.report() if allowance else {}),
                                   **({"team": team} if team is not None else {}),
-                                  **{key: result[key] for key in ("seconds", "exit_code", "stdout_tail", "stderr_tail") if key in result}},
+                                  **_capture_summary(result)},
                                  0 if error is None else 1)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return output.print_json({"success": False, "error": str(exc)}, 1)
