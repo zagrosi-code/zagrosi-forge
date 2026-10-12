@@ -92,6 +92,12 @@ integration receipt from the last section; otherwise capture the full
 postflight without `--run-tests`. The receipt must match final code and contracts;
 later edits require refreshed verification.
 
+Ordinary verification preserves superseded receipt bytes under
+`implementation/verification/history/<receipt-stem>/<sha256>.json`, including
+bounded output tails. Identical bytes are stored once per scope; archives cannot
+establish run counts or cumulative execution time. Only current receipts determine
+completion. Archives are never pruned automatically.
+
 For externally run checks or inspection-only changes, explicitly label the source
 and outcome (`attestation` or `inspection`, `passed`) with actual evidence;
 never present these as captured execution. Legacy free text remains readable but

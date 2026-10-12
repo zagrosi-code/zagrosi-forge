@@ -375,6 +375,7 @@
   "tests/test_typescript_contract.py",
   "tests/test_verification_contracts.py",
   "tests/test_verification_diagnostics.py",
+  "tests/test_verification_history.py",
   "tests/test_verification_receipts.py",
   "tests/test_verification_repositories.py",
   "tests/test_verification_symlinks.py",

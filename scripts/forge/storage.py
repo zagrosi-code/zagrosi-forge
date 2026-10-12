@@ -47,15 +47,13 @@ def file_signature(path: Path, current=None) -> tuple:
     return signature
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Publish complete bytes; a failed write leaves the previous state intact."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+@contextmanager
+def _atomic_write(path: Path, mode: str, **options):
     descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(content)
+        with os.fdopen(descriptor, mode, **options) as handle:
+            yield handle
             handle.flush()
             os.fsync(handle.fileno())
         if path.exists():
@@ -63,6 +61,20 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Publish complete bytes; a failed write leaves the previous state intact."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    with _atomic_write(path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _atomic_write(path, "wb") as handle:
+        handle.write(content)
 
 
 def load_json(path: Path) -> dict[str, Any]:
