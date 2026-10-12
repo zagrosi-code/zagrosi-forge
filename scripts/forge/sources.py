@@ -159,6 +159,7 @@ TEST_MANIFEST = {
     "test_trial_suite_workflow.py": "77a3434713c5def66cc4fad30f30135989b09e11ef507ef517215abefcb948e4",
     "test_trial_workspaces.py": "56f3cf95406268ec2dd6b413b1bf54ff1f6bca7f0f0b60fe9f8e3f80dc5b008d",
     "test_typescript_contract.py": "56505d33575982a78c65601b31e2791fd744e4e3de9a5652e2f1b30390ced3dc",
+    "test_verification_allowance.py": "3e77fe328c63412ccd28a809512c7738be2f12ebf72c50785a32a5e2897c7c1f",
     "test_verification_contracts.py": "76bb8151b2e64010f25b1d7cc60a96f4b4acba65cb7da1c257140546e5977314",
     "test_verification_diagnostics.py": "42743d2d2e952a185a53a335ed7f8d63de1a918bed81bfdc7e613931b5463de0",
     "test_verification_history.py": "19516c5627169330d2bd60814827ad206bd97ff9f98ce57434382062d4ebb33b",

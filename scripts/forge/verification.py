@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 from pathlib import Path
 import re
 import stat
 import subprocess
 
-from . import markdown, mutable_inputs, output, storage
+from . import markdown, mutable_inputs, output, storage, verification_allowance
 
 
 def receipt_path(planning_dir: Path, section: str | None = None) -> Path:
@@ -29,6 +30,18 @@ def _check_managed_path(root: Path, path: Path, *, directory=False, single_link=
                 or (current == path and single_link and info.st_nlink > 1)):
             raise ValueError(f"Unsafe verification path: {current}")
     return True
+
+
+@contextmanager
+def _verification_lock(planning: Path):
+    lock = planning / "implementation" / ".mutable-state"
+    lock_path = lock.with_name(f"{lock.name}.lock")
+    _check_managed_path(planning, lock_path, single_link=True)
+    verification_allowance.checked_path(planning)
+    with storage.file_lock(lock):
+        _check_managed_path(planning, lock_path, single_link=True)
+        verification_allowance.checked_path(planning)
+        yield
 
 
 def _archive_receipts(planning: Path, paths) -> None:
@@ -156,6 +169,9 @@ def implement_verify(args) -> int:
             raise ValueError("Captured execution determines its own outcome; omit --outcome and --evidence.")
         if getattr(args, "stage", None) and (not args.section or args.integration or not command):
             raise ValueError("Compatibility stages require --section and explicit argv; omit --integration and manual evidence.")
+        total = getattr(args, "allowance_seconds", None)
+        if total is not None and not command:
+            raise ValueError("Verification allowance requires an explicit command; omit it for manual evidence.")
         from . import team_workflow
 
         team = team_workflow.guard(planning, target, None if args.integration else args.section)
@@ -164,31 +180,36 @@ def implement_verify(args) -> int:
         if getattr(args, "stage", None):
             from .compatibility import capture
 
-            result = capture(planning, target, args.section, args.stage, command, args.timeout)
+            result = capture(planning, target, args.section, args.stage, command, args.timeout, allowance_seconds=total)
             return output.print_json({**result, **({"team": team} if team is not None else {})},
                                      0 if result["success"] else 1)
-        lock = planning / "implementation" / ".mutable-state"
-        lock_path = lock.with_name(f"{lock.name}.lock")
-        _check_managed_path(planning, lock_path, single_link=True)
-        with storage.file_lock(lock):
-            _check_managed_path(planning, lock_path, single_link=True)
+        with _verification_lock(planning):
             before = mutable_inputs.verification_snapshot(planning, target, args.section)
             path = receipt_path(planning, args.section)
             receipts = {path: before}
             if args.integration and args.section:
                 receipts[receipt_path(planning)] = {**before, "section": None}
+            allowance = verification_allowance.Allowance(planning, target, total) if command else None
+            timeout = allowance.reserve(args.timeout) if allowance else args.timeout
             _archive_receipts(planning, receipts)
             for destination, snapshot in receipts.items():
                 storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
                                                  "outcome": "pending", "snapshot": snapshot})
             if command:
                 mutable_inputs.prepared_contract(planning, target)
-                result = _capture(command, target, args.timeout)
+                result = _capture(command, target, timeout)
+                try:
+                    allowance.settle(result)
+                except (OSError, ValueError) as exc:
+                    result["error"] = str(exc)
+                    if result["outcome"] == "passed":
+                        result["outcome"] = "failed"
             else:
                 result = {"source": args.source, "outcome": args.outcome,
                           "evidence": markdown.normalize_repeated(args.evidence)}
             result.update(version=1, completed_at=storage.now_iso(), snapshot=before)
             error, changed = _receipt_status(result, planning, target, args.section)
+            error = result.get("error") or error
             if error and result["outcome"] == "passed":
                 result.update(outcome="failed", error=error)
             for destination, snapshot in receipts.items():
@@ -197,6 +218,7 @@ def implement_verify(args) -> int:
                                   "changed_components": changed,
                                   "integration_receipt_path": str(receipt_path(planning)) if args.integration or not args.section else None,
                                   "source": result["source"], "outcome": result["outcome"],
+                                  **(allowance.report() if allowance else {}),
                                   **({"team": team} if team is not None else {}),
                                   **{key: result[key] for key in ("seconds", "exit_code", "stdout_tail", "stderr_tail") if key in result}},
                                  0 if error is None else 1)

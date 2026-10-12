@@ -187,16 +187,18 @@ def _stage_error(pair: dict, stage: str) -> str | None:
     return None
 
 
-def capture(planning: Path, target: Path, section: str, stage: str, command: list[str], timeout: float) -> dict:
+def capture(planning: Path, target: Path, section: str, stage: str, command: list[str], timeout: float,
+            *, allowance_seconds=None) -> dict:
     """Run only explicit argv, publishing pending first and retaining prior attempts."""
-    from .verification import _capture, result_error
+    from .verification import _capture, _verification_lock, result_error
+    from .verification_allowance import Allowance
 
     if stage not in {"baseline", "candidate"} or not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command):
         raise ValueError("Compatibility capture needs baseline|candidate and an explicit command array.")
     if not 0 < timeout <= 86400:
         raise ValueError("Compatibility timeout must be positive and at most 86400 seconds.")
     mutable_inputs.prepared_contract(planning, target)
-    with storage.file_lock(planning / "implementation" / ".mutable-state"):
+    with _verification_lock(planning):
         pair = _load_pair(planning, target, section)
         source, checks = _observations(target, pair["declaration"])
         if stage == "baseline":
@@ -208,6 +210,8 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
             if checks != pair["baseline"]["checks"] or command != pair["baseline"]["command"]:
                 raise ValueError("Compatibility candidate must use unchanged baseline checks and command.")
         snapshot = mutable_inputs.verification_snapshot(planning, target, section)
+        allowance = Allowance(planning, target, allowance_seconds)
+        timeout = allowance.reserve(timeout)
         pending = {"version": 1, "source": "captured", "outcome": "pending", "command": command,
                    "snapshot": snapshot, "protected_source": source, "checks": checks,
                    "origin_digest": _origin_digest(pair)}
@@ -223,6 +227,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
         try:
             mutable_inputs.prepared_contract(planning, target)
             result = {**pending, **_capture(command, target, timeout), "completed_at": storage.now_iso()}
+            allowance.settle(result)
             error = result_error(result)
             if (snapshot != mutable_inputs.verification_snapshot(planning, target, section)
                     or (source, checks) != _observations(target, pair["declaration"])):
@@ -237,6 +242,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
         storage.write_json(path, pair)
         return {"success": error is None, "receipt_path": str(path), "stage": stage, "error": error,
                 "outcome": result["outcome"],
+                **allowance.report(),
                 **{key: result[key] for key in ("seconds", "exit_code", "stdout_tail", "stderr_tail") if key in result}}
 
 

@@ -277,6 +277,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--stage", choices=["baseline", "candidate"], help="Capture the declared caller checks before or after source changes.")
     p.add_argument("--integration", action="store_true", help="With --section, also record final integration from this same full-suite run.")
     p.add_argument("--timeout", type=float, default=600)
+    p.add_argument("--allowance-seconds", type=float, help="Optional total seconds for this plan's checks; persists across calls. Raise the total to continue.")
     p.add_argument("--source", choices=["attestation", "inspection"])
     p.add_argument("--outcome", choices=["passed", "failed", "timed_out", "skipped", "pending"])
     p.add_argument("--evidence", action="append", default=[])

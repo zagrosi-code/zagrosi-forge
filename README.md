@@ -42,7 +42,7 @@ git clone https://github.com/zagrosi-code/zagrosi-forge.git
 cd zagrosi-forge
 ```
 
-Load the checkout for one Claude Code session:
+One Claude Code session:
 
 ```bash
 claude --plugin-dir "/absolute/path/to/zagrosi-forge"
@@ -81,9 +81,12 @@ Use $zagrosi-forge:zagrosi-forge to add this feature and finish verification.
 Use $zagrosi-forge:zagrosi-cleanup to simplify this subsystem while preserving behavior.
 ```
 
-Shared skills, runtime and standards. Individual phases: `zagrosi-project`,
+Shared skills, runtime and standards; phases: `zagrosi-project`,
 `zagrosi-plan`, `zagrosi-implement`. Authorized work continues through delivery;
 planning-only requests stop at planning.
+
+Optional [verification allowances](skills/zagrosi-implement/references/verification.md)
+(unlimited by default).
 
 ## Multiple models
 
