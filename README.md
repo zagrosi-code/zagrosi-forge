@@ -85,6 +85,18 @@ Shared skills, runtime and standards. Individual phases: `zagrosi-project`,
 `zagrosi-plan`, `zagrosi-implement`. Authorized work continues through delivery;
 planning-only requests stop at planning.
 
+### Optional verification allowance
+
+Both hosts support a time allowance for Forge-captured checks:
+
+```text
+Implement this feature with a 600-second total verification allowance. If it runs out, tell me which checks remain and wait before extending it.
+```
+
+Verification is unlimited by default. A saved allowance persists when resuming;
+failed and timed-out checks count too. Direct shell commands and external CI are
+outside enforcement. See [behavior and limits](skills/zagrosi-implement/references/verification.md).
+
 ## Multiple models
 
 Request independent Codex, Claude or Gemini reviews of the same bounded packet:

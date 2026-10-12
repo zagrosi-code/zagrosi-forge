@@ -45,6 +45,11 @@ only with actual results. After recording, use the returned `entry` for the next
 section. `recorded: true` means the record is saved even if that entry needs repair.
 Parallelize only disjoint files and serialize records.
 
+When the user supplies cumulative verification time, or a resumed plan reports
+a saved allowance, follow [verification allowance](references/verification.md).
+Do not infer a cap from depth or elapsed effort; extend only with explicit user
+authorization. Keep fresh evidence reusable and unfinished checks visible.
+
 1. Read index once, current section, original source excerpts, linked contracts,
    and relevant callers. Resolve assumptions that contradict the source first.
    For required [compatibility checks](references/compatibility.md), activate this
