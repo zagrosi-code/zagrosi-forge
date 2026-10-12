@@ -259,6 +259,7 @@ def test_aliased_allowance_refuses_without_mutating_user_file(workspace, capsys,
 
 def test_exhausted_paired_receipts_remain_reusable_until_inputs_change(workspace, capsys, monkeypatch):
     forge, planning, target = workspace
+    execute = forge.child_process.execute
     calls, process = fake_executor(forge, monkeypatch)
     process["seconds"] = 1
     code, verified = verify(workspace, capsys, "--section", SECTION, "--integration", "--allowance-seconds", "1")
@@ -267,6 +268,8 @@ def test_exhausted_paired_receipts_remain_reusable_until_inputs_change(workspace
     before = evidence_bytes(workspace)
     assert verify(workspace, capsys, "--section", SECTION, "--integration")[0] == 1
     assert evidence_bytes(workspace) == before
+    monkeypatch.setattr(forge.child_process, "execute", execute)
+    monkeypatch.setattr(forge.gates, "local_gate_available", lambda *_: False)
     code, record = invoke(workspace, capsys, *record_args(workspace, "--verification-receipt", verified["receipt_path"]))
     assert code == 0 and "allowance" not in record["record"]["verification_result"]
     args = ["postflight", "--phase", "implement", "--planning-dir", str(planning), "--target-dir", str(target), "--strict"]
