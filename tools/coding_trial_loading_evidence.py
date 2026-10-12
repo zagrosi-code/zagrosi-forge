@@ -155,7 +155,7 @@ def native_usage(process):
     if not complete(process):
         return None
     try:
-        events = [parse_json(line) for line in process["stdout"].splitlines() if line.strip()]
+        events = [parse_json(line) for line in re.split(r"[\n\r\v\f\x1c-\x1e]", process["stdout"]) if line.strip()]
         require(all(type(event) is dict for event in events), "Invalid native event")
         usage = [event["usage"] for event in events if event.get("type") == "turn.completed"
                  and type(event.get("usage")) is dict]

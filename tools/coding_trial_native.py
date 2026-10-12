@@ -320,7 +320,7 @@ def _native_events(process):
     require(isinstance(process.get("stdout"), str) and isinstance(process.get("stderr"), str),
             "Native process streams must be text")
     events, kinds, completed = [], {}, set()
-    for line in process["stdout"].splitlines():
+    for line in re.split(r"[\n\r\v\f\x1c-\x1e]", process["stdout"]):
         if not line.strip():
             continue
         event = parse_json(line)
