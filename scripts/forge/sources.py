@@ -110,7 +110,7 @@ TEST_MANIFEST = {
     "test_team_git.py": "5014b7422b5d268e0a9bd71978cf1afc4a455cfe6e10025d4fed684d38deb622",
     "test_team_guidance.py": "6873006837f8ccea1c96d78275edb2a26f69488b302b47526019ec05efa7aeb9",
     "test_team_plan_claims.py": "4b895c63de64d3330a4f64df8678ab645be50e879851de1c341d66df85388bcb",
-    "test_team_plan_integration.py": "82008dbd1206b31f6f533c46cacf1ccaedb8f18901a1ffad89354c94b2ea0daa",
+    "test_team_plan_integration.py": "76c350040515844ca57ae87a03c75edab903c7145a68827700ed37197ac1fc3c",
     "test_team_plan_workflows.py": "e637547ccad14470f4e72b6e3650599bae57fd14c46116ec21e5ac8d419efdd5",
     "test_team_plans.py": "1eb6aa87c475208f2774295720fddda414f19b30248b8bf7c20582c6511612d1",
     "test_team_protocol_upgrade.py": "c4aa3f701b79bc7ba73f42a7f3936655c6e647d168ec40d4e4f060555a80f83b",

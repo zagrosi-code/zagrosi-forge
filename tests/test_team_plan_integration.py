@@ -101,7 +101,7 @@ def implement(root, section):
 @pytest.fixture
 def collaboration_repo(tmp_path):
     """Create genuine clones of one deliberately committed contract and discovery file."""
-    def build(depth='lean', *, dependent=False, linked=False, crlf=False):
+    def build(depth='lean', *, dependent=False, linked=False, crlf=False, peer=True):
         remote = tmp_path / 'shared.git'
         git(tmp_path, 'init', '--bare', '--initial-branch=main', remote)
         first = tmp_path / 'alice'
@@ -142,6 +142,9 @@ def collaboration_repo(tmp_path):
         git(first, 'add', '.forge/team.json')
         git(first, 'commit', '-m', 'Share team discovery')
         git(first, 'push', '-u', 'origin', 'main')
+        (first / CANONICAL / 'private-notes.md').write_text(PRIVATE_TEXT, encoding='utf-8')
+        if not peer:
+            return first, None, remote
         second = tmp_path / ('linked' if linked else 'bob')
         if linked:
             git(first, 'worktree', 'add', '-b', 'claude-task', second)
@@ -150,8 +153,7 @@ def collaboration_repo(tmp_path):
             git(tmp_path, 'clone', *options, remote, second)
         git(second, 'config', 'commit.gpgsign', 'false')
         team(second, 'join', '--remote', 'origin', '--name', 'Blair')
-        for root in (first, second):
-            (root / CANONICAL / 'private-notes.md').write_text(PRIVATE_TEXT, encoding='utf-8')
+        (second / CANONICAL / 'private-notes.md').write_text(PRIVATE_TEXT, encoding='utf-8')
         return first, second, remote
     return build
 
@@ -294,7 +296,7 @@ def test_identical_contract_after_code_commits_and_real_crlf_checkout_coexists(c
 
 
 def test_changed_branch_or_target_preserves_prepared_state_and_receipts(collaboration_repo):
-    first, _, _ = collaboration_repo()
+    first, _, _ = collaboration_repo(peer=False)
     workspace, _ = prepare(first)
     reserve(first, workspace, SECTION, 'codex')
     setup(first, workspace, SECTION)
