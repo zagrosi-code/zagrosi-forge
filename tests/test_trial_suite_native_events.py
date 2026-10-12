@@ -337,3 +337,59 @@ def test_loading_diagnostic_keeps_earlier_incomplete_and_malformed_errors(fault,
                                  action_command=ACTION_COMMAND, action_bytes=b"expected", subagents=True)
     assert all(row == {"status": "failed", "detail": message, "event_ids": []} for row in result.values())
     assert process == before
+
+
+@pytest.mark.parametrize("boundary", ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e"])
+def test_native_jsonl_preserves_ascii_boundaries_and_blank_filtering(boundary):
+    from coding_trial_loading_evidence import native_usage
+    usage = {"input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3, "reasoning_output_tokens": 1}
+    events = [*valid_events(), {"type": "turn.completed", "usage": usage}]
+    baseline = process_record(events)
+    expected = check(baseline)
+    assert all(row["status"] == "passed" for row in expected.values())
+    assert [row["event_ids"] for row in expected.values()] == [["entry-1"], ["action-1"], ["spawn-1", "wait-1"]]
+    expected_usage = native_usage(baseline)
+    assert expected_usage["usage"] == [usage] and expected_usage["totals"] == usage
+    process = process_record(events)
+    process["stdout"] = boundary + " \t\x85\u2028\u2029 " + boundary + boundary.join(
+        json.dumps(event) for event in events) + boundary * 2
+    before = deepcopy(process)
+    assert check(process) == expected
+    assert native_usage(process) == expected_usage
+    assert process == before
+
+
+@pytest.mark.parametrize("character", ["\x85", "\u2028", "\u2029"], ids=["NEL", "LS", "PS"])
+@pytest.mark.parametrize("escaped", [True, False], ids=["escaped", "literal"])
+def test_native_jsonl_unicode_payload_preserves_exact_observations_and_usage(character, escaped):
+    from coding_trial_loading_evidence import native_usage
+    usage = {"input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3, "reasoning_output_tokens": 1}
+    events = [*valid_events(), {"type": "turn.completed", "usage": usage}]
+    entry, action = "entry" + character + "payload", "action" + character + "payload"
+    events[0]["item"]["aggregated_output"] = entry
+    events[1]["item"]["aggregated_output"] = action
+    process = process_record(events)
+    process["stdout"] = "\n".join(json.dumps(event, ensure_ascii=escaped) for event in events) + "\n"
+    before = deepcopy(process)
+    result = check_native_events(process, entry_command=ENTRY_COMMAND, entry_bytes=entry.encode(),
+                                 action_command=ACTION_COMMAND, action_bytes=action.encode(), subagents=True)
+    assert {name: (row["status"], row["event_ids"]) for name, row in result.items()} == {
+        "entry-routing": ("passed", ["entry-1"]), "required-tools": ("passed", ["action-1"]),
+        "subagent-execution": ("passed", ["spawn-1", "wait-1"])}
+    assert native_usage(process) == {
+        "source": "codex exec JSONL", "usage": [usage], "totals": usage,
+        "api_retries": None, "command_seconds": None,
+        "limits": "Usage is reported by the native CLI; command timing and backend identity are unknown."}
+    assert process == before
+
+
+@pytest.mark.parametrize("boundary", ["\x85", "\u2028", "\u2029"], ids=["NEL", "LS", "PS"])
+def test_native_jsonl_unicode_between_records_is_not_a_record_boundary(boundary):
+    from coding_trial_loading_evidence import native_usage
+    events = [*valid_events(), {"type": "turn.completed", "usage": {"input_tokens": 10}}]
+    process = process_record(events)
+    process["stdout"] = boundary.join(json.dumps(event) for event in events)
+    before = deepcopy(process)
+    assert all(row["status"] == "failed" and row["event_ids"] == [] for row in check(process).values())
+    assert native_usage(process) is None
+    assert process == before
