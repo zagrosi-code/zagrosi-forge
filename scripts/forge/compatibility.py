@@ -190,7 +190,7 @@ def _stage_error(pair: dict, stage: str) -> str | None:
 def capture(planning: Path, target: Path, section: str, stage: str, command: list[str], timeout: float,
             *, allowance_seconds=None) -> dict:
     """Run only explicit argv, publishing pending first and retaining prior attempts."""
-    from .verification import _capture, _verification_lock, result_error
+    from .verification import _capture, _capture_summary, _verification_lock, result_error
     from .verification_allowance import Allowance
 
     if stage not in {"baseline", "candidate"} or not isinstance(command, list) or not command or not all(isinstance(arg, str) and arg for arg in command):
@@ -243,7 +243,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
         return {"success": error is None, "receipt_path": str(path), "stage": stage, "error": error,
                 "outcome": result["outcome"],
                 **allowance.report(),
-                **{key: result[key] for key in ("seconds", "exit_code", "stdout_tail", "stderr_tail") if key in result}}
+                **_capture_summary(result)}
 
 
 def evidence_error(planning: Path, target: Path, section: str, evidence) -> str | None:
