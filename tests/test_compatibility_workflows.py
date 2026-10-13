@@ -385,3 +385,32 @@ def test_completed_pair_survives_missing_live_receipt(forge, tmp_path, capsys):
     assert payload["completed_sections"] == [SECTION]
     assert not path.exists()
     assert forge.state.implementation_state_path(planning).read_bytes() == state
+
+
+@pytest.mark.parametrize("review_section", [SECTION, "section-02-unrelated"])
+def test_review_artifact_alone_marks_only_its_section_started(forge, tmp_path, capsys, review_section):
+    planning, target = workspace(tmp_path)
+    pair = forge.compatibility.receipt_path(planning, SECTION)
+    if review_section == SECTION:
+        assert setup(forge, capsys, planning, target)[0] == 0
+        pair.rename(pair.with_suffix(".saved"))
+    source = target / "src/labels.py"
+    source.write_text("def normalize(value):\n    return value.strip()\n")
+    review = planning / "implementation/code_review" / f"{review_section}-review.md"
+    review.parent.mkdir(parents=True)
+    review.write_text("Verdict: blocked\nReviewed: fixture caller behavior still needs verification.\n")
+    before = {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()}
+    expected = "blocked" if review_section == SECTION else "activate"
+    assert forge.compatibility.status(planning, target, SECTION)["stage"] == expected
+    assert {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()} == before
+    code, payload = setup(forge, capsys, planning, target)
+    if review_section == SECTION:
+        assert code == 1, payload
+        assert "restore" in payload["error"].lower()
+        assert not pair.exists()
+        assert {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()} == before
+    else:
+        assert code == 0, payload
+        assert pair.is_file()
+        assert all(p.read_bytes() == content for p, content in before.items())
+    assert source.read_text() == "def normalize(value):\n    return value.strip()\n"

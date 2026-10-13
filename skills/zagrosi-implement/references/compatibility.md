@@ -89,7 +89,7 @@ baseline. Retain pre-existing failures separately. If checks need correction,
 establish a fresh baseline against the unchanged original source before retrying
 the candidate. Never reset user work or rebaseline changed code to manufacture a
 pass. Origin does not refresh automatically. If a required receipt is missing but
-section progress, verification or implementation evidence remains, setup and status
+section progress, review, verification or implementation evidence remains, setup and status
 block. Restore the original compatibility receipt; keep the surviving records.
 If the original source is unavailable,
 report the missing evidence; do not claim compatibility or substitute an attestation.

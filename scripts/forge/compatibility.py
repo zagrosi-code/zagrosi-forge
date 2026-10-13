@@ -139,6 +139,7 @@ def _require_first_activation(planning: Path, section: str) -> None:
     if (any(section in saved.get(field, {}) for field in ("pending_sections", "completed_sections"))
             or any(event["section"] == section for event in events)
             or (verification / f"{section}.json").exists()
+            or (planning / "implementation/code_review" / f"{section}-review.md").exists()
             or (history.exists() and any(history.iterdir()))):
         raise ValueError(f"Compatibility origin is missing for {section}; restore the original receipt at "
                          f"{receipt_path(planning, section)} before resuming. Retained work cannot establish a new origin.")
