@@ -119,17 +119,45 @@ class GitBoard:
         return _run(self.repo.root, "-c", f"remote.{self.remote}.mirror=false", "-c", "push.followTags=false",
                     "-c", "push.recurseSubmodules=no", command, *args, **kwargs)
 
+    def _transport_settings(self):
+        settings = {key: [] for key in ("url", "pushurl", "receivepack", "proxy", "proxyAuthMethod", "vcs")}
+        remote = self.remote.replace(".", r"\.")
+        pattern = rf"^remote\.{remote}\.({'|'.join(settings).lower()})$"
+        configured = _run(self.repo.root, "config", "--null", "--get-regexp", pattern, check=False)
+        error = "Could not inspect the joined remote's transport settings."
+        if configured["returncode"]:
+            if configured["returncode"] == 1 and not configured["stdout"] and not configured.get("stdout_truncated"):
+                return settings
+            raise TeamError("team-remote", error)
+        if configured.get("stdout_truncated"):
+            # Combined keys can exceed the cap while every original value-only
+            # read fits. Discard the batch and retain the old per-key limits.
+            for key in settings:
+                result = _run(self.repo.root, "config", "--null", "--get-all", f"remote.{self.remote}.{key}", check=False)
+                if result["returncode"] not in (0, 1) or result.get("stdout_truncated"):
+                    raise TeamError("team-remote", error)
+                settings[key] = result["stdout"].split("\0")[:-1]
+            return settings
+        raw = configured["stdout"]
+        if raw and not raw.endswith("\0"):
+            raise TeamError("team-remote", error)
+        names = {f"remote.{self.remote}.{key.lower()}": key for key in settings}
+        for record in raw.split("\0")[:-1]:
+            name, _, value = record.partition("\n")
+            key = names.get(name)
+            if key is None:
+                raise TeamError("team-remote", error)
+            settings[key].append(value)
+        return settings
+
     def _push(self, receipt):
         # Git push updates a named remote's tracking refs even with negative fetch
         # mappings. A command-local alias has no mappings and preserves raw URL
         # rewriting semantics; hooks still run, receiving this temporary name.
         alias = "forge-team-" + uuid.uuid4().hex
         options = ["-c", "push.followTags=false", "-c", "push.recurseSubmodules=no"]
-        for key in ("url", "pushurl", "receivepack", "proxy", "proxyAuthMethod", "vcs"):
-            configured = _run(self.repo.root, "config", "--null", "--get-all", f"remote.{self.remote}.{key}", check=False)
-            if configured["returncode"] not in (0, 1) or configured.get("stdout_truncated"):
-                raise TeamError("team-remote", "Could not inspect the joined remote's transport settings.")
-            for value in configured["stdout"].split("\0")[:-1]:
+        for key, values in self._transport_settings().items():
+            for value in values:
                 options += ["-c", f"remote.{alias}.{key}={value}"]
         # remote get-url rejects aliases that exist only in command config.
         # Transport resolves them; revalidate the source's two endpoints after

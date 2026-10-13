@@ -411,3 +411,191 @@ def test_persisted_pending_bytes_bound_accepted_required_state(repositories, mon
             assert mandatory_size(saved) <= before_push[-1][1]
             row = result.get('session')
     assert len(before_push) == 4
+
+
+def test_push_settings_preserve_raw_alias_values_and_later_pin(repositories, monkeypatch):
+    remote, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    name = "Team/a.b"
+    git(alice, "remote", "rename", "origin", name)
+    git(alice, "config", f"remote.{name}.pushurl", str(remote))
+    git(alice, "config", "--add", f"remote.{name}.receivepack", "first\nsecond")
+    git(alice, "config", "--add", f"remote.{name}.proxyAuthMethod", "first")
+    git(alice, "config", "--add", f"remote.{name}.receivepack", " last ")
+    git(alice, "config", f"remote.{name}.proxy", "")
+    git(alice, "config", "--add", f"remote.{name}.proxyAuthMethod", "first")
+    git(alice, "config", "--add", f"remote.{name}.proxyAuthMethod", "second")
+    git(alice, "config", "remote.Team/axb.proxy", "wrong-dot")
+    git(alice, "config", "remote.team/a.b.proxy", "wrong-case")
+    transport = forge.team_git.GitBoard(forge.team_git.Repository.discover(alice), remote=name)
+    config_path = transport.repo.git_dir / "config"
+    git(alice, "config", f"remote.{name}.vcs", "")
+    before = config_path.read_bytes()
+    execute = forge.team_git.execute
+    calls = []
+
+    def observe(argv, *args, **kwargs):
+        calls.append(list(argv))
+        if "push" in argv:
+            # Artificial helper/settings values are inspected, never executed.
+            return {"returncode": 0, "stdout": "", "stderr": ""}
+        return execute(argv, *args, **kwargs)
+
+    monkeypatch.setattr(forge.team_git, "execute", observe)
+    result = transport.write(board(), None, lambda attempt: None)
+    push = next(argv for argv in calls if "push" in argv)
+    alias = push[-2]
+    assert alias.startswith("forge-team-") and alias != name
+    assert push[-1] == f"{result.revision}:{forge.team_git.TEAM_REF}"
+    configured = [push[index + 1] for index, arg in enumerate(push[:-1]) if arg == "-c"]
+    assert configured == [
+        "push.followTags=false", "push.recurseSubmodules=no",
+        f"remote.{alias}.url={remote}", f"remote.{alias}.pushurl={remote}",
+        f"remote.{alias}.receivepack=first\nsecond", f"remote.{alias}.receivepack= last ",
+        f"remote.{alias}.proxy=", f"remote.{alias}.proxyAuthMethod=first",
+        f"remote.{alias}.proxyAuthMethod=first", f"remote.{alias}.proxyAuthMethod=second", f"remote.{alias}.vcs=",
+    ]
+    last_settings = max(index for index, argv in enumerate(calls) if argv[1] == "config" and "--null" in argv)
+    later = calls[last_settings + 1:]
+    assert later[0] == ["git", "remote", "get-url", "--all", name]
+    assert later[1] == ["git", "remote", "get-url", "--push", "--all", name]
+    assert later[2][-3:] == ["ls-remote", "--get-url", alias]
+    assert later[3] == push
+    assert config_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", ["error", "truncated"])
+def test_push_settings_preserve_per_key_failure_and_pending_receipt(repositories, monkeypatch, fault):
+    remote, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    transport = client(forge, alice)
+    execute = forge.team_git.execute
+    failed_key = []
+    transport_calls = []
+
+    def fail_one_key(argv, *args, **kwargs):
+        if argv[1] == "config" and "--null" in argv:
+            assert kwargs["output_limit"] == forge.team_git.BOARD_LIMIT + 4096
+            if "--get-regexp" in argv:
+                # New batching must fall back; the original source skips this arm.
+                return {"returncode": 0, "stdout": "discard-me", "stderr": "", "stdout_truncated": True}
+            if argv[-1] == "remote.origin.proxy":
+                failed_key.append(argv[-1])
+                return {"returncode": 128 if fault == "error" else 0,
+                        "stdout": "partial\0", "stderr": "private-diagnostic",
+                        "stdout_truncated": fault == "truncated"}
+        if "push" in argv or ("ls-remote" in argv and "--get-url" in argv):
+            transport_calls.append(list(argv))
+        return execute(argv, *args, **kwargs)
+
+    monkeypatch.setattr(forge.team_git, "execute", fail_one_key)
+    attempts = []
+    with pytest.raises(forge.team_state.TeamError) as failed:
+        transport.write(board(), None, attempts.append)
+    assert failed.value.code == "team-remote"
+    assert "private-diagnostic" not in str(failed.value)
+    assert failed_key == ["remote.origin.proxy"] and not transport_calls
+    assert len(attempts) == 1
+    assert git(alice, "rev-parse", f"refs/forge/team-pending/{attempts[0]['revision']}").stdout.strip() == attempts[0]["revision"]
+    assert git(remote, "rev-parse", "--verify", forge.team_git.TEAM_REF, check=False).returncode != 0
+
+
+def test_push_settings_use_one_bounded_read_for_real_publication(repositories, monkeypatch):
+    remote, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    transport = client(forge, alice)
+    before_config = (transport.repo.git_dir / "config").read_bytes()
+    before_head = git(alice, "rev-parse", "HEAD").stdout
+    execute = forge.team_git.execute
+    settings = []
+
+    def observe(argv, *args, **kwargs):
+        if argv[1] == "config" and "--null" in argv:
+            settings.append((list(argv), kwargs["output_limit"]))
+        return execute(argv, *args, **kwargs)
+
+    monkeypatch.setattr(forge.team_git, "execute", observe)
+    created = transport.write(board(), None, lambda attempt: None)
+    assert git(remote, "rev-parse", forge.team_git.TEAM_REF).stdout.strip() == created.revision
+    assert len(settings) == 1
+    assert settings[0][1] == forge.team_git.BOARD_LIMIT + 4096
+    assert git(alice, "rev-parse", "HEAD").stdout == before_head
+    assert (transport.repo.git_dir / "config").read_bytes() == before_config
+    assert not git(alice, "for-each-ref", "refs/forge", "refs/remotes").stdout
+
+
+def test_push_settings_discard_truncated_batch_and_publish_with_old_caps(repositories, monkeypatch):
+    remote, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    transport = client(forge, alice)
+    execute = forge.team_git.execute
+    settings, pushes = [], []
+
+    def truncate_batch(argv, *args, **kwargs):
+        if argv[1] == "config" and "--null" in argv:
+            settings.append((list(argv), kwargs["output_limit"]))
+            if "--get-regexp" in argv:
+                return {"returncode": 0,
+                        "stdout": "remote.origin.url\npoisoned-destination\0remote.origin.proxy\ncut",
+                        "stderr": "", "stdout_truncated": True}
+        if "push" in argv:
+            pushes.append(list(argv))
+        return execute(argv, *args, **kwargs)
+
+    monkeypatch.setattr(forge.team_git, "execute", truncate_batch)
+    attempts = []
+    created = transport.write(board(), None, attempts.append)
+    assert git(remote, "rev-parse", forge.team_git.TEAM_REF).stdout.strip() == created.revision
+    assert len(settings) == 7 and "--get-regexp" in settings[0][0]
+    assert [argv[1:] for argv, _ in settings[1:]] == [
+        ["config", "--null", "--get-all", f"remote.origin.{key}"]
+        for key in ("url", "pushurl", "receivepack", "proxy", "proxyAuthMethod", "vcs")
+    ]
+    assert all(cap == forge.team_git.BOARD_LIMIT + 4096 for _, cap in settings)
+    assert len(pushes) == 1 and not any("poisoned-destination" in arg for arg in pushes[0])
+    assert len(attempts) == 1 and created.revision == attempts[0]["revision"]
+    assert not git(alice, "for-each-ref", "refs/forge", "refs/remotes").stdout
+
+
+@pytest.mark.parametrize("response, expected_code", [
+    ({"returncode": 128, "stdout": "discard\0", "stdout_truncated": True}, "team-remote"),
+    ({"returncode": 0, "stdout": "remote.origin.url\nunterminated"}, "team-remote"),
+    ({"returncode": 0, "stdout": "remote.other.url\nwrong\0"}, "team-remote"),
+    ({"returncode": 1, "stdout": ""}, "team-destination-changed"),
+    ({"returncode": 0, "stdout": "remote.origin.vcs\0"}, "team-destination-changed"),
+])
+def test_push_settings_batch_failure_and_absence_do_not_publish(repositories, monkeypatch, response, expected_code):
+    remote, (alice, _) = repositories
+    forge = load_zagrosi_module()
+    transport = client(forge, alice)
+    execute = forge.team_git.execute
+    calls, batch_positions = [], []
+
+    def replace_batch(argv, *args, **kwargs):
+        calls.append(list(argv))
+        if argv[1] == "config" and "--get-regexp" in argv:
+            batch_positions.append(len(calls) - 1)
+            return {"stderr": "private-diagnostic", **response}
+        return execute(argv, *args, **kwargs)
+
+    monkeypatch.setattr(forge.team_git, "execute", replace_batch)
+    attempts = []
+    with pytest.raises(forge.team_state.TeamError) as failed:
+        transport.write(board(), None, attempts.append)
+    assert failed.value.code == expected_code
+    assert "private-diagnostic" not in str(failed.value)
+    assert len(batch_positions) == 1
+    later = calls[batch_positions[0] + 1:]
+    assert not any("push" in argv or "--get-all" in argv for argv in later)
+    if expected_code == "team-destination-changed":
+        # Absence proceeds to the unchanged pin and alias destination checks.
+        assert later[0] == ["git", "remote", "get-url", "--all", "origin"]
+        assert later[1] == ["git", "remote", "get-url", "--push", "--all", "origin"]
+        assert later[2][-3:-1] == ["ls-remote", "--get-url"]
+        if response["stdout"]:
+            assert f"remote.{later[2][-1]}.vcs=" in later[2]
+    else:
+        assert not later
+    assert len(attempts) == 1
+    assert git(alice, "rev-parse", f"refs/forge/team-pending/{attempts[0]['revision']}").stdout.strip() == attempts[0]["revision"]
+    assert git(remote, "rev-parse", "--verify", forge.team_git.TEAM_REF, check=False).returncode != 0
