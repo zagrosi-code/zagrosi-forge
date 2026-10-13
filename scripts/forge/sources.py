@@ -37,7 +37,7 @@ TEST_MANIFEST = {
     "test_compact_plan.py": "bcdc03a4016c7ba2aaee540c7fc1aa3338c3fd9dea2f825d5efa274e5e7780e9",
     "test_compatibility_admission.py": "29c32ea4863b20cca87a95dfc9a85860fe546a0eea0dc3fdb00054dc8396a529",
     "test_compatibility_checks.py": "a781a8553250b42ef78c306acd21f80d31948491b6a0ed188fed0dd06a17fc74",
-    "test_compatibility_workflows.py": "e2d20abc0c16b5e3bbb4713485cfe0729acd6e3085ffda90dd86ecd1671c830f",
+    "test_compatibility_workflows.py": "ef9d02f69b864015e3d6d15ef4616df47ecab6a33519caa35bf51ecb64b0073c",
     "test_complete_plan_admission.py": "388d6949bcb8b93079acb4c4a6aa33363bae663ff3ef34091108a0f4903870e3",
     "test_completion_contracts.py": "00bc8b153463486b062ceae517d7e8499a510643dcf9120296e48631c87fed24",
     "test_completion_output.py": "bed3b361b98dc9b0da3b0691cef8e31be8a8ee14f8bad20f0b237ae23c41b90f",

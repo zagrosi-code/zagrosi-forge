@@ -268,3 +268,120 @@ def test_legacy_compatibility_prose_keeps_existing_completion(forge, tmp_path, c
     code, payload = record(forge, capsys, planning, target)
     assert code == 0, payload
     assert not forge.compatibility.receipt_path(planning, SECTION).exists()
+
+
+@pytest.mark.parametrize("evidence", ["progress", "verification", "history", "pending", "completed", "legacy"])
+def test_missing_origin_with_saved_work_requires_original_receipt(forge, tmp_path, capsys, evidence):
+    planning, target = workspace(tmp_path)
+    assert setup(forge, capsys, planning, target)[0] == 0
+    write_checks(target)
+    assert verify(forge, capsys, planning, target, "baseline")[0] == 0
+    pair = forge.compatibility.receipt_path(planning, SECTION)
+    original = pair.read_bytes()
+    saved = pair.with_suffix(".saved")
+    pair.rename(saved)
+    state_dir = planning / "implementation"
+    if evidence == "progress":
+        assert invoke(forge, capsys, "implement-progress", "--planning-dir", str(planning),
+                      "--section", SECTION, "--stage", "red", "--result", "Fixture feature failed")[0] == 0
+    elif evidence in {"verification", "history"}:
+        args = ["implement-verify", "--planning-dir", str(planning), "--target-dir", str(target),
+                "--section", SECTION, "--", sys.executable, "-c", "raise SystemExit(1)"]
+        assert invoke(forge, capsys, *args)[0] == 1
+        if evidence == "history":
+            assert invoke(forge, capsys, *args)[0] == 1
+            forge.verification.receipt_path(planning, SECTION).rename(state_dir / "feature.saved")
+    else:
+        state = forge.state.load_implementation_state(planning)
+        field = "completed_sections" if evidence == "completed" else "pending_sections"
+        state[field] = {SECTION: {"compatibility": json.loads(original)}}
+        path = forge.state.implementation_state_path(planning)
+        path.write_text(json.dumps(state))
+        if evidence == "legacy":
+            path.rename(state_dir / "deep_implement_state.json")
+    source = target / "src/labels.py"
+    source.write_text("def normalize(value):\n    return value.strip()\n")
+    before = {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()}
+    status = forge.compatibility.status(planning, target, SECTION)
+    assert status["stage"] == "blocked"
+    code, payload = setup(forge, capsys, planning, target)
+    assert code == 1, payload
+    assert "origin" in payload["error"].lower() and "restore" in payload["error"].lower()
+    assert not pair.exists()
+    assert verify(forge, capsys, planning, target, "baseline")[0] == 1
+    assert {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()} == before
+    assert source.read_text() == "def normalize(value):\n    return value.strip()\n"
+    saved.rename(pair)
+    assert setup(forge, capsys, planning, target)[0] == 0
+    assert pair.read_bytes() == original
+    assert forge.compatibility.status(planning, target, SECTION)["stage"] == "candidate"
+    assert verify(forge, capsys, planning, target, "candidate")[0] == 0
+    if evidence == "progress":
+        assert invoke(forge, capsys, "implement-verify", "--planning-dir", str(planning),
+                      "--target-dir", str(target), "--section", SECTION, "--", sys.executable, "-c",
+                      "import sys; sys.path.insert(0, 'src'); from labels import normalize; "
+                      "assert normalize(' Ada  Lovelace ') == 'Ada  Lovelace'")[0] == 0
+        assert invoke(forge, capsys, "implement-record-section", "--sections-dir", str(planning / "sections"),
+                      "--target-dir", str(target), "--section", SECTION, "--review-status", "pass",
+                      "--verification-receipt", str(forge.verification.receipt_path(planning, SECTION)),
+                      "--file", "src/labels.py", "--flight", "off")[0] == 0
+        accepted = forge.state.load_implementation_state(planning)["completed_sections"][SECTION]["compatibility"]
+        assert accepted["origin"] == json.loads(original)["origin"]
+        assert accepted["baseline"]["protected_source"] != accepted["candidate"]["protected_source"]
+
+
+def test_other_section_evidence_and_empty_history_allow_first_origin(forge, tmp_path, capsys):
+    planning, target = workspace(tmp_path)
+    other = "section-02-unrelated"
+    state_dir = planning / "implementation"
+    history = state_dir / "verification/history"
+    (history / SECTION).mkdir(parents=True)
+    (history / other).mkdir()
+    (history / other / "old.json").write_text("retained unrelated result")
+    (state_dir / "verification" / f"{other}.json").write_text("unrelated result")
+    (state_dir / "verification/integration.json").write_text("integration result")
+    (state_dir / "zagrosi_implement_state.json").write_text(json.dumps({"pending_sections": {other: {}}}))
+    (state_dir / "forge-progress.json").write_text(json.dumps({"events": [{"section": other, "stage": "red"}]}))
+    forge.storage.write_json(state_dir / "zagrosi_implement_config.json", {
+        "sections_dir": str((planning / "sections").resolve()), "target_dir": str(target.resolve()),
+        "planning_dir": str(planning.resolve()), "test_command": "uv run pytest tests/test_labels.py",
+        "runtime": "python-uv", "profile": "solo", "depth_mode": "lean",
+    })
+    before = {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()}
+    assert forge.compatibility.status(planning, target, SECTION)["stage"] == "activate"
+    assert {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()} == before
+    assert setup(forge, capsys, planning, target)[0] == 0
+    assert forge.compatibility.receipt_path(planning, SECTION).is_file()
+    assert all(p.read_bytes() == content for p, content in before.items())
+
+
+@pytest.mark.parametrize("progress", ["not JSON", '{"events": {}}', '{"events": [null]}'])
+def test_missing_origin_does_not_hide_invalid_progress(forge, tmp_path, capsys, progress):
+    planning, target = workspace(tmp_path)
+    assert setup(forge, capsys, planning, target)[0] == 0
+    pair = forge.compatibility.receipt_path(planning, SECTION)
+    pair.rename(pair.with_suffix(".saved"))
+    path = planning / "implementation/forge-progress.json"
+    path.write_text(progress)
+    before = {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()}
+    assert forge.compatibility.status(planning, target, SECTION)["stage"] == "blocked"
+    assert setup(forge, capsys, planning, target)[0] == 1
+    assert not pair.exists()
+    assert {p: p.read_bytes() for p in planning.rglob("*") if p.is_file()} == before
+
+
+def test_completed_pair_survives_missing_live_receipt(forge, tmp_path, capsys):
+    planning, target = workspace(tmp_path)
+    assert setup(forge, capsys, planning, target)[0] == 0
+    write_checks(target)
+    assert verify(forge, capsys, planning, target, "baseline")[0] == 0
+    assert verify(forge, capsys, planning, target, "candidate")[0] == 0
+    assert record(forge, capsys, planning, target)[0] == 0
+    path = forge.compatibility.receipt_path(planning, SECTION)
+    path.rename(path.with_suffix(".saved"))
+    state = forge.state.implementation_state_path(planning).read_bytes()
+    code, payload = setup(forge, capsys, planning, target)
+    assert code == 0, payload
+    assert payload["completed_sections"] == [SECTION]
+    assert not path.exists()
+    assert forge.state.implementation_state_path(planning).read_bytes() == state
