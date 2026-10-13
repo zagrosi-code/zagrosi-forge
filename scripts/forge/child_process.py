@@ -97,21 +97,34 @@ def execute(argv: list[str], workspace: Path, *, prompt: str | None = None,
         stdin.seek(0)
         if cancel_event is not None and cancel_event.is_set():
             return _cancelled_result(start)
+        process = None
+        ready = threading.Event()
+        readers = []
+
+        def drain(name):
+            ready.wait()
+            if process is not None:
+                tails[name].drain(getattr(process, name))
+
         try:
-            process = subprocess.Popen(argv, cwd=workspace, stdin=stdin, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, env=env,
-                                       start_new_session=os.name == "posix")
-        except OSError as exc:
-            result = {"returncode": 127, "seconds": round(time.monotonic() - start, 3),
-                      "stdout": "", "stderr": str(exc), "timed_out": False}
-            if cancel_event is not None:
-                result["cancelled"] = False
-            return result
-        readers = [threading.Thread(target=tails[name].drain, args=(getattr(process, name),),
-                                    daemon=True) for name in tails]
-        for reader in readers:
-            reader.start()
-        try:
+            # Acquire both readers before a command can leave a pipe open.
+            for name in tails:
+                reader = threading.Thread(target=drain, args=(name,), daemon=True)
+                readers.append(reader)
+                reader.start()
+            if cancel_event is not None and cancel_event.is_set():
+                return _cancelled_result(start)
+            try:
+                process = subprocess.Popen(argv, cwd=workspace, stdin=stdin, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, env=env,
+                                           start_new_session=os.name == "posix")
+            except OSError as exc:
+                result = {"returncode": 127, "seconds": round(time.monotonic() - start, 3),
+                          "stdout": "", "stderr": str(exc), "timed_out": False}
+                if cancel_event is not None:
+                    result["cancelled"] = False
+                return result
+            ready.set()
             # Pipes inherited by descendants keep the deadline active after leader exit.
             while process.poll() is None or any(reader.is_alive() for reader in readers):
                 remaining = timeout - (time.monotonic() - start)
@@ -129,11 +142,15 @@ def execute(argv: list[str], workspace: Path, *, prompt: str | None = None,
                 # Close the owned group before returning, even when its leader passed.
                 termination_error = _terminate(process)
         except BaseException:
-            _terminate(process)
+            if process is not None:
+                _terminate(process)
             raise
         finally:
+            ready.set()
             for reader in readers:
-                reader.join(timeout=1)
+                if reader.ident is not None:
+                    # Without a process, released workers return without I/O.
+                    reader.join(timeout=1 if process is not None else None)
         if any(reader.is_alive() for reader in readers):
             termination_error = "Output pipes remain open; detached descendants may have escaped cleanup"
         returncode = 124 if timed_out else 130 if cancelled else process.returncode
