@@ -107,13 +107,14 @@ def execute(argv: list[str], workspace: Path, *, prompt: str | None = None,
             if cancel_event is not None:
                 result["cancelled"] = False
             return result
-        readers = [threading.Thread(target=tails[name].drain, args=(getattr(process, name),),
-                                    daemon=True) for name in tails]
-        for reader in readers:
-            reader.start()
+        readers = {}
         try:
+            for name, tail in tails.items():
+                reader = threading.Thread(target=tail.drain, args=(getattr(process, name),), daemon=True)
+                readers[name] = reader
+                reader.start()
             # Pipes inherited by descendants keep the deadline active after leader exit.
-            while process.poll() is None or any(reader.is_alive() for reader in readers):
+            while process.poll() is None or any(reader.is_alive() for reader in readers.values()):
                 remaining = timeout - (time.monotonic() - start)
                 if remaining <= 0:
                     timed_out = True
@@ -132,9 +133,13 @@ def execute(argv: list[str], workspace: Path, *, prompt: str | None = None,
             _terminate(process)
             raise
         finally:
-            for reader in readers:
-                reader.join(timeout=1)
-        if any(reader.is_alive() for reader in readers):
+            for name in tails:
+                reader = readers.get(name)
+                if reader is not None and reader.ident is not None:
+                    reader.join(timeout=1)
+                else:
+                    getattr(process, name).close()
+        if any(reader.is_alive() for reader in readers.values()):
             termination_error = "Output pipes remain open; detached descendants may have escaped cleanup"
         returncode = 124 if timed_out else 130 if cancelled else process.returncode
         if termination_error and returncode == 0:

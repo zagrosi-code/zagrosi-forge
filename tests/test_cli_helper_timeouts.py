@@ -73,3 +73,66 @@ def test_helper_timeout_stops_descendant_writes(tmp_path):
         assert heartbeat.read_bytes() == before
     finally:
         release.touch()
+
+
+@pytest.mark.parametrize("operation,reader_number", [
+    ("construct", 1), ("construct", 2), ("start", 1), ("start", 2), ("after_start", 2),
+])
+def test_reader_initialization_failure_reaps_child_and_preserves_exception(
+        tmp_path, monkeypatch, operation, reader_number):
+    executor = helpers.load_zagrosi_module().child_process
+    real_popen, real_thread = executor.subprocess.Popen, executor.threading.Thread
+    command = [sys.executable, "-B", "-c", "import time; time.sleep(10)"]
+    error_type = KeyboardInterrupt if operation == "after_start" else RuntimeError
+    failure = error_type(f"injected {operation} failure for reader {reader_number}")
+    children, readers = [], []
+    constructed = 0
+
+    def spawn(argv, *args, **kwargs):
+        child = real_popen(argv, *args, **kwargs)
+        if argv == command:  # Windows taskkill is a separate executor-owned helper.
+            children.append(child)
+        return child
+
+    def reader(*args, **kwargs):
+        nonlocal constructed
+        constructed += 1
+        number = constructed
+        if operation == "construct" and number == reader_number:
+            raise failure
+        thread = real_thread(*args, **kwargs)
+        readers.append(thread)
+        real_start = thread.start
+
+        def start():
+            if operation == "start" and number == reader_number:
+                raise failure
+            real_start()
+            if operation == "after_start" and number == reader_number:
+                raise failure
+
+        monkeypatch.setattr(thread, "start", start)
+        return thread
+
+    monkeypatch.setattr(executor.subprocess, "Popen", spawn)
+    monkeypatch.setattr(executor.threading, "Thread", reader)
+    try:
+        with pytest.raises(error_type) as caught:
+            executor.execute(command, tmp_path, timeout=1)
+        assert caught.value is failure
+        assert len(children) == 1 and children[0].returncode is not None
+        assert all(not thread.is_alive() for thread in readers)
+        assert all(stream.closed for stream in (children[0].stdout, children[0].stderr))
+    finally:
+        # RED must not leave the real fixture child or its pipe readers behind.
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+        for thread in readers:
+            if thread.ident is not None:
+                thread.join(timeout=5)
+        for child in children:
+            child.stdout.close()
+            child.stderr.close()
+        assert all(not thread.is_alive() for thread in readers)
