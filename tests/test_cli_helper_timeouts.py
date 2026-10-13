@@ -75,24 +75,76 @@ def test_helper_timeout_stops_descendant_writes(tmp_path):
         release.touch()
 
 
+@pytest.fixture
+def reader_setup_resources(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    executor = helpers.load_zagrosi_module().child_process
+    real_popen, real_threading = executor.subprocess.Popen, executor.threading
+    resources = SimpleNamespace(
+        executor=executor,
+        command=[sys.executable, "-B", "-c", "import time; time.sleep(10)"],
+        children=[], readers=[], launches=[], gates=[], real_event=real_threading.Event,
+    )
+
+    class ReaderThreads:
+        def __getattr__(self, name):
+            return getattr(real_threading, name)
+
+        def Event(self, *args, **kwargs):
+            gate = real_threading.Event(*args, **kwargs)
+            resources.gates.append(gate)
+            return gate
+
+        def Thread(self, *args, **kwargs):
+            thread = real_threading.Thread(*args, **kwargs)
+            resources.readers.append(thread)
+            return thread
+
+    def spawn(argv, *args, **kwargs):
+        owned = argv == resources.command
+        if owned:
+            resources.launches.append(argv)
+        child = real_popen(argv, *args, **kwargs)
+        if owned:  # Windows taskkill is a separate executor-owned helper.
+            resources.children.append(child)
+        return child
+
+    # Keep real Thread internals on their original threading module. Only Events
+    # allocated directly by this executor are available for fixture cleanup.
+    monkeypatch.setattr(executor, "threading", ReaderThreads())
+    monkeypatch.setattr(executor.subprocess, "Popen", spawn)
+    try:
+        yield resources
+    finally:
+        # Release only fixture-owned gates after the lifecycle assertions. This
+        # cannot make a leaked reader pass its pre-cleanup stopped-thread check.
+        for gate in resources.gates:
+            gate.set()
+        for child in resources.children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+        for thread in resources.readers:
+            if thread.ident is not None:
+                thread.join(timeout=5)
+        for child in resources.children:
+            child.stdout.close()
+            child.stderr.close()
+        assert all(not thread.is_alive() for thread in resources.readers)
+
+
 @pytest.mark.parametrize("operation,reader_number", [
     ("construct", 1), ("construct", 2), ("start", 1), ("start", 2), ("after_start", 2),
 ])
 def test_reader_initialization_failure_reaps_child_and_preserves_exception(
-        tmp_path, monkeypatch, operation, reader_number):
-    executor = helpers.load_zagrosi_module().child_process
-    real_popen, real_thread = executor.subprocess.Popen, executor.threading.Thread
-    command = [sys.executable, "-B", "-c", "import time; time.sleep(10)"]
+        tmp_path, monkeypatch, operation, reader_number, reader_setup_resources):
+    resources = reader_setup_resources
+    executor = resources.executor
+    real_thread = executor.threading.Thread
     error_type = KeyboardInterrupt if operation == "after_start" else RuntimeError
     failure = error_type(f"injected {operation} failure for reader {reader_number}")
-    children, readers = [], []
     constructed = 0
-
-    def spawn(argv, *args, **kwargs):
-        child = real_popen(argv, *args, **kwargs)
-        if argv == command:  # Windows taskkill is a separate executor-owned helper.
-            children.append(child)
-        return child
 
     def reader(*args, **kwargs):
         nonlocal constructed
@@ -101,7 +153,6 @@ def test_reader_initialization_failure_reaps_child_and_preserves_exception(
         if operation == "construct" and number == reader_number:
             raise failure
         thread = real_thread(*args, **kwargs)
-        readers.append(thread)
         real_start = thread.start
 
         def start():
@@ -114,25 +165,54 @@ def test_reader_initialization_failure_reaps_child_and_preserves_exception(
         monkeypatch.setattr(thread, "start", start)
         return thread
 
-    monkeypatch.setattr(executor.subprocess, "Popen", spawn)
     monkeypatch.setattr(executor.threading, "Thread", reader)
-    try:
-        with pytest.raises(error_type) as caught:
-            executor.execute(command, tmp_path, timeout=1)
-        assert caught.value is failure
-        assert len(children) == 1 and children[0].returncode is not None
-        assert all(not thread.is_alive() for thread in readers)
-        assert all(stream.closed for stream in (children[0].stdout, children[0].stderr))
-    finally:
-        # RED must not leave the real fixture child or its pipe readers behind.
-        for child in children:
-            if child.poll() is None:
-                child.kill()
-            child.wait(timeout=5)
-        for thread in readers:
-            if thread.ident is not None:
-                thread.join(timeout=5)
-        for child in children:
-            child.stdout.close()
-            child.stderr.close()
-        assert all(not thread.is_alive() for thread in readers)
+    with pytest.raises(error_type) as caught:
+        executor.execute(resources.command, tmp_path, timeout=1)
+    assert caught.value is failure
+    assert resources.launches == [] and resources.children == []
+    assert all(not thread.is_alive() for thread in resources.readers)
+
+
+def test_missing_executable_stops_created_readers(tmp_path, reader_setup_resources):
+    resources = reader_setup_resources
+    resources.command = [str(tmp_path / "missing-executable")]
+    result = resources.executor.execute(resources.command, tmp_path, timeout=1)
+    assert result["returncode"] == 127 and result["timed_out"] is False
+    assert result["stdout"] == "" and result["stderr"]
+    assert result["seconds"] >= 0
+    assert set(result) == {"returncode", "seconds", "stdout", "stderr", "timed_out"}
+    assert resources.children == []
+    assert all(not thread.is_alive() for thread in resources.readers)
+
+
+def test_cancellation_during_reader_setup_prevents_launch(
+        tmp_path, monkeypatch, reader_setup_resources):
+    resources = reader_setup_resources
+    executor = resources.executor
+    real_thread = executor.threading.Thread
+    event = resources.real_event()
+
+    def reader(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        number = len(resources.readers)
+        real_start = thread.start
+
+        def start():
+            real_start()
+            if number == 2:
+                event.set()
+
+        monkeypatch.setattr(thread, "start", start)
+        return thread
+
+    monkeypatch.setattr(executor.threading, "Thread", reader)
+    result = executor.execute(resources.command, tmp_path, timeout=1, cancel_event=event)
+    assert event.is_set()
+    assert result["returncode"] == 130 and result["cancelled"] is True
+    assert result["timed_out"] is False and result["seconds"] >= 0
+    for name in ("stdout", "stderr"):
+        assert result[name] == "" and result[name + "_bytes"] == 0
+        assert result[name + "_truncated"] is False
+    assert "termination_error" not in result
+    assert resources.launches == [] and resources.children == []
+    assert all(not thread.is_alive() for thread in resources.readers)
