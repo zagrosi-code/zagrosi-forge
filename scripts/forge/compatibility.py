@@ -121,6 +121,30 @@ def _validate_pair(pair, identity: dict) -> None:
             raise ValueError(f"Compatibility {stage} is malformed.")
 
 
+def _require_first_activation(planning: Path, section: str) -> None:
+    """Missing evidence cannot make previously started work a fresh section."""
+    from . import state
+
+    saved = state.load_implementation_state(planning)
+    progress_path = planning / "implementation/forge-progress.json"
+    events = []
+    if progress_path.exists():
+        progress = state.validate_implementation_progress(storage.load_json(progress_path), progress_path)
+        events = progress.get("events", [])
+        if any(not isinstance(event, dict) or not isinstance(event.get("section"), str)
+               or not event["section"].strip() for event in events):
+            raise ValueError(f"Saved progress events need section names: {progress_path}")
+    verification = planning / "implementation/verification"
+    history = verification / "history" / section
+    if (any(section in saved.get(field, {}) for field in ("pending_sections", "completed_sections"))
+            or any(event["section"] == section for event in events)
+            or (verification / f"{section}.json").exists()
+            or (planning / "implementation/code_review" / f"{section}-review.md").exists()
+            or (history.exists() and any(history.iterdir()))):
+        raise ValueError(f"Compatibility origin is missing for {section}; restore the original receipt at "
+                         f"{receipt_path(planning, section)} before resuming. Retained work cannot establish a new origin.")
+
+
 def activate(planning: Path, target: Path, section: str) -> dict | None:
     """Anchor the selected section once. The setup caller holds the mutable lock."""
     mutable_inputs.prepared_contract(planning, target)
@@ -133,6 +157,7 @@ def activate(planning: Path, target: Path, section: str) -> dict | None:
         pair = json.loads(storage.read_text(path), object_pairs_hook=_json_object)
         _validate_pair(pair, identity)
         return pair
+    _require_first_activation(planning, section)
     source, _ = _observations(target, declared, allow_missing_checks=True)
     pair = {**identity, "origin": {"source": source, "captured_at": storage.now_iso()}, "prior_attempts": []}
     mutable_inputs.prepared_contract(planning, target)
@@ -282,6 +307,7 @@ def status(planning: Path, target: Path, section: str) -> dict:
         if not declared or declared["mode"] == "not_required":
             return {"mode": declared["mode"] if declared else "legacy", "stage": None, "error": None}
         if not receipt_path(planning, section).exists():
+            _require_first_activation(planning, section)
             _observations(target, declared, allow_missing_checks=True)
             return {"mode": "required", "stage": "activate", "error": None}
         pair = _load_pair(planning, target, section)
