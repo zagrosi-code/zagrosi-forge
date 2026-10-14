@@ -562,7 +562,7 @@ def test_push_settings_discard_truncated_batch_and_publish_with_old_caps(reposit
     ({"returncode": 0, "stdout": "remote.origin.url\nunterminated"}, "team-remote"),
     ({"returncode": 0, "stdout": "remote.other.url\nwrong\0"}, "team-remote"),
     ({"returncode": 1, "stdout": ""}, "team-destination-changed"),
-    ({"returncode": 0, "stdout": "remote.origin.vcs\0"}, "team-destination-changed"),
+    ({"returncode": 0, "stdout": "remote.origin.url\n../wrong-team-target.git\0remote.origin.proxy\0"}, "team-destination-changed"),
 ])
 def test_push_settings_batch_failure_and_absence_do_not_publish(repositories, monkeypatch, response, expected_code):
     remote, (alice, _) = repositories
@@ -588,12 +588,13 @@ def test_push_settings_batch_failure_and_absence_do_not_publish(repositories, mo
     later = calls[batch_positions[0] + 1:]
     assert not any("push" in argv or "--get-all" in argv for argv in later)
     if expected_code == "team-destination-changed":
-        # Absence proceeds to the unchanged pin and alias destination checks.
+        # Absent or mismatched settings still reach the pin and alias destination checks.
         assert later[0] == ["git", "remote", "get-url", "--all", "origin"]
         assert later[1] == ["git", "remote", "get-url", "--push", "--all", "origin"]
         assert later[2][-3:-1] == ["ls-remote", "--get-url"]
         if response["stdout"]:
-            assert f"remote.{later[2][-1]}.vcs=" in later[2]
+            assert f"remote.{later[2][-1]}.url=../wrong-team-target.git" in later[2]
+            assert f"remote.{later[2][-1]}.proxy=" in later[2]
     else:
         assert not later
     assert len(attempts) == 1
