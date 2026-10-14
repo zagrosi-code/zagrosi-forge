@@ -163,6 +163,7 @@ TEST_MANIFEST = {
     "test_verification_contracts.py": "76bb8151b2e64010f25b1d7cc60a96f4b4acba65cb7da1c257140546e5977314",
     "test_verification_diagnostics.py": "4be1f230788e533995d86604ebe310be66bb6ab1fd4d99d22086e9fa7f8d6eed",
     "test_verification_history.py": "5af53d25c85d716044bae364f15593c334d66e93b8c12fb6b2b56dacc3c8282f",
+    "test_verification_preparation.py": "9eab45ea6a4ecf91bb4fbcd63e8a986f83b5cb5a487ad6ab3db4b44be6d75241",
     "test_verification_receipts.py": "3e215bc3a73326c3db49a3d58f926548d2a98a0da15769e9b4a21ddd5e9448ed",
     "test_verification_repositories.py": "f3b16d6c3a8a41eb4876dafe542e8d6a0e56c8e8cf33f6b93929765bfd3cd603",
     "test_verification_symlinks.py": "c722812b7b97b365765a0e33789d3c0c767ae6d2faf9785741fce66dbbb0a3a2",

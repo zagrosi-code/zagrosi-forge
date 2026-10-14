@@ -165,7 +165,7 @@ RUNTIME_MANIFEST = {
     "forge/cli.py": "4cc212b5a57919b76cd0438de8db8d2110a98c713612cd7f0220271807982d7f",
     "forge/codex_config.py": "e8aa857d1243b9e494eee02bb09240b8623d43cd34007e84220e905f77156f5c",
     "forge/command_args.py": "46ec41dc6480f0a0ba5220cc4d73044c5f6ddd70d80b5b7af1c0016c9c7fa8d7",
-    "forge/compatibility.py": "c90473748dec324cee3f20b988e28cfa6c988432f8b0c136d5d9ce6fa21b73f0",
+    "forge/compatibility.py": "c7699d0801900cadf27dc5dea0536e09e86daf2b72fa4e6a1889b03c072fd8cc",
     "forge/context.py": "048706f79fad77eeaf800da31eabb8e70b4d72f049d327351a05115f1b0ca596",
     "forge/context_links.py": "f5cb5ba95ccf44d853ec54134f45be6a44803b65089c54850d68d14949806b13",
     "forge/detached_authority.py": "059cbcc328d299aed829d1e0e8c04685250bd0d213455cf3b265980e7971d0c8",
@@ -211,7 +211,7 @@ RUNTIME_MANIFEST = {
     "forge/sections.py": "f3875f1d448afc383bae5077b010d4914534238e2d354c5ff013ab083d07f32d",
     "forge/secure_io.py": "2c529854508436ff083d3a01c1ad97de4b5e5a532c1365b28a173c0cd0401108",
     "forge/session.py": "87d35fb6a68e016f6480d7fa083842022f535e4c5385529202498f71b4bbbc02",
-    "forge/sources.py": "49f3a989efa776a2d65c98cc1e45c317665921cb5281cbd363f9f184138b1b92",
+    "forge/sources.py": "ac9beab8d7dca2a830140c283a091489deab2dce7685950f34564ce9f08c8670",
     "forge/state.py": "7114e8bb671c3adbf8de5fa6d247455ce53a3f23c75eb35612898ed443289f50",
     "forge/status.py": "da739435e3d930bdd14cd31ad42da36e500a12a772bd39505169efcca77a601c",
     "forge/storage.py": "fc7100b6437c556a324793079a4cee264d2b92344b2226d222cfa4a3fc4d8c4c",
@@ -228,8 +228,8 @@ RUNTIME_MANIFEST = {
     "forge/transaction_state.py": "1ee1194d0816d63b3c4afae1ffd21408ed6251a013a50eea934f894a87fc3c8b",
     "forge/unit12_adapter.py": "6319a6178572e603a7ec4767a9650e045af1b9afc3051c697dfb2b0317df553d",
     "forge/validation.py": "af2205b0318250700e159987b8be4c20eb50054650d126b7798c5cdeb6c5065a",
-    "forge/verification.py": "32e81ea8e288ce5d66b434fdead74c80ed3933e89e2b0218f6f7b64d2cb4f45a",
-    "forge/verification_allowance.py": "d033ea714ca5c173e8c2f2d8ae4756bebf93e9e24e6c79a40f374dc349294c31",
+    "forge/verification.py": "ccd2237e5b02ba2d6ef0459d269e4e570747bd59a70e065f291d4184c970d977",
+    "forge/verification_allowance.py": "a380e9271095e919b98ecd24d77e68e01e252897e613190810db6e09ef050c28",
     "forge/workflows.py": "08a3732d3b7482c01bf049cd0eb5185438b0c3cda3794dcbc006fd5d8204671c"
 }
 # END RUNTIME MANIFEST

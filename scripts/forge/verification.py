@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import re
 import stat
@@ -198,12 +198,14 @@ def implement_verify(args) -> int:
                 receipts[receipt_path(planning)] = {**before, "section": None}
             allowance = verification_allowance.Allowance(planning, target, total) if command else None
             timeout = allowance.reserve(args.timeout) if allowance else args.timeout
-            _archive_receipts(planning, receipts)
-            for destination, snapshot in receipts.items():
-                storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
-                                                 "outcome": "pending", "snapshot": snapshot})
+            with allowance.preparation() if allowance else nullcontext():
+                _archive_receipts(planning, receipts)
+                for destination, snapshot in receipts.items():
+                    storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
+                                                     "outcome": "pending", "snapshot": snapshot})
+                if command:
+                    mutable_inputs.prepared_contract(planning, target)
             if command:
-                mutable_inputs.prepared_contract(planning, target)
                 result = _capture(command, target, timeout)
                 try:
                     allowance.settle(result)
