@@ -1,6 +1,8 @@
 """Prospective accounting for helper-owned checks, under the mutable workflow lock."""
 
+from contextlib import contextmanager
 from pathlib import Path
+import subprocess
 import sys
 
 from . import storage
@@ -77,6 +79,19 @@ class Allowance:
         self.timeout = float(min(timeout, remaining))
         self._save({**state, "pending_seconds": self.timeout})
         return self.timeout
+
+    @contextmanager
+    def preparation(self):
+        """After reservation, release on preparation failure. Never wrap execution."""
+        try:
+            yield
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            if self.state is not None:
+                try:
+                    self._save({**self.state, "pending_seconds": 0})
+                except (OSError, ValueError) as cleanup:
+                    raise ValueError(f"{exc}; unused verification allocation could not be released: {cleanup}") from cleanup
+            raise
 
     def settle(self, result):
         if self.state is None:

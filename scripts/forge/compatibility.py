@@ -237,20 +237,22 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
         snapshot = mutable_inputs.verification_snapshot(planning, target, section)
         allowance = Allowance(planning, target, allowance_seconds)
         timeout = allowance.reserve(timeout)
-        pending = {"version": 1, "source": "captured", "outcome": "pending", "command": command,
-                   "snapshot": snapshot, "protected_source": source, "checks": checks,
-                   "origin_digest": _origin_digest(pair)}
-        if stage == "candidate":
-            pending["baseline_digest"] = mutable_inputs.digest(pair["baseline"])
-        for replaced in (("baseline", "candidate") if stage == "baseline" else ("candidate",)):
-            if replaced in pair:
-                pair["prior_attempts"].append({"stage": replaced, "result": pair.pop(replaced)})
-        pair[stage] = pending
-        path = receipt_path(planning, section)
-        storage.write_json(path, pair)
+        with allowance.preparation():
+            pending = {"version": 1, "source": "captured", "outcome": "pending", "command": command,
+                       "snapshot": snapshot, "protected_source": source, "checks": checks,
+                       "origin_digest": _origin_digest(pair)}
+            if stage == "candidate":
+                pending["baseline_digest"] = mutable_inputs.digest(pair["baseline"])
+            for replaced in (("baseline", "candidate") if stage == "baseline" else ("candidate",)):
+                if replaced in pair:
+                    pair["prior_attempts"].append({"stage": replaced, "result": pair.pop(replaced)})
+            pair[stage] = pending
+            path = receipt_path(planning, section)
+            storage.write_json(path, pair)
         result = pending
         try:
-            mutable_inputs.prepared_contract(planning, target)
+            with allowance.preparation():
+                mutable_inputs.prepared_contract(planning, target)
             result = {**pending, **_capture(command, target, timeout), "completed_at": storage.now_iso()}
             allowance.settle(result)
             error = result_error(result)
