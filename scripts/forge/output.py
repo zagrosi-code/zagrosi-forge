@@ -491,6 +491,10 @@ def format_pretty(payload: dict[str, Any]) -> str:
         lines.append(f"Context words: {payload['required_words']} required; {payload['max_words']} budget")
     diagnostics = _format_diagnostics(payload, diagnostic_label, actions_shown=True)
     lines.extend(diagnostics or (["Findings: none"] if diagnostic_label == "Findings" else []))
+    if gaps := payload.get("coverage_gaps"):
+        lines.append("Missing requirement coverage:")
+        lines.extend(f"  - {requirement}: {', '.join(missing)}"
+                     for requirement, missing in gaps.items())
     if isinstance(payload.get("content"), str) and payload["content"]:
         lines.extend(["", payload["content"].rstrip()])
     if payload.get("full_report"):

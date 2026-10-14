@@ -76,6 +76,7 @@ TEST_MANIFEST = {
     "test_native_process.py": "5757b225cc4aac67c81fc61b0e5f498d3ab2364c9ef0c76d7a0760bbfc84c07f",
     "test_native_workflow_trials.py": "b3e45332b47ff0bf244945e1e7fe0b0b135105d8cc7caf901de7420b9e426a48",
     "test_owned_verification.py": "c23850c286dfb8cda322fe445e51b1935836af7bf8bed1ff842cc497c63dbb4b",
+    "test_packet_coverage_output.py": "cfa377f0148f1794a2afef2b5cf8176c63ba77c55640f791952cba5cf2b864d5",
     "test_parallel_ownership.py": "e0265620b989847bb0dc8cf60d8d5d12f62941a357c145d8da7e21cb0b2a1224",
     "test_parsed_plan_reuse.py": "eb023236aa41d1d6d2308ad0c1d371701b574ad7e0f8470558fd1407c73117b6",
     "test_patch_scope.py": "82bd87e4c55bc14b72966437b3b1c223c976157b9048262f01663b6a8d0161f6",
