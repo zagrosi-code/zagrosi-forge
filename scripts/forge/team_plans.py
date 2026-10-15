@@ -309,7 +309,7 @@ def _validate(planning, target, *, recover_legacy=False):
             return None
         administrative = planning.parent.parent
         detected = team_git._run(administrative, 'rev-parse', '--absolute-git-dir', check=False)
-        if detected['returncode'] or Path(detected['stdout'].strip()).resolve() != administrative.resolve():
+        if detected['returncode'] or Path(detected['stdout'].removesuffix('\n')).resolve() != administrative.resolve():
             return None
         _fail('The prepared plan marker is missing; preserve the workspace before recovery.')
     value = team_git.decode_json(_read(marker, BUNDLE_LIMIT))
