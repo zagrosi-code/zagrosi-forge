@@ -95,6 +95,7 @@ TEST_MANIFEST = {
     "test_quality_gates.py": "4b6bdb5dc9b982bc30a73c6e3354ae62b5e623bb196e4eff7b7513b97510a147",
     "test_release.py": "d16f0ad9b4997bf97bf5b7115fce6c69fc1e81644a5e3f99807fee4cec740d55",
     "test_release_identity.py": "2a2bbbd03bc07e7ece8b6c5f1f4c6ae7d271b7bfa41a0f8fe218da14c2e232db",
+    "test_repository_paths.py": "3d8e63aa6ab85c4a5b7db1c0de6c3409a81f3f5ab831122333ebceeb2deece68",
     "test_resume_context.py": "5aa47690740f0d1db589d1ea526f99c54de7541ae038641967aae610cc2df9b7",
     "test_resume_guidance.py": "40a776c2b9369e0b2fc0902ff4b287b7211639b5007f1f2d9d7ce66cb9f91bba",
     "test_retry_trial.py": "7dc38231f6157837bf5c4f6c428bb974c84971415cd55d2de751077559194a74",

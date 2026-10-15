@@ -36,6 +36,11 @@ def _output(root, *args, **kwargs):
     return _run(root, *args, **kwargs)["stdout"].strip()
 
 
+def _path_output(root, *args):
+    # Git adds one LF; trailing whitespace before it belongs to the path.
+    return _run(root, *args)["stdout"].removesuffix("\n")
+
+
 def _oid(value):
     if not isinstance(value, str) or not _OID.fullmatch(value):
         raise TeamError("team-invalid-revision", "Team revision must be a complete Git object ID.")
@@ -73,9 +78,9 @@ class Repository:
     def discover(cls, target):
         target = Path(target).resolve()
         try:
-            root = Path(_output(target, "rev-parse", "--show-toplevel")).resolve()
-            git_dir = Path(_output(root, "rev-parse", "--absolute-git-dir")).resolve()
-            common_dir = Path(_output(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+            root = Path(_path_output(target, "rev-parse", "--show-toplevel")).resolve()
+            git_dir = Path(_path_output(root, "rev-parse", "--absolute-git-dir")).resolve()
+            common_dir = Path(_path_output(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
             head = _oid(_output(root, "rev-parse", "--verify", "HEAD"))
             branch_result = _run(root, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
             if branch_result["returncode"] not in (0, 1):
