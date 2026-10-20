@@ -118,7 +118,10 @@ def test_claude_config_paths_default_to_home(hosts, tmp_path, monkeypatch):
     "{", "[]", {"version": 2, "plugins": []}, {"version": 2, "plugins": {"zagrosi-forge@zagrosi": {}}},
     {"version": 2, "plugins": {"zagrosi-forge@zagrosi": ["0.4.0"]}},
     {"version": 2, "plugins": {"zagrosi-forge@zagrosi": [{"scope": "user", "installPath": "/cache"}]}},
-], ids=["invalid-json", "list", "plugins-list", "rows-object", "row-string", "row-without-version"])
+    {"version": 2, "plugins": {"zagrosi-forge@zagrosi": [install("0.4.0", "local", projectPath="bad\0path")]}},
+    {"version": 2, "plugins": {"zagrosi-forge@zagrosi": [install("0.4.0", "local", projectPath=["/work"])]}},
+], ids=["invalid-json", "list", "plugins-list", "rows-object", "row-string", "row-without-version",
+        "project-path-nul", "project-path-list"])
 def test_unrecognized_claude_registry_reports_error(hosts, tmp_path, monkeypatch, registry):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     write_registry(tmp_path, registry)

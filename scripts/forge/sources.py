@@ -66,7 +66,7 @@ TEST_MANIFEST = {
     "test_heldout_contracts.py": "fcca3c9af0a5cb85ce741015477c8d9a6555b47de45a2f061819a12002a850ab",
     "test_helper_termination.py": "7cf8d3a668242d6c896c1e4b607407add0920fa853b58878b30ea36abe3cb55d",
     "test_host_aware_commands.py": "30bdeb69c05424197c81f6177a74d9f7cb0206542ec28d8df82022db61904926",
-    "test_host_detection.py": "6aa0f221f32c84a9f975e5fa431a665625f007de7000968a2976849f24d345d1",
+    "test_host_detection.py": "dd1769d4158960ca795f6507df0b149afd386475f11691062a33125b7653687a",
     "test_implementation_drift.py": "12f4cb0977c8557718015851ff1ae1a8bd7d305957d8b8e205942e453ba1fe7a",
     "test_implementation_phase_reuse.py": "f79a211e105becb4c23da1ea06a842d2fe1617bbb99fc1644195b7a6d13167db",
     "test_install_config_safety.py": "7214d15f4410b4b5d49bf1be558c83c2e713d2c2d7bb2c90f776814b53d247ba",

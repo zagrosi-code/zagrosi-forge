@@ -44,10 +44,16 @@ def _applies_here(project: Any) -> bool:
     if not project:
         return True
     try:
-        here, root = Path.cwd().resolve(), Path(str(project)).resolve()
-    except (OSError, RuntimeError):
+        here, root = Path.cwd().resolve(), Path(project).resolve()
+    except (OSError, RuntimeError, ValueError):
         return False
     return here == root or here.is_relative_to(root)
+
+
+def _known_row(row: Any) -> bool:
+    project = row.get("projectPath") if isinstance(row, dict) else None
+    return (isinstance(row, dict) and isinstance(row.get("version"), str)
+            and (project is None or isinstance(project, str) and "\0" not in project))
 
 
 def claude_plugin_status(source_version: str) -> dict[str, Any]:
@@ -64,8 +70,7 @@ def claude_plugin_status(source_version: str) -> dict[str, Any]:
         return {**unknown, "registry_error": f"Could not read the Claude Code plugin registry: {exc}"}
     plugins = data.get("plugins") if isinstance(data, dict) else None
     rows = plugins.get(PLUGIN_ID, []) if isinstance(plugins, dict) else None
-    if not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get("version"), str)
-                                         for row in rows):
+    if not isinstance(rows, list) or not all(map(_known_row, rows)):
         return {**unknown, "registry_error": "The Claude Code plugin registry has an unrecognized format."}
     installs: dict[bool, list[dict[str, Any]]] = {True: [], False: []}
     for row in rows:
