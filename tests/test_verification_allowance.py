@@ -47,7 +47,7 @@ def test_unconfigured_calls_stay_unlimited_and_opt_in_is_prospective(workspace, 
     code, result = verify(workspace, capsys, "--allowance-seconds", "10")
     assert code == 0 and isinstance(result["allowance"], dict)
     assert_account(workspace, 10, measured=3)
-    assert [call[2]["timeout"] for call in calls] == [600, 600, 10]
+    assert [call[2]["timeout"] for call in calls] == [540, 540, 10]
 
 
 def test_failures_timeouts_and_extension_preserve_cumulative_spend(workspace, capsys, monkeypatch):

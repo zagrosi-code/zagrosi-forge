@@ -5,16 +5,19 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import tempfile
 
 from .child_process import execute
 from .output import print_json
 from .provider_preflight import check_cli
-from .provider_output import review_output
+from .provider_output import provider_error, review_output
 from .storage import write_json
 
 PROVIDERS = {"codex": ["codex", "login"], "claude": ["claude", "auth", "login"], "gemini": ["gemini"]}
+AUTHENTICATION = re.compile(r"authenticat|not logged in|\blog ?in\b|oauth|api key|credential|unauthori[sz]ed",
+                            re.IGNORECASE)
 PACKET_LIMIT = 256 * 1024
 OUTPUT_LIMIT = 1024 * 1024
 REVIEW_INSTRUCTION = (
@@ -145,6 +148,14 @@ def provider_review(args: argparse.Namespace) -> int:
             raise ValueError(f"Provider review exceeded its {args.timeout:g}-second timeout (exit {result['returncode']}); no retry was attempted.")
         if result["returncode"]:
             failure_kind, recovery = "request_failed", "Inspect the native CLI's request settings, service status and model access before retrying."
+            reported = None if result.get("stdout_truncated") else provider_error(args.provider, result["stdout"])
+            if reported:
+                report["provider_error"] = reported
+                if AUTHENTICATION.search(reported):
+                    failure_kind = "authentication"
+                    recovery = "Sign in through the provider's native CLI, then retry; Forge never handles credentials."
+                    if args.provider in PROVIDERS:
+                        report["login_argv"] = PROVIDERS[args.provider]
             raise ValueError(f"Provider request failed (exit {result['returncode']}); no fallback was attempted.")
         if result.get("stdout_truncated") or result.get("stderr_truncated"):
             failure_kind, recovery = "output_limit", "Split the packet by responsibility to request shorter complete reviews."
