@@ -29,11 +29,12 @@ def read(path: Path) -> dict:
         return {}
 
 
-def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool, *, previous: bool = True) -> list[dict]:
+def schedule(cases: list[str], depths: list[str], repeats: int, comparison: bool, *, previous: bool = True,
+             arms: list[str] | None = None) -> list[dict]:
+    """Rotate arm order across case/depth/repetition blocks; `arms` overrides the Forge/plain comparison arms."""
     items = []
-    arms = ["current"]
-    if comparison:
-        arms = (["previous"] if previous else []) + ["current", "plain"]
+    if arms is None:
+        arms = ((["previous"] if previous else []) + ["current", "plain"]) if comparison else ["current"]
     for repeat in range(1, repeats + 1):
         for depth in depths:
             for case in cases:
