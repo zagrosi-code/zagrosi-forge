@@ -273,6 +273,7 @@
   "tests/test_directory_observations.py",
   "tests/test_evaluations.py",
   "tests/test_evidence_discovery.py",
+  "tests/test_gate_diagnostics.py",
   "tests/test_gate_reports.py",
   "tests/test_handoff_authority.py",
   "tests/test_handoff_failures.py",

@@ -190,9 +190,22 @@ def add_budget_finding(
                 code,
                 f"{artifact_label} has {actual_words} words; budget is {budget_words}.",
                 path,
-                "Delete repetition; keep only decisions, evidence, contracts, tests, risks, and acceptance criteria.",
+                "Delete repetition; keep only decisions, evidence, contracts, tests, risks, and acceptance criteria. "
+                "Forge counts each run of letters, digits or underscores as a word, so paths and IDs count several times.",
             )
         )
+
+
+# Facts a multi-section compact plan states once in its shared plan and index.
+SHARED_TERMS = {"goal", "dependencies", "risks", "rollback", "acceptance"}
+
+
+def shared_term_texts(groups: dict[str, list[str]], text: str, shared: str) -> list[tuple[str, dict[str, list[str]]]]:
+    """Pair term groups with the text that may satisfy them; only shared facts count from the shared plan."""
+    if not shared:
+        return [(text, groups)]
+    return [(f"{text}\n{shared}", {key: value for key, value in groups.items() if key in SHARED_TERMS}),
+            (text, {key: value for key, value in groups.items() if key not in SHARED_TERMS})]
 
 
 def require_terms(

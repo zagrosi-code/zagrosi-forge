@@ -112,7 +112,8 @@ def plan_analysis(planning_dir: Path, depth: str | None = None) -> tuple[list[_m
         tdd_words = _markdown.word_count(tdd_text)
         _quality.add_budget_finding(findings, tdd_words, budgets["tdd"], "TDD plan", "tdd-plan-too-large", tdd_path)
         if not _markdown.has_verification(tdd_text):
-            findings.append(_quality.finding("medium", "thin-tdd-plan", "TDD plan needs a regression case and command, or justified inspection with an expected result.", tdd_path))
+            findings.append(_quality.finding("medium", "thin-tdd-plan", "TDD plan needs a regression case and command, or justified inspection with an expected result.", tdd_path,
+                                             _markdown.verification_hint(tdd_text)))
         tdd_ids = set(_markdown.requirement_ids(_markdown.visible_markdown(tdd_text)))
         missing_in_tdd = [req_id for req_id in spec_ids if req_id not in tdd_ids]
         if missing_in_tdd:
@@ -180,6 +181,7 @@ def section_analysis(planning_dir: Path, depth: str | None = None, *, allow_comp
     findings = _artifacts.compact_plan_findings(planning_dir, depth=depth)
     canonical = _artifacts.compact_plan_descriptor(planning_dir)
     canonical_path = canonical["path"] if canonical and not canonical["errors"] else None
+    shared = _artifacts.shared_contract_text(planning_dir)
     progress = _sections.check_section_progress(planning_dir)
     if progress["state"] == "invalid_index":
         for error in progress.get("errors", []):
@@ -303,9 +305,12 @@ def section_analysis(planning_dir: Path, depth: str | None = None, *, allow_comp
                     section_path,
                 )
             )
-        mapped = section_path == canonical_path and canonical["headings"].get("contract")
+        # A verified contract supplies tests, implementation and acceptance, as in the canonical section.
+        mapped = (section_path == canonical_path and canonical["headings"].get("contract")
+                  or bool(shared) and _markdown.has_verification(text))
         terms = {key: value for key, value in _policy.LEAN_SECTION_TERMS.items() if not mapped or key == "risks"}
-        _quality.require_terms(findings, text, terms, section_path, "medium")
+        for term_text, groups in _quality.shared_term_texts(terms, text, shared):
+            _quality.require_terms(findings, term_text, groups, section_path, "medium")
         if not _policy.FILE_PATH_RE.search(text):
             findings.append(_quality.finding("medium", "section-no-file-paths", f"{section} does not name concrete files.", section_path))
         allowed_owners = predecessor_closure[section] | {section}
