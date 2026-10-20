@@ -128,7 +128,11 @@ def format_state_first(payload: dict[str, Any]) -> list[str]:
              f"Planning dir: {payload.get('planning_dir')}"]
     if payload.get("goal"):
         lines.append(f"Goal: {payload['goal']}")
-    lines.extend(f"  - {error}" for error in payload.get("errors") or [])
+    if problems := [*(payload.get("errors") or payload.get("plan_errors") or []),
+                    *(f"{name} has no status" for name in payload.get("unsynced_sections") or []),
+                    *(f"{name} is no longer in plan.md" for name in payload.get("orphaned_sections") or [])]:
+        lines.append("Plan: needs repair")
+        lines.extend(f"  - {problem}" for problem in problems)
     for item in payload.get("sections") or []:
         risk = f" (standard evidence: {'; '.join(item['risk'])})" if item.get("risk") else ""
         lines.append(f"  {item['section']}: {item.get('state') or 'no status'}{risk}")

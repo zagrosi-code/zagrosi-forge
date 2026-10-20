@@ -303,3 +303,23 @@ def test_damaged_snapshot_only_loses_change_listing(run, workspace):
 def test_programmatic_progress_callers_need_no_state_first_options(forge):
     args = argparse.Namespace(planning_dir="plan", section="section-01-a", stage="red", command="pytest", result="1 failed")
     assert forge.state_first.options_used(args) is False
+
+
+def test_started_sections_cannot_silently_leave_the_plan(run, workspace):
+    planning = ready(run, workspace)
+    assert progress(run, planning, "section-01-trim", "done", "--notes", "Trimmed.")[0] == 0
+    assert progress(run, planning, "section-02-docs", "started")[0] == 0
+    (planning / "plan.md").write_text("".join(line for line in PLAN.splitlines(keepends=True) if "section-02-docs" not in line))
+    code, payload = run("implement-verify", "--planning-dir", str(planning), "--", *PASS)
+    assert code == 1 and payload["postflight"]["blocking_gates"] == ["state-status"]
+    status = run("status", "--path", str(planning))[1]
+    assert status["orphaned_sections"] == ["section-02-docs"] and "restore" in status["next_action"]
+
+
+def test_pretty_status_shows_plan_repairs(forge, run, workspace):
+    planning = ready(run, workspace)
+    (planning / "plan.md").write_text(PLAN.replace("## Goal\n", "## Aim\n"))
+    code, payload = run("status", "--path", str(planning))
+    assert code == 0 and payload["plan_errors"]
+    pretty = forge.output.format_pretty(payload)
+    assert "Plan: needs repair" in pretty and "## Goal" in pretty and "Next action: fix plan.md" in pretty

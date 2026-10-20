@@ -36,6 +36,7 @@ INTERFACE_RE = re.compile(
     r"\b(?:public|published|exported)\s+(?:api|interface|signature|schema|cli|command|flag|option|endpoint|format)s?\b"
     r"|\bbreaking\s+changes?\b|\bbackwards?[- ]compatib(?:le|ility)\b", re.I)
 CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+FINISH_ACTION = "capture the full suite with implement-verify, which also runs postflight"
 
 
 def active(planning_dir: Path) -> bool:
@@ -277,6 +278,12 @@ def _team(target: Path) -> bool:
     return team.configured(target)
 
 
+def orphaned(status: dict[str, Any], plan: dict[str, Any]) -> list[str]:
+    """Started or finished sections whose rows left the plan; plan-setup refuses to drop them."""
+    rows = {row["section"] for row in plan["sections"]}
+    return [name for name, entry in status["sections"].items() if name not in rows and entry["state"] != "pending"]
+
+
 def summary(planning_dir: Path, status: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
     rows = {row["section"]: row for row in plan["sections"]}
     names = [*rows, *(name for name in status["sections"] if name not in rows)]
@@ -286,20 +293,23 @@ def summary(planning_dir: Path, status: dict[str, Any], plan: dict[str, Any]) ->
                  "owns": rows[name]["files"] if name in rows else None,
                  "risk": triggers(rows[name], team=team) if name in rows else []} for name in names]
     missing = [name for name in rows if name not in status["sections"]]
+    removed = orphaned(status, plan)
     next_section = next((name for name in rows if status["sections"].get(name, {}).get("state") != "done"), None)
     if plan["errors"]:
         action = f"fix {PLAN}: {plan['errors'][0]} Then rerun plan-setup."
+    elif removed:
+        action = f"restore the {PLAN} rows of {', '.join(removed)}; started sections cannot leave the plan"
     elif missing:
         action = f"rerun plan-setup so {', '.join(missing)} get a status"
     elif next_section:
         verb = "start" if status["sections"][next_section]["state"] == "pending" else "finish"
         action = f"{verb} {next_section}"
     else:
-        action = "capture the full suite with implement-verify, which also runs postflight"
+        action = FINISH_ACTION
     return {"mode": "state-first", "planning_dir": str(planning_dir), "target_dir": str(target),
             "goal": plan["goal"], "acceptance": plan["acceptance"], "sections": sections,
             "next_section": next_section, "plan_errors": plan["errors"],
-            "unsynced_sections": missing, "next_action": action,
+            "unsynced_sections": missing, "orphaned_sections": removed, "next_action": action,
             "commands": commands(planning_dir, target, next_section)}
 
 
@@ -311,7 +321,7 @@ def status_payload(planning_dir: Path) -> dict[str, Any]:
     payload = {"success": True, **summary(planning_dir, status, parse_plan(planning_dir)),
                "notes": latest_notes(planning_dir), "last_verification": last_verification(status, current),
                "changed_since_status": changed_files(planning_dir, current)}
-    if final_error(status, current) is None and payload["next_section"] is None and not payload["plan_errors"]:
+    if payload["next_action"] == FINISH_ACTION and final_error(status, current) is None:
         payload["next_action"] = "complete: the final suite passed on the current tree"
     return payload
 
@@ -557,8 +567,10 @@ def postflight_report(planning_dir: Path, phase: str) -> dict[str, Any]:
         checks.append(gates.direct_gate("state-status", False, {"error": str(exc)}))
         return gates.flight_payload(phase=phase, stage="postflight", mode="strict", gates=checks, extras=extras)
     missing = [name for name in rows if name not in status["sections"]]
-    checks.append(gates.direct_gate("state-status", not missing, {
-        "sections_without_status": missing, "message": "Rerun plan-setup so every plan section has a status."}))
+    removed = orphaned(status, plan)
+    checks.append(gates.direct_gate("state-status", not missing and not removed, {
+        "sections_without_status": missing, "sections_without_row": removed,
+        "message": "Rerun plan-setup so every plan section has a status, and restore the rows of started sections."}))
     if phase == "implement":
         unfinished = [name for name in rows if name in status["sections"] and status["sections"][name]["state"] != "done"]
         checks.append(gates.direct_gate("state-sections", not unfinished, {
@@ -592,8 +604,7 @@ def _sync(status: dict[str, Any], plan: dict[str, Any]) -> tuple[list[str], list
     """Add new sections as pending; only pending sections may leave the plan."""
     names = [row["section"] for row in plan["sections"]]
     sections = status["sections"]
-    errors = [f"{name} is {entry['state']} but missing from {PLAN}; restore its row." for name, entry in sections.items()
-              if name not in names and entry["state"] != "pending"]
+    errors = [f"{name} is {sections[name]['state']} but missing from {PLAN}; restore its row." for name in orphaned(status, plan)]
     if errors:
         return errors, [], []
     removed = [name for name in sections if name not in names]
