@@ -176,7 +176,7 @@ TEST_MANIFEST = {
     "test_workflow_efficiency.py": "e259443b0f4d4bc1ada9affba22f975c54f888dfc1e651f05ef01a93b0b3a209",
     "test_workflow_handoff.py": "df05ed94edf06bdd4b36c9bde177461d6da73ae23d6c92127c5d13b30ba5c3a2",
     "test_workflow_sequences.py": "7a9fd3be2278fc3f3f97739aa438cf73380fc92261ca42fa59a4d8dd72353672",
-    "test_zagrosi_skills.py": "dece62c41056a44a055d9fba11631184361378dc4fa12e82050459e55e1e2531",
+    "test_zagrosi_skills.py": "885003fdfa13c0492a14c8f8ac2954c437369f493d19e1dbcb35d1d8012b2994",
     "trial_suite_assessment_cases.py": "abedd1a573fd16c1cfde16691544766bbaebd813d658d8e9f671d4af5d01f218",
     "trial_suite_client_lock_cases.py": "3b45a423647a6f5cd9ca51d734c8719e095bb7dec42252c54214eff132ad084c",
     "trial_suite_dependency_admission_cases.py": "b24d62b45cc0abc27e1ac9cf3bcbeb6c5ede894e4c300d2d6b7fdc78604c6e38",

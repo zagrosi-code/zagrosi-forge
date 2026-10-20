@@ -69,10 +69,10 @@ def test_skill_files_are_codex_native() -> None:
     # exercised by host/workflow tests; prose wording is not an executable API.
 
 
-# Pre-approved helper commands cannot run plan- or model-supplied commands, contact
-# models, write arbitrary paths or push; everything else keeps the host's prompt.
-SAFE_HELPER_COMMANDS = ["team status", "status", "next-section", "project-setup", "plan-setup",
-                        "implement-setup", "implement-progress", "implement-record-section"]
+# Pre-approved helper commands only read Forge state; commands that write caller-chosen
+# paths, run checks, contact models or push keep the host's prompt.
+SAFE_HELPER_COMMANDS = ["team status", "status", "next-section"]
+HELPER_LAUNCHERS = ["python3", "python", "py -3"]
 
 
 def skill_parts(path: Path) -> tuple[str, str]:
@@ -89,8 +89,8 @@ def test_every_skill_resolves_plugin_root() -> None:
 
 
 def test_skills_preapprove_only_safe_helper_commands() -> None:
-    expected = [f'Bash(python3 "${{CLAUDE_PLUGIN_ROOT}}/scripts/zagrosi_skills.py" {command} *)'
-                for command in SAFE_HELPER_COMMANDS]
+    expected = [f'Bash({launcher} "${{CLAUDE_PLUGIN_ROOT}}/scripts/zagrosi_skills.py" {command} *)'
+                for launcher in HELPER_LAUNCHERS for command in SAFE_HELPER_COMMANDS]
     for skill in sorted((ROOT / "skills").glob("*/SKILL.md")):
         frontmatter, body = skill_parts(skill)
         assert "allowed-tools:" in frontmatter, skill

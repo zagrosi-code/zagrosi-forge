@@ -4,7 +4,7 @@
 
 - Deliver runtime fixes to Claude Code installs: Claude Code keeps a cached plugin until its manifest version changes, so pull-request validation now fails when `skills/` or `scripts/` change without a new release version.
 - Resolve the helper path in every skill, including the router and cleanup. Where the host supports it, the router loads phases as skills, so Claude Code substitutes the plugin root.
-- Pre-approve Forge's status and setup helper commands in Claude Code. Commands that run checks, contact models, write arbitrary paths or push still ask first.
+- Pre-approve Forge's read-only status helpers (`team status`, `status`, `next-section`) in Claude Code, including the Windows `python` and `py -3` launchers. Commands that write files, run checks, contact models or push still ask first.
 - Keep captures within host command limits: `implement-verify` defaults to 540 seconds, skills give host commands a longer timeout or background execution, and SIGTERM now stops the owned check process group.
 - Keep each provider's own failure message in `provider-review` reports, and report sign-in failures as authentication with the native login command.
 

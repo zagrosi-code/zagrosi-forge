@@ -5,11 +5,12 @@ allowed-tools:
   - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" team status *)
   - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" status *)
   - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" next-section *)
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" project-setup *)
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" plan-setup *)
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" implement-setup *)
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" implement-progress *)
-  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" implement-record-section *)
+  - Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" team status *)
+  - Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" status *)
+  - Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" next-section *)
+  - Bash(py -3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" team status *)
+  - Bash(py -3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" status *)
+  - Bash(py -3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" next-section *)
 ---
 
 # Zagrosi Plan
