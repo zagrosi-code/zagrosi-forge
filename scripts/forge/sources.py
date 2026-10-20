@@ -113,7 +113,7 @@ TEST_MANIFEST = {
     "test_runtime_reuse.py": "91fe91c5ccbd9077fc4965fd3d2f547ef683a69d524ceddb654e801e36425856",
     "test_section_contracts.py": "de911d33ee7d8e71ba372fe540e476aac41663cce4cfc7c3a9ec100b3943ca6d",
     "test_state_first.py": "b5bcd60a7fa99b3fde9aea754e1b2d1554c0320dfd8d8e44ac6c8561fcbefad6",
-    "test_state_first_progress.py": "e559305dc0dbcc9430a762e02440fb8fd1d2227219f08a5741fc637bd6938a50",
+    "test_state_first_progress.py": "915dd4621d8432e4c70025765a01f2fbfa2fc0e25ef419f2cb93d3440acd9930",
     "test_team_collaboration.py": "75cfcb0a4cc8764a09466c3af86b4611769ddf4d16861e2a8274bdb2a959c17e",
     "test_team_config.py": "c9d28c024567afe132bad6004a4a9e94412c89e3e87e3573564f50268db2e2ef",
     "test_team_dependencies.py": "cf88b3387082d5244874497029f00c0ef4ef7bba5981352c74e51ea503f9c60e",
