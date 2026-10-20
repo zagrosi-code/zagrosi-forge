@@ -144,6 +144,10 @@ def deep_plan_setup(args: argparse.Namespace) -> int:
         return _output.print_json({"success": False, "error": error}, 1)
 
     planning_dir = spec_file.parent
+    from . import state_first
+
+    if getattr(args, "state_first", False) or state_first.active(planning_dir):
+        return state_first.plan_setup(args, spec_file)
     config_path = planning_dir / "zagrosi_plan_config.json"
     legacy_config_path = planning_dir / "deep_plan_config.json"
     if not config_path.exists() and legacy_config_path.exists():
@@ -237,6 +241,10 @@ def deep_implement_setup(args: argparse.Namespace) -> int:
 
 def _mutable_lifecycle(args: argparse.Namespace, operation) -> int:
     planning_dir = _storage.resolve_path(args.sections_dir).parent
+    from . import state_first
+
+    if state_first.active(planning_dir):
+        return state_first.redirect(planning_dir)
     try:
         from . import mutable_inputs
 

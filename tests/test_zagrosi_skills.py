@@ -69,6 +69,18 @@ def test_skill_files_are_codex_native() -> None:
     # exercised by host/workflow tests; prose wording is not an executable API.
 
 
+def test_skills_describe_state_first() -> None:
+    reference = (ROOT / "skills/zagrosi-implement/references/state-first.md").read_text()
+    for command in ("plan-setup", "--state-first", "--stage done", "--stage baseline", "implement-verify", "status --path"):
+        assert command in reference
+    for skill, link in (("zagrosi-plan", "../zagrosi-implement/references/state-first.md"),
+                        ("zagrosi-implement", "references/state-first.md"),
+                        ("zagrosi-forge", "../zagrosi-implement/references/state-first.md")):
+        content = (ROOT / "skills" / skill / "SKILL.md").read_text()
+        assert f"]({link})" in content and "state-first" in content, skill
+        assert len(content.split()) < 1000, skill
+
+
 # Pre-approved helper commands only read Forge state; commands that write caller-chosen
 # paths, run checks, contact models or push keep the host's prompt.
 SAFE_HELPER_COMMANDS = ["team status", "status", "next-section"]

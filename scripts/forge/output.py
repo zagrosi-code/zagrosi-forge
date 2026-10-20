@@ -123,6 +123,30 @@ def format_actions(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
+def format_state_first(payload: dict[str, Any]) -> list[str]:
+    lines = ["ZAGROSI FORGE STATE-FIRST", f"Status: {plain_status(payload.get('success'))}",
+             f"Planning dir: {payload.get('planning_dir')}"]
+    if payload.get("goal"):
+        lines.append(f"Goal: {payload['goal']}")
+    lines.extend(f"  - {error}" for error in payload.get("errors") or [])
+    for item in payload.get("sections") or []:
+        risk = f" (standard evidence: {'; '.join(item['risk'])})" if item.get("risk") else ""
+        lines.append(f"  {item['section']}: {item.get('state') or 'no status'}{risk}")
+    check = payload.get("last_verification")
+    if check:
+        binding = {True: "current tree", False: "stale", None: "reported"}[check.get("fresh")]
+        lines.append(f"Last verification: {check.get('outcome', 'reported')} ({binding}) {check.get('result') or ''}".rstrip())
+    changed = payload.get("changed_since_status") or {}
+    if files := [name for key in ("changed", "added", "removed") for name in changed.get(key, [])]:
+        lines.append(f"Changed since status: {', '.join(files)}")
+    lines.extend(f"Note {note['heading'] or ''}: {note['text']}" for note in payload.get("notes") or [])
+    if final := payload.get("final"):
+        lines.append(f"Final suite: {final.get('outcome')} {final.get('result') or ''}".rstrip())
+    if blocking := (payload.get("postflight") or {}).get("blocking_gates"):
+        lines.append(f"Blocking: {', '.join(blocking)}")
+    return lines
+
+
 def format_workflow_details(payload: dict[str, Any]) -> list[str]:
     lines = []
     if "recorded" in payload:
@@ -483,6 +507,8 @@ def format_pretty(payload: dict[str, Any]) -> str:
         ]
         for result in payload.get("results", []):
             lines.append(f"  [{plain_status(result.get('returncode') == 0)}] {result.get('command')}")
+    elif payload.get("mode") == "state-first":
+        lines = format_state_first(payload)
     elif any(key in payload for key in ("preflight", "postflight", "resume_label", "next_section")):
         lines = format_setup(payload)
     elif "next_action" in payload:

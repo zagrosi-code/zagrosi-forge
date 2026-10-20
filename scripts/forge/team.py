@@ -141,6 +141,11 @@ def read_context(target):
     return cache[key]
 
 
+def configured(target) -> bool:
+    """Filesystem-only: whether team coordination is set up for this checkout."""
+    return _team_hint(Path(target).resolve())
+
+
 def _team_hint(target):
     """Keep solo workflow entry filesystem-only, including ordinary worktrees."""
     for parent in (target, *target.parents):

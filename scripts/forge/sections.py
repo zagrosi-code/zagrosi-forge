@@ -178,13 +178,24 @@ def dependency_graph(planning_dir: Path, progress: dict[str, Any] | None = None)
     return parse_section_dependencies(_storage.read_text(index_path), progress.get("sections", []))
 
 
+def risk_terms(text: str) -> list[str]:
+    return sorted({match[0].lower() for match in _policy.RISK_TERM_RE.finditer(text)})
+
+
+def _without_compatibility(text: str) -> str:
+    """Compatibility JSON always names an author and paths; it is metadata, not section risk."""
+    for title, body in _markdown.markdown_h2_sections(text):
+        if title.casefold() == "compatibility":
+            text = text.replace(body, "", 1)
+    return text
+
+
 def section_metrics(section: str, path: Path, dependencies: dict[str, list[str]]) -> dict[str, Any]:
     text = _storage.read_text(path) if path.exists() else ""
     files = _ownership.extract_section_owned_paths(text)
     words = _markdown.word_count(text)
     dep_count = len(dependencies.get(section, []))
-    risk_terms = ["security", "privacy", "auth", "permission", "migration", "data", "payment", "token", "secret"]
-    risk_points = dep_count + (2 if _markdown.contains_any(text, risk_terms) else 0) + (1 if len(files) > 5 else 0)
+    risk_points = dep_count + (2 if risk_terms(_without_compatibility(text)) else 0) + (1 if len(files) > 5 else 0)
     effort_score = words + len(files) * 120 + dep_count * 180
     effort = "large" if effort_score >= 1800 else "medium" if effort_score >= 750 else "small"
     risk = "high" if risk_points >= 4 else "medium" if risk_points >= 2 else "low"

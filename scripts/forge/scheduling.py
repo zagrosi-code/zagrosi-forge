@@ -44,7 +44,11 @@ def next_section(args: argparse.Namespace) -> int:
 
         return _detached_progress.detached_next_section(args)
     planning_dir = _storage.resolve_path(args.planning_dir)
+    from . import state_first
+
     try:
+        if state_first.active(planning_dir):
+            return _output.print_json(state_first.status_payload(planning_dir))
         target = _mutable_inputs.target_directory(planning_dir, getattr(args, "target_dir", None))
         profile = _actions.implementation_profile(planning_dir, getattr(args, "profile", None))
         readiness = _state.mutable_admitted_readiness(planning_dir, target_dir=target, profile=profile)
@@ -155,11 +159,18 @@ def ownership_overlaps(left: set, right: set) -> bool:
 
 
 def implement_progress(args: argparse.Namespace) -> int:
+    from . import state_first
+
+    planning_dir = _storage.resolve_path(args.planning_dir)
+    if not getattr(args, "implementation_root", None) and state_first.active(planning_dir):
+        return state_first.progress(args, planning_dir)
+    if state_first.options_used(args):
+        return state_first.failure(planning_dir, "state-first-options", "--stage baseline or done, --file, --review-status, "
+                                   "--allowance-seconds and a check after -- need a state-first plan (plan-setup --state-first).")
     if getattr(args, "implementation_root", None):
         from . import detached_progress as _detached_progress
 
         return _detached_progress.detached_implement_progress(args)
-    planning_dir = _storage.resolve_path(args.planning_dir)
     state_dir = planning_dir / "implementation"
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / "forge-progress.json"
