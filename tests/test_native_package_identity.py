@@ -7,7 +7,7 @@ import shutil
 
 import pytest
 
-from test_native_workflow_trials import trials
+from test_native_workflow_trials import native, trials
 from coding_trial_evidence import evaluator_files
 from forge_test_helpers import ROOT
 from native_workflow_checks import runtime_module
@@ -42,10 +42,7 @@ def native_matrix(tmp_path, monkeypatch):
     shutil.copytree(source, codex)
     shutil.copytree(source, claude)
     directory = tmp_path / "matrix"
-    trial = directory / "codex-unsupported"
-    (trial / "workspace").mkdir(parents=True)
-    (trial / "workspace/user.txt").write_text("user bytes")
-    record = {"rows": [{"id": trial.name, "host": "codex", "trigger": "unsupported"}],
+    record = {"rows": [{"id": f"{host}-unsupported", "host": host, "trigger": "unsupported"} for host in ("codex", "claude")],
               "models": {"codex": "pinned", "claude": "pinned"},
               "efforts": {"codex": "medium", "claude": "medium"},
               "plugin_root": str(source), "plugin_sha256": trials.plugin_files(source),
@@ -53,8 +50,12 @@ def native_matrix(tmp_path, monkeypatch):
               "installation": {"codex_plugin": str(codex), "claude_plugin": str(claude),
                                "marketplace_name": "fixture", "marketplace": str(source)},
               "total_timeout": 10, "timeout": 5}
+    for row in record["rows"]:
+        trial = directory / row["id"]
+        (trial / "workspace").mkdir(parents=True)
+        (trial / "workspace/user.txt").write_text("user bytes")
+        trials.write(trial / "baseline.json", trials.files(trial / "workspace"))
     trials.write(directory / "matrix.json", record)
-    trials.write(trial / "baseline.json", trials.files(trial / "workspace"))
     calls = []
     monkeypatch.setattr(trials, "authenticated", lambda host: True)
 
@@ -66,7 +67,7 @@ def native_matrix(tmp_path, monkeypatch):
     return directory, record, calls
 
 
-@pytest.mark.parametrize("location", ["plugin_root", "codex_plugin"])
+@pytest.mark.parametrize("location", ["plugin_root", "codex_plugin", "claude_plugin"])
 @pytest.mark.parametrize("name", LOADING)
 @pytest.mark.parametrize("operation", ["edit", "delete"])
 def test_loading_metadata_drift_prevents_any_model_call(native_matrix, location, name, operation):
@@ -77,7 +78,8 @@ def test_loading_metadata_drift_prevents_any_model_call(native_matrix, location,
         path.write_text("changed loading bytes")
     else:
         path.unlink()
-    result = trials.run(directory, "codex-unsupported")
+    # A row binds only its own host's install, so each install is checked through a row on that host.
+    result = trials.run(directory, "claude-unsupported" if location == "claude_plugin" else "codex-unsupported")
     assert not result["success"] and not calls, result
 
 
@@ -85,13 +87,77 @@ def test_loading_metadata_drift_prevents_any_model_call(native_matrix, location,
                                   "skills/planning/SKILL.md", "agents/new.md", "hooks/hooks.json", ".mcp.json",
                                   "skills/__pycache__/SKILL.md", "skills/.pytest_cache/SKILL.md",
                                   "scripts/forge/__pycache__/helper.py", "scripts/forge/.pytest_cache/helper.py"])
-def test_undeclared_loading_additions_prevent_model_calls(native_matrix, name):
+@pytest.mark.parametrize("host", ["codex", "claude"])
+def test_undeclared_loading_additions_prevent_model_calls(native_matrix, name, host):
     directory, record, calls = native_matrix
-    path = Path(record["installation"]["codex_plugin"]) / name
+    path = Path(record["installation"][f"{host}_plugin"]) / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("new loader input")
-    result = trials.run(directory, "codex-unsupported")
+    result = trials.run(directory, f"{host}-unsupported")
     assert not result["success"] and not calls, result
+
+
+def test_unchanged_claude_install_reaches_its_session(native_matrix, monkeypatch):
+    # Control: the Claude drift cases fail because of drift, not because a Claude row can never pass.
+    directory, record, _ = native_matrix
+    roots = []
+
+    def session(*args, **kwargs):
+        roots.append(kwargs["plugin_root"])
+        return {"success": True, "final_text": "Bonjour", "plugin_actions": [],
+                "registered_skills": sorted(trials.EXPECTED_SKILLS)}
+
+    monkeypatch.setattr(trials, "run_session", session)
+    result = trials.run(directory, "claude-unsupported")
+    assert result["success"] and roots == [Path(record["installation"]["claude_plugin"])], result
+
+
+def test_claude_details_inventory_rejects_count_mismatch():
+    details = "Component inventory\n  Skills (2)  zagrosi-plan, zagrosi-forge\n  Agents (0)\n  Hooks (0)\n"
+    assert native.inventory(details, "Skills") == ["zagrosi-forge", "zagrosi-plan"]
+    assert native.inventory(details, "Agents") == []
+    for broken in (details.replace("Skills (2)", "Skills (3)"), details.replace("Agents (0)", "Agents (1)"),
+                   details.replace("  Skills (2)  zagrosi-plan, zagrosi-forge\n", "")):
+        component = "Agents" if "Agents (1)" in broken else "Skills"
+        with pytest.raises(ValueError, match=component):
+            native.inventory(broken, component)
+
+
+def test_claude_load_path_accepts_only_the_staged_package_or_its_settings(tmp_path):
+    source, settings = tmp_path / "source", tmp_path / "settings"
+    copy = settings / "plugins/cache/zagrosi/zagrosi-forge/1.0.0"
+    for directory in (source, copy):
+        directory.mkdir(parents=True)
+    # Claude Code 2.1.289+ loads local-marketplace plugins in place and still records a cache copy.
+    assert native.claude_load_path({"installPath": str(copy), "readFromFolder": str(source)}, source, settings) == source.resolve()
+    assert native.claude_load_path({"installPath": str(copy)}, source, settings) == copy.resolve()
+    for item in ({"installPath": str(copy), "readFromFolder": str(tmp_path / "checkout")},
+                 {"installPath": str(source)}, {"installPath": str(tmp_path / "elsewhere")}):
+        with pytest.raises(ValueError, match="outside the staged package"):
+            native.claude_load_path(item, source, settings)
+
+
+def test_claude_smoke_rejects_a_plugin_loaded_from_elsewhere(monkeypatch):
+    calls, environments = [], []
+
+    def claude(command, cwd, env, *, timeout=60):
+        calls.append(command[1:])
+        environments.append(env)
+        if command[1:3] == ["plugin", "list"]:
+            settings = Path(env["CLAUDE_CONFIG_DIR"])
+            return json.dumps([{"id": "zagrosi-forge@zagrosi", "version": "1.0.0", "enabled": True,
+                                "installPath": str(settings / "plugins/cache/zagrosi/zagrosi-forge/1.0.0"),
+                                "readFromFolder": str(settings.parent / "developer-checkout")}])
+        return "2.1.304 (Claude Code)\n" if command[1:] == ["--version"] else ""
+
+    monkeypatch.setattr(native, "run", claude)
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", "/real/user/plugins")
+    with pytest.raises(ValueError, match="outside the staged package"):
+        native.smoke(ROOT, "claude", "claude")
+    assert ["plugin", "install", "zagrosi-forge@zagrosi"] in calls
+    assert not any(call[:2] == ["plugin", "details"] for call in calls)
+    # A relocated plugins root would send installs past the disposable settings.
+    assert not any("CLAUDE_CODE_PLUGIN_CACHE_DIR" in env for env in environments)
 
 
 def test_copied_packages_match_and_generated_bytecode_does_not_change_identity(tmp_path):

@@ -296,6 +296,21 @@ def format_flight(payload: dict[str, Any], indent: str = "") -> list[str]:
     return lines
 
 
+def _next_step_lines(payload: dict[str, Any]) -> list[str]:
+    steps = payload.get("next_steps") or []
+    return ["Next:", *(f"  - {step}" for step in steps)] if steps else []
+
+
+def _claude_plugin_line(status: dict[str, Any]) -> str:
+    if status.get("registry_error"):
+        return f"Claude Code plugin: unreadable registry {status.get('registry_path')}"
+    if not status.get("installed"):
+        others = len(status.get("other_installs") or [])
+        return "Claude Code plugin: not installed" + (f" here ({others} in other projects)" if others else "")
+    installs = ", ".join(f"{row.get('version')} ({row.get('scope')})" for row in status.get("installs", []))
+    return f"Claude Code plugin: {installs}   Current: {status.get('current')}"
+
+
 def _quality_heading(payload: dict[str, Any]) -> list[str]:
     lines = [
         f"ZAGROSI FORGE GATE: {str(payload.get('gate', 'quality')).upper()}",
@@ -391,33 +406,33 @@ def format_pretty(payload: dict[str, Any]) -> str:
         lines = [
             "ZAGROSI FORGE UPDATE CHECK",
             f"Status: {plain_status(payload.get('success'))}   Restart required: {payload.get('restart_required', False)}",
-            f"Config: {payload.get('config_path')}",
+            f"Host: {payload.get('host')}",
+            f"Codex config: {payload.get('config_path')}",
             f"Codex home: {payload.get('codex_home')}",
             f"Plugin root: {payload.get('plugin_root')}",
             f"Network policy: {payload.get('network_policy')}",
         ]
         cache = payload.get("cache") or {}
         if cache:
-            lines.append(f"Cache: {cache.get('path')}   Current: {cache.get('current')}")
+            lines.append(f"Codex cache: {cache.get('path')}   Current: {cache.get('current')}")
         config = payload.get("config") or {}
         if config:
-            lines.append(f"Config current: {config.get('current')}")
-        next_steps = payload.get("next_steps") or []
-        if next_steps:
-            lines.append("Next:")
-            lines.extend(f"  - {step}" for step in next_steps)
+            lines.append(f"Codex config current: {config.get('current')}")
+        if isinstance(payload.get("claude"), dict):
+            lines.append(_claude_plugin_line(payload["claude"]))
+        lines.extend(_next_step_lines(payload))
     elif payload.get("operation") in {"install-codex", "self-update"}:
         lines = [
             "ZAGROSI FORGE SELF UPDATE" if payload.get("operation") == "self-update" else "ZAGROSI FORGE INSTALL",
             f"Status: {plain_status(payload.get('success'))}   Changed: {payload.get('changed', False)}",
-            f"Config: {payload.get('config_path')}",
+            f"Codex config: {payload.get('config_path')}",
             f"Codex home: {payload.get('codex_home')}",
             f"Plugin root: {payload.get('plugin_root')}",
             f"Plugin: {payload.get('plugin')}",
         ]
         cache = payload.get("cache") or {}
         if cache:
-            lines.append(f"Cache: {cache.get('path')}   Changed: {cache.get('changed')}")
+            lines.append(f"Codex cache: {cache.get('path')}   Changed: {cache.get('changed')}")
         verification = payload.get("verification") or {}
         if verification:
             lines.append(f"Verification: {verification.get('status')}")
@@ -425,10 +440,7 @@ def format_pretty(payload: dict[str, Any]) -> str:
             lines.append(f"Backup: {payload.get('backup_path')}")
         if payload.get("dry_run"):
             lines.append("Mode: dry run")
-        next_steps = payload.get("next_steps") or []
-        if next_steps:
-            lines.append("Next:")
-            lines.extend(f"  - {step}" for step in next_steps)
+        lines.extend(_next_step_lines(payload))
     elif "forge_score" in payload:
         lines = [
             "ZAGROSI FORGE SCORE",
@@ -459,6 +471,9 @@ def format_pretty(payload: dict[str, Any]) -> str:
     elif "gate" in payload:
         lines = _quality_heading(payload)
         diagnostic_label = "Findings"
+        if isinstance(payload.get("claude_plugin"), dict):
+            lines.extend([f"Host: {payload.get('host')}", _claude_plugin_line(payload["claude_plugin"]),
+                          *_next_step_lines(payload)])
     elif "results" in payload and "plugin_root" in payload:
         lines = [
             "ZAGROSI FORGE RELEASE CHECK",

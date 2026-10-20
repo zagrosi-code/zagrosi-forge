@@ -21,6 +21,7 @@ from .codex_config import expected_codex_config
 from . import child_process as _child_process
 from .doctor import SKILL_NAMES
 from . import gates as _gates
+from . import hosts as _hosts
 from . import output as _output
 from .plugin_cache import materialize_plugin_cache, plugin_cache_status
 from . import storage as _storage
@@ -178,9 +179,12 @@ def update_check(args: argparse.Namespace) -> int:
     except (OSError, ValueError):
         return _output.print_json({"success": False, "operation": "update-check", "error": _codex_config.CONFIG_ERROR}, 1)
     config_current = expected_config == existing
-    restart_required = not cache_current or not config_current
+    codex_current = cache_current and config_current
+    host = _hosts.detect_host()
+    claude = _hosts.claude_plugin_status(plugin_version)
+    restart_required = not codex_current or claude["current"] is False
     next_steps: list[str] = []
-    if restart_required:
+    if not codex_current:
         command = shlex.join([
             sys.executable, str(plugin_root / "scripts/zagrosi_skills.py"), "self-update",
             "--plugin-root", str(plugin_root), "--config", str(config_path),
@@ -189,6 +193,9 @@ def update_check(args: argparse.Namespace) -> int:
         next_steps.append("Restart Codex after self-update reports changed cache or config.")
     else:
         next_steps.append("Codex config and Zagrosi Forge plugin cache are already current.")
+    # Codex steps keep their text and position; each Claude Code step names its host.
+    next_steps.extend(["Claude Code: installed plugin is already current."] if claude["current"]
+                      else _hosts.claude_plugin_steps(claude))
     next_steps.append("This check is local-only; update the git checkout separately when you want newer remote source.")
 
     payload = {
@@ -197,9 +204,10 @@ def update_check(args: argparse.Namespace) -> int:
         "plugin_root": str(plugin_root),
         "config_path": str(config_path),
         "codex_home": str(codex_home),
-        "plugin": "zagrosi-forge@zagrosi",
+        "plugin": _hosts.PLUGIN_ID,
         "plugin_name": plugin_name,
         "plugin_version": plugin_version,
+        "host": host,
         "network_policy": "local-only",
         "remote_checked": False,
         "cache": {
@@ -212,6 +220,7 @@ def update_check(args: argparse.Namespace) -> int:
             "changed": not config_current,
             "changes": config_changes,
         },
+        "claude": claude,
         "restart_required": restart_required,
         "next_steps": next_steps,
     }
@@ -263,7 +272,7 @@ def install_codex(args: argparse.Namespace) -> int:
     plugin_root = _storage.resolve_path(args.plugin_root)
     config_path = _storage.absolute_path_no_follow(args.config) if args.config else default_codex_config_path()
     codex_home = codex_home_for_config(config_path, bool(args.config))
-    plugin_id = "zagrosi-forge@zagrosi"
+    plugin_id = _hosts.PLUGIN_ID
     operation = "self-update" if getattr(args, "command", "") == "self-update" else "install-codex"
     if args.verify_codex and args.no_verify_codex:
         return _output.print_json(
@@ -410,6 +419,8 @@ def install_codex(args: argparse.Namespace) -> int:
     else:
         next_steps.append("Codex config and Zagrosi Forge plugin cache are already current.")
     next_steps.append("Use " + ", ".join(f"${skill}" for skill in required_skills) + " in Codex.")
+    if _hosts.detect_host() == "claude":
+        next_steps.append(_hosts.CLAUDE_INSTALL_STEP)
 
     payload = {
         "success": True,

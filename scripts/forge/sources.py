@@ -17,7 +17,7 @@ from . import storage as _storage
 
 # BEGIN TEST MANIFEST
 TEST_MANIFEST = {
-    "conftest.py": "35e40c2f68e0d304044cdf607f997597fdddcf18ad1f8f6b018152cc2266f5c3",
+    "conftest.py": "9a1d9598e6aa0da025982dbe1a1b1bf353e30f59a52b4d7a1425fab2556c9a65",
     "detached_test_support.py": "5deabb6b1dadbc155d450981e2836e730574f41f83e3feb53d7d462681467295",
     "fault_injection_support.py": "83597a7136891f9ee6cbb38603f7e2179c602ffcbae3cf307bdeec47dc88811b",
     "forge_test_helpers.py": "94180fbdb20ebefca347f1969cf04a3f063281ed7ccc02f3f02eea8aea414db4",
@@ -28,7 +28,7 @@ TEST_MANIFEST = {
     "test_benchmark_forge.py": "1436b31c5fc07824a903fb4a2f5bccf565059dbffa67151da7819b932c2383eb",
     "test_cache_publication.py": "218df403a40b42fe170ee816d0dd5de2df7f58106ac79e7d4dd55983f0698aff",
     "test_capabilities.py": "1d30df82e81ab304ae6c11991a9290bd34385bd533176704b56853243218d1e5",
-    "test_ci_coverage.py": "b266923590523920ff2dfbdfb82aad30661b9c5966252ed4310c7773576e31c4",
+    "test_ci_coverage.py": "c89ec8de08e03f595a03cd624ccbd8b3f7d1289f77e84d59198c7a9f5dca5b61",
     "test_claude_plugin.py": "6f4f96ba9dc7d1593da1887250afe52ce28090137a5fe213e7053550db2a1b46",
     "test_cli_helper_timeouts.py": "410b8559e77456c2c296cadd7074b905792199c3f5547c58dab7ce90520d2153",
     "test_coding_trials.py": "b4a88823bf51083f405eadb368a7e72033243d36b0f87d4b990348db607a3663",
@@ -65,6 +65,8 @@ TEST_MANIFEST = {
     "test_handoff_wire.py": "4c2fb34168a5dae808b37dfd9d75840da93dc9ee93bc73200db80b90c7e27b72",
     "test_heldout_contracts.py": "fcca3c9af0a5cb85ce741015477c8d9a6555b47de45a2f061819a12002a850ab",
     "test_helper_termination.py": "7cf8d3a668242d6c896c1e4b607407add0920fa853b58878b30ea36abe3cb55d",
+    "test_host_aware_commands.py": "30bdeb69c05424197c81f6177a74d9f7cb0206542ec28d8df82022db61904926",
+    "test_host_detection.py": "6aa0f221f32c84a9f975e5fa431a665625f007de7000968a2976849f24d345d1",
     "test_implementation_drift.py": "12f4cb0977c8557718015851ff1ae1a8bd7d305957d8b8e205942e453ba1fe7a",
     "test_implementation_phase_reuse.py": "f79a211e105becb4c23da1ea06a842d2fe1617bbb99fc1644195b7a6d13167db",
     "test_install_config_safety.py": "7214d15f4410b4b5d49bf1be558c83c2e713d2c2d7bb2c90f776814b53d247ba",
@@ -74,7 +76,7 @@ TEST_MANIFEST = {
     "test_invoice_contract.py": "2e3ca21e6dd00c8efd134e66658cd2efe1816b32cc95ac41f78dcf3632832f23",
     "test_mutable_state.py": "c2a1bd08ce23094d4001a7e1998beac79c4c4ecf06f39dcf84a821ad86287b9e",
     "test_mutable_state_safety.py": "03b956534c4837d187dc19e43e99d673c1004a4ed7628e92abbf80c87f944f25",
-    "test_native_package_identity.py": "46dd9530e9e3dfdb597741eea5bc7c7c465a355262d8952feb46c9df322be201",
+    "test_native_package_identity.py": "2b6a1baf668b6f59f66b5aee3c04ceeae3fe983594f5e5b60a1ab5564215b2ae",
     "test_native_process.py": "5757b225cc4aac67c81fc61b0e5f498d3ab2364c9ef0c76d7a0760bbfc84c07f",
     "test_native_workflow_trials.py": "b3e45332b47ff0bf244945e1e7fe0b0b135105d8cc7caf901de7420b9e426a48",
     "test_owned_verification.py": "c23850c286dfb8cda322fe445e51b1935836af7bf8bed1ff842cc497c63dbb4b",

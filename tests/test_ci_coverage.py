@@ -96,6 +96,12 @@ def test_windows_partitions_cover_linux_and_macos_once():
     } <= selected["all"].keys()
 
 
+def test_native_ci_pins_component_validating_claude():
+    pins = re.findall(r"@anthropic-ai/claude-code@(\d+)\.(\d+)\.(\d+)\b", WORKFLOW.read_text())
+    assert len(pins) == 1, "Pin exactly one Claude Code release for native smoke"
+    assert tuple(map(int, pins[0])) >= (2, 1, 289), "Claude Code 2.1.289+ validates plugin components"
+
+
 def test_type_contract_compiler_is_installed_for_full_and_compatibility_tests():
     text = WORKFLOW.read_text()
     for name, following in (("validate", "compatibility"), ("compatibility", "native-plugins")):

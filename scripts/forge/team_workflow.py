@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from . import actions, compatibility, ownership, sections, storage, team_state
+from . import actions, compatibility, hosts, ownership, sections, storage, team_state
 
 
 def command_guard(args) -> None:
@@ -180,7 +180,7 @@ def guard(planning: Path, target: Path, section: str | None = None, *, required_
                                           candidates=[{key: row[key] for key in ('id', 'generation', 'host', 'task', 'state')}
                                                       for row in candidates])
             path_args = [value for path in extra_paths for value in ('--path', path)]
-            commands['team_start'] = command('start', '--task', '<task>', '--host', 'other', *scope_args, *path_args)
+            commands['team_start'] = command('start', '--task', '<task>', '--host', hosts.detect_host(), *scope_args, *path_args)
             raise team_state.TeamError('team-binding-required', 'Start a team session for this plan and target before working.')
         if not isinstance(binding, dict) or any(
             not isinstance(binding.get(name), str) or not re.fullmatch(r'[a-f0-9]{32}', binding[name])
