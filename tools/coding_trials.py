@@ -7,7 +7,6 @@ import ast
 from collections import Counter
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import shlex
@@ -27,6 +26,7 @@ from coding_trial_process import execute
 from coding_trial_git import initialize_repository
 from coding_trial_resume import prepare_resume, resume_verdict
 from coding_trial_comparison import task_acceptance
+from coding_trial_outcomes import known_total
 
 PACK = ROOT / "examples/evals/coding"
 CASES = json.loads((PACK / "cases.json").read_text())
@@ -73,7 +73,8 @@ def code_metrics(workspace: Path, runtime: str = "python") -> dict:
 
 
 def prepare(trial: Path, case: str, depth: str | None = None, *,
-            plugin_root: Path | None = None, plain_agent: bool = False) -> dict:
+            plugin_root: Path | None = None, plain_agent: bool = False, brief: str | None = None) -> dict:
+    """`brief` replaces the workspace prompt.md before the baseline is recorded."""
     plugin_root = (plugin_root or ROOT).resolve()
     if plain_agent and case == "resume":
         raise ValueError("The Forge resume checkpoint has no comparable plain-agent arm")
@@ -83,6 +84,8 @@ def prepare(trial: Path, case: str, depth: str | None = None, *,
     fixture = PACK / CASES[case].get("fixture", "fixture")
     oracle = ROOT / CASES[case].get("oracle", "tools/coding_trial_checks.py")
     shutil.copytree(fixture, workspace, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if brief is not None:
+        (workspace / "prompt.md").write_text(brief)
     selected = depth or CASES[case]["depth"]
     checkpoint = prepare_resume(ROOT, workspace, selected, tests, plugin_root=plugin_root) if case == "resume" else None
     baseline = files(workspace)
@@ -224,12 +227,10 @@ def run_sessions(trial: Path, runner: list[str], timeout: int, *, resume_runner=
     telemetry.append(json.loads(telemetry_path.read_text()) if telemetry_path.exists() else {})
     if telemetry_path.exists():
         telemetry_path.replace(trial / "telemetry-session-02.json")
-    def total(values):
-        return sum(values) if all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in values) else None
     aggregate = {"source": "two fresh interrupted/resumed sessions", "sessions": telemetry,
-                 "totals": {key: total([(row.get("totals") or {}).get(key) for row in telemetry])
+                 "totals": {key: known_total([(row.get("totals") or {}).get(key) for row in telemetry])
                             for key in ("input_tokens", "cached_input_tokens", "output_tokens", "uncached_input_tokens")},
-                 "reported_cost_usd": total([row.get("reported_cost_usd") for row in telemetry]),
+                 "reported_cost_usd": known_total([row.get("reported_cost_usd") for row in telemetry]),
                  "interventions": 1, "limits": "The deliberate interruption counts as one harness intervention. Missing session telemetry remains unknown."}
     telemetry_path.write_text(json.dumps(aggregate, indent=2) + "\n")
     return {**second, "seconds": first["seconds"] + second["seconds"], "sessions": sessions,
