@@ -10,6 +10,7 @@ import os
 import json
 import keyword
 import re
+import signal
 import stat
 import sys
 from pathlib import Path, PurePosixPath
@@ -162,7 +163,7 @@ RUNTIME_MANIFEST = {
     "forge/authority.py": "dc3b592eeb2deba8e5778887f68c1435c4b04a7b215bc6b7f028c8a995563b41",
     "forge/capabilities.py": "156ccf97e99dabc99c0ae5aff3671984bb9a1042d024ba24e1d18aa4cde7fcbc",
     "forge/child_process.py": "257b32bf2dca70fd00f4ea76f43633163633aa5c2d258f784560e1cdadbe023e",
-    "forge/cli.py": "4cc212b5a57919b76cd0438de8db8d2110a98c713612cd7f0220271807982d7f",
+    "forge/cli.py": "80f573507a640b2ad2c8fb28b2dfb4f18893f2abaf730c64336514ec5b418625",
     "forge/codex_config.py": "e8aa857d1243b9e494eee02bb09240b8623d43cd34007e84220e905f77156f5c",
     "forge/command_args.py": "46ec41dc6480f0a0ba5220cc4d73044c5f6ddd70d80b5b7af1c0016c9c7fa8d7",
     "forge/compatibility.py": "c7699d0801900cadf27dc5dea0536e09e86daf2b72fa4e6a1889b03c072fd8cc",
@@ -189,7 +190,7 @@ RUNTIME_MANIFEST = {
     "forge/markdown.py": "e890dae35120d93cef771bffc991d44ea59da9ba43af458b35daf60b320e0d97",
     "forge/models.py": "939f0ff5b2936143e7265657dd51f3fc757d02a85cf68b796e8b939100efafec",
     "forge/mutable_inputs.py": "071dcb5530a3fa42ba64b2653519abfdbf7dce00f4af065b26cfd7c2a62cc627",
-    "forge/output.py": "abb0451990af2d7a9f9fc59e2d742d2f109574fa3c1584bd8a83b18324f2be03",
+    "forge/output.py": "45fed511555005cac94f9303cca5d1beaa8eb6ca2cc70546cdf9ea5558e0265a",
     "forge/ownership.py": "7dfda3deeb6f1c0e19ce9d1636507f628808ad4fbd9385e58dda8dc95e8fcca4",
     "forge/pinners.py": "6f5948c2d379fea95f67b6d1b5a6833c257e0c71101145ddb3b12a820afb4da3",
     "forge/planning_contract.py": "3889f2998bd95dd382ebb280473472ec4e576f4a9a1cfe8f023c1b41e959a737",
@@ -200,9 +201,9 @@ RUNTIME_MANIFEST = {
     "forge/processes.py": "c9dbfda15593d10f7904749252fe3bf05beb069cd3565a9a884ee52e2bd10e66",
     "forge/projects.py": "496988d203dc08dfcd96e0be894a4b7bee5b87848106ca84fa2b86c483c75dac",
     "forge/prompts.py": "98165c170b655fb72078c09d02e294f48f944d815385449d83abfd9fbae6e1eb",
-    "forge/provider_output.py": "f2f769646b4f30cd94cce53eb1c99ffdf6b273b540b44cbc921a991079165abe",
+    "forge/provider_output.py": "300d9c3d89ad694b7ad27cc1b2c46eaa0955a4483247d59b9927fc4172845f51",
     "forge/provider_preflight.py": "9a54f3cfe83735517b6e85d0d9d1fbe2e566fd141ecdd8102195617a0d5e8da4",
-    "forge/providers.py": "b3babfba96ceae5590b11a22f15693fa22f71591679dd83f08de17f20445febd",
+    "forge/providers.py": "cfa1b3ddbe2e4d5da5e0c3ad377c07d561d24a88419b6871887da35a20c5187e",
     "forge/quality.py": "07b65d5bfe65cce538a96a17cacf92309d2788e50bc2fe149d7abec8385cd1e6",
     "forge/recovery.py": "e3ccfd05e6f5d8177be70dcfa0a111c0665c2da876979c3c0437b56edbb1a667",
     "forge/resume.py": "083638cfd6f7183063f13ef0923484b18de75018310a4bb8908df4e00f73bf5d",
@@ -211,7 +212,7 @@ RUNTIME_MANIFEST = {
     "forge/sections.py": "f3875f1d448afc383bae5077b010d4914534238e2d354c5ff013ab083d07f32d",
     "forge/secure_io.py": "2c529854508436ff083d3a01c1ad97de4b5e5a532c1365b28a173c0cd0401108",
     "forge/session.py": "87d35fb6a68e016f6480d7fa083842022f535e4c5385529202498f71b4bbbc02",
-    "forge/sources.py": "9a1d92aa8f5c2944ab9ea7323a2ef79954910f5596990cf0673b9ab165ffb1dc",
+    "forge/sources.py": "746a84b1433f4dab439bd7ba6abd37160efd2414b6d475b28773b95727d12628",
     "forge/state.py": "7114e8bb671c3adbf8de5fa6d247455ce53a3f23c75eb35612898ed443289f50",
     "forge/status.py": "da739435e3d930bdd14cd31ad42da36e500a12a772bd39505169efcca77a601c",
     "forge/storage.py": "fc7100b6437c556a324793079a4cee264d2b92344b2226d222cfa4a3fc4d8c4c",
@@ -286,5 +287,21 @@ def main(argv: list[str] | None = None) -> int:
     return cli.main(raw_args)
 
 
+class HostStop(BaseException):
+    """SIGTERM from the host; unlike SystemExit, in-process gates cannot record it as a result."""
+
+
+def run_program() -> int:
+    """Run main() as a program, unwinding on SIGTERM so execute() stops its own child group."""
+    def stop(signum: int, _frame: object) -> None:
+        raise HostStop(128 + signum)
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        return main()
+    except HostStop as stopped:
+        return stopped.args[0]
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_program())

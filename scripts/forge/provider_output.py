@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import re
 
+ERROR_LIMIT = 300
+
 
 def optional_object(value, label: str) -> dict:
     if value is None:
@@ -13,8 +15,54 @@ def optional_object(value, label: str) -> dict:
     return value
 
 
+def json_lines(raw: str) -> list:
+    return [json.loads(line) for line in re.split(r"[\n\r\v\f\x1c-\x1e]", raw) if line.strip()]
+
+
+def api_message(message: str) -> str:
+    """Codex embeds the API error body as JSON text; prefer its message."""
+    try:
+        body = json.loads(message)
+    except ValueError:
+        return message
+    error = body.get("error") if isinstance(body, dict) else None
+    nested = error.get("message") if isinstance(error, dict) else None
+    return nested if isinstance(nested, str) and nested.strip() else message
+
+
+def provider_error(provider: str, raw: str) -> str | None:
+    """Return the provider's own error report from a failed request's complete stdout."""
+    try:
+        if provider == "codex":
+            # Earlier error events can be retry notices; the failed turn, then the last error, is final.
+            failed, errors = [], []
+            for event in json_lines(raw):
+                if not isinstance(event, dict):
+                    continue
+                error = event.get("error")
+                if event.get("type") == "turn.failed" and isinstance(error, dict):
+                    failed.append(error.get("message"))
+                elif event.get("type") == "error":
+                    errors.append(event.get("message"))
+            messages = [*failed, *reversed(errors)]
+        else:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return None
+            error = data.get("error")
+            messages = [data.get("result") if data.get("is_error") is True else None,
+                        error.get("message") if isinstance(error, dict) else error]
+    except (ValueError, RecursionError):
+        return None
+    message = next((item for item in messages if isinstance(item, str) and item.strip()), None)
+    if message is None:
+        return None
+    text = "".join(character for character in api_message(message) if character.isprintable()).strip()
+    return text[:ERROR_LIMIT] or None
+
+
 def codex_output(raw: str) -> dict:
-    events = [json.loads(line) for line in re.split(r"[\n\r\v\f\x1c-\x1e]", raw) if line.strip()]
+    events = json_lines(raw)
     if not events or any(not isinstance(event, dict) for event in events):
         raise ValueError("Expected Codex JSON event objects")
     if any(event.get("type") in {"error", "turn.failed"} for event in events):
