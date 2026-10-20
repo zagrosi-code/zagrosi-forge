@@ -15,7 +15,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import signal
 import statistics
 import sys
 import tempfile
@@ -65,8 +67,10 @@ PLANS = {
 }
 TOKENS = ("input_tokens", "cached_input_tokens", "cache_creation_input_tokens", "uncached_input_tokens",
           "output_tokens", "reasoning_output_tokens")
-EDIT_TOOLS = {"Edit", "MultiEdit", "NotebookEdit", "Write"}
-HIDDEN = ("session-1.md", "session-1-events.jsonl", "session-1-telemetry.json", "checkpoint.json", "checkpoint")
+EDIT_TOOLS = {"Edit", "Write"}
+SESSION_ONE = ("session-1.md", "session-1-events.jsonl", "session-1-telemetry.json", "checkpoint.json", "checkpoint")
+MODES, LOCK = "hidden-modes.json", "run.lock"
+PARENT = re.compile(r"(?:^|[\s'\"=:;&|(/\\])\.\.(?:$|[\s'\";&|)/\\])")
 
 
 def write(path: Path, value) -> None:
@@ -75,6 +79,10 @@ def write(path: Path, value) -> None:
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def last_json(text: str):
@@ -97,14 +105,16 @@ def session_prompt(arm: str, prompt: str, case: str, session: int, clauses=()) -
     return "\n\n".join(parts) + "\n"
 
 
+def analyzer() -> dict:
+    return {path.relative_to(ROOT).as_posix(): sha256(path) for path in (Path(__file__).resolve(), CHECKS)}
+
+
 def identity(plugin_root: Path, cases) -> dict:
     """Evaluator, plugin and fixture bytes that every attempt must share."""
-    evaluator = {}
+    evaluator = analyzer()
     for case in cases:
         oracle = ROOT / coding_trials.CASES[case]["oracle"]
         evaluator.update(evaluator_files(ROOT, oracle, coding_trials.PACK / "cases.json"))
-    for path in (Path(__file__).resolve(), CHECKS):
-        evaluator[path.relative_to(ROOT).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     return {"evaluator": evaluator, "plugin": plugin_files(plugin_root),
             "fixtures": {case: files(coding_trials.PACK / coding_trials.CASES[case]["fixture"]) for case in cases}}
 
@@ -137,8 +147,9 @@ def run_oracle(workspace: Path, case: str, *, compatibility: bool, expected: int
 
 
 def run_checks(workspace: Path, operation: str, case: str | None = None):
+    """One JSON report line, kept whole however many tests a candidate adds; None when unobserved."""
     process = execute([sys.executable, "-B", str(CHECKS), operation, str(workspace), *([case] if case else [])],
-                      workspace, timeout=300)
+                      workspace, timeout=300, output_limit=8 * 1024 * 1024)
     report = last_json(process["stdout"])
     return report if process["returncode"] == 0 and isinstance(report, dict) else None
 
@@ -192,36 +203,89 @@ class FirstEdit:
         self.thread = threading.Thread(target=self._poll, daemon=True)
         self.thread.start()
 
+    def _changed(self) -> bool | None:
+        try:
+            if code_snapshot(self.workspace) == self.baseline:
+                return False
+            # The edit's own event precedes the change, so it lies within this size.
+            size = self.events.stat().st_size if self.events.exists() else 0
+        except OSError:
+            return None
+        self.found = {"seconds": round(time.monotonic() - self.started, 1), "event_bytes": size}
+        return True
+
     def _poll(self):
         while not self.stop.wait(POLL_SECONDS):
-            try:
-                if code_snapshot(self.workspace) == self.baseline:
-                    continue
-                # The edit's own event precedes the change, so it lies within this size.
-                size = self.events.stat().st_size if self.events.exists() else 0
-            except OSError:
-                continue
-            self.found = {"seconds": round(time.monotonic() - self.started, 1), "event_bytes": size}
-            return
+            if self._changed():
+                return
 
     def finish(self) -> dict:
         self.stop.set()
         self.thread.join()
-        return self.found or {"seconds": None, "event_bytes": None,
-                              "changed": code_snapshot(self.workspace) != self.baseline}
+        if self.found is None and self._changed():
+            self.found["after_exit"] = True  # Within the last poll: seconds are an upper bound.
+        return self.found or {"seconds": None, "event_bytes": None}
+
+
+def restore_hidden(directory: Path) -> None:
+    """Undo every recorded mode change; one missing path cannot keep the rest unreadable."""
+    record = directory / MODES
+    if not record.exists():
+        return
+    failures = []
+    for path, mode in json.loads(record.read_text()).items():
+        try:
+            os.chmod(path, mode)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        raise OSError("Cannot restore hidden paths: " + "; ".join(failures))
+    record.unlink()
 
 
 @contextlib.contextmanager
-def hidden(trial: Path):
-    """Session 2 cannot read session-1 prompts, transcripts or checkpoint results beside its workspace."""
-    modes = {path: path.stat().st_mode & 0o7777 for path in (trial / name for name in HIDDEN) if path.exists()}
+def hidden(directory: Path, trial: Path):
+    """While session 2 runs, only its own workspace, trial record and prompt stay readable in the matrix.
+
+    Other attempts' prompts hold the withheld clauses, and their evidence holds probe results. The modes
+    are recorded first, so a later run restores them even after this process was killed.
+    """
+    paths = [trial / name for name in SESSION_ONE] + [
+        path for path in directory.iterdir() if path != trial and path.name not in (MODES, LOCK)]
+    modes = {str(path): path.lstat().st_mode & 0o7777 for path in paths if path.exists() and not path.is_symlink()}
+    write(directory / MODES, modes)
     try:
         for path in modes:
-            path.chmod(0)
+            os.chmod(path, 0)
         yield
     finally:
-        for path, mode in modes.items():
-            path.chmod(mode)
+        restore_hidden(directory)
+
+
+@contextlib.contextmanager
+def locked(directory: Path):
+    """One run per matrix: attempts stay serial and none can start twice."""
+    try:
+        descriptor = os.open(directory / LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        raise ValueError(f"Another run holds {directory / LOCK}; delete it only if no run is active") from None
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(f"{os.getpid()}\n")
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        # Turn termination into an exception so session processes stop and file modes are restored.
+        for number in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+            if number is not None:
+                previous[number] = signal.signal(number, signal.default_int_handler)
+    try:
+        restore_hidden(directory)
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+        (directory / LOCK).unlink(missing_ok=True)
 
 
 def run_session(trial: Path, number: int, argv: list[str], timeout: int, *, watch: bool = False) -> dict:
@@ -234,12 +298,16 @@ def run_session(trial: Path, number: int, argv: list[str], timeout: int, *, watc
                           timeout=timeout)
     finally:
         first_edit = watcher.finish() if watcher else None
-    # The runner always writes these names, so each session's copy moves aside before the next starts.
-    for name, suffix in (("telemetry.json", "telemetry.json"), ("agent-events.jsonl", "events.jsonl")):
-        if (trial / name).exists():
-            (trial / name).replace(trial / f"session-{number}-{suffix}")
+        # The runner always writes these names, so each session's copy moves aside before the next starts.
+        for name, suffix in (("telemetry.json", "telemetry.json"), ("agent-events.jsonl", "events.jsonl")):
+            if (trial / name).exists():
+                (trial / name).replace(trial / f"session-{number}-{suffix}")
     return {"session": number, "argv": argv, "process": process,
             **({"first_edit": first_edit} if watch else {})}
+
+
+def failed(session: dict) -> bool:
+    return session["process"].get("returncode") != 0 and not session["process"].get("timed_out")
 
 
 def make_checkpoint(trial: Path, case: str, manifest: dict) -> dict:
@@ -254,8 +322,21 @@ def make_checkpoint(trial: Path, case: str, manifest: dict) -> dict:
     return record
 
 
+def combine_telemetry(trial: Path, sessions: int) -> dict:
+    """Both sessions' runner-reported usage; one missing session leaves every total unknown."""
+    rows = [read(trial / f"session-{number}-telemetry.json") for number in range(1, sessions + 1)]
+    totals = {key: known_total([(row.get("totals") or {}).get(key) for row in rows]) if all(rows) else None
+              for key in TOKENS}
+    totals["total_tokens"] = known_total([totals["input_tokens"], totals["output_tokens"]])
+    record = {"source": "session-break sessions", "sessions": rows, "totals": totals,
+              "reported_cost_usd": known_total([row.get("reported_cost_usd") for row in rows]) if all(rows) else None,
+              "missing_tools": [row.get("missing_tools") for row in rows]}
+    write(trial / "telemetry.json", record)
+    return record
+
+
 def assertion_counts(tests: Path) -> dict:
-    """Assert statements and assert*/fail* calls per unittest method ID."""
+    """Assert statements and assert*/fail* calls per unittest method ID, for methods defined in top-level classes."""
     counts = {}
     for path in sorted(tests.rglob("*.py")) if tests.is_dir() else []:
         try:
@@ -324,19 +405,27 @@ def spellings(path: Path) -> list[str]:
     return list(dict.fromkeys((os.path.normpath(path), os.path.normpath(path.resolve()))))
 
 
-def code_edit(path: str, workspace: Path) -> bool:
+def workspace_path(path: str, workspace: Path) -> str | None:
+    """The workspace-relative form of a logged path, or None outside the workspace."""
     candidate = os.path.normpath(path if os.path.isabs(path) else workspace / path)
     for root in spellings(workspace):
         if os.path.commonpath([candidate, root]) == root:
-            return Path(os.path.relpath(candidate, root)).parts[:1] in (("src",), ("tests",))
-    return False
+            return Path(os.path.relpath(candidate, root)).as_posix()
+    return None
 
 
-def outside_reference(text: str, workspace: Path) -> bool:
-    """A command or tool input that names the trial directory or its parents beyond the workspace."""
+def code_edit(path: str, workspace: Path) -> bool:
+    relative = workspace_path(path, workspace)
+    return relative is not None and relative.split("/", 1)[0] in ("src", "tests")
+
+
+def outside_reference(kind: str, text: str, workspace: Path) -> bool:
+    """An edit outside the workspace, or a command or tool input naming `..` or the matrix beyond it."""
+    if kind == "edit":
+        return workspace_path(text, workspace) is None
     for root in spellings(workspace):
         text = text.replace(root, "")
-    return any(marker in text for marker in ("../", "..\\", *spellings(workspace.parent)))
+    return bool(PARENT.search(text)) or any(root in text for root in spellings(workspace.parent.parent))
 
 
 def main_loop_usage(rows, boundary: int) -> dict | None:
@@ -363,11 +452,11 @@ def session_evidence(path: Path, workspace: Path, first_edit: dict | None = None
                 "helper_calls": sum("zagrosi_skills.py" in text for text in commands),
                 "code_edits": sum(kind == "edit" and code_edit(text, workspace) for _, kind, text in started),
                 "outside_references": [text[:240] for _, kind, text in started
-                                       if kind != "edit" and outside_reference(text, workspace)][:20]}
+                                       if outside_reference(kind, text, workspace)][:20]}
     if first_edit is None:
         return evidence
     boundary, source = first_edit.get("event_bytes"), "poll"
-    if boundary is None:  # A session shorter than one poll: use its first logged code edit instead.
+    if boundary is None:  # Unpolled: use the first logged code edit instead.
         boundary = next((offset for offset, kind, text in started if kind == "edit" and code_edit(text, workspace)), None)
         source = None if boundary is None else "event"
     before = [(kind, text) for offset, kind, text in started if boundary is not None and offset <= boundary]
@@ -380,27 +469,38 @@ def session_evidence(path: Path, workspace: Path, first_edit: dict | None = None
 
 
 def regressions(checkpoint: dict, final: dict, on_final: dict | None, before: dict, after: dict, probe: bool) -> dict:
-    """(a) compatibility lost after the checkpoint; (b) checkpoint tests failing, deleted or weakened; (c) clauses."""
-    passed = sorted(name for name, outcome in (checkpoint["tests"] or {}).items() if outcome == "passed")
-    final_tests = final["tests"] or {}
-    tests = {"failing": [name for name in passed if (on_final or {}).get(name) != "passed"],
-             "deleted": [name for name in passed if name not in final_tests],
-             "weakened": [name for name in passed if name in final_tests and (
-                 final_tests[name] == "skipped" or after.get(name, 0) < before.get(name, 0))]}
-    clauses = [name for name, status in (final["probes"] or {}).items() if status == "fail"]
+    """(a) compatibility lost after the checkpoint; (b) checkpoint tests failing, deleted or weakened; (c) clauses.
+
+    A part whose observation is missing stays None instead of reading as a regression or as none.
+    """
+    outcomes, final_tests = checkpoint.get("tests"), final.get("tests") or {}
+    tests = None
+    if outcomes is not None and on_final is not None:
+        passed = sorted(name for name, outcome in outcomes.items() if outcome == "passed")
+        tests = {"failing": [name for name in passed if on_final.get(name) != "passed"],
+                 # Absent both from the final run and from the final source; an import failure is not a deletion.
+                 "deleted": [name for name in passed if name not in final_tests and name not in after],
+                 "weakened": [name for name in passed if final_tests.get(name) == "skipped"
+                              or name in after and after[name] < before.get(name, 0)]}
+    probes = final.get("probes")
     result = {"compatibility": checkpoint["compatibility"]["passed"] and not final["compatibility"]["passed"],
-              "tests": tests, "withheld_clauses": clauses if probe else []}
-    result["any"] = bool(result["compatibility"] or any(tests.values()) or result["withheld_clauses"])
+              "tests": tests,
+              "withheld_clauses": None if probe and probes is None else
+              [name for name, status in (probes or {}).items() if status == "fail"] if probe else []}
+    parts = [result["compatibility"], None if tests is None else any(tests.values()),
+             None if result["withheld_clauses"] is None else bool(result["withheld_clauses"])]
+    result["any"] = True if True in parts else None if None in parts else False
     return result
 
 
-def analyze(trial: Path, case: str, manifest: dict, sessions: list[dict]) -> dict:
+def analyze_attempt(trial: Path, case: str, manifest: dict, sessions: list[dict]) -> dict:
     workspace = trial / "workspace"
     checkpoint = json.loads((trial / "checkpoint.json").read_text())
     final = observe(workspace, case, manifest["compatibility_assertions"][case])
     with scratch_copy(workspace, trial / "checkpoint/workspace/tests") as copy:
         on_final = run_checks(copy, "tests")
-    return {
+    analysis = {
+        "analyzer": analyzer(), "analyzed": now(),
         "checkpoint_unchanged": files(trial / "checkpoint/workspace") == checkpoint["files"],
         "final": {**final, "planning": planning_stats(workspace)},
         "checkpoint_tests_on_final": on_final,
@@ -412,36 +512,55 @@ def analyze(trial: Path, case: str, manifest: dict, sessions: list[dict]) -> dic
                                          row.get("first_edit") if row["session"] == 2 else None)}
                      for row in sessions],
     }
+    write(trial / "session-break.json", analysis)
+    return analysis
+
+
+def finish_attempt(trial: Path, case: str, manifest: dict, sessions: list[dict]) -> str | None:
+    """Record usage, check the candidate and analyze both sessions; each step runs whatever failed before it."""
+    errors = []
+    combine_telemetry(trial, len(sessions))
+    for step in (lambda: coding_trials.check(trial, review=trial / "review.json" if (trial / "review.json").is_file() else None),
+                 lambda: analyze_attempt(trial, case, manifest, sessions) if len(sessions) == 2 else None):
+        try:
+            step()
+        except Exception as exc:  # Keep later evidence even when one step fails.
+            errors.append(f"{type(exc).__name__}: {exc}")
+    return "; ".join(errors) or None
 
 
 def run_attempt(directory: Path, manifest: dict, item: dict) -> dict:
     trial = directory / item["id"]
     started = time.monotonic()
-    write(trial / "attempt.json", {"status": "running", "started": now()})
+    try:
+        with (trial / "attempt.json").open("x") as handle:  # Claim the attempt exactly once.
+            handle.write(json.dumps({"status": "running", "started": now()}) + "\n")
+    except FileExistsError:
+        raise ValueError(f"{item['id']} was already attempted; prepare a new directory to repeat it") from None
     sessions, status, error = [], "completed", None
     try:
         sessions.append(run_session(trial, 1, manifest["runners"][0], manifest["timeout"]))
-        make_checkpoint(trial, item["case"], manifest)
-        with hidden(trial):
-            sessions.append(run_session(trial, 2, manifest["runners"][1], manifest["timeout"], watch=True))
+        if not failed(sessions[0]):  # A crashed first session is not a break; stop the attempt there.
+            make_checkpoint(trial, item["case"], manifest)
+            with hidden(directory, trial):
+                sessions.append(run_session(trial, 2, manifest["runners"][1], manifest["timeout"], watch=True))
     except Exception as exc:  # Keep the attempt as failed evidence; never retry it in place.
         status, error = "error", f"{type(exc).__name__}: {exc}"
     record = json.loads((trial / "trial.json").read_text())
     seconds = [row["process"].get("seconds") for row in sessions]
-    record["runner"] = {"returncode": sessions[1]["process"]["returncode"] if len(sessions) == 2 else 1,
+    record["runner"] = {"returncode": sessions[-1]["process"]["returncode"] if sessions and status == "completed" else 1,
                         "seconds": known_total(seconds) if seconds else None,
-                        "timed_out": len(sessions) == 2 and bool(sessions[1]["process"].get("timed_out")),
+                        "timed_out": bool(sessions) and bool(sessions[-1]["process"].get("timed_out")),
                         "sessions": sessions}
+    if len(sessions) == 1 and status == "completed":
+        record["runner"]["returncode"] = sessions[0]["process"]["returncode"] or 1
     write(trial / "trial.json", record)
-    try:
-        coding_trials.check(trial)
-        if status == "completed":
-            analysis = analyze(trial, item["case"], manifest, sessions)
-            write(trial / "session-break.json", analysis)
-    except Exception as exc:
-        status, error = "error", error or f"{type(exc).__name__}: {exc}"
+    problem = finish_attempt(trial, item["case"], manifest, sessions) if sessions else None
+    if problem:
+        status, error = "error", error or problem
     outcome = {"status": status, "error": error, "seconds": round(time.monotonic() - started, 3), "finished": now(),
-               "session_returncodes": [row["process"].get("returncode") for row in sessions]}
+               "session_returncodes": [row["process"].get("returncode") for row in sessions],
+               "failed_sessions": [row["session"] for row in sessions if failed(row)]}
     write(trial / "attempt.json", outcome)
     return outcome
 
@@ -483,6 +602,9 @@ def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str
     plugin_root = plugin_root.resolve()
     if not (plugin_root / "scripts/zagrosi_skills.py").is_file():
         raise ValueError("The plugin root must contain scripts/zagrosi_skills.py")
+    if probe and "forge-lean" in arms and any((plugin_root / name).exists() for name in ("examples", "tools", "tests")):
+        # The Forge prompt points at this tree; an evaluator checkout holds the withheld clauses.
+        raise ValueError("--probe needs a runtime-only plugin snapshot without examples/, tools/ or tests/")
     executables = {"codex": codex, "claude": claude}
     versions = cli_versions({host, resume_host}, executables)
     compatibility = {}
@@ -511,7 +633,6 @@ def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str
                      "resume_model": resume_model, "resume_effort": resume_effort},
         "runners": [runner(host, model, effort, executables), runner(resume_host, resume_model, resume_effort, executables)],
         "cli_versions": versions, "compatibility_assertions": compatibility,
-        "clauses": {case: [clause["id"] for clause in CLAUSES[case]] for case in cases} if probe else {},
         "cases": {case: coding_trials.CASES[case] for case in cases},
         "identity": identity(plugin_root, cases), "prepared": now(), "trials": items,
     }
@@ -521,65 +642,77 @@ def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str
             "cli_versions": versions}
 
 
+def select(manifest: dict, directory: Path, attempt: str | None) -> list[dict]:
+    items = [item for item in manifest["trials"] if attempt in (None, item["id"])]
+    if not items:
+        raise ValueError(f"Unknown attempt: {attempt}")
+    return items
+
+
 def run(directory: Path, attempt: str | None = None) -> dict:
     """Attempt pending rows serially; stop after a session fails without timing out."""
     manifest = read_manifest(directory)
-    items = manifest["trials"]
-    if attempt is not None:
-        items = [item for item in items if item["id"] == attempt]
-        if not items:
-            raise ValueError(f"Unknown attempt: {attempt}")
-        if (directory / attempt / "attempt.json").exists():
-            raise ValueError(f"{attempt} was already attempted; prepare a new directory to repeat it")
+    items = select(manifest, directory, attempt)
+    if attempt is not None and (directory / attempt / "attempt.json").exists():
+        raise ValueError(f"{attempt} was already attempted; prepare a new directory to repeat it")
     halted = None
-    for item in items:
-        if (directory / item["id"] / "attempt.json").exists():
-            continue
-        require_identity(manifest)
-        outcome = run_attempt(directory, manifest, item)
-        print(json.dumps({"attempt": item["id"], **outcome}), flush=True)
-        failed = [code for code in outcome["session_returncodes"] if code not in (0, 124)]
-        if outcome["status"] != "completed" or failed:
-            halted = {"attempt": item["id"], "status": outcome["status"], "error": outcome["error"],
-                      "session_returncodes": outcome["session_returncodes"]}
-            break
+    with locked(directory):
+        for item in items:
+            if (directory / item["id"] / "attempt.json").exists():
+                continue
+            require_identity(manifest)
+            outcome = run_attempt(directory, manifest, item)
+            print(json.dumps({"attempt": item["id"], **outcome}), flush=True)
+            if outcome["status"] != "completed" or outcome["failed_sessions"]:
+                halted = {"attempt": item["id"], **{key: outcome[key] for key in
+                                                    ("status", "error", "session_returncodes", "failed_sessions")}}
+                break
     return {**report(directory), "halted": halted}
+
+
+def analyze(directory: Path, attempt: str | None = None) -> dict:
+    """Recompute usage, checks and session analysis for attempts whose sessions finished."""
+    manifest = read_manifest(directory)
+    with locked(directory):
+        for item in select(manifest, directory, attempt):
+            trial = directory / item["id"]
+            sessions = (read(trial / "trial.json").get("runner") or {}).get("sessions") or []
+            if read(trial / "attempt.json").get("status") in ("completed", "error") and sessions:
+                finish_attempt(trial, item["case"], manifest, sessions)
+    return report(directory)
 
 
 def attempt_row(directory: Path, item: dict) -> dict:
     trial = directory / item["id"]
-    attempt, result, analysis, checkpoint = (read(trial / name) for name in (
-        "attempt.json", "result.json", "session-break.json", "checkpoint.json"))
+    attempt, result, analysis, checkpoint, telemetry = (read(trial / name) for name in (
+        "attempt.json", "result.json", "session-break.json", "checkpoint.json", "telemetry.json"))
     status = attempt.get("status", "pending")
     if status == "running":
         status = "interrupted"
-    telemetry = [read(trial / f"session-{number}-telemetry.json") for number in (1, 2)]
-    totals = {key: known_total([(row.get("totals") or {}).get(key) for row in telemetry]) if all(telemetry) else None
-              for key in TOKENS}
-    totals["total_tokens"] = known_total([totals["input_tokens"], totals["output_tokens"]])
     quality = (result.get("common_quality") or {}).get("success")
     common = ("pending" if status == "pending" else "passed" if quality is True and status == "completed"
               else "failed" if quality is False or status != "completed" else "unknown")
     sessions = analysis.get("sessions") or []
-    seconds = [row.get("seconds") for row in sessions]
+    seconds = [row.get("seconds") for row in (result.get("runner") or {}).get("sessions") or []]
     final = analysis.get("final") or {}
     return {
         "id": item["id"], "arm": item["arm"], "case": item["case"], "block": item["block"], "status": status,
         "common_quality": common, "workflow": (result.get("workflow") or {}).get("success"),
         "behavior": (result.get("behavior") or {}).get("success"),
         "cleanup": (result.get("cleanup") or {}).get("success"),
-        "reported_telemetry": {"totals": totals, "reported_cost_usd": known_total(
-            [row.get("reported_cost_usd") for row in telemetry]) if all(telemetry) else None},
-        "attempt_seconds": known_total(seconds) if len(seconds) == 2 else None,
+        "reported_telemetry": {"totals": telemetry.get("totals") or dict.fromkeys((*TOKENS, "total_tokens")),
+                               "reported_cost_usd": telemetry.get("reported_cost_usd")},
+        "attempt_seconds": known_total([row.get("process", {}).get("seconds") for row in
+                                        (result.get("runner") or {}).get("sessions") or []]) if seconds else None,
         "sessions": [{key: row.get(key) for key in ("seconds", "returncode", "timed_out", "commands", "helper_calls")}
                      for row in sessions],
-        "missing_tools": [row.get("missing_tools") for row in telemetry],
+        "missing_tools": telemetry.get("missing_tools"),
         "reorientation": sessions[1].get("reorientation") if len(sessions) == 2 else None,
         "regressions": analysis.get("regressions"),
         "probes": final.get("probes"), "checkpoint_unchanged": analysis.get("checkpoint_unchanged"),
-        "checkpoint": {key: checkpoint.get(key) for key in ("changed_files", "planning", "probes")},
+        "checkpoint": {key: checkpoint.get(key) for key in ("changed_files", "planning", "probes", "compatibility")},
         "final_planning": final.get("planning"),
-        "outside_references": sum(len(row.get("outside_references") or []) for row in sessions),
+        "outside_references": sum(len(row.get("outside_references") or []) for row in sessions) if sessions else None,
         "rejection": rejection(result, analysis, status),
     }
 
@@ -592,14 +725,16 @@ def rejection(result: dict, analysis: dict, status: str) -> list[str]:
         return []
     reasons = []
     runner_record = result.get("runner") or {}
-    if runner_record.get("returncode") != 0:
+    if len(runner_record.get("sessions") or []) == 1:
+        reasons.append("session 1 failure")
+    elif runner_record.get("returncode") != 0:
         reasons.append("session 2 timeout" if runner_record.get("timed_out") else "session 2 failure")
     final = analysis.get("final") or {}
     probes = list((final.get("probes") or {}).values())
-    if not (final.get("compatibility") or {}).get("passed"):
+    if final and not (final.get("compatibility") or {}).get("passed"):
         reasons.append("compatibility regression" if (analysis.get("regressions") or {}).get("compatibility")
                        else "compatibility")
-    elif not (final.get("oracle") or {}).get("passed"):
+    elif final and not (final.get("oracle") or {}).get("passed"):
         reasons.append("unfinished feature" if "missing" in probes else
                        "clause" if any(value != "pass" for value in probes) else "feature")
     if (result.get("tests") or {}).get("returncode") != 0:
@@ -618,7 +753,7 @@ def summarize(rows: list[dict]) -> dict:
     total = known_total([row["reported_telemetry"]["totals"]["total_tokens"] for row in rows])
     reoriented = [row["reorientation"] for row in rows if row["reorientation"]]
     seconds = [value["seconds"] for value in reoriented if value.get("seconds") is not None]
-    regressions = [row["regressions"] for row in rows if row["regressions"]]
+    observed = [row["regressions"] for row in rows if row["regressions"] and row["regressions"]["any"] is not None]
     return {
         "scheduled": common["scheduled"], "accepted": common["accepted"], "accepted_rate": common["accepted_rate"],
         "statuses": dict(Counter(row["status"] for row in rows)),
@@ -630,13 +765,13 @@ def summarize(rows: list[dict]) -> dict:
         "reorientation": {"median_seconds": statistics.median(seconds) if seconds else None,
                           "planning_read": sum(value.get("planning_read") is True for value in reoriented),
                           "observed": len(reoriented)},
-        "regressions": {"attempts": sum(value["any"] for value in regressions),
-                        "compatibility": sum(bool(value["compatibility"]) for value in regressions),
-                        "tests": sum(any(value["tests"].values()) for value in regressions),
-                        "withheld_clauses": sum(bool(value["withheld_clauses"]) for value in regressions),
-                        "observed": len(regressions)},
+        "regressions": {"attempts": sum(value["any"] for value in observed),
+                        "compatibility": sum(value["compatibility"] is True for value in observed),
+                        "tests": sum(bool(value["tests"]) and any(value["tests"].values()) for value in observed),
+                        "withheld_clauses": sum(bool(value["withheld_clauses"]) for value in observed),
+                        "observed": len(observed), "unobserved": len(rows) - len(observed)},
         "helper_calls": sum(sum(session.get("helper_calls") or 0 for session in row["sessions"]) for row in rows),
-        "outside_references": sum(row["outside_references"] for row in rows),
+        "outside_references": known_total([row["outside_references"] for row in rows]),
         "rejections": dict(Counter(reason for row in rows for reason in row["rejection"])),
     }
 
@@ -648,17 +783,19 @@ def beats(first: dict, second: dict) -> bool:
     return (more > other and fewer <= regressed) or (fewer < regressed and more >= other)
 
 
-def decide(arms: dict) -> dict | None:
-    """Apply the protocol's decision rule to observed counts; small samples cannot establish an effect."""
+def decide(arms: dict, blockers: list[str]) -> dict:
+    """Apply the protocol's decision rule to complete observations only; small samples cannot establish an effect."""
     if set(arms) != set(ARMS):
-        return None
-    forge, notes, plain = (arms[name] for name in ARMS)
+        blockers = [*blockers, "the decision rule needs all three arms"]
+    if blockers:
+        return {"complete": False, "blockers": blockers}
+    forge, notes = arms["forge-lean"], arms["notes"]
     forge_tokens, notes_tokens = forge["total_tokens"]["total"], notes["total_tokens"]["total"]
     ratio = forge_tokens / notes_tokens if forge_tokens is not None and notes_tokens else None
     pairs = {f"{first}>{second}": beats(arms[first], arms[second]) for first in ARMS for second in ARMS if first != second}
-    h1 = pairs["forge-lean>plain"] and pairs["notes>plain"]
-    h2 = pairs["forge-lean>notes"] and ratio is not None and ratio <= 1.5
-    return {"H1": h1, "H2": h2, "H0": not any(pairs.values()), "pairs": pairs, "forge_to_notes_tokens": ratio}
+    h2 = pairs["forge-lean>notes"] and (None if ratio is None else ratio <= 1.5)
+    return {"complete": True, "blockers": [], "H1": pairs["forge-lean>plain"] and pairs["notes>plain"], "H2": h2,
+            "H0": not any(pairs.values()), "pairs": pairs, "forge_to_notes_tokens": ratio}
 
 
 def report(directory: Path) -> dict:
@@ -670,10 +807,15 @@ def report(directory: Path) -> dict:
     arms = {arm: summarize([row for row in rows if row["arm"] == arm]) for arm in dict.fromkeys(row["arm"] for row in rows)}
     blocks = {item["block"] for item in manifest["trials"]}
     reviewed = [row for row in reviews(directory) if row["valid"]]
+    blockers = [text for count, text in (
+        (sum(row["status"] in ("pending", "interrupted") for row in rows), "attempts not run to the end"),
+        (len(blocks) - len(reviewed), "blocks without a valid blind review"),
+        (sum(summary["regressions"]["unobserved"] for summary in arms.values()), "attempts with unobserved regressions"),
+    ) if count for text in [f"{count} {text}"]]
     result = {
         "protocol": PROTOCOL, "settings": manifest["settings"], "probe": manifest["probe"],
         "cli_versions": manifest["cli_versions"], "timeout": manifest["timeout"], "groups": groups, "arms": arms,
-        "decision": decide(arms), "comparative_review": {"expected": len(blocks), "completed": len(reviewed)},
+        "decision": decide(arms, blockers), "comparative_review": {"expected": len(blocks), "completed": len(reviewed)},
         "attempts": rows,
         "limits": "Every scheduled attempt counts, including failures, timeouts and pending work. Accepted means the "
                   "common-quality verdict, which needs an independent blind cleanup review. Tokens sum both sessions "
@@ -699,7 +841,7 @@ def apply_reviews(directory: Path) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("prepare", "run", "report", "blind", "apply-reviews"))
+    parser.add_argument("operation", choices=("prepare", "run", "analyze", "report", "blind", "apply-reviews"))
     parser.add_argument("directory", type=Path)
     parser.add_argument("--cases", nargs="+", default=list(PLANS))
     parser.add_argument("--arms", nargs="+", default=list(ARMS))
@@ -716,9 +858,9 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0, help="Blind packet ordering")
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--claude", default="claude")
-    parser.add_argument("--attempt", help="Run one pending attempt")
+    parser.add_argument("--attempt", help="Run or analyze one attempt")
     args = parser.parse_args()
-    directory = args.directory.absolute()
+    directory = Path(os.path.abspath(args.directory))
     try:
         if args.operation == "prepare":
             if not args.model or not args.effort:
@@ -730,6 +872,8 @@ def main() -> int:
                              codex=args.codex, claude=args.claude)
         elif args.operation == "run":
             result = run(directory, args.attempt)
+        elif args.operation == "analyze":
+            result = analyze(directory, args.attempt)
         elif args.operation == "blind":
             read_manifest(directory)
             result = packets(directory)
