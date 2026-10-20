@@ -72,35 +72,83 @@ def live_flags(installation):
             "-c", f"plugins.zagrosi-forge@{name}.enabled=true", "-c", "plugins.zagrosi-forge@zagrosi.enabled=false"]
 
 
-def prepare_live(root: Path, destination: Path, executable="codex", *, codex_home=None):
-    """Stage a unique native cache entry; never read or copy auth or change user settings."""
+def installed_plugin(executable, cwd, env, plugin_id):
+    listing = json.loads(run([executable, "plugin", "list", "--json"], cwd, env))
+    rows = listing if isinstance(listing, list) else listing["installed"]
+    item = next((row for row in rows if row.get("id", row.get("pluginId")) == plugin_id), None)
+    if item is None or not item.get("enabled"):
+        raise ValueError(f"Native plugin {plugin_id} is not installed and enabled")
+    return item
+
+
+def claude_skills(executable, cwd, env, plugin="zagrosi-forge"):
+    return inventory(run([executable, "plugin", "details", plugin], cwd, env), "Skills")
+
+
+def prepare_live(root: Path, destination: Path, executable="codex", *, codex_home=None, hosts=("codex",), claude="claude"):
+    """Stage a unique native package for the selected hosts; never read or copy auth or change user settings."""
+    if not hosts or set(hosts) - {"codex", "claude"}:
+        raise ValueError("Select codex, claude or both native hosts")
     destination.mkdir(parents=True, exist_ok=False)
-    marketplace, settings = destination / "marketplace", destination / "settings"
-    source = marketplace / "plugin"
     members = json.loads((root / ".codex-plugin/package-files.json").read_text())
-    for name in members:
-        path = source / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(root / name, path)
+
+    def stage(marketplace):
+        for name in members:
+            path = marketplace / "plugin" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / name, path)
+        return marketplace / "plugin"
+
     namespace = "forge-native-" + uuid.uuid4().hex
-    catalog = marketplace / ".agents/plugins/marketplace.json"
-    catalog.parent.mkdir(parents=True)
-    catalog.write_text(json.dumps({"name": namespace, "plugins": [{"name": "zagrosi-forge",
-        "source": {"source": "local", "path": "./plugin"}, "category": "Developer tools",
-        "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}}]}))
-    settings.mkdir()
-    env = {**os.environ, "CODEX_HOME": str(settings)}
-    run([executable, "plugin", "marketplace", "add", str(marketplace)], destination, env)
-    result = json.loads(run([executable, "plugin", "add", "zagrosi-forge@" + namespace, "--json"], destination, env))
-    installed = Path(result["installedPath"])
-    auth_home = Path(codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-    cache = auth_home / "plugins/cache" / namespace
-    shutil.copytree(settings / "plugins/cache" / namespace, cache)
-    loaded = cache / installed.relative_to(settings / "plugins/cache" / namespace)
-    if mismatches(root, loaded, members):
-        raise ValueError("Native cache does not match the requested package")
-    return {"marketplace_name": namespace, "marketplace": str(marketplace), "codex_plugin": str(loaded),
-            "claude_plugin": str(source), "temporary_cache": str(cache), "settings": "unchanged", "auth": "native"}
+    installation = {"marketplace_name": namespace, "hosts": [host for host in ("codex", "claude") if host in hosts],
+                    "settings": "unchanged", "auth": "native"}
+    if "claude" in hosts:
+        # Claude installs first, into disposable settings inside the trial, so its failures never strand a Codex
+        # cache entry. Codex also reads .claude-plugin catalogs, so each host gets its own marketplace. Sessions load
+        # the installed copy with --plugin-dir: running Claude with this config directory would drop the native login.
+        marketplace, settings = destination / "claude-marketplace", destination / "claude-settings"
+        source = stage(marketplace)
+        catalog = marketplace / ".claude-plugin/marketplace.json"
+        catalog.parent.mkdir()
+        catalog.write_text(json.dumps({"name": namespace, "owner": {"name": "Forge native trials"},
+                                       "plugins": [{"name": "zagrosi-forge", "source": "./plugin"}]}))
+        settings.mkdir()
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(settings)}
+        run([claude, "plugin", "validate", str(source), "--strict"], destination, env)
+        run([claude, "plugin", "marketplace", "add", str(marketplace)], destination, env)
+        run([claude, "plugin", "install", "zagrosi-forge@" + namespace], destination, env)
+        installed = Path(installed_plugin(claude, destination, env, "zagrosi-forge@" + namespace)["installPath"])
+        if not installed.resolve().is_relative_to(settings.resolve()) or mismatches(root, installed, members):
+            raise ValueError("Native Claude install does not match the requested package inside its disposable settings")
+        installation.update(claude_marketplace=str(marketplace), claude_plugin=str(installed), claude_settings=str(settings))
+    if "codex" in hosts:
+        marketplace, settings = destination / "marketplace", destination / "settings"
+        stage(marketplace)
+        catalog = marketplace / ".agents/plugins/marketplace.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(json.dumps({"name": namespace, "plugins": [{"name": "zagrosi-forge",
+            "source": {"source": "local", "path": "./plugin"}, "category": "Developer tools",
+            "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}}]}))
+        settings.mkdir()
+        env = {**os.environ, "CODEX_HOME": str(settings)}
+        run([executable, "plugin", "marketplace", "add", str(marketplace)], destination, env)
+        result = json.loads(run([executable, "plugin", "add", "zagrosi-forge@" + namespace, "--json"], destination, env))
+        installed = Path(result["installedPath"])
+        auth_home = Path(codex_home or os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        cache = auth_home / "plugins/cache" / namespace
+        if cache.exists():
+            raise ValueError(f"Codex cache namespace already exists: {cache}")
+        try:
+            shutil.copytree(settings / "plugins/cache" / namespace, cache)
+            loaded = cache / installed.relative_to(settings / "plugins/cache" / namespace)
+            if mismatches(root, loaded, members):
+                raise ValueError("Native cache does not match the requested package")
+        except BaseException:
+            # Nothing records a failed staging, so its namespace must not outlive it in the user's cache.
+            shutil.rmtree(cache, ignore_errors=True)
+            raise
+        installation.update(marketplace=str(marketplace), codex_plugin=str(loaded), temporary_cache=str(cache))
+    return installation
 
 
 def mismatches(source: Path, installed: Path, members: list[str]) -> list[str]:
@@ -165,11 +213,7 @@ def smoke(root: Path, host: str, executable: str, *, upgrade: bool = False) -> d
         def install(update=False):
             verb = "update" if host == "claude" and update else "install" if host == "claude" else "add"
             output = run([executable, "plugin", verb, "zagrosi-forge@zagrosi"], base, env)
-            listing = json.loads(run([executable, "plugin", "list", "--json"], base, env))
-            rows = listing if isinstance(listing, list) else listing["installed"]
-            item = next(row for row in rows if row.get("id", row.get("pluginId")) == "zagrosi-forge@zagrosi")
-            if not item.get("enabled"):
-                raise ValueError("Native plugin is disabled")
+            item = installed_plugin(executable, base, env, "zagrosi-forge@zagrosi")
             if host == "claude":
                 # Codex reports skill paths to contain below; Claude reports where it loads the plugin from.
                 claude_load_path(item, source, settings)
@@ -229,7 +273,7 @@ def main() -> int:
         try:
             results.append(smoke(args.plugin_root.resolve(), host, executable, upgrade=args.upgrade) if executable else
                            {"host": host, "status": "unavailable", "success": False if args.require else None})
-        except (OSError, ValueError, KeyError, StopIteration, queue.Empty, subprocess.TimeoutExpired) as exc:
+        except (OSError, ValueError, KeyError, queue.Empty, subprocess.TimeoutExpired) as exc:
             results.append({"host": host, "success": False, "error": str(exc) or type(exc).__name__})
     success = all(row.get("success") is not False for row in results)
     print(json.dumps({"success": success, "results": results}, indent=2))

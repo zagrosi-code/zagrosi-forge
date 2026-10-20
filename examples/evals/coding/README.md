@@ -501,14 +501,25 @@ independent review must explain the concrete improvement.
 Native writer runs use existing CLI authentication and consume the account's
 usage. They do not read or copy credentials. Claude loads the selected plugin
 with `--plugin-dir`, suppresses user/project settings, and preserves OAuth; its
-plain arm omits the plugin. Host permission controls differ. The disposable trial
-workspace and scope checker are evaluation boundaries, not a security sandbox.
+plain arm omits the plugin. Both Claude arms get the same tools, including
+`Agent` and `TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate`. Claude Code 2.1.304
+keeps `TodoWrite` off by default and silently drops unknown or disabled tool
+names, so telemetry records the registered tools and any `missing_tools`.
+Efforts are checked
+per host before launch: Codex accepts `low` to `xhigh`, Claude `low` to `max`.
+Claude ignores an unknown `--effort`, so only this check rejects it. Host
+permission controls differ. The disposable trial workspace and scope checker
+are evaluation boundaries, not a security sandbox.
 
 Reports retain every attempt and add accepted rate, elapsed time, cached/uncached
 input and output usage, interventions and CLI-reported cost per accepted result. Failures count
 in totals. Missing observations stay unknown; zero accepted results leaves
-per-accepted figures undefined. Claude final-result usage is counted once;
-reported costs are estimates, not subscription charges. Independent review time
+per-accepted figures undefined. Claude final-result usage is counted once.
+Claude `totals` come from the result's per-model usage, which includes
+subagents, whenever the CLI reports it (`totals_source`). `top_level_totals`
+keep the result `usage`, which covers only the top-level loop. Telemetry also
+records `subagent_stats`.
+Reported costs are estimates, not subscription charges. Independent review time
 is currently unmeasured. Offline stream tests are parser evidence, not live
 model-quality results. Historical reports above remain unchanged.
 
@@ -530,7 +541,9 @@ python3 tools/coding_trials.py run /tmp/forge-cross-host --case resume \
 
 If the first process finishes before interruption or cleanup is unconfirmed,
 the interruption trial fails explicitly. A successful helper-process recovery
-test does not claim that either model used a skill correctly.
+test does not claim that either model used a skill correctly. This path has no
+plain-agent arm. The [session-break protocol](../session-break-protocol.md)
+specifies the arm-neutral comparison.
 
 ### Native skill acceptance matrix
 
@@ -542,11 +555,24 @@ It independently checks the original failing test, unchanged requirements/tests,
 saved input hashes, final behavior, admitted records and captured verification.
 These are workflow checks, not performance or general code-quality comparisons.
 
-Native `prepare` copies the selected package into a UUID namespace under the
-active Codex plugin cache (`$CODEX_HOME/plugins/cache`, default
+For Codex, native `prepare` copies the selected package into a UUID namespace
+under the active Codex plugin cache (`$CODEX_HOME/plugins/cache`, default
 `~/.codex/plugins/cache`). It retains that namespace for later continuation;
 remove only the recorded namespace after finishing. Use the isolated coding-trial
 harness above when writing to the native cache is outside the authorized scope.
+For Claude, `prepare` validates the package and installs it from its own
+marketplace copy into disposable settings inside the matrix. Codex also reads
+`.claude-plugin` catalogs, which is why Claude gets a separate copy. It records
+the installed copy and the `claude plugin details` skill list. Sessions load
+that copy with `--plugin-dir` and keep the native login.
+
+`--host claude` prepares a Claude-only matrix and never runs Codex or writes
+to its cache. Its direct and indirect rows both continue on Claude:
+
+```bash
+python /frozen/evaluator/tools/native_workflow_trials.py prepare /saved/claude-matrix \
+  --host claude --plugin-root /frozen/plugin --claude-model YOUR_CLAUDE_MODEL --effort max
+```
 
 ```bash
 # No model calls: native staging/discovery, fixed inputs and evaluator hashes.
@@ -565,8 +591,9 @@ native events, CLI version, result and reported usage. A host batch stops on a
 failure; failed attempts are never overwritten. Diagnose shared defects before
 preparing a new matrix. Missing authentication is blocked, not passed or failed.
 Codex inherits native settings unchanged and uses matching per-process plugin
-overrides for discovery/execution. Claude uses session-only `--plugin-dir`.
-Authentication stays with each CLI; the harness never copies credential stores.
+overrides for discovery/execution. Claude uses session-only `--plugin-dir` on
+its installed copy. Authentication stays with each CLI; the harness never copies
+credential stores.
 
 `--resume-host codex` permits Codex-only acceptance while preserving direct rows'
 cross-host checks as pending. Keep the matrix, frozen evaluator/plugin trees and

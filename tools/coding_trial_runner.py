@@ -12,6 +12,42 @@ import subprocess
 import sys
 import time
 
+# Claude Code warns and ignores an unknown --effort, so the harness rejects it before launch.
+EFFORTS = {"codex": ("low", "medium", "high", "xhigh"), "claude": ("low", "medium", "high", "xhigh", "max")}
+EFFORT_CHOICES = tuple(dict.fromkeys(effort for efforts in EFFORTS.values() for effort in efforts))
+# One list for --tools and --allowedTools. Claude Code 2.1.304 keeps TodoWrite off by default and drops
+# unknown or disabled names silently, so telemetry compares the init event's tools with this list.
+CLAUDE_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,Skill,Agent,TaskCreate,TaskGet,TaskList,TaskUpdate"
+# The init event reports the Agent tool as Task.
+REQUESTED_CLAUDE_TOOLS = frozenset("Task" if name == "Agent" else name for name in CLAUDE_TOOLS.split(","))
+
+
+def require_effort(host: str, effort: str) -> str:
+    if effort not in EFFORTS[host]:
+        raise ValueError(f"{host} does not accept {effort!r} effort; choose one of {', '.join(EFFORTS[host])}")
+    return effort
+
+
+def input_totals(uncached, cached, written) -> dict:
+    """Split input usage; a missing or invalid count stays unknown instead of zero."""
+    valid = [type(value) is int and value >= 0 for value in (uncached, cached, written)]
+    return {"input_tokens": uncached + cached + written if all(valid) else None,
+            "cached_input_tokens": cached if valid[1] else None,
+            "cache_creation_input_tokens": written if valid[2] else None,
+            "uncached_input_tokens": uncached if valid[0] else None}
+
+
+def model_usage_totals(model_usage) -> dict:
+    """Sum the result's per-model usage, which also counts subagents; invalid values stay unknown."""
+    rows = list(model_usage.values()) if isinstance(model_usage, dict) else []
+
+    def total(key):
+        values = [row.get(key) if isinstance(row, dict) else None for row in rows]
+        return sum(values) if values and all(type(value) is int and value >= 0 for value in values) else None
+
+    return {**input_totals(*map(total, ("inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"))),
+            "output_tokens": total("outputTokens")}
+
 
 def qualify_native_loading(suite, suite_root, task_id, arm_id, roots, evidence_dir, *, auth_file=None):
     """Explicit native bootstrap; keep suite dependencies out of legacy imports."""
@@ -173,6 +209,7 @@ class ClaudeTelemetry(Telemetry):
         self.commands = {}
         self.models = set()
         self.result = None
+        self.tools = None
 
     def observe(self, event: dict, elapsed: float):
         self.events += 1
@@ -180,6 +217,8 @@ class ClaudeTelemetry(Telemetry):
         message = message if isinstance(message, dict) else {}
         if isinstance(message.get("model"), str):
             self.models.add(message["model"])
+        if event.get("type") == "system" and event.get("subtype") == "init" and isinstance(event.get("tools"), list):
+            self.tools = sorted({name for name in event["tools"] if isinstance(name, str)})
         if event.get("type") == "result":
             self.result = event
             self.usage = [event["usage"]] if isinstance(event.get("usage"), dict) else []
@@ -208,34 +247,37 @@ class ClaudeTelemetry(Telemetry):
     def summary(self) -> dict:
         summary = super().summary()
         usage = self.usage[-1] if self.usage else {}
-        uncached, cached, written = (usage.get(key) for key in
-            ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-        valid = lambda value: type(value) is int and value >= 0
         totals = summary["totals"]
-        totals.update(input_tokens=sum((uncached, cached, written)) if all(map(valid, (uncached, cached, written))) else None,
-                      cached_input_tokens=cached if valid(cached) else None,
-                      cache_creation_input_tokens=written if valid(written) else None,
-                      uncached_input_tokens=uncached if valid(uncached) else None)
-        cost = (self.result or {}).get("total_cost_usd")
+        totals.update(input_totals(*(usage.get(key) for key in
+                                     ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))))
+        top_level = dict(totals)
+        result = self.result or {}
+        cost = result.get("total_cost_usd")
+        model_usage = result.get("modelUsage") if isinstance(result.get("modelUsage"), dict) and result["modelUsage"] else None
+        if model_usage:
+            totals.update(model_usage_totals(model_usage))
+        stats = result.get("subagent_stats")
         return {**summary, "source": "claude print stream-json", "observed_models": sorted(self.models),
                 "reported_cost_usd": cost if type(cost) in (int, float) and math.isfinite(cost) and cost >= 0 else None,
                 "cost_basis": "CLI estimate, not subscription billing", "result_received": self.result is not None,
-                "permission_denials": (self.result or {}).get("permission_denials"),
-                "limits": "Final result usage only; assistant usage is not added twice. Input totals include uncached, cache reads and cache writes. Command timing uses received tool events. Missing fields remain unknown. CLI costs are estimates, not charges; model names are reported, not independently attested."}
+                "permission_denials": result.get("permission_denials"),
+                "totals_source": None if self.result is None else "modelUsage" if model_usage else "result usage",
+                "top_level_totals": top_level, "model_usage": model_usage,
+                "subagent_stats": stats if isinstance(stats, dict) else None, "registered_tools": self.tools,
+                "missing_tools": None if self.tools is None else sorted(REQUESTED_CLAUDE_TOOLS - set(self.tools)),
+                "limits": "Final result usage only; assistant usage is not added twice. Totals use the result's per-model usage, which includes subagents, when the CLI reports it; top_level_totals keep the result usage of the top-level loop. Input totals include uncached, cache reads and cache writes. Command timing uses received tool events. Missing fields remain unknown. CLI costs are estimates, not charges; model names are reported, not independently attested."}
 
 
 def writer_command(host: str, executable: str, model: str, effort: str, record: dict) -> list[str]:
+    require_effort(host, effort)
     if host == "codex":
         return [executable, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--json",
                 "--sandbox", "workspace-write", "--skip-git-repo-check", "--model", model,
                 "-c", 'approval_policy="never"', "-c", f'model_reasoning_effort="{effort}"', "-"]
-    if effort == "xhigh":
-        raise ValueError("Claude does not accept Codex's xhigh effort; select an explicit supported effort")
     command = [executable, "--print", "--output-format", "stream-json", "--verbose", "--model", model,
                "--effort", effort, "--restricted", "--setting-sources", "", "--strict-mcp-config",
                "--mcp-config", '{"mcpServers":{}}', "--permission-mode", "acceptEdits",
-               "--permission-prompts", "none", "--tools", "Read,Edit,Write,Bash,Glob,Grep,Skill",
-               "--allowedTools", "Read,Edit,Write,Bash,Glob,Grep,Skill"]
+               "--permission-prompts", "none", "--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_TOOLS]
     if record.get("plugin_root") and not record.get("plain_agent"):
         command.extend(["--plugin-dir", record["plugin_root"]])
     return command
@@ -245,7 +287,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", choices=("codex", "claude"), default="codex")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--effort", required=True, choices=("low", "medium", "high", "xhigh"))
+    parser.add_argument("--effort", required=True, choices=EFFORT_CHOICES)
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--claude", default="claude")
     args = parser.parse_args()
