@@ -163,6 +163,10 @@ def _capture_summary(result: dict) -> dict:
 
 def implement_verify(args) -> int:
     planning = storage.resolve_path(args.planning_dir)
+    from . import state_first
+
+    if state_first.active(planning):
+        return state_first.finish(args, planning)
     target = mutable_inputs.target_directory(planning, getattr(args, "target_dir", None))
     command = args.command_argv[1:] if args.command_argv[:1] == ["--"] else args.command_argv
     try:

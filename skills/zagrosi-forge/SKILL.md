@@ -48,7 +48,8 @@ host supports skill invocation; otherwise read and follow its `SKILL.md`.
 For a small change, keep one compact section; do not split it into a project.
 Use `lean` unless the user requests `standard`/`deep` or material risk warrants
 more investigation. Explain a depth change briefly. Every depth preserves the
-same behavior, ownership, and verification obligations.
+same behavior, ownership, and verification obligations. [State-first](../zagrosi-implement/references/state-first.md)
+lean is opt-in: use it only when the user asks or `status.json` already exists.
 
 An implementation request authorizes moving through planning and implementation;
 continue without asking again at each phase. A plan, audit, or review-only request

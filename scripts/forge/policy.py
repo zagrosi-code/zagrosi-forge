@@ -68,10 +68,27 @@ REVIEW_BOARD_PASSES = [
 SENSITIVE_KEY_RE = re.compile(r"(token|secret|key|password|credential|authorization|bearer)", re.I)
 
 
+# Whole words and their inflections: "auth" never matches "author", nor "data" "metadata".
+RISK_TERMS = (
+    r"(?:in)?secur\w*", r"privacy", r"o?auth(?:entic\w*|ori[sz]\w*|[nz]?\d*)", r"permissions?", r"migrat\w*",
+    r"data(?:base)?s?", r"payments?", r"tokens?", r"secrets?", r"passwords?", r"credentials?", r"(?:en|de)crypt\w*",
+)
+
+
+RISK_TERM_RE = re.compile(r"\b(?:" + "|".join(RISK_TERMS) + r")\b", re.I)
+
+
 WORKFLOW_AMBIGUITY_TERMS = ["choose", "either", "tradeoff", "unknown", "tbd"]
 
 
 LOCAL_TOOL_NAMES = ["gh", "codex", "claude", "gemini"]
+
+
+LEGACY_PLAN_FILES = ("codex-plan.md", "claude-plan.md")
+
+
+# Legacy host-prefixed names win; plan.md is the host-neutral name.
+PLAN_FILES = (*LEGACY_PLAN_FILES, "plan.md")
 
 
 DEFAULT_DEPTH = "lean"

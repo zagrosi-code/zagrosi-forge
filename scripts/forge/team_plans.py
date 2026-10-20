@@ -18,7 +18,7 @@ FILE_LIMIT = 128 * 1024
 BUNDLE_LIMIT = 512 * 1024
 FILE_COUNT = 128
 _OID = re.compile(r'(?:[a-f0-9]{40}|[a-f0-9]{64})\Z')
-_ARTIFACTS = {'codex-plan.md', 'claude-plan.md', 'codex-spec.md', 'claude-spec.md',
+_ARTIFACTS = {*policy.LEGACY_PLAN_FILES, 'codex-spec.md', 'claude-spec.md',
               'codex-plan-tdd.md', 'claude-plan-tdd.md', 'codex-research.md', 'claude-research.md',
               'codex-integration-notes.md', 'claude-integration-notes.md', 'codex-evidence.md',
               'claude-evidence.md', 'decisions.md', 'risk-register.md', 'quality-gates.md'}
@@ -157,10 +157,10 @@ def _eligible(name, entries):
 
 
 def _seeds(entries):
-    plans = set(entries) & {'codex-plan.md', 'claude-plan.md'}
+    plans = set(entries) & set(policy.LEGACY_PLAN_FILES) or set(entries) & {'plan.md'}
     if len(plans) != 1:
         _fail('Shared preparation requires exactly one committed physical compact plan.')
-    selected = (set(entries) & _ARTIFACTS) | {'sections/index.md'}
+    selected = (set(entries) & _ARTIFACTS) | plans | {'sections/index.md'}
     selected.update(name for name in entries if name.startswith('reviews/') and name.count('/') == 1 and name.endswith('.md'))
     return next(iter(plans)), selected
 

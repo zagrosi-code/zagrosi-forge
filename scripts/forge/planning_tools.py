@@ -35,8 +35,7 @@ def planning_consistency(args: argparse.Namespace) -> int:
         return _quality.emit_quality("planning-consistency", findings, args, {"planning_dir": str(planning_dir)})
     source_ids = _markdown.requirement_ids(_storage.read_text(source_path))
     required_artifact_names = [
-        "codex-plan.md",
-        "claude-plan.md",
+        *_policy.LEGACY_PLAN_FILES,
         "codex-plan-tdd.md",
         "claude-plan-tdd.md",
         "codex-integration-notes.md",
@@ -45,6 +44,8 @@ def planning_consistency(args: argparse.Namespace) -> int:
         "traceability.md",
         "sections/index.md",
     ]
+    if (plan := _artifacts.plan_file(planning_dir)) and plan.name not in required_artifact_names:
+        required_artifact_names.append(plan.name)
     compact = _artifacts.compact_plan_descriptor(planning_dir)
     if compact and not compact["errors"]:
         # Compact indexes route work; the canonical plan owns requirement coverage.

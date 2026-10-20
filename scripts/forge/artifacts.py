@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 import json
@@ -17,12 +18,25 @@ from . import sections as _sections
 from . import session as _session
 from . import storage as _storage
 
-def artifact(path: Path, names: list[str]) -> Path | None:
+def artifact(path: Path, names: Sequence[str]) -> Path | None:
     for name in names:
         candidate = path / name
         if candidate.exists():
             return candidate
     return None
+
+
+def plan_file(planning_dir: Path) -> Path | None:
+    """Legacy names first; plan.md counts only with Forge metadata, so scratch and state-first plans never do."""
+    legacy = artifact(planning_dir, _policy.LEGACY_PLAN_FILES)
+    if legacy:
+        return legacy
+    candidate = planning_dir / "plan.md"
+    try:
+        text = _storage.read_text(candidate) if candidate.is_file() else ""
+    except (OSError, UnicodeDecodeError):
+        return None  # An unreadable scratch file is not a plan.
+    return candidate if _markdown.extract_block(text, _policy.FORGE_META_START, "END_FORGE_META") is not None else None
 
 
 def planning_config(planning_dir: Path) -> dict[str, Any]:
@@ -44,9 +58,9 @@ def compact_plan_descriptor(planning_dir: Path) -> dict[str, Any] | None:
 
 def _compact_plan_descriptor(planning_dir: Path, observe) -> dict[str, Any] | None:
     """Resolve the explicitly selected canonical plan; legacy files win."""
-    for name in ("codex-plan.md", "claude-plan.md", "sections/index.md"):
+    for name in (*_policy.PLAN_FILES, "sections/index.md"):
         observe(planning_dir / name)
-    physical = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
+    physical = plan_file(planning_dir)
     index = planning_dir / "sections" / "index.md"
     marker_path = physical or index
     if not marker_path.is_file():
@@ -103,7 +117,7 @@ def _compact_plan_descriptor(planning_dir: Path, observe) -> dict[str, Any] | No
 
 
 def implementation_plan_path(planning_dir: Path) -> Path | None:
-    physical = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
+    physical = plan_file(planning_dir)
     if physical:
         return physical
     compact = compact_plan_descriptor(planning_dir)
@@ -182,7 +196,7 @@ def planning_depth(planning_dir: Path, fallback: str = _policy.DEFAULT_DEPTH) ->
     depth = planning_config(planning_dir).get("depth_mode")
     if isinstance(depth, str) and depth in _policy.DEPTH_MODES:
         return depth
-    plan_path = artifact(planning_dir, ["codex-plan.md", "claude-plan.md"])
+    plan_path = plan_file(planning_dir)
     if plan_path:
         meta, _ = _markdown.parse_forge_meta(_storage.read_text(plan_path))
         meta_depth = meta.get("depth_mode") if isinstance(meta, dict) else None
@@ -303,7 +317,7 @@ def plan_artifact_state(planning_dir: Path) -> dict[str, Path | None]:
         "research": nonempty_artifact(planning_dir, ["codex-research.md", "claude-research.md"]),
         "interview": nonempty_artifact(planning_dir, ["codex-interview.md", "claude-interview.md"]),
         "spec": nonempty_artifact(planning_dir, ["codex-spec.md", "claude-spec.md"]),
-        "plan": nonempty_artifact(planning_dir, ["codex-plan.md", "claude-plan.md"]),
+        "plan": plan if (plan := plan_file(planning_dir)) and _storage.read_text(plan).strip() else None,
         "integration_notes": nonempty_artifact(
             planning_dir,
             ["codex-integration-notes.md", "claude-integration-notes.md"],
