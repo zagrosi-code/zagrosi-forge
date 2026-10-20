@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 
-ROOTS = {".agents", ".codex-plugin", ".claude-plugin", "assets", "docs", "examples", "scripts", "skills", "tests", "tools"}
+ROOTS = {".agents", ".codex-plugin", ".claude-plugin", "agents", "assets", "docs", "examples", "scripts", "skills", "tests", "tools"}
 FILES = {"README.md", "NOTICE.md", "LICENSE", "pyproject.toml"}
 MANIFEST = ".codex-plugin/package-files.json"
 

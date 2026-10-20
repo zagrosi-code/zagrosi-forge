@@ -416,6 +416,16 @@ def test_runtime_drift_is_separate_from_behavior(tmp_path):
     assert "scripts/forge/processes.py" in result["plugin_provenance"]["changed_files"]
 
 
+def test_reviewer_agent_drift_invalidates_plugin_provenance(tmp_path):
+    trial = tmp_path / "trial"
+    trials.prepare(trial, "cleanup")
+    record_path = trial / "trial.json"
+    record = json.loads(record_path.read_text())
+    record["plugin_sha256"]["agents/forge-reviewer.md"] = "0" * 64
+    record_path.write_text(json.dumps(record))
+    assert trials.check(trial)["plugin_provenance"]["changed_files"] == ["agents/forge-reviewer.md"]
+
+
 def test_evaluator_provenance_includes_verdict_helpers_and_case_requirements(tmp_path):
     trial = tmp_path / "trial"
     trials.prepare(trial, "cleanup")

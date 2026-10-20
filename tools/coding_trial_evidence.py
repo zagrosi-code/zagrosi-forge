@@ -18,7 +18,7 @@ def files(root: Path) -> dict[str, str]:
 
 def plugin_files(root: Path) -> dict[str, str]:
     paths = [root / "scripts/zagrosi_skills.py", *sorted((root / "scripts/forge").rglob("*.py")),
-             *sorted((root / "skills").rglob("*.md"))]
+             *sorted((root / "skills").rglob("*.md")), *sorted((root / "agents").glob("*.md"))]
     return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.is_file()}
 
 
@@ -39,7 +39,7 @@ def plugin_provenance(record: dict, root: Path) -> dict:
                     and any(name.startswith("scripts/forge/") for name in before))
     status = "incomplete" if not complete else "drift" if changed else "verified"
     return {"success": status == "verified", "status": status, "changed_files": changed,
-            "coverage": "launcher, runtime Python modules, and skill Markdown"}
+            "coverage": "launcher, runtime Python modules, and skill and agent Markdown"}
 
 
 def semantic_files(workspace: Path) -> dict[str, str]:

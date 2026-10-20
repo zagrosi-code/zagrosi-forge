@@ -88,6 +88,26 @@ def test_every_skill_resolves_plugin_root() -> None:
     assert "zagrosi-forge:zagrosi-plan" in router
 
 
+REVIEWER = ROOT / "agents" / "forge-reviewer.md"
+
+
+def test_reviewer_agent_is_read_only_packaged_and_requested() -> None:
+    frontmatter, body = skill_parts(REVIEWER)
+    fields = dict(re.findall(r"^(\w+): (.+)$", frontmatter, re.MULTILINE))
+    # Plugin agents ignore permissionMode, hooks and mcpServers, and memory adds write tools, so
+    # read-only access rests on exactly these keys, each a single-line plain YAML scalar.
+    assert sorted(fields) == ["description", "name", "tools"] and len(frontmatter.strip().splitlines()) == 3
+    assert not any(": " in value or " #" in value or value[0] in "-?:,[]{}#&*!|>'\"%@`" for value in fields.values())
+    assert fields["name"] == REVIEWER.stem
+    assert {tool.strip() for tool in fields["tools"].split(",")} == {"Read", "Grep", "Glob"}
+    assert "path:line" in body and "Distinguishing check" in body
+    assert "agents/forge-reviewer.md" in json.loads((ROOT / ".codex-plugin/package-files.json").read_text())
+    for skill in ("zagrosi-implement", "zagrosi-cleanup"):
+        assert "providers.md#same-host-review" in (ROOT / "skills" / skill / "SKILL.md").read_text(), skill
+    providers = (ROOT / "skills/zagrosi-forge/references/providers.md").read_text()
+    assert "## Same-host review" in providers and "{plugin_root}/agents/forge-reviewer.md" in providers
+
+
 def test_skills_preapprove_only_safe_helper_commands() -> None:
     expected = [f'Bash({launcher} "${{CLAUDE_PLUGIN_ROOT}}/scripts/zagrosi_skills.py" {command} *)'
                 for launcher in HELPER_LAUNCHERS for command in SAFE_HELPER_COMMANDS]

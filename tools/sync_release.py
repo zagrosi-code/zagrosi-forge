@@ -8,7 +8,7 @@ import subprocess
 import tomllib
 
 # Hosts that pin a manifest version (Claude Code) only refresh installs when it changes.
-RUNTIME_PREFIXES = ("skills/", "scripts/")
+RUNTIME_PREFIXES = ("agents/", "skills/", "scripts/")
 # Generated hash manifests change with every test edit but ship no new behavior.
 GENERATED_MANIFESTS = {"scripts/forge/sources.py": "TEST", "scripts/zagrosi_skills.py": "RUNTIME"}
 
@@ -35,7 +35,7 @@ def unreleased_changes(root: Path, base: str) -> list[str]:
         return block.sub(b"", git("show", f"{merge_base}:{path}")) == block.sub(b"", git("show", f"HEAD:{path}"))
 
     merge_base = git("merge-base", base, "HEAD").decode().strip()
-    # Without rename detection, moving a runtime file out of skills/ or scripts/ still counts; -z keeps
+    # Without rename detection, moving a file out of a runtime directory still counts; -z keeps
     # non-ASCII paths unquoted. Additions, deletions and mode changes always count.
     entries = git("diff", "--raw", "--no-renames", "-z", f"{merge_base}..HEAD").decode().split("\0")
     changed = []

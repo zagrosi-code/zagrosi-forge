@@ -1,5 +1,11 @@
 # Releases
 
+## 0.4.2 — same-host independent review
+
+- Add the read-only `forge-reviewer` agent. Claude Code runs same-host independent review in a fresh context that reads the repository itself, without a second CLI sign-in; other hosts with subagents use the same instructions.
+- Implement and Cleanup ask a fresh-context subagent to review behavior changes, the diff and affected callers where the host supports one. `provider-review` remains for other providers: Codex or Gemini from Claude Code, Claude or Gemini from Codex.
+- Package `agents/` for both hosts, require a new release when it changes, include it in trial provenance, and check that Claude Code discovers the agent in the native smoke test.
+
 ## 0.4.1 — Claude Code host fixes
 
 - Deliver runtime fixes to Claude Code installs: Claude Code keeps a cached plugin until its manifest version changes, so pull-request validation now fails when `skills/` or `scripts/` change without a new release version.
