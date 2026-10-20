@@ -159,7 +159,7 @@ def bootstrap(manifest: dict[str, str], cli_path: Path, namespace: str):
 RUNTIME_MANIFEST = {
     "forge/__init__.py": "f6b2a10e6ee7118cac49c823f53216f5952058d206db18bf681db53864afa73f",
     "forge/actions.py": "9e01b2dbae283e33f251bf2132ee2a4d8054d2b008f415e07a6a92e7f496530d",
-    "forge/artifacts.py": "2d50f39261a29bc807985b98ad8a45d299681fda0303d40917b80b67fd3fb3a4",
+    "forge/artifacts.py": "7b82d303ef8431b01728b8fb11dbe58ecb2d416bc46f995154e2712e497f0d6c",
     "forge/authority.py": "dc3b592eeb2deba8e5778887f68c1435c4b04a7b215bc6b7f028c8a995563b41",
     "forge/capabilities.py": "156ccf97e99dabc99c0ae5aff3671984bb9a1042d024ba24e1d18aa4cde7fcbc",
     "forge/child_process.py": "257b32bf2dca70fd00f4ea76f43633163633aa5c2d258f784560e1cdadbe023e",
@@ -212,7 +212,7 @@ RUNTIME_MANIFEST = {
     "forge/sections.py": "e864c38715e474f652823edd5dc26af8e703c553b39bfa141170ee1adc10a026",
     "forge/secure_io.py": "2c529854508436ff083d3a01c1ad97de4b5e5a532c1365b28a173c0cd0401108",
     "forge/session.py": "87d35fb6a68e016f6480d7fa083842022f535e4c5385529202498f71b4bbbc02",
-    "forge/sources.py": "b64546e87483e6681bed3976dd8011e568d735f392aeecc41aaa40f2bfe92f37",
+    "forge/sources.py": "3ae62d87388ba0720541d5226be0f93249b6b796bb8d26e933c35d960530dde2",
     "forge/state.py": "7114e8bb671c3adbf8de5fa6d247455ce53a3f23c75eb35612898ed443289f50",
     "forge/status.py": "da739435e3d930bdd14cd31ad42da36e500a12a772bd39505169efcca77a601c",
     "forge/storage.py": "fc7100b6437c556a324793079a4cee264d2b92344b2226d222cfa4a3fc4d8c4c",

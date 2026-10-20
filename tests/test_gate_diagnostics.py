@@ -109,8 +109,9 @@ TERM_CODES = {f"missing-{term}" for term in (
     "goal", "dependencies", "tests-first", "implementation", "risks", "acceptance", "rollback", "ownership")}
 
 
-def two_section_plan(tmp_path, *, second_depends="section-01-first", second_contract=None, filler=""):
-    planning = tmp_path / "planning"
+def two_section_plan(tmp_path, *, second_depends="section-01-first", second_contract=None, filler="",
+                     planning_name="planning"):
+    planning = tmp_path / planning_name
     (planning / "sections").mkdir(parents=True)
     (planning / "spec.md").write_text("REQ-001: Trim label edges.\nREQ-002: Lowercase labels.\n")
     (planning / "codex-plan.md").write_text(
@@ -173,6 +174,13 @@ def test_shared_text_only_for_valid_multi_section_compact_plans(forge, tmp_path)
     compact = two_section_plan(tmp_path / "compact")
     assert "Goal: trim" in shared(compact) and "Depends on" in shared(compact)
     assert shared(make_plan(tmp_path / "single")) == ""
+    assert "Goal: trim" in shared(two_section_plan(tmp_path / "nested", planning_name="sections"))
+    singleton = two_section_plan(tmp_path / "singleton")
+    index = singleton / "sections/index.md"
+    index.write_text(index.read_text().replace("section-02-second\nEND_MANIFEST", "END_MANIFEST").replace(
+        "| section-02-second | section-01-first | REQ-002 | src/case.py | tests/test_case.py |\n", ""))
+    (singleton / "sections/section-02-second.md").unlink()
+    assert shared(singleton) == ""
     for name, change in [("legacy", lambda text: text.split("END_FORGE_META -->\n", 1)[1]),
                          ("unknown depth", lambda text: text.replace('"lean"', '"unknown"'))]:
         planning = two_section_plan(tmp_path / name)

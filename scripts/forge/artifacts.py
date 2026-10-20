@@ -45,7 +45,10 @@ def compact_plan_descriptor(planning_dir: Path) -> dict[str, Any] | None:
 def shared_contract_text(planning_dir: Path) -> str:
     """Shared plan and index text that sections of a multi-section compact plan inherit for coverage terms."""
     canonical = compact_plan_descriptor(planning_dir)
-    if not canonical or canonical["errors"] or canonical["path"].parent.name == "sections":
+    # Only a physical plan beside two or more sections is shared; compare paths, not directory names.
+    if not canonical or canonical["errors"] or canonical["path"].parent != planning_dir:
+        return ""
+    if len(_sections.check_section_progress(planning_dir).get("sections", [])) < 2:
         return ""
     index = planning_dir / "sections" / "index.md"
     return "\n".join(_storage.read_text(path) for path in (canonical["path"], index) if path.is_file())
