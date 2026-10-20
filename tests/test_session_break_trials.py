@@ -53,13 +53,17 @@ if args == ["--version"]:
 prompt = sys.stdin.read()
 session = 1 if "complete sections 1 and 2 only" in prompt else 2
 mode = os.environ.get("FAKE_WRITER_MODE", "")
-try:
-    Path("../session-1.md").read_text()
-    leaked = True
-except OSError:
-    leaked = False
+readable = []
+for pattern in ("../session-1.md", "../checkpoint.json", "../checkpoint/workspace/src/orders.py", "../../matrix.json",
+                "../../*/session-1.md"):
+    for path in Path().glob(pattern) if "*" in pattern else [Path(pattern)]:
+        try:
+            path.read_bytes()
+            readable.append(str(path))
+        except OSError:
+            pass
 with open(os.environ["FAKE_WRITER_LOG"], "a") as log:
-    log.write(json.dumps({"session": session, "prompt": prompt, "args": args, "leaked": leaked}) + "\n")
+    log.write(json.dumps({"session": session, "prompt": prompt, "args": args, "readable": readable}) + "\n")
 
 
 def emit(**event):
@@ -141,9 +145,9 @@ def read(path):
 
 
 def test_sessions_are_isolated_and_retain_their_own_evidence(tmp_path, writer):
-    directory = prepare(tmp_path, writer, probe=True)
+    directory = prepare(tmp_path, writer, probe=True, repeats=2)
     trial = directory / "import-preview-lean-1-notes"
-    result = breaks.run(directory)
+    result = breaks.run(directory, "import-preview-lean-1-notes")
     assert result["halted"] is None
     first, second = writer["calls"]()
     assert CLARIFICATION in first["prompt"] and breaks.FIRST_SESSION in first["prompt"]
@@ -152,9 +156,11 @@ def test_sessions_are_isolated_and_retain_their_own_evidence(tmp_path, writer):
     assert "rounds down per line" not in (trial / "workspace/prompt.md").read_text()
     assert first["args"] == second["args"] and "fake-model" in first["args"]
     if os.geteuid() != 0:  # Permission bits do not restrict root.
-        assert not second["leaked"]
+        assert second["readable"] == [] and len(first["readable"]) == 4  # Session 1 sees both prompts and the matrix.
+    assert not (directory / "hidden-modes.json").exists() and not (directory / "run.lock").exists()
     assert CLARIFICATION in (trial / "session-1.md").read_text()  # Readable again after session 2.
-    assert not (trial / "telemetry.json").exists() and not (trial / "agent-events.jsonl").exists()
+    assert not (trial / "agent-events.jsonl").exists()
+    assert read(trial / "telemetry.json")["source"] == "session-break sessions"
     usage = [read(trial / f"session-{number}-telemetry.json")["totals"]["input_tokens"] for number in (1, 2)]
     assert usage == [1000, 2000]
     assert all((trial / f"session-{number}-events.jsonl").stat().st_size for number in (1, 2))
@@ -168,8 +174,12 @@ def test_sessions_are_isolated_and_retain_their_own_evidence(tmp_path, writer):
     assert not analysis["regressions"]["any"]
     row = result["attempts"][0]
     assert row["reported_telemetry"]["totals"]["total_tokens"] == 3100 and row["outside_references"] == 0
-    # Cleanup still awaits an independent blind review, so nothing is accepted yet.
+    assert read(trial / "result.json")["reported_telemetry"]["totals"]["total_tokens"] == 3100
+    # Cleanup still awaits an independent blind review, so nothing is accepted and nothing is decided yet.
     assert row["common_quality"] == "failed" and row["rejection"] == ["cleanup review"]
+    assert result["decision"] == {"complete": False, "blockers": [
+        "1 attempts not run to the end", "2 blocks without a valid blind review",
+        "1 attempts with unobserved regressions", "the decision rule needs all three arms"]}
 
 
 def test_reorientation_ends_at_the_first_code_edit(tmp_path, writer):
@@ -198,9 +208,10 @@ def test_attempts_run_once_and_a_failed_session_halts_the_run(tmp_path, writer, 
     directory = prepare(tmp_path, writer, arms=("notes", "plain"))
     monkeypatch.setenv("FAKE_WRITER_MODE", "fail")
     result = breaks.run(directory)
-    assert result["halted"]["attempt"] == "import-preview-lean-1-notes"
+    assert result["halted"]["attempt"] == "import-preview-lean-1-notes" and result["halted"]["failed_sessions"] == [1]
     assert [row["status"] for row in result["attempts"]] == ["completed", "pending"]
-    assert len(writer["calls"]()) == 2
+    assert result["attempts"][0]["rejection"][0] == "session 1 failure"
+    assert len(writer["calls"]()) == 1 and not (directory / "import-preview-lean-1-notes/checkpoint").exists()
     with pytest.raises(ValueError, match="already attempted"):
         breaks.run(directory, "import-preview-lean-1-notes")
     with pytest.raises(FileExistsError):
@@ -318,15 +329,18 @@ def summary(accepted, regressed, tokens):
 
 def test_decision_rule_needs_dominance_and_bounded_tokens():
     state = {"forge-lean": summary(4, 0, 140), "notes": summary(3, 1, 100), "plain": summary(2, 2, 50)}
-    assert breaks.decide(state) | {"pairs": None} == {"H1": True, "H2": True, "H0": False, "pairs": None,
-                                                      "forge_to_notes_tokens": 1.4}
+    assert breaks.decide(state, []) | {"pairs": None} == {"complete": True, "blockers": [], "H1": True, "H2": True,
+                                                          "H0": False, "pairs": None, "forge_to_notes_tokens": 1.4}
     state["forge-lean"] = summary(4, 0, 151)
-    assert not breaks.decide(state)["H2"] and breaks.decide(state)["H1"]
+    assert breaks.decide(state, [])["H2"] is False and breaks.decide(state, [])["H1"]
+    state["forge-lean"] = summary(4, 0, None)
+    assert breaks.decide(state, [])["H2"] is None  # Unknown usage leaves the token bound unknown.
     alike = {arm: summary(3, 1, 100) for arm in breaks.ARMS}
-    assert breaks.decide(alike)["H0"] and not breaks.decide(alike)["H1"]
+    assert breaks.decide(alike, [])["H0"] and not breaks.decide(alike, [])["H1"]
     mixed = {**alike, "notes": summary(4, 2, 100)}
-    assert breaks.decide(mixed)["H0"]  # More accepted but more regressed attempts beats no arm.
-    assert breaks.decide({"plain": alike["plain"]}) is None
+    assert breaks.decide(mixed, [])["H0"]  # More accepted but more regressed attempts beats no arm.
+    assert breaks.decide(alike, ["2 blocks without a valid blind review"]) == {
+        "complete": False, "blockers": ["2 blocks without a valid blind review"]}
 
 
 def test_missing_session_usage_stays_unknown(tmp_path, writer):
@@ -334,6 +348,66 @@ def test_missing_session_usage_stays_unknown(tmp_path, writer):
     breaks.run(directory)
     trial = directory / "import-preview-lean-1-notes"
     (trial / "session-2-telemetry.json").unlink()
-    row = breaks.report(directory)["attempts"][0]
-    assert row["reported_telemetry"]["totals"]["input_tokens"] is None
-    assert breaks.report(directory)["arms"]["notes"]["total_tokens"]["total"] is None
+    result = breaks.analyze(directory)
+    assert result["attempts"][0]["reported_telemetry"]["totals"]["input_tokens"] is None
+    assert result["arms"]["notes"]["total_tokens"]["total"] is None
+
+
+def test_a_killed_run_leaves_its_lock_and_restores_hidden_modes_on_the_next(tmp_path, writer):
+    directory = prepare(tmp_path, writer)
+    prompt = directory / "import-preview-lean-1-notes/session-1.md"
+    breaks.write(directory / "hidden-modes.json", {str(prompt): 0o644})
+    prompt.chmod(0)
+    (directory / "run.lock").write_text("12345\n")
+    with pytest.raises(ValueError, match="Another run holds"):
+        breaks.run(directory)
+    (directory / "run.lock").unlink()
+    breaks.run(directory)
+    assert prompt.stat().st_mode & 0o777 == 0o644 and not (directory / "hidden-modes.json").exists()
+
+
+def test_analyze_recomputes_missing_evidence(tmp_path, writer):
+    directory = prepare(tmp_path, writer)
+    breaks.run(directory)
+    trial = directory / "import-preview-lean-1-notes"
+    (trial / "session-break.json").unlink()
+    (trial / "telemetry.json").unlink()
+    row = breaks.analyze(directory)["attempts"][0]
+    assert read(trial / "session-break.json")["regressions"]["any"] is False
+    assert row["reported_telemetry"]["totals"]["total_tokens"] == 3100
+
+
+def test_probe_needs_a_runtime_only_plugin_snapshot(tmp_path, writer):
+    root = plugin(tmp_path)
+    (root / "tools").mkdir()
+    with pytest.raises(ValueError, match="runtime-only plugin snapshot"):
+        breaks.prepare(tmp_path / "matrix", cases=["godfile"], arms=["forge-lean"], repeats=1, host="codex",
+                       model="fake-model", effort="medium", plugin_root=root, timeout=60, probe=True,
+                       codex=writer["codex"])
+    assert not (tmp_path / "matrix").exists()
+
+
+def test_missing_observations_stay_unknown_instead_of_regressions():
+    checkpoint = {"tests": {"t.T.test_a": "passed"}, "compatibility": {"passed": True}}
+    final = {"tests": None, "probes": None, "compatibility": {"passed": True}}
+    found = breaks.regressions(checkpoint, final, None, {"t.T.test_a": 2}, {"t.T.test_a": 2}, True)
+    assert found == {"compatibility": False, "tests": None, "withheld_clauses": None, "any": None}
+    # A module that fails to import at the end still defines its tests, so they are failing, not deleted.
+    final = {"tests": {"unittest.loader._FailedTest.t": "error"}, "probes": {"c": "pass"}, "compatibility": {"passed": True}}
+    found = breaks.regressions(checkpoint, final, {"t.T.test_a": "error"}, {"t.T.test_a": 2}, {"t.T.test_a": 2}, True)
+    assert found["tests"] == {"failing": ["t.T.test_a"], "deleted": [], "weakened": []} and found["any"] is True
+
+
+@pytest.mark.parametrize(("kind", "text", "outside"), [
+    ("command", "cat .planning/NOTES.md", False),
+    ("command", "cd .. && cat session-1.md", True),
+    ("command", "sed -n 1,9p ../session-1.md", True),
+    ("command", "cat {matrix}/matrix.json", True),
+    ("command", "cat {workspace}/src/orders.py", False),
+    ("edit", "{workspace}/src/orders.py", False),
+    ("edit", "{matrix}/other/notes.md", True),
+])
+def test_outside_references_name_the_matrix_or_parent_paths(tmp_path, kind, text, outside):
+    workspace = tmp_path / "matrix/attempt/workspace"
+    text = text.format(matrix=tmp_path / "matrix", workspace=workspace)
+    assert breaks.outside_reference(kind, text, workspace) is outside

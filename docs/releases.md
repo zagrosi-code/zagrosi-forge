@@ -1,5 +1,13 @@
 # Releases
 
+## 0.4.4 — session-break trials
+
+- Run the [session-break protocol](../examples/evals/session-break-protocol.md) end to end with `tools/session_break_trials.py`: any arm through a forced break after section 2, a checkpoint with per-test, oracle and clause-probe results, and a fresh second session that cannot read the first session's files. Reports add re-orientation time, regressions against the checkpoint and blind review through the existing comparison packets.
+- `--probe` removes the withheld decision clauses from each brief before the baseline is recorded and gives them in session 1 only. Tests confirm that violating each clause fails the unchanged oracle while a good control passes.
+- Claude writers no longer save session transcripts (`--no-session-persistence`), so a later session cannot find an earlier one on disk.
+
+Runtime code is unchanged apart from regenerated manifests.
+
 ## 0.4.3 — Claude-only trial arms and a session-break protocol
 
 - Prepare native acceptance matrices for Claude alone. `native_workflow_trials.py prepare --host claude` installs the package with Claude's own installer into disposable settings inside the matrix, checks skill discovery, and never runs Codex or writes to its cache. Two-host matrices also install Claude natively, from a separate marketplace copy, and remove their Codex cache namespace if preparation fails.

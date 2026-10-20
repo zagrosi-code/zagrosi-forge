@@ -1,9 +1,8 @@
 # Session-break evaluation protocol
 
-Status: draft protocol, not yet run. The full protocol needs the two-session
-orchestrator described under [Harness support](#harness-support); a probe-free
-manual pilot works with today's tools. Every run consumes model usage, so start
-each pilot or main run only after the user approves its budget.
+Status: [`tools/session_break_trials.py`](../../tools/session_break_trials.py)
+runs this protocol end to end; see [Harness](#harness). Every run consumes model
+usage, so start each pilot or main run only after the user approves its budget.
 
 ## Question
 
@@ -121,8 +120,8 @@ the break. The oracle stays unchanged.
 | `godfile` | `status_counts` lists all four statuses, including zero counts | "counts by status"; the empty-input sentence also drops "zero counts" | checks zero counts after a transition and for an empty book |
 | `import-preview` | Tax rounds down per line; never round again over the combined subtotal | "`subtotal`, `tax`, `total`: sums of the existing amounts" | compares against summed per-line reference amounts |
 
-Before use, confirm that a candidate violating each clause fails the oracle and
-that the good control still passes. Both cases implement these clauses after
+The orchestrator tests confirm that a candidate violating each clause fails the
+unchanged oracle and that a good control passes. Both cases implement these clauses after
 the break (godfile section 5, import-preview section 4). If session 1 finishes
 them early, record the overshoot.
 
@@ -132,9 +131,9 @@ them early, record the overshoot.
 |---|---|
 | Accepted outcome | `coding_trials.py check --review` common-quality verdict: the same behavior, scope, oracle and cleanup rules for every arm. Both cases require cleanup, so every attempt needs an independent review blind to the arm; without one, cleanup fails. Report Forge workflow completion separately. |
 | Total tokens | Session 1 plus session 2 `totals`. Claude `totals` come from the result's per-model usage, which includes subagents (`totals_source: modelUsage`); `top_level_totals` keep the result `usage`. Report uncached input, cache reads, cache writes and output separately, plus the CLI's cost estimate. |
-| Re-orientation | Session-2 tokens and seconds before its first workspace edit (first `Edit`/`Write` tool call, or first Codex file change). Use main-loop assistant usage deduplicated by message ID. Subagent usage before that edit is not attributable. |
+| Re-orientation | Session-2 seconds and tokens before its first `src/` or `tests/` change, polled every half second. Claude: main-loop assistant usage through the event that made that edit, deduplicated by message ID; subagent usage is not attributable. Codex reports usage once per session, so its re-orientation tokens are unknown; the commands before the edit and whether they read `.planning/` stand in. |
 | Wall time | Runner seconds for both sessions, excluding harness checks and review. |
-| Regressions | (a) the compatibility-only oracle passes at the checkpoint but fails at the end; (b) a test passing at the checkpoint fails, is deleted or loses assertions by the end; (c) the final oracle fails on a withheld clause. |
+| Regressions | (a) the compatibility-only oracle passes at the checkpoint but fails at the end; (b) a test passing at the checkpoint fails against the final source, is deleted or renamed, is skipped, or loses `assert` statements or `assert*`/`fail*` calls; (c) a clause probe gives a wrong answer at the end. Each probe checks one withheld clause, so the oracle's first failure cannot mask it; a feature that is still missing counts as unfinished, not as a clause failure. |
 | Tool parity | `missing_tools` is empty in every Claude session. The CLI drops unknown or disabled tool names silently, so the init event is the only proof every arm had the same tools. |
 | Secondary | Forge helper calls, `.planning/` size, whether session 2 read the state before its first edit, and session-1 overshoot or undershoot. |
 
@@ -153,36 +152,35 @@ python3 /frozen/evaluator/tools/native_workflow_trials.py prepare /saved/claude-
 python3 /frozen/evaluator/tools/native_workflow_trials.py report /saved/claude-native
 ```
 
-**Pilot (probe-free, available now).** One repetition per arm and case, with
-the clauses left in the brief. This checks timeouts, prompts and metric
-extraction. One arm on `godfile`:
+**Pilot (probe-free).** One repetition per arm and case, with the clauses left
+in the brief. This checks timeouts, prompts and metric extraction:
 
 ```bash
-python3 /frozen/evaluator/tools/coding_trials.py prepare /saved/break/godfile-1-notes --case godfile --plain-agent
-# Write session-1.md and session-2.md beside prompt.md from the texts above.
-cd /saved/break/godfile-1-notes/workspace
-python3 /frozen/evaluator/tools/coding_trial_runner.py --host claude --model YOUR_CLAUDE_MODEL --effort high < ../session-1.md
-mv ../telemetry.json ../session-1-telemetry.json && mv ../agent-events.jsonl ../session-1-events.jsonl
-cp -R . ../checkpoint
-python3 /frozen/evaluator/tools/godfile_trial_checks.py ../checkpoint godfile --compatibility-only
-python3 /frozen/evaluator/tools/coding_trial_runner.py --host claude --model YOUR_CLAUDE_MODEL --effort high < ../session-2.md
-mv ../telemetry.json ../session-2-telemetry.json && mv ../agent-events.jsonl ../session-2-events.jsonl
-python3 /frozen/evaluator/tools/godfile_trial_checks.py . godfile --compatibility-only
-python3 /frozen/evaluator/tools/coding_trials.py review-template /saved/break/godfile-1-notes > /saved/reviews/godfile-1-notes.json
-# An independent reviewer, blind to the arm, completes the form from the frozen candidate.
-python3 /frozen/evaluator/tools/coding_trials.py check /saved/break/godfile-1-notes --review /saved/reviews/godfile-1-notes.json
+python3 /frozen/evaluator/tools/session_break_trials.py prepare /saved/break-pilot \
+  --cases godfile import-preview --arms forge-lean notes plain --repeats 1 \
+  --host codex --model YOUR_MODEL --effort medium --plugin-root /frozen/plugin --timeout 1800
+python3 /frozen/evaluator/tools/session_break_trials.py run /saved/break-pilot
+python3 /frozen/evaluator/tools/session_break_trials.py blind /saved/break-pilot
+# Reviewers blind to the arms complete every blind/*/review.json from the packets alone.
+python3 /frozen/evaluator/tools/session_break_trials.py apply-reviews /saved/break-pilot
+python3 /frozen/evaluator/tools/session_break_trials.py report /saved/break-pilot
 ```
 
-For `forge-lean`, prepare with `--depth lean --plugin-root /frozen/plugin`.
-The runner then loads that plugin. Rename telemetry between sessions: the
-runner overwrites `telemetry.json` and `agent-events.jsonl`. Keep review forms
-outside the candidate workspace.
-
 **Main run.** Two cases × three arms × four repetitions: 24 attempts, 48
-sessions. Run serially and rotate arm order within each case-repetition block,
-as `trial_matrix.py` schedules comparisons. Use the orchestrator so withheld
-clauses, checkpoints and per-session evidence are uniform. Estimate the budget
-from the pilot's measured usage and get approval first.
+sessions. Prepare a new directory with `--repeats 4 --probe`; `--probe`
+derives each brief without the withheld clauses before the baseline is recorded
+and gives the clauses in session 1 only. The Forge prompt names the plugin tree,
+and an evaluator checkout holds the clauses, so `--probe` requires a
+runtime-only snapshot:
+
+```bash
+mkdir /frozen/plugin && git -C /frozen/evaluator archive HEAD scripts skills .codex-plugin .claude-plugin | tar -x -C /frozen/plugin
+```
+
+For the host-switch variant, add
+`--resume-host claude --resume-model YOUR_CLAUDE_MODEL --resume-effort high` and
+report it separately. Estimate the budget from the pilot's measured usage and
+get approval first.
 
 ## Analysis
 
@@ -193,23 +191,41 @@ rejection: withheld clause, regression, unfinished work or other. Keep failed
 and pending attempts in the denominator. Quote one session-2 opening per arm
 to show how it re-oriented.
 
-## Harness support
+## Harness
 
-| Need | Status |
-|---|---|
-| Claude-only arms without Codex; `xhigh`/`max` effort; `Agent` and task tools | Available |
-| Whole-tree Claude usage (`totals` with `totals_source`, `top_level_totals`, `subagent_stats`) and tool parity (`missing_tools`) | Available |
-| Native Claude install and skill discovery in disposable settings | Available: `native_workflow_trials.py prepare --host claude` |
-| Fresh second session with per-session telemetry | Partial: `coding_trials.py run --resume-runner` accepts only `--case resume`, kills on a timeout and sends a Forge-only continuation prompt |
-| Any case and arm across a section-boundary break, with checkpoint copy and checks | Missing |
-| Derived briefs for withheld clauses | Missing; `godfile_trial_checks.py` accepts only the case name `godfile` |
-| Re-orientation offsets and regression diffs | Missing; derive them from retained events and checkpoints |
-| Blind cleanup review across arms | Available for `trial_matrix.py` comparisons; the orchestrator must reuse its packets |
+`tools/session_break_trials.py` reuses `coding_trials.prepare`/`check`, the
+pinned writer adapter and the unchanged oracles:
 
-Proposed follow-up: `tools/session_break_trials.py` with `prepare`, `run` and
-`report`. It would reuse `coding_trials.prepare`/`check`, the pinned writer
-adapter and the existing oracles, and freeze evaluator and fixture hashes the
-way existing matrices do.
+- `prepare` checks hosts, efforts and arms, records the evaluator, plugin,
+  fixture and CLI identities in `matrix.json`, and prepares one fresh workspace
+  per attempt. Arm order rotates within each case-repetition block, as in
+  `trial_matrix.py`. `session-1.md` and `session-2.md` sit beside each workspace.
+- `run` attempts each pending row once, serially, under a lock, and refuses to
+  start while any recorded identity differs. Session 1's events and telemetry
+  become `session-1-*`. The workspace is copied to `checkpoint/workspace`; its
+  tests (per test), the compatibility-only and full oracles and the clause
+  probes run against a scratch copy (`checkpoint.json`). Session 2 is a fresh
+  process. While it runs, everything in the matrix except its own workspace,
+  trial record and prompt is unreadable, including other attempts' session-1
+  prompts; the modes are recorded first, so the next run restores them after a
+  crash. After `coding_trials.py check`, the same observations repeat on the
+  final tree, plus the checkpoint's tests against the final source
+  (`session-break.json`). A session that exits nonzero without timing out stops
+  the run, and a failed session 1 ends its attempt; that attempt stays as
+  evidence. `analyze` recomputes usage, checks and analysis for finished
+  attempts.
+- `blind` and `apply-reviews` reuse the `trial_matrix.py` packets and form
+  checks, then recheck each attempt with its review.
+- `report` writes `report.json` per arm and case and per arm overall and lists,
+  for each rejection, the failed checks without arm labels. It applies the
+  decision rule only when every attempt has finished, every block has a valid
+  blind review and every regression was observed; otherwise it names what is
+  missing. A missing observation stays unknown rather than counting as a
+  regression or as none. Commands, tool inputs and edits that reach past the
+  workspace, through `..` or the matrix path, appear as `outside_references`.
+
+[`tools/session_break_checks.py`](../../tools/session_break_checks.py) holds the
+withheld clauses, their brief edits and probes, and the per-test runner.
 
 ## Threats to validity
 
@@ -223,3 +239,6 @@ way existing matrices do.
 - Removing clauses changes what the brief says, not the oracle. Plain agents
   can still guess correctly, so probe failures are evidence, not certainty.
 - Forge's planning text can show in the code, so blinding is partial.
+- Hosts may keep their own memory between sessions. Before a Claude run,
+  confirm that session 1 writes nothing under Claude Code's auto-memory
+  directory for the workspace; otherwise clarifications reach every arm.

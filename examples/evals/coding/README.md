@@ -500,9 +500,10 @@ independent review must explain the concrete improvement.
 
 Native writer runs use existing CLI authentication and consume the account's
 usage. They do not read or copy credentials. Claude loads the selected plugin
-with `--plugin-dir`, suppresses user/project settings, and preserves OAuth; its
-plain arm omits the plugin. Both Claude arms get the same tools, including
-`Agent` and `TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate`. Claude Code 2.1.304
+with `--plugin-dir`, suppresses user/project settings, saves no session
+transcript, and preserves OAuth; its plain arm omits the plugin. Both Claude
+arms get the same tools, including `Agent` and
+`TaskCreate`/`TaskGet`/`TaskList`/`TaskUpdate`. Claude Code 2.1.304
 keeps `TodoWrite` off by default and silently drops unknown or disabled tool
 names, so telemetry records the registered tools and any `missing_tools`.
 Efforts are checked
@@ -543,7 +544,7 @@ If the first process finishes before interruption or cleanup is unconfirmed,
 the interruption trial fails explicitly. A successful helper-process recovery
 test does not claim that either model used a skill correctly. This path has no
 plain-agent arm. The [session-break protocol](../session-break-protocol.md)
-specifies the arm-neutral comparison.
+specifies the arm-neutral comparison, and `tools/session_break_trials.py` runs it.
 
 ### Native skill acceptance matrix
 

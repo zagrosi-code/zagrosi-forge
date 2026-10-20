@@ -51,13 +51,27 @@ def derived_brief(text: str, case: str) -> str:
     return text
 
 
+class ControlFailure(Exception):
+    """A clause-neutral value is wrong, so the clause itself cannot be judged."""
+
+
 def _order(order_id, status, created_on):
     return {"id": order_id, "customer": "Ada", "region": "uk", "created_on": created_on, "status": status,
             "items": [{"sku": "PEN", "price": 125, "quantity": 1, "weight_grams": 50}]}
 
 
 def _summaries(module, orders):
-    return [module.summarize_orders(iter(orders)), module.OrderBook(orders).summary()]
+    summaries = [module.summarize_orders(list(orders)), module.OrderBook(orders).summary()]
+    if any(not isinstance(summary, dict) or summary.get("order_count") != len(orders) for summary in summaries):
+        raise ControlFailure("order_count")
+    return summaries
+
+
+def _preview(module, text, catalog):
+    preview = module.preview_import(text, catalog)
+    if not isinstance(preview, dict) or (preview.get("order_count"), preview.get("item_count")) != (2, 2):
+        raise ControlFailure("order_count/item_count")
+    return preview
 
 
 def probes(case: str, module) -> dict:
@@ -73,8 +87,7 @@ def probes(case: str, module) -> dict:
                 summary["status_counts"] == dict.fromkeys(STATUSES, 0) for summary in _summaries(module, [])),
         }
     # Each 3-cent line has 0 tax; rounding the combined 6-cent subtotal again would give 1.
-    return {"tax_per_line": lambda: module.preview_import(
-        "order_id,sku,quantity\nA,X,1\nB,Y,1\n", {"X": 3, "Y": 3})["tax"] == 0}
+    return {"tax_per_line": lambda: _preview(module, "order_id,sku,quantity\nA,X,1\nB,Y,1\n", {"X": 3, "Y": 3})["tax"] == 0}
 
 
 def _present(module, name: str) -> bool:
@@ -157,6 +170,8 @@ def main() -> int:
     args = parser.parse_args()
     sys.dont_write_bytecode = True
     workspace = args.workspace.resolve()
+    # As with `python -m unittest` from the workspace: its root, not this script's directory, leads sys.path.
+    sys.path[0] = str(workspace)
     if args.operation == "probe" and args.case is None:
         parser.error("probe requires a case")
     report = test_outcomes(workspace) if args.operation == "tests" else run_probes(workspace, args.case)
