@@ -5,8 +5,8 @@ providers when independent analysis addresses a concrete risk. Keep one primary 
 reviewers receive the same bounded packet and return evidence. No vote counting,
 automatic model substitution, or repeated review loops.
 
-Resolve `plugin_root` from the loaded skill's enclosing plugin directory containing
-`scripts/zagrosi_skills.py`; Claude also supplies `${CLAUDE_PLUGIN_ROOT}`.
+Use the `plugin_root` resolved by the loaded Forge skill: the directory containing
+`scripts/zagrosi_skills.py`. References are read directly, so nothing here is substituted.
 Use Python 3.11+ (`python3`, `python`, or `py -3`).
 
 ## Native authentication
@@ -62,6 +62,9 @@ python3 "{plugin_root}/scripts/zagrosi_skills.py" provider-review --provider cod
 python3 "{plugin_root}/scripts/zagrosi_skills.py" provider-review --provider claude --input "{packet.md}" --output "{claude-review.json}" --timeout 120 --pretty
 ```
 
+Give each call a host command timeout above its `--timeout` (Claude Code's shell
+defaults to 120 s), or run it in the background.
+
 Both receive identical input. Each keeps its own result, including failures;
 one unavailable reviewer does not erase the other's findings. Use `gemini` the
 same way when selected. The active host remains the only writer.
@@ -80,8 +83,10 @@ Timeouts, malformed/oversized output, and reported tool activity fail explicitly
 Failures retain a `failure_kind` and matching `recovery`: timeout suggests packet
 or deadline adjustment; process cleanup requires checking remaining processes;
 missing software requires installation; request rejection needs native CLI
-diagnosis. Neither timeout nor cleanup is treated as an authentication failure.
-Cleanup diagnostics are bounded; native stderr and account details are not saved.
+diagnosis. A failed request keeps the provider's own reported error as bounded,
+printable `provider_error`; a sign-in failure becomes `authentication` with the
+native login command. Neither timeout nor cleanup is treated as an authentication
+failure. Cleanup diagnostics are bounded; native stderr is never saved.
 
 The readable result shows requested/reported model identity and the saved review
 path. Read each saved review once. `success` means a completed provider request, not

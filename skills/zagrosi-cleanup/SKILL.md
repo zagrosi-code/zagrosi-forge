@@ -1,6 +1,16 @@
 ---
 name: zagrosi-cleanup
 description: Simplify existing code while preserving behavior. Use when asked to clean an AI-generated or difficult repository, split godfiles, remove duplication or dead layers, or review a PR for unnecessary complexity.
+allowed-tools:
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" team status *)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" status *)
+  - Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" next-section *)
+  - Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" team status *)
+  - Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" status *)
+  - Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" next-section *)
+  - Bash(py -3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" team status *)
+  - Bash(py -3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" status *)
+  - Bash(py -3 "${CLAUDE_PLUGIN_ROOT}/scripts/zagrosi_skills.py" next-section *)
 ---
 
 # Forge Cleanup
@@ -9,6 +19,14 @@ For a Git target, check `team status --target-dir "{target_dir}"` with Forge’s
 helper before work or resume.
 Follow [team coordination](../zagrosi-forge/references/collaboration.md) when configured or unavailable;
 reuse the same task across phases and delegated agents.
+
+Resolve absolute `plugin_root`: the plugin directory two levels above this skill's
+folder, containing `scripts/zagrosi_skills.py`; never the target repo. Claude Code
+substitutes it when loading this skill: `${CLAUDE_PLUGIN_ROOT}`. Literal text there
+means the file was read directly: derive the path; no such shell variable exists.
+Run every helper command, including returned argv arrays, with the exact prefix
+`python3 "{plugin_root}/scripts/zagrosi_skills.py"` (Python 3.11+; `python` or
+`py -3` on Windows); host pre-approvals match that text.
 
 Produce code that is easier to understand and change. Apply the shared
 [engineering standard](../zagrosi-implement/references/engineering.md).

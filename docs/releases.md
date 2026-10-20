@@ -1,6 +1,6 @@
 # Releases
 
-## 0.4.2 — Claude-only trial arms and a session-break protocol
+## 0.4.3 — Claude-only trial arms and a session-break protocol
 
 - Prepare native acceptance matrices for Claude alone. `native_workflow_trials.py prepare --host claude` installs the package with Claude's own installer into disposable settings inside the matrix, checks skill discovery, and never runs Codex or writes to its cache. Two-host matrices also install Claude natively, from a separate marketplace copy, and remove their Codex cache namespace if preparation fails.
 - Give Forge and plain Claude writers the same subagent and task tools (`Agent`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`); `TodoWrite` is off by default in Claude Code 2.1.304. Accept `xhigh` and `max` effort for Claude, and reject efforts a host does not support before launch, since Claude ignores unknown values.
@@ -8,6 +8,14 @@
 - Add a draft [session-break evaluation protocol](../examples/evals/session-break-protocol.md) and a [state-first `lean` proposal](proposals/state-first-lean.md). Default workflow behavior is unchanged.
 
 Runtime code is unchanged apart from regenerated manifests. No model trials were run for this release.
+
+## 0.4.1 — Claude Code host fixes
+
+- Deliver runtime fixes to Claude Code installs: Claude Code keeps a cached plugin until its manifest version changes, so pull-request validation now fails when `skills/` or `scripts/` change without a new release version.
+- Resolve the helper path in every skill, including the router and cleanup. Where the host supports it, the router loads phases as skills, so Claude Code substitutes the plugin root.
+- Pre-approve Forge's read-only status helpers (`team status`, `status`, `next-section`) in Claude Code, including the Windows `python` and `py -3` launchers. Commands that write files, run checks, contact models or push still ask first.
+- Keep captures within host command limits: `implement-verify` defaults to 540 seconds, skills give host commands a longer timeout or background execution, and SIGTERM now stops the owned check process group.
+- Keep each provider's own failure message in `provider-review` reports, and report sign-in failures as authentication with the native login command.
 
 ## 0.4.0 — collaboration across engineers
 

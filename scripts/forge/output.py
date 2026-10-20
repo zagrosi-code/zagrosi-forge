@@ -379,7 +379,8 @@ def format_pretty(payload: dict[str, Any]) -> str:
                  f"Requested model: {payload.get('requested_model') or 'native default'}",
                  f"Observed models: {', '.join(payload.get('observed_models') or []) or 'unreported'}",
                  f"Model identity: {payload.get('model_identity', 'unreported')}"]
-        for key, label in (("failure_kind", "Failure"), ("recovery", "Recovery"), ("termination_error", "Process cleanup")):
+        for key, label in (("failure_kind", "Failure"), ("recovery", "Recovery"), ("provider_error", "Provider error"),
+                           ("termination_error", "Process cleanup")):
             if payload.get(key):
                 lines.append(f"{label}: {payload[key]}")
         if payload.get("output"):

@@ -67,3 +67,33 @@ def test_skill_files_are_codex_native() -> None:
 
     # Native discovery, reference resolution, phase routing and completion are
     # exercised by host/workflow tests; prose wording is not an executable API.
+
+
+# Pre-approved helper commands only read Forge state; commands that write caller-chosen
+# paths, run checks, contact models or push keep the host's prompt.
+SAFE_HELPER_COMMANDS = ["team status", "status", "next-section"]
+HELPER_LAUNCHERS = ["python3", "python", "py -3"]
+
+
+def skill_parts(path: Path) -> tuple[str, str]:
+    _, frontmatter, body = path.read_text().split("---", 2)
+    return frontmatter, body
+
+
+def test_every_skill_resolves_plugin_root() -> None:
+    for skill in sorted((ROOT / "skills").glob("*/SKILL.md")):
+        _, body = skill_parts(skill)
+        assert "scripts/zagrosi_skills.py" in body and "${CLAUDE_PLUGIN_ROOT}" in body, skill
+    _, router = skill_parts(ROOT / "skills/zagrosi-forge/SKILL.md")
+    assert "zagrosi-forge:zagrosi-plan" in router
+
+
+def test_skills_preapprove_only_safe_helper_commands() -> None:
+    expected = [f'Bash({launcher} "${{CLAUDE_PLUGIN_ROOT}}/scripts/zagrosi_skills.py" {command} *)'
+                for launcher in HELPER_LAUNCHERS for command in SAFE_HELPER_COMMANDS]
+    for skill in sorted((ROOT / "skills").glob("*/SKILL.md")):
+        frontmatter, body = skill_parts(skill)
+        assert "allowed-tools:" in frontmatter, skill
+        rules = re.findall(r"^  - (.+)$", frontmatter.split("allowed-tools:", 1)[1], re.MULTILINE)
+        assert rules == expected, skill
+        assert 'python3 "{plugin_root}/scripts/zagrosi_skills.py"' in body, skill

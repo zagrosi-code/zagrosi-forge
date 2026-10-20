@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.1.0
         with:
           cache-dependency-glob: pyproject.toml
@@ -29,6 +31,11 @@ jobs:
           python -m json.tool .claude-plugin/marketplace.json >/dev/null
       - name: Check release identity
         run: python tools/sync_release.py --check
+      - name: Require a new release for runtime changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python tools/sync_release.py --check --base "origin/$BASE_REF"
       - name: Check runtime manifest
         run: python tools/update_runtime_manifest.py --check
       - name: Check package membership
