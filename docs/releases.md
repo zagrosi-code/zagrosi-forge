@@ -1,5 +1,14 @@
 # Releases
 
+## 0.4.2 — Claude-only trial arms and a session-break protocol
+
+- Prepare native acceptance matrices for Claude alone. `native_workflow_trials.py prepare --host claude` installs the package with Claude's own installer into disposable settings inside the matrix, checks skill discovery, and never runs Codex or writes to its cache. Two-host matrices also install Claude natively, from a separate marketplace copy, and remove their Codex cache namespace if preparation fails.
+- Give Forge and plain Claude writers the same subagent and task tools (`Agent`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`); `TodoWrite` is off by default in Claude Code 2.1.304. Accept `xhigh` and `max` effort for Claude, and reject efforts a host does not support before launch, since Claude ignores unknown values.
+- Count Claude tokens across the whole session tree. `totals` now come from the result's per-model usage, which includes subagents; `top_level_totals` keep the previous figures. Telemetry also records `subagent_stats`, the registered tools and any `missing_tools`.
+- Add a draft [session-break evaluation protocol](../examples/evals/session-break-protocol.md) and a [state-first `lean` proposal](proposals/state-first-lean.md). Default workflow behavior is unchanged.
+
+Runtime code is unchanged apart from regenerated manifests. No model trials were run for this release.
+
 ## 0.4.0 — collaboration across engineers
 
 - Share task awareness and atomic path reservations across clones and worktrees through an opt-in Git board.

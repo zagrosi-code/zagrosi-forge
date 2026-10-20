@@ -42,6 +42,15 @@ test suite so scoring changes are deliberate. Use `--check-snapshots` for
 normal verification. Use `--update-snapshots` only after intentionally changing
 scoring behavior and reviewing the new golden payloads.
 
+## Session-Break Protocol
+
+[`session-break-protocol.md`](session-break-protocol.md) tests whether durable
+state is Forge's core value. It forces a session break after section 2 of a
+five-section task and compares Forge `lean`, a plain agent keeping
+`.planning/NOTES.md`, and a plain agent. It reuses the existing coding oracles.
+It is a draft: running it needs model usage and the user's approval, and its
+withheld-decision probe needs a two-session orchestrator that does not exist yet.
+
 ## Comparison Protocol
 
 When comparing Forge against another planning system, use the same input brief,
