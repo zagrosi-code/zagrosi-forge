@@ -5,6 +5,7 @@
 - Run the [session-break protocol](../examples/evals/session-break-protocol.md) end to end with `tools/session_break_trials.py`: any arm through a forced break after section 2, a checkpoint with per-test, oracle and clause-probe results, and a fresh second session that cannot read the first session's files. Reports add re-orientation time, regressions against the checkpoint and blind review through the existing comparison packets.
 - `--probe` removes the withheld decision clauses from each brief before the baseline is recorded and gives them in session 1 only. Tests confirm that violating each clause fails the unchanged oracle while a good control passes.
 - Claude writers no longer save session transcripts (`--no-session-persistence`), so a later session cannot find an earlier one on disk.
+- First [Codex results](../examples/evals/session-break-results-2026-10-20.md): both stateful arms kept a pre-break decision that plain agents lost in 4 of 4 attempts. Notes matched Forge `lean` (6/8 accepted each, plain 4/8) at a sixth of its tokens, which supports H1 but not H2.
 
 Runtime code is unchanged apart from regenerated manifests.
 

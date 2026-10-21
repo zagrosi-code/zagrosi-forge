@@ -1,8 +1,10 @@
 # Session-break evaluation protocol
 
 Status: [`tools/session_break_trials.py`](../../tools/session_break_trials.py)
-runs this protocol end to end; see [Harness](#harness). Every run consumes model
-usage, so start each pilot or main run only after the user approves its budget.
+runs this protocol end to end; see [Harness](#harness). The first Codex run
+supports H1, not H2: [results from 20 October 2026](session-break-results-2026-10-20.md).
+Every run consumes model usage, so start each pilot or main run only after the
+user approves its budget.
 
 ## Question
 
