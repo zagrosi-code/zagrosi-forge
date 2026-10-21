@@ -9,12 +9,14 @@ from coding_trial_comparison import reviews
 from coding_trial_outcomes import accepted_outcomes, known_total
 from trial_matrix import read
 
-ARMS = ("forge-lean", "notes", "plain")
-TOKENS = ("input_tokens", "cached_input_tokens", "cache_creation_input_tokens", "uncached_input_tokens",
+ARMS = ("forge-lean", "forge-state", "notes", "plain")
+# H0–H2 compare these three; forge-state, the state-first proposal's fourth arm, adds its adoption test.
+CORE_ARMS = ("forge-lean", "notes", "plain")
+TOKENS =("input_tokens", "cached_input_tokens", "cache_creation_input_tokens", "uncached_input_tokens",
           "output_tokens", "reasoning_output_tokens")
 
 
-def attempt_row(directory: Path, item: dict) -> dict:
+def attempt_row(directory: Path, item: dict, sections: int | None = None) -> dict:
     trial = directory / item["id"]
     attempt, result, analysis, checkpoint, telemetry = (read(trial / name) for name in (
         "attempt.json", "result.json", "session-break.json", "checkpoint.json", "telemetry.json"))
@@ -38,6 +40,9 @@ def attempt_row(directory: Path, item: dict) -> dict:
                                         (result.get("runner") or {}).get("sessions") or []]) if seconds else None,
         "sessions": [{key: row.get(key) for key in ("seconds", "returncode", "timed_out", "commands", "helper_calls")}
                      for row in sessions],
+        "helper_calls": sum(row.get("helper_calls") or 0 for row in sessions) if sessions else None,
+        # The state-first proposal's allowance: one helper call per section plus three.
+        "helper_budget": None if sections is None else sections + 3,
         "missing_tools": telemetry.get("missing_tools"),
         "reorientation": sessions[1].get("reorientation") if len(sessions) == 2 else None,
         "regressions": analysis.get("regressions"),
@@ -86,6 +91,7 @@ def summarize(rows: list[dict]) -> dict:
     reoriented = [row["reorientation"] for row in rows if row["reorientation"]]
     seconds = [value["seconds"] for value in reoriented if value.get("seconds") is not None]
     observed = [row["regressions"] for row in rows if row["regressions"] and row["regressions"]["any"] is not None]
+    calls = [row for row in rows if row["helper_calls"] is not None]
     return {
         "scheduled": common["scheduled"], "accepted": common["accepted"], "accepted_rate": common["accepted_rate"],
         "statuses": dict(Counter(row["status"] for row in rows)),
@@ -102,8 +108,14 @@ def summarize(rows: list[dict]) -> dict:
                         "tests": sum(bool(value["tests"]) and any(value["tests"].values()) for value in observed),
                         "withheld_clauses": sum(bool(value["withheld_clauses"]) for value in observed),
                         "observed": len(observed), "unobserved": len(rows) - len(observed)},
-        "helper_calls": sum(sum(session.get("helper_calls") or 0 for session in row["sessions"]) for row in rows),
-        "outside_references": known_total([row["outside_references"] for row in rows]),
+        "helper_calls": sum(row["helper_calls"] for row in calls),
+        "helper_calls_per_attempt": {
+            "median": statistics.median(row["helper_calls"] for row in calls) if calls else None,
+            "max": max((row["helper_calls"] for row in calls), default=None),
+            "median_over_budget": statistics.median(row["helper_calls"] - row["helper_budget"] for row in calls)
+            if calls and all(row["helper_budget"] is not None for row in calls) else None,
+            "observed": len(calls)},
+        "outside_references":known_total([row["outside_references"] for row in rows]),
         "rejections": dict(Counter(reason for row in rows for reason in row["rejection"])),
     }
 
@@ -115,24 +127,55 @@ def beats(first: dict, second: dict) -> bool:
     return (more > other and fewer <= regressed) or (fewer < regressed and more >= other)
 
 
+def token_ratio(first: dict, second: dict) -> float | None:
+    tokens, other = first["total_tokens"]["total"], second["total_tokens"]["total"]
+    return tokens / other if tokens is not None and other else None
+
+
+def state_first(arms: dict, pairs: dict) -> dict:
+    """H2 with forge-state in forge-lean's place, and H3: the state-first proposal's bar for the default lean."""
+    state, lean, notes = (arms[arm] for arm in ("forge-state", "forge-lean", "notes"))
+    ratio = token_ratio(state, notes)
+    per_state, per_lean = state["total_tokens"]["per_accepted"], lean["total_tokens"]["per_accepted"]
+    # At most half of today's lean tokens per accepted result; an arm that accepted nothing has no such cost.
+    tokens = (None if state["total_tokens"]["total"] is None or lean["total_tokens"]["total"] is None
+              else False if not state["accepted"] else True if not lean["accepted"] else per_state <= per_lean / 2)
+    over = state["helper_calls_per_attempt"]["median_over_budget"]
+    criteria = {"accepted": state["accepted"] >= max(lean["accepted"], notes["accepted"]),
+                "regressions": state["regressions"]["attempts"] <= min(lean["regressions"]["attempts"],
+                                                                    notes["regressions"]["attempts"]),
+                "tokens_per_accepted": tokens, "helper_calls": None if over is None else over <= 0}
+    values = list(criteria.values())
+    return {"H2": pairs["forge-state>notes"] and (None if ratio is None else ratio <= 1.5),
+            "H3": False if False in values else None if None in values else True, "criteria": criteria,
+            "state_to_notes_tokens": ratio,
+            "state_to_lean_tokens_per_accepted": per_state / per_lean if per_state is not None and per_lean else None,
+            "median_helper_calls": state["helper_calls_per_attempt"]["median"]}
+
+
 def decide(arms: dict, blockers: list[str]) -> dict:
     """Apply the protocol's decision rule to complete observations only; small samples cannot establish an effect."""
-    if set(arms) != set(ARMS):
-        blockers = [*blockers, "the decision rule needs all three arms"]
+    if not set(CORE_ARMS) <= set(arms):
+        blockers = [*blockers, "the decision rule needs the forge-lean, notes and plain arms"]
     if blockers:
         return {"complete": False, "blockers": blockers}
-    forge, notes = arms["forge-lean"], arms["notes"]
-    forge_tokens, notes_tokens = forge["total_tokens"]["total"], notes["total_tokens"]["total"]
-    ratio = forge_tokens / notes_tokens if forge_tokens is not None and notes_tokens else None
-    pairs = {f"{first}>{second}": beats(arms[first], arms[second]) for first in ARMS for second in ARMS if first != second}
-    h2 = pairs["forge-lean>notes"] and (None if ratio is None else ratio <= 1.5)
-    return {"complete": True, "blockers": [], "H1": pairs["forge-lean>plain"] and pairs["notes>plain"], "H2": h2,
-            "H0": not any(pairs.values()), "pairs": pairs, "forge_to_notes_tokens": ratio}
+    present = [arm for arm in ARMS if arm in arms]
+    pairs = {f"{first}>{second}": beats(arms[first], arms[second]) for first in present for second in present
+             if first != second}
+    ratio = token_ratio(arms["forge-lean"], arms["notes"])
+    result = {"complete": True, "blockers": [], "H1": pairs["forge-lean>plain"] and pairs["notes>plain"],
+              "H2": pairs["forge-lean>notes"] and (None if ratio is None else ratio <= 1.5),
+              "H0": not any(pairs[f"{first}>{second}"] for first in CORE_ARMS for second in CORE_ARMS if first != second),
+              "pairs": pairs, "forge_to_notes_tokens": ratio}
+    if "forge-state" in arms:
+        result["state_first"] = state_first(arms, pairs)
+    return result
 
 
 def build_report(directory: Path, manifest: dict) -> dict:
     """Per arm and case, per arm overall, and the decision rule once every observation is complete."""
-    rows = [attempt_row(directory, item) for item in manifest["trials"]]
+    sections = manifest.get("sections") or {}
+    rows = [attempt_row(directory, item, sections.get(item["case"])) for item in manifest["trials"]]
     keys = sorted({(row["arm"], row["case"]) for row in rows})
     groups = [{"arm": arm, "case": case, **summarize([row for row in rows if (row["arm"], row["case"]) == (arm, case)])}
               for arm, case in keys]
@@ -154,7 +197,8 @@ def build_report(directory: Path, manifest: dict) -> dict:
                   "and stay unknown when either session's usage is missing; Claude totals include subagents. "
                   "Re-orientation time is polled to the first src/ or tests/ change in session 2; Codex reports "
                   "usage per session only, so its tokens before that edit are unknown. A renamed test counts as "
-                  "deleted. Probe failures are evidence, not certainty, and four repetitions per arm and case are "
-                  "observations, not statistically established effects.",
+                  "deleted. Helper calls count commands naming zagrosi_skills.py. Probe failures are evidence, not "
+                  "certainty, and four repetitions per arm and case are observations, not statistically established "
+                  "effects.",
     }
     return result

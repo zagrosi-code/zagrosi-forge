@@ -1,5 +1,11 @@
 # Releases
 
+## 0.5.1 — state-first arm for session-break trials
+
+- `tools/session_break_trials.py` adds a fourth arm, `forge-state`: Forge `lean` in the opt-in state-first mode, loaded from its own frozen snapshot (`--state-plugin-root`, which defaults to `--plugin-root`). Its standing instruction names the mode; the other arms' prompts are unchanged.
+- Reports count helper calls per attempt against N + 3 for N sections. With `forge-state` present, the decision rule adds `state_first`: H2 with `forge-state` in place of `forge-lean`, and H3, the state-first proposal's rollout bar against `forge-lean` and `notes`. H0–H2 still compare the first three arms, so the first run's decision reproduces unchanged.
+- A state-first implement postflight now reports `sections_recorded_complete`, so trial and eval readers count a finished state-first plan as complete.
+
 ## 0.5.0 — opt-in state-first lean
 
 - `plan-setup --state-first` keeps a lean plan as `plan.md` (goal, acceptance and a section table), `status.json` (each section pending, active or done, with files, host and time) and append-only `notes.md`. Setup drafts `plan.md` from the brief and checks only structure; every failure names the field with an example.

@@ -43,6 +43,10 @@ POLL_SECONDS = 0.5
 NOTES = ("Keep `.planning/NOTES.md` as your durable working notes: the plan, each section's status, decisions and "
          "clarifications, verification results and the next step. Update it whenever one of these changes. When "
          "continuing work, read it before acting.")
+STATE_FIRST = "Use Forge's opt-in state-first lean mode: pass `--state-first` to `plan-setup` and follow {reference}."
+STATE_REFERENCE = "skills/zagrosi-implement/references/state-first.md"
+# Each Forge arm loads its own frozen snapshot, recorded under this identity part.
+FORGE_ARMS = {"forge-lean": "plugin", "forge-state": "state_plugin"}
 FIRST_SESSION = "In this session, complete sections 1 and 2 only, then stop."
 SECOND_SESSION = ("An earlier session that you cannot see worked on this task in this workspace. Complete every "
                   "remaining section and the task's acceptance requirements.")
@@ -88,9 +92,16 @@ def last_json(text: str):
         return None
 
 
-def session_prompt(arm: str, prompt: str, case: str, session: int, clauses=()) -> str:
+def standing_instruction(arm: str, roots: dict) -> str | None:
+    """Arm text at the start of both session prompts, as a repository instruction file would be."""
+    if arm == "notes":
+        return NOTES
+    return STATE_FIRST.format(reference=roots["state_plugin"] / STATE_REFERENCE) if arm == "forge-state" else None
+
+
+def session_prompt(standing: str | None, prompt: str, case: str, session: int, clauses=()) -> str:
     """Standing instruction, case prompt and shared plan; clarifications reach session 1 only."""
-    parts = [NOTES] if arm == "notes" else []
+    parts = [standing] if standing else []
     parts += [prompt.rstrip(), "Section plan:\n" + "\n".join(f"{number}. {text}" for number, text
                                                              in enumerate(PLANS[case], 1))]
     if session == 1 and clauses:
@@ -104,14 +115,20 @@ def analyzer() -> dict:
     return {path.relative_to(ROOT).as_posix(): sha256(path) for path in SOURCES}
 
 
-def identity(plugin_root: Path, cases) -> dict:
+def identity(roots: dict, cases) -> dict:
     """Evaluator, plugin and fixture bytes that every attempt must share."""
     evaluator = analyzer()
     for case in cases:
         oracle = ROOT / coding_trials.CASES[case]["oracle"]
         evaluator.update(evaluator_files(ROOT, oracle, coding_trials.PACK / "cases.json"))
-    return {"evaluator": evaluator, "plugin": plugin_files(plugin_root),
+    return {"evaluator": evaluator, **{part: plugin_files(root) for part, root in roots.items()},
             "fixtures": {case: files(coding_trials.PACK / coding_trials.CASES[case]["fixture"]) for case in cases}}
+
+
+def plugin_roots(manifest: dict) -> dict:
+    """Snapshot per identity part; a matrix without forge-state records only the forge-lean root."""
+    return {"plugin": Path(manifest["plugin_root"]),
+            **({"state_plugin": Path(manifest["state_plugin_root"])} if manifest.get("state_plugin_root") else {})}
 
 
 def cli_versions(hosts, executables: dict) -> dict:
@@ -411,7 +428,7 @@ def read_manifest(directory: Path) -> dict:
 
 def require_identity(manifest: dict) -> None:
     """Refuse a run when evaluator, plugin, fixture or CLI bytes differ from preparation."""
-    current = identity(Path(manifest["plugin_root"]), manifest["cases"])
+    current = identity(plugin_roots(manifest), manifest["cases"])
     drift = [f"{part}:{name}" for part in current for name in changed_files(manifest["identity"][part], current[part])]
     if cli_versions(manifest["cli_versions"], manifest["executables"]) != manifest["cli_versions"]:
         drift.append("cli_versions")
@@ -421,7 +438,7 @@ def require_identity(manifest: dict) -> None:
 
 def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str, effort: str, plugin_root: Path,
             timeout: int, probe: bool = False, seed: int = 0, resume_host: str | None = None,
-            resume_model: str | None = None, resume_effort: str | None = None,
+            resume_model: str | None = None, resume_effort: str | None = None, state_plugin_root: Path | None = None,
             codex: str = "codex", claude: str = "claude") -> dict:
     cases, arms = list(cases), list(arms)
     if not cases or set(cases) - PLANS.keys() or len(set(cases)) != len(cases):
@@ -436,12 +453,18 @@ def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str
     resume_model, resume_effort = resume_model or model, resume_effort or effort
     require_effort(host, effort)
     require_effort(resume_host, resume_effort)
-    plugin_root = plugin_root.resolve()
-    if not (plugin_root / "scripts/zagrosi_skills.py").is_file():
+    # Without its own snapshot, forge-state uses the forge-lean tree, which then must carry the state-first mode.
+    roots = {"plugin": plugin_root.resolve(),
+             **({"state_plugin": (state_plugin_root or plugin_root).resolve()} if "forge-state" in arms else {})}
+    if not (roots["plugin"] / "scripts/zagrosi_skills.py").is_file():
         raise ValueError("The plugin root must contain scripts/zagrosi_skills.py")
-    if probe and "forge-lean" in arms and any((plugin_root / name).exists() for name in ("examples", "tools", "tests")):
+    if "state_plugin" in roots and not all((roots["state_plugin"] / name).is_file()
+                                           for name in ("scripts/zagrosi_skills.py", STATE_REFERENCE)):
+        raise ValueError(f"The state plugin root must contain scripts/zagrosi_skills.py and {STATE_REFERENCE}")
+    if probe and any(arm in arms and any((roots[part] / name).exists() for name in ("examples", "tools", "tests"))
+                     for arm, part in FORGE_ARMS.items()):
         # The Forge prompt points at this tree; an evaluator checkout holds the withheld clauses.
-        raise ValueError("--probe needs a runtime-only plugin snapshot without examples/, tools/ or tests/")
+        raise ValueError("--probe needs runtime-only plugin snapshots without examples/, tools/ or tests/")
     executables = {"codex": codex, "claude": claude}
     versions = cli_versions({host, resume_host}, executables)
     compatibility = {}
@@ -454,24 +477,27 @@ def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str
     directory.mkdir(parents=True, exist_ok=False)
     items = schedule(cases, ["lean"], repeats, True, arms=arms)
     for item in items:
-        trial, case = directory / item["id"], item["case"]
+        trial, case, forge = directory / item["id"], item["case"], item["arm"] in FORGE_ARMS
         fixture = coding_trials.PACK / coding_trials.CASES[case]["fixture"]
         brief = derived_brief((fixture / "prompt.md").read_text(), case) if probe else None
-        coding_trials.prepare(trial, case, "lean", plugin_root=plugin_root,
-                              plain_agent=item["arm"] != "forge-lean", brief=brief)
-        prompt = (trial / "prompt.md").read_text()
+        coding_trials.prepare(trial, case, "lean", plugin_root=roots[FORGE_ARMS[item["arm"]] if forge else "plugin"],
+                              plain_agent=not forge, brief=brief)
+        prompt, standing = (trial / "prompt.md").read_text(), standing_instruction(item["arm"], roots)
         for session in (1, 2):
             (trial / f"session-{session}.md").write_text(
-                session_prompt(item["arm"], prompt, case, session, CLAUSES[case] if probe else ()))
+                session_prompt(standing, prompt, case, session, CLAUSES[case] if probe else ()))
     manifest = {
         "protocol": PROTOCOL, "comparison": True, "seed": seed, "probe": probe, "timeout": timeout,
-        "evaluator_root": str(ROOT), "plugin_root": str(plugin_root), "executables": executables,
+        "evaluator_root": str(ROOT), "plugin_root": str(roots["plugin"]),
+        **({"state_plugin_root": str(roots["state_plugin"])} if "state_plugin" in roots else {}),
+        "executables": executables,
         "settings": {"host": host, "model": model, "effort": effort, "resume_host": resume_host,
                      "resume_model": resume_model, "resume_effort": resume_effort},
         "runners": [runner(host, model, effort, executables), runner(resume_host, resume_model, resume_effort, executables)],
         "cli_versions": versions, "compatibility_assertions": compatibility,
         "cases": {case: coding_trials.CASES[case] for case in cases},
-        "identity": identity(plugin_root, cases), "prepared": now(), "trials": items,
+        "sections": {case: len(PLANS[case]) for case in cases},
+        "identity": identity(roots, cases), "prepared": now(), "trials": items,
     }
     # Written last: a directory without matrix.json was never a runnable matrix.
     write(directory / "matrix.json", manifest)
@@ -549,6 +575,8 @@ def main() -> int:
     parser.add_argument("--effort", choices=EFFORT_CHOICES)
     parser.add_argument("--resume-effort", choices=EFFORT_CHOICES)
     parser.add_argument("--plugin-root", type=Path, default=ROOT, help="Frozen Forge snapshot for the forge-lean arm")
+    parser.add_argument("--state-plugin-root", type=Path,
+                        help="Frozen Forge snapshot with the state-first mode for the forge-state arm; defaults to --plugin-root")
     parser.add_argument("--timeout", type=int, default=1800, help="Seconds per session")
     parser.add_argument("--probe", action="store_true", help="Withhold decision clauses from the brief; give them in session 1")
     parser.add_argument("--seed", type=int, default=0, help="Blind packet ordering")
@@ -565,7 +593,7 @@ def main() -> int:
                              model=args.model, effort=args.effort, plugin_root=args.plugin_root, timeout=args.timeout,
                              probe=args.probe, seed=args.seed, resume_host=args.resume_host,
                              resume_model=args.resume_model, resume_effort=args.resume_effort,
-                             codex=args.codex, claude=args.claude)
+                             state_plugin_root=args.state_plugin_root, codex=args.codex, claude=args.claude)
         elif args.operation == "run":
             result = run(directory, args.attempt)
         elif args.operation == "analyze":

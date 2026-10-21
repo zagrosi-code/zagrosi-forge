@@ -100,6 +100,7 @@ def test_finish_captures_suite_and_postflight(run, workspace):
     code, payload = run("implement-verify", "--planning-dir", str(planning), "--target-dir", str(workspace), "--", *PASS)
     assert code == 0, payload
     assert payload["final"]["outcome"] == "passed" and payload["postflight"]["success"]
+    assert payload["postflight"]["sections_recorded_complete"] is True
     assert json.loads((planning / "status.json").read_text())["final"]["result"] == "3 passed"
     assert "| plan | finish |" in (planning / "notes.md").read_text()
 
@@ -125,6 +126,7 @@ def test_postflight_blocks_only_structural_gaps(run, workspace):
 
     code, payload = run("postflight", "--phase", "implement", "--planning-dir", str(planning))
     assert code == 1 and payload["blocking_gates"] == ["state-sections", "final-verification"]
+    assert payload["sections_recorded_complete"] is False
 
     (planning / "plan.md").write_text(PLAN + "| section-03-more | src/more.py | more works |\n")
     code, payload = run("postflight", "--phase", "plan", "--planning-dir", str(planning))
