@@ -117,7 +117,7 @@ TEST_MANIFEST = {
     "test_section_contracts.py": "de911d33ee7d8e71ba372fe540e476aac41663cce4cfc7c3a9ec100b3943ca6d",
     "test_session_break_trials.py": "0a70623249dbdba0b2db6a79e0c28a242e4cd829d57c17c986d6c8fb2e4e1b93",
     "test_state_first.py": "b5bcd60a7fa99b3fde9aea754e1b2d1554c0320dfd8d8e44ac6c8561fcbefad6",
-    "test_state_first_progress.py": "cc51455ee1de06462b208072fbc617971fad51796ac209e6f6f9ce152d85aa9c",
+    "test_state_first_progress.py": "7e7afc6fadb1b6ebbe0f55b480b30240e050ea1825442f1abe0685270e2e7062",
     "test_team_collaboration.py": "75cfcb0a4cc8764a09466c3af86b4611769ddf4d16861e2a8274bdb2a959c17e",
     "test_team_config.py": "c9d28c024567afe132bad6004a4a9e94412c89e3e87e3573564f50268db2e2ef",
     "test_team_dependencies.py": "cf88b3387082d5244874497029f00c0ef4ef7bba5981352c74e51ea503f9c60e",

@@ -121,6 +121,20 @@ def test_finish_captures_suite_and_postflight(run, workspace):
     assert payload["postflight"]["blocking_gates"] == ["final-verification"]
 
 
+@pytest.mark.parametrize(("name", "old", "new"), [
+    ("plan.md", "- Internal spaces stay.\n", "- Internal spaces stay.\n- Tabs count as edges.\n"),
+    ("spec.md", "REQ-001: Trim label edges.\n", "REQ-001: Trim label edges and tabs.\n"),
+])
+def test_requirement_edits_stale_the_final_receipt(run, workspace, name, old, new):
+    planning = ready(run, workspace)
+    finish_sections(run, planning)
+    assert run("implement-verify", "--planning-dir", str(planning), "--target-dir", str(workspace), "--", *PASS)[0] == 0
+    path = planning / name
+    path.write_text(path.read_text().replace(old, new))
+    code, payload = run("postflight", "--phase", "implement", "--planning-dir", str(planning))
+    assert code == 1 and payload["blocking_gates"] == ["final-verification"]
+
+
 def test_trial_workflow_verdict_accepts_a_finished_plan(run, workspace):
     planning = ready(run, workspace)
     finish_sections(run, planning)

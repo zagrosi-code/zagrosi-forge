@@ -163,10 +163,13 @@ def target_dir(planning_dir: Path, status: dict[str, Any]) -> Path:
     return (planning_dir / status["target_dir"]).resolve()
 
 
-def observe_tree(planning_dir: Path, target: Path, spec: str) -> dict[str, str]:
-    """Digest each source entry outside this plan's own state, which edits never stale."""
+def observe_tree(planning_dir: Path, target: Path) -> dict[str, str]:
+    """Digest each source entry except this plan's bookkeeping, whose edits never stale a receipt.
+
+    The plan and the brief stay observed: a receipt certifies the tree against the requirements it was run for.
+    """
     paths = mutable_inputs.source_paths(target)
-    own = [planning_dir / name for name in (PLAN, STATUS, NOTES, spec, "implementation")]
+    own = [planning_dir / name for name in (STATUS, NOTES, "implementation")]
     observed = [path.relative_to(target).as_posix() for path in paths
                 if not any(path == item or path.is_relative_to(item) for item in own)]
     return {name: mutable_inputs.digest(identity)
@@ -175,7 +178,7 @@ def observe_tree(planning_dir: Path, target: Path, spec: str) -> dict[str, str]:
 
 def write_status(planning_dir: Path, status: dict[str, Any], tree: dict[str, str] | None = None) -> None:
     """Save state with the tree it describes, so status can list later edits."""
-    tree = tree or observe_tree(planning_dir, target_dir(planning_dir, status), status["spec"])
+    tree = tree or observe_tree(planning_dir, target_dir(planning_dir, status))
     status["updated_at"] = storage.now_iso()
     storage.write_json(planning_dir / STATUS, status)
     storage.write_json(planning_dir / SNAPSHOT, {"version": 1, "written_at": status["updated_at"], "files": tree})
@@ -317,7 +320,7 @@ def status_payload(planning_dir: Path) -> dict[str, Any]:
     """Everything a resumed session needs, without writing."""
     status = load_status(planning_dir)
     target = target_dir(planning_dir, status)
-    current = observe_tree(planning_dir, target, status["spec"])
+    current = observe_tree(planning_dir, target)
     payload = {"success": True, **summary(planning_dir, status, parse_plan(planning_dir)),
                "notes": latest_notes(planning_dir), "last_verification": last_verification(status, current),
                "changed_since_status": changed_files(planning_dir, current)}
@@ -337,7 +340,7 @@ def final_error(status: dict[str, Any], current: dict[str, str]) -> str | None:
     return None
 
 
-def capture(planning_dir: Path, target: Path, spec: str, argv: list[str], timeout: float,
+def capture(planning_dir: Path, target: Path, argv: list[str], timeout: float,
             allowance_seconds: float | None, before: dict[str, str] | None = None,
             ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
     """Run one explicit check under the state lock; edits during the run fail it, as receipts do.
@@ -347,14 +350,14 @@ def capture(planning_dir: Path, target: Path, spec: str, argv: list[str], timeou
     from . import verification_allowance
 
     # Observe first: a failed observation must not leave reserved, unmeasured allowance.
-    before = before or observe_tree(planning_dir, target, spec)
+    before = before or observe_tree(planning_dir, target)
     allowance = verification_allowance.Allowance(planning_dir, target, allowance_seconds)
     result = verification._capture(argv, target, allowance.reserve(timeout))
     try:
         allowance.settle(result)
     except (OSError, ValueError) as exc:
         result["error"] = str(exc)
-    after = observe_tree(planning_dir, target, spec)
+    after = observe_tree(planning_dir, target)
     if result["outcome"] == "passed" and (result.get("error") or after != before):
         result["outcome"] = "failed"
         result.setdefault("error", "Files changed while the check ran; rerun it.")
@@ -472,10 +475,10 @@ def _progress(args: argparse.Namespace, planning_dir: Path, argv: list[str]) -> 
         # so edits made before this first call still count.
         origin = _snapshot(planning_dir)
         if origin is None:
-            origin = tree = observe_tree(planning_dir, target, status["spec"])
+            origin = tree = observe_tree(planning_dir, target)
         entry["origin"] = _row_tree(origin, row["files"])
     if stage == "baseline":
-        tree = tree or observe_tree(planning_dir, target, status["spec"])
+        tree = tree or observe_tree(planning_dir, target)
         if edited := _edited_sources(row, entry, tree):
             return failure(planning_dir, "state-first-baseline", f"{section} source changed since it started "
                            f"({', '.join(edited)}); capture the baseline against the original source.")
@@ -491,7 +494,7 @@ def _progress(args: argparse.Namespace, planning_dir: Path, argv: list[str]) -> 
     update: dict[str, Any] = {"state": "active", "stage": stage, "host": host(), "updated_at": now}
     tails: dict[str, Any] = {}
     if argv:
-        record, tails, tree = capture(planning_dir, target, status["spec"], argv, args.timeout, args.allowance_seconds,
+        record, tails, tree = capture(planning_dir, target, argv, args.timeout, args.allowance_seconds,
                                       before=tree)
         update["baseline" if stage == "baseline" else "check"] = record
         if baseline:
@@ -506,7 +509,7 @@ def _progress(args: argparse.Namespace, planning_dir: Path, argv: list[str]) -> 
         update["red"] = {"command": args.command, "result": args.result, "at": now}
     elif args.command or args.result:
         update["check"] = {"source": "reported", "command": args.command, "result": args.result, "at": now}
-    tree = tree or observe_tree(planning_dir, target, status["spec"])
+    tree = tree or observe_tree(planning_dir, target)
     _attribute(planning_dir, entry, tree)
     if stage == "done":
         update.update(state="done", completed_at=now)
@@ -539,7 +542,7 @@ def finish(args: argparse.Namespace, planning_dir: Path) -> int:
             target = target_dir(planning_dir, status)
             if args.target_dir and storage.resolve_path(args.target_dir) != target:
                 return failure(planning_dir, "state-first-target", f"This plan targets {target}; omit --target-dir or pass it.")
-            final, tails, tree = capture(planning_dir, target, status["spec"], argv, args.timeout, args.allowance_seconds)
+            final, tails, tree = capture(planning_dir, target, argv, args.timeout, args.allowance_seconds)
             status["final"] = final
             write_status(planning_dir, status, tree)
             append_note(planning_dir, "plan", "finish", f"Full suite {final['outcome']}: {final['result']}")
@@ -578,7 +581,7 @@ def postflight_report(planning_dir: Path, phase: str) -> dict[str, Any]:
         checks.append(gates.direct_gate("state-sections", not unfinished, {
             "unfinished_sections": unfinished, "message": "Mark each finished section done with implement-progress --stage done."}))
         try:
-            error = final_error(status, observe_tree(planning_dir, target_dir(planning_dir, status), status["spec"]))
+            error = final_error(status, observe_tree(planning_dir, target_dir(planning_dir, status)))
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             error = f"Cannot observe the target to check the final receipt: {exc}"
         checks.append(gates.direct_gate("final-verification", error is None, {"error": error, "final": status.get("final")}))

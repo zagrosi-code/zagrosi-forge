@@ -195,6 +195,10 @@ helper-call median down.
   brief or how to record decisions.
 - `forge-lean` ran release 0.5.1, which also changed risk-term matching on default
   paths, so it is not byte-identical to the first run's arm.
+- After the run, a code review made state-first final receipts also cover
+  `plan.md` and the brief, not only the source. Trial workspaces ignore
+  `.planning/` in Git, so the receipts never covered those files there, and
+  replaying the change leaves all eight `forge-state` workflow verdicts passing.
 - Helper calls count commands that name `zagrosi_skills.py`, so a chained command
   counts once. The invocation counts above come from the session logs and are
   not part of the harness report.
