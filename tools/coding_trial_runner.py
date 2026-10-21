@@ -6,6 +6,7 @@ import argparse
 from collections import Counter, defaultdict
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -20,12 +21,32 @@ EFFORT_CHOICES = tuple(dict.fromkeys(effort for efforts in EFFORTS.values() for 
 CLAUDE_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,Skill,Agent,TaskCreate,TaskGet,TaskList,TaskUpdate"
 # The init event reports the Agent tool as Task.
 REQUESTED_CLAUDE_TOOLS = frozenset("Task" if name == "Agent" else name for name in CLAUDE_TOOLS.split(","))
+# A writer started from inside Claude Code would inherit that session's variables: its session and messaging
+# ids, entrypoint and plugin data, plus the effort and model aliases from its settings. Only credentials and
+# the config location pass through.
+CLAUDE_PASSTHROUGH = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                                "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"})
 
 
 def require_effort(host: str, effort: str) -> str:
     if effort not in EFFORTS[host]:
         raise ValueError(f"{host} does not accept {effort!r} effort; choose one of {', '.join(EFFORTS[host])}")
     return effort
+
+
+def writer_environment(host: str, environ) -> tuple[dict, list[str]]:
+    """The writer's environment and the inherited names it drops.
+
+    Claude auto-memory is on by default and keyed by the workspace path, so a second session in the same
+    workspace would read what the first one saved; it stays off for every Claude writer.
+    """
+    if host != "claude":
+        return dict(environ), []
+    removed = sorted(name for name in environ
+                     if name.startswith(("CLAUDE", "ANTHROPIC_")) and name not in CLAUDE_PASSTHROUGH)
+    environment = {name: value for name, value in environ.items() if name not in removed}
+    environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+    return environment, removed
 
 
 def input_totals(uncached, cached, written) -> dict:
@@ -62,7 +83,6 @@ def run_suite_writer(suite: dict, suite_root: Path, task_id: str, arm_id: str,
             and suite["host"].get("adapter") == "codex"):
         from coding_trial_loading import run_native_writer
         return run_native_writer(suite, suite_root, task_id, arm_id, roots, evidence_dir, auth_file=auth_file)
-    import os
     import stat
     from coding_trial_inventory import fingerprint
     from coding_trial_isolation import derive_layout, execute_isolated, fresh_evidence_path, suite_context
@@ -300,16 +320,18 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
     version = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=10)
+    environment, removed = writer_environment(args.host, os.environ)
     telemetry = ClaudeTelemetry() if args.host == "claude" else Telemetry()
     def persist(code=None):
         report = {**telemetry.summary(), "host": args.host, "model": args.model, "effort": args.effort,
-                  "command": command, args.host + "_version": version.stdout.strip(), "returncode": code}
+                  "command": command, args.host + "_version": version.stdout.strip(), "returncode": code,
+                  "removed_environment": removed}
         temporary = trial / "telemetry.tmp"
         temporary.write_text(json.dumps(report) + "\n")
         temporary.replace(trial / "telemetry.json")
 
     start = time.monotonic()
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=environment)
     process.stdin.write(sys.stdin.read())
     process.stdin.close()
     with (trial / "agent-events.jsonl").open("w") as log:

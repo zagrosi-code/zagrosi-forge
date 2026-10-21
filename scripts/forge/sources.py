@@ -134,7 +134,7 @@ TEST_MANIFEST = {
     "test_test_binding.py": "d08862ff2eee423190dd6878e12da54b2af6e47080848f1655a14cbe703a7723",
     "test_transaction_publication.py": "fc44fe564cc1641b4bbfd53e2c5bb95dbb637d1e27bc115ada4b634cf28b64f9",
     "test_transaction_rollback.py": "cdab79a27436bf25551a604b61d3fda77d0290de80f41214e0b5faa13e5f86f5",
-    "test_trial_hosts.py": "f88218ca893ebf6eaaa5e0108a2ba7bd2bce8e541cad6c2f49740c0cbefa1af9",
+    "test_trial_hosts.py": "541b2439442b33560aecfea010c77dd8c529dc8fe23a1b57a042997320d058ab",
     "test_trial_matrix.py": "54520d8161d2ec6afd20f558782cd074d7149bd7cbd89c6cc6a5c4177210ba34",
     "test_trial_plan_names.py": "f2cf2cb6c85f185979670692bf0a7333318448ce6f0c949ce212d6e0a32505be",
     "test_trial_planning_roots.py": "e8968fb283b0de99963020fbdba3778d15dc7f72550fa893e3e9821ff4d4ab16",

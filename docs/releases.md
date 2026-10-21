@@ -1,5 +1,12 @@
 # Releases
 
+## 0.5.3 — Claude session-break run
+
+- Claude writers no longer inherit the launching Claude Code session's environment. A trial started from inside Claude Code received that session's id, messaging socket, entrypoint and plugin data, plus the effort and model aliases from its settings, such as `ANTHROPIC_DEFAULT_OPUS_MODEL`. Only credentials and `CLAUDE_CONFIG_DIR` pass through, and telemetry lists the removed names.
+- Claude auto-memory is off for every writer (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`). It is on by default and keyed by the workspace path, so a second session could read what the first one saved.
+
+Runtime code is unchanged apart from regenerated manifests.
+
 ## 0.5.2 — state-first arm for session-break trials
 
 - `tools/session_break_trials.py` adds a fourth arm, `forge-state`: Forge `lean` in the opt-in state-first mode, loaded from its own frozen snapshot (`--state-plugin-root`, which defaults to `--plugin-root`). Its standing instruction names the mode; the other arms' prompts are unchanged.
