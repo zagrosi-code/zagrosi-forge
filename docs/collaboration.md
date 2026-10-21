@@ -252,7 +252,7 @@ it does not invent a new task. Recovery requires explicit human agreement and
 an exact observed board revision. Review again if that revision changes. Recovery
 rotates ownership generation; rebind the local plan and independently verify code.
 It does not cherry-pick changes or accept the previous owner's test results.
-Set the receiving host on recovery or update; an unspecified recovery host is `other`.
+Set the receiving host on recovery or update; an unspecified recovery host is the detected one (`claude` or `codex`, otherwise `other`).
 Interrupted initialization resumes with `team init` using the original remote.
 
 Pending commits stay under private Git refs so local garbage collection cannot

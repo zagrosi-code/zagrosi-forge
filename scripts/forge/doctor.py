@@ -10,6 +10,7 @@ import tomllib
 import sys
 
 from . import CLI_PATH
+from . import hosts as _hosts
 from . import models as _models
 from . import quality as _quality
 from . import storage as _storage
@@ -159,11 +160,16 @@ def doctor(args: argparse.Namespace) -> int:
         "python": sys.version.split()[0],
         "marketplace": {
             "name": marketplace.get("name"),
-            "plugin": "zagrosi-forge@zagrosi" if marketplace_entry else None,
+            "plugin": _hosts.PLUGIN_ID if marketplace_entry else None,
             "path": str(marketplace_path),
         },
         "version": version,
         "skills": list(SKILL_NAMES),
         "plugin_scoped_skills": [f"zagrosi-forge:{name}" for name in SKILL_NAMES],
+        "host": _hosts.detect_host(),
     }
+    if version:
+        # Informational only: doctor runs in every preflight, so host state must not change findings.
+        extras["claude_plugin"] = _hosts.claude_plugin_status(version)
+        extras["next_steps"] = _hosts.claude_plugin_steps(extras["claude_plugin"])
     return _quality.emit_quality("doctor", findings, args, extras)

@@ -1,5 +1,13 @@
 # Releases
 
+## 0.4.4 — Claude Code host parity
+
+- `doctor` and `update-check` compare Claude Code installs of Forge that apply to the current project with the source release and name the fix: `claude plugin marketplace update zagrosi`, then `claude plugin update zagrosi-forge@zagrosi`. They honor `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_PLUGIN_CACHE_DIR`. Doctor reports this without findings, so preflight scores do not change.
+- Detect the running host from `CLAUDECODE=1` (Claude Code) or `CODEX_THREAD_ID` (Codex); both or neither means `other`. Generated `team start` commands, and team sessions started or recovered without `--host`, record it.
+- `capability-inventory` also summarizes user-level Claude Code plugins and MCP servers, showing names, transports and yes/no flags only.
+- The native smoke test fails when Claude Code loads Forge from anywhere but the staged package (local marketplaces load in place) or its disposable settings. It also fails when a `claude plugin details` row's count does not match its names; Claude Code 2.1.304 has no structured inventory. It ignores `CLAUDE_CODE_PLUGIN_*` overrides that could reach real plugin settings. CI pins Claude Code 2.1.304, and package drift tests cover the Claude install.
+- Tests ignore the developer's Claude Code install and host markers.
+
 ## 0.4.3 — plan gates that explain themselves
 
 - Verification findings name the exact gap: a case without `Expected:` or `Command:`, an unread label such as `Expected failure now:`, or an inspection rationale that does not cover the whole section.

@@ -9,6 +9,7 @@ import re
 import shutil
 import tomllib
 
+from . import hosts as _hosts
 from . import output as _output
 from . import policy as _policy
 from . import storage as _storage
@@ -38,20 +39,25 @@ def load_toml_config(path: Path | None) -> tuple[dict[str, Any], list[str], str 
     return data if isinstance(data, dict) else {}, [], str(path)
 
 
-def summarize_plugins(config: dict[str, Any]) -> list[dict[str, Any]]:
-    plugins = config.get("plugins", {})
+def summarize_plugins(plugins: Any) -> list[dict[str, Any]]:
+    """Codex maps plugin ids to tables with `enabled`; Claude Code maps them to booleans."""
     if not isinstance(plugins, dict):
         return []
     rows: list[dict[str, Any]] = []
     for plugin_id, settings in sorted(plugins.items()):
         enabled = True
-        if isinstance(settings, dict) and "enabled" in settings:
+        if isinstance(settings, bool):
+            enabled = settings
+        elif isinstance(settings, dict) and "enabled" in settings:
             enabled = bool(settings.get("enabled"))
         rows.append({"id": str(plugin_id), "enabled": enabled})
     return rows
 
 
 def mcp_transport(settings: dict[str, Any]) -> str:
+    kind = settings.get("type")
+    if isinstance(kind, str) and kind in {"stdio", "sse", "http", "ws"}:
+        return kind  # Claude Code names its transport; other values are never echoed.
     if settings.get("url"):
         return "http"
     if settings.get("command"):
@@ -63,8 +69,8 @@ def has_sensitive_key(mapping: dict[str, Any]) -> bool:
     return any(_policy.SENSITIVE_KEY_RE.search(str(key)) for key in mapping)
 
 
-def summarize_mcp_servers(config: dict[str, Any]) -> list[dict[str, Any]]:
-    servers = config.get("mcp_servers", {})
+def summarize_mcp_servers(servers: Any) -> list[dict[str, Any]]:
+    """Report names and booleans only; Codex and Claude Code spell header fields differently."""
     if not isinstance(servers, dict):
         return []
     rows: list[dict[str, Any]] = []
@@ -72,13 +78,14 @@ def summarize_mcp_servers(config: dict[str, Any]) -> list[dict[str, Any]]:
         server = settings if isinstance(settings, dict) else {}
         env = server.get("env", {})
         env_vars = server.get("env_vars", {})
-        headers = server.get("http_headers", {})
+        headers = server.get("http_headers", server.get("headers", {}))
         has_env = isinstance(env, dict) and bool(env)
         has_env_vars = isinstance(env_vars, (dict, list)) and bool(env_vars)
         has_http_headers = isinstance(headers, dict) and bool(headers)
         has_auth = (
             bool(server.get("bearer_token"))
             or bool(server.get("bearer_token_env_var"))
+            or bool(server.get("headersHelper"))
             or has_http_headers
             or (isinstance(env, dict) and has_sensitive_key(env))
             or (isinstance(env_vars, dict) and has_sensitive_key(env_vars))
@@ -97,15 +104,44 @@ def summarize_mcp_servers(config: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def load_claude_json(path: Path, warnings: list[str]) -> dict[str, Any]:
+    if not path.exists():
+        warnings.append(f"No Claude Code file found: {path}")
+        return {}
+    try:
+        data = _storage.load_json(path)
+    except (OSError, ValueError) as exc:
+        warnings.append(f"Claude Code file could not be parsed: {path} ({exc.__class__.__name__})")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def claude_settings_summary() -> dict[str, Any]:
+    """User-scope Claude Code plugins and MCP servers; project and managed settings are not read."""
+    settings_path, mcp_path = _hosts.claude_config_dir() / "settings.json", _hosts.claude_global_config()
+    warnings: list[str] = []
+    settings, mcp_config = load_claude_json(settings_path, warnings), load_claude_json(mcp_path, warnings)
+    return {
+        "settings_path": str(settings_path),
+        "mcp_config_path": str(mcp_path),
+        "warnings": warnings,
+        "plugins": {"configured": summarize_plugins(settings.get("enabledPlugins"))},
+        "mcp_servers": {"configured": summarize_mcp_servers(mcp_config.get("mcpServers"))},
+    }
+
+
 def capability_inventory(args: argparse.Namespace) -> int:
     plugin_root = _storage.resolve_path(args.plugin_root or ".")
     config_path = _storage.resolve_path(args.config) if args.config else None
     config, warnings, loaded_config = load_toml_config(config_path)
     tools = local_tool_status()
-    plugins = summarize_plugins(config)
-    mcp_servers = summarize_mcp_servers(config)
-    recommendations = ["Use the active agent's available tools; this inventory reads Codex configuration only."]
-    if any(server["name"] == "context7" and server["enabled"] for server in mcp_servers):
+    plugins = summarize_plugins(config.get("plugins"))
+    mcp_servers = summarize_mcp_servers(config.get("mcp_servers"))
+    claude = claude_settings_summary()
+    recommendations = ["Use the active agent's available tools; this inventory reads user-level Codex and Claude Code "
+                       "settings only, not project or managed settings."]
+    if any(server["name"] == "context7" and server["enabled"]
+           for server in mcp_servers + claude["mcp_servers"]["configured"]):
         recommendations.append("Use Context7 or configured documentation MCP for current library/API documentation when relevant.")
     if tools["gh"]["available"]:
         recommendations.append("GitHub CLI is available for opt-in PR and CI inspection workflows.")
@@ -120,6 +156,7 @@ def capability_inventory(args: argparse.Namespace) -> int:
         "warnings": warnings,
         "plugins": {"configured": plugins},
         "mcp_servers": {"configured": mcp_servers},
+        "claude": claude,
         "local_tools": tools,
         "recommendations": recommendations,
     }

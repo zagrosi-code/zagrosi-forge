@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 import uuid
 
-from . import session as command_session, team_dependencies
+from . import hosts, session as command_session, team_dependencies
 from .team_config import LocalTeam
 from .team_git import GitBoard, Repository, Snapshot, _run
 from .team_state import (TeamError, new_board, normalize_paths, paths_cover,
@@ -253,7 +253,7 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
                 raise TeamError("team-session-exists", "That task already exists; inspect it before updating.")
             row = {"participant_id": context["state"]["participant_id"],
                    "checkout_id": context["checkout"]["checkout_id"], "generation": token,
-                   "name": context["state"]["connection"]["name"], "host": host or "other", "task": task,
+                   "name": context["state"]["connection"]["name"], "host": host or hosts.detect_host(), "task": task,
                    "state": "working" if paths else "planning", "paths": paths or [],
                    "branch": repo.branch, "head": repo.head, "updated_at": time.time(), "note": note or ""}
         elif action == "recover":
@@ -266,7 +266,7 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
                 raise TeamError("team-recovery-reason", "Explicit recovery requires an agreed handoff or recovery reason.")
             row = {**previous, "participant_id": context["state"]["participant_id"],
                    "checkout_id": context["checkout"]["checkout_id"], "generation": token,
-                   "name": context["state"]["connection"]["name"], "state": "blocked", "host": host or "other",
+                   "name": context["state"]["connection"]["name"], "state": "blocked", "host": host or hosts.detect_host(),
                    "branch": repo.branch, "head": repo.head, "updated_at": time.time()}
             validate_session({**row, "note": reason})
         else:

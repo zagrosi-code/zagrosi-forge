@@ -109,9 +109,21 @@ def mismatches(source: Path, installed: Path, members: list[str]) -> list[str]:
 
 
 def inventory(details: str, component: str) -> list[str]:
-    """Names on one `claude plugin details` component row, such as `Agents (1)  forge-reviewer`."""
-    match = re.search(rf"^\s*{component} \(\d+\)[ \t]*([^\n]*)", details, re.MULTILINE)
-    return sorted(name.strip() for name in match[1].split(",") if name.strip()) if match else []
+    """Names on one `claude plugin details` component row; Claude Code 2.1.304 has no structured inventory."""
+    match = re.search(rf"^\s*{component} \((\d+)\)[ \t]*([^\n]*)", details, re.MULTILINE)
+    names = sorted(name.strip() for name in match[2].split(",") if name.strip()) if match else []
+    if not match or len(names) != int(match[1]):
+        raise ValueError(f"Claude plugin details has no well-formed {component} row: {match[0].strip() if match else 'missing'}")
+    return names
+
+
+def claude_load_path(item: dict, source: Path, settings: Path) -> Path:
+    """Claude loads local-marketplace plugins in place (`readFromFolder`) and copies others into its settings."""
+    folder = item.get("readFromFolder")
+    loaded = Path(folder or item["installPath"]).resolve()
+    if not (loaded == source.resolve() if folder else loaded.is_relative_to(settings.resolve())):
+        raise ValueError(f"Native Claude plugin loads from outside the staged package and disposable settings: {loaded}")
+    return loaded
 
 
 def check_references(root: Path) -> list[str]:
@@ -136,7 +148,9 @@ def smoke(root: Path, host: str, executable: str, *, upgrade: bool = False) -> d
             destination = source / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / name, destination)
-        env = {**os.environ, "CODEX_HOME": str(settings), "CLAUDE_CONFIG_DIR": str(settings)}
+        # CLAUDE_CODE_PLUGIN_* settings can move the plugins root or add plugins outside these disposable settings.
+        env = {**{key: value for key, value in os.environ.items() if not key.startswith("CLAUDE_CODE_PLUGIN_")},
+               "CODEX_HOME": str(settings), "CLAUDE_CONFIG_DIR": str(settings)}
         version = run([executable, "--version"], base, env).strip()
         manifest = ".claude-plugin/plugin.json" if host == "claude" else ".codex-plugin/plugin.json"
         original = (source / manifest).read_text()
@@ -157,6 +171,8 @@ def smoke(root: Path, host: str, executable: str, *, upgrade: bool = False) -> d
             if not item.get("enabled"):
                 raise ValueError("Native plugin is disabled")
             if host == "claude":
+                # Codex reports skill paths to contain below; Claude reports where it loads the plugin from.
+                claude_load_path(item, source, settings)
                 return Path(item["installPath"]), item
             # Codex add reports the cache path; list confirms it is enabled.
             installed = json.loads(output)["installedPath"] if output.lstrip().startswith("{") else None

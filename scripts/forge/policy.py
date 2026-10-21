@@ -415,7 +415,7 @@ COMMAND_CATALOG = [
     {
         "name": "capability-inventory",
         "phase": "utility",
-        "summary": "List tools and redacted Codex config.",
+        "summary": "List tools and redacted Codex and Claude settings.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py capability-inventory --plugin-root ."],
     },
@@ -450,7 +450,7 @@ COMMAND_CATALOG = [
     {
         "name": "update-check",
         "phase": "utility",
-        "summary": "Compare installed Codex bytes.",
+        "summary": "Compare installed Codex and Claude plugins.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py update-check --plugin-root ."],
     },
