@@ -110,7 +110,7 @@ TEST_MANIFEST = {
     "test_runtime_performance.py": "4f7cf467082e3eca7b2548dff0a7aa6239270c9118e0f5f8a2cd6a5bc084a5d7",
     "test_runtime_reuse.py": "91fe91c5ccbd9077fc4965fd3d2f547ef683a69d524ceddb654e801e36425856",
     "test_section_contracts.py": "de911d33ee7d8e71ba372fe540e476aac41663cce4cfc7c3a9ec100b3943ca6d",
-    "test_session_break_trials.py": "14b5ba438d227a37b92649c0f34bd4d7391a84b41b4c95fbe47943b0062702ce",
+    "test_session_break_trials.py": "bce2cff46c6476c51f424b8dde340a6aee44bbe184b22995a371a13ca2bf77b0",
     "test_team_collaboration.py": "75cfcb0a4cc8764a09466c3af86b4611769ddf4d16861e2a8274bdb2a959c17e",
     "test_team_config.py": "c9d28c024567afe132bad6004a4a9e94412c89e3e87e3573564f50268db2e2ef",
     "test_team_dependencies.py": "cf88b3387082d5244874497029f00c0ef4ef7bba5981352c74e51ea503f9c60e",

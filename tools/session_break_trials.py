@@ -7,18 +7,14 @@ attempts each scheduled row once; after fixing a shared failure, prepare a new d
 from __future__ import annotations
 
 import argparse
-import ast
-from collections import Counter
 import contextlib
 from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import signal
-import statistics
 import sys
 import tempfile
 import threading
@@ -31,15 +27,18 @@ if str(ROOT / "tools") not in sys.path:
 import coding_trials  # noqa: E402
 from coding_trial_comparison import packets, reviews  # noqa: E402
 from coding_trial_evidence import evaluator_files, files, plugin_files  # noqa: E402
-from coding_trial_outcomes import accepted_outcomes, known_total  # noqa: E402
+from coding_trial_outcomes import known_total  # noqa: E402
 from coding_trial_process import execute  # noqa: E402
 from coding_trial_runner import EFFORT_CHOICES, require_effort  # noqa: E402
 from session_break_checks import CLAUSES, derived_brief  # noqa: E402
+from session_break_evidence import assertion_counts, regressions, session_evidence  # noqa: E402
+from session_break_report import ARMS, TOKENS, build_report  # noqa: E402
 from trial_matrix import read, schedule  # noqa: E402
 
 PROTOCOL = "session-break/v1"
-ARMS = ("forge-lean", "notes", "plain")
 CHECKS = ROOT / "tools/session_break_checks.py"
+# Every module whose bytes shape an attempt or its analysis, besides the shared trial harness.
+SOURCES = (Path(__file__).resolve(), CHECKS, *(ROOT / "tools" / f"session_break_{name}.py" for name in ("evidence", "report")))
 POLL_SECONDS = 0.5
 NOTES = ("Keep `.planning/NOTES.md` as your durable working notes: the plan, each section's status, decisions and "
          "clarifications, verification results and the next step. Update it whenever one of these changes. When "
@@ -65,12 +64,8 @@ PLANS = {
         "Match `import_orders` errors, keep inputs unchanged and handle header-only batches.",
     ),
 }
-TOKENS = ("input_tokens", "cached_input_tokens", "cache_creation_input_tokens", "uncached_input_tokens",
-          "output_tokens", "reasoning_output_tokens")
-EDIT_TOOLS = {"Edit", "Write"}
 SESSION_ONE = ("session-1.md", "session-1-events.jsonl", "session-1-telemetry.json", "checkpoint.json", "checkpoint")
 MODES, LOCK = "hidden-modes.json", "run.lock"
-PARENT = re.compile(r"(?:^|[\s'\"=:;&|(/\\])\.\.(?:$|[\s'\";&|)/\\])")
 
 
 def write(path: Path, value) -> None:
@@ -106,7 +101,7 @@ def session_prompt(arm: str, prompt: str, case: str, session: int, clauses=()) -
 
 
 def analyzer() -> dict:
-    return {path.relative_to(ROOT).as_posix(): sha256(path) for path in (Path(__file__).resolve(), CHECKS)}
+    return {path.relative_to(ROOT).as_posix(): sha256(path) for path in SOURCES}
 
 
 def identity(plugin_root: Path, cases) -> dict:
@@ -335,164 +330,6 @@ def combine_telemetry(trial: Path, sessions: int) -> dict:
     return record
 
 
-def assertion_counts(tests: Path) -> dict:
-    """Assert statements and assert*/fail* calls per unittest method ID, for methods defined in top-level classes."""
-    counts = {}
-    for path in sorted(tests.rglob("*.py")) if tests.is_dir() else []:
-        try:
-            tree = ast.parse(path.read_text())
-        except (OSError, SyntaxError, UnicodeError, ValueError):
-            continue
-        module = ".".join(path.relative_to(tests).with_suffix("").parts)
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
-                continue
-            for method in node.body:
-                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) and method.name.startswith("test"):
-                    counts[f"{module}.{node.name}.{method.name}"] = sum(
-                        isinstance(item, ast.Assert) or isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
-                        and item.func.attr.startswith(("assert", "fail")) for item in ast.walk(method))
-    return counts
-
-
-def event_rows(path: Path) -> list[tuple[int, dict]]:
-    """Parsed events with the byte offset at which each line ends."""
-    rows, offset = [], 0
-    if not path.is_file():
-        return rows
-    with path.open("rb") as handle:
-        for line in handle:
-            offset += len(line)
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(event, dict):
-                rows.append((offset, event))
-    return rows
-
-
-def actions(event: dict) -> list[tuple[str, str]]:
-    """Commands, other tool inputs and edited paths an event starts, for Codex and Claude logs."""
-    item = event.get("item")
-    if isinstance(item, dict):
-        if event.get("type") != "item.started":
-            return []
-        if item.get("type") == "command_execution" and isinstance(item.get("command"), str):
-            return [("command", item["command"])]
-        if item.get("type") == "file_change" and isinstance(item.get("changes"), list):
-            return [("edit", change["path"]) for change in item["changes"]
-                    if isinstance(change, dict) and isinstance(change.get("path"), str)]
-        return []
-    message = event.get("message")
-    content = message.get("content") if event.get("type") == "assistant" and isinstance(message, dict) else None
-    rows = []
-    for block in content if isinstance(content, list) else []:
-        if not isinstance(block, dict) or block.get("type") != "tool_use" or not isinstance(block.get("input"), dict):
-            continue
-        name, data = block.get("name"), block["input"]
-        if name == "Bash" and isinstance(data.get("command"), str):
-            rows.append(("command", data["command"]))
-        elif name in EDIT_TOOLS and isinstance(data.get("file_path"), str):
-            rows.append(("edit", data["file_path"]))
-        else:
-            rows.append(("tool", json.dumps(data, sort_keys=True)))
-    return rows
-
-
-def spellings(path: Path) -> list[str]:
-    """A path as given and resolved; hosts may log either, for example /tmp or /private/tmp on macOS."""
-    return list(dict.fromkeys((os.path.normpath(path), os.path.normpath(path.resolve()))))
-
-
-def workspace_path(path: str, workspace: Path) -> str | None:
-    """The workspace-relative form of a logged path, or None outside the workspace."""
-    candidate = os.path.normpath(path if os.path.isabs(path) else workspace / path)
-    for root in spellings(workspace):
-        if os.path.commonpath([candidate, root]) == root:
-            return Path(os.path.relpath(candidate, root)).as_posix()
-    return None
-
-
-def code_edit(path: str, workspace: Path) -> bool:
-    relative = workspace_path(path, workspace)
-    return relative is not None and relative.split("/", 1)[0] in ("src", "tests")
-
-
-def outside_reference(kind: str, text: str, workspace: Path) -> bool:
-    """An edit outside the workspace, or a command or tool input naming `..` or the matrix beyond it."""
-    if kind == "edit":
-        return workspace_path(text, workspace) is None
-    for root in spellings(workspace):
-        text = text.replace(root, "")
-    return bool(PARENT.search(text)) or any(root in text for root in spellings(workspace.parent.parent))
-
-
-def main_loop_usage(rows, boundary: int) -> dict | None:
-    """Claude top-level assistant usage through the boundary, counted once per message ID."""
-    messages = {}
-    for offset, event in rows:
-        message = event.get("message")
-        if offset > boundary:
-            break
-        if (event.get("type") == "assistant" and not event.get("parent_tool_use_id") and isinstance(message, dict)
-                and isinstance(message.get("usage"), dict)):
-            messages[message.get("id") or offset] = message["usage"]
-    if not messages:
-        return None
-    return {key: known_total([usage.get(key) for usage in messages.values()]) for key in
-            ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")}
-
-
-def session_evidence(path: Path, workspace: Path, first_edit: dict | None = None) -> dict:
-    rows = event_rows(path)
-    started = [(offset, kind, text) for offset, event in rows for kind, text in actions(event)]
-    commands = [text for _, kind, text in started if kind == "command"]
-    evidence = {"events": len(rows), "commands": len(commands),
-                "helper_calls": sum("zagrosi_skills.py" in text for text in commands),
-                "code_edits": sum(kind == "edit" and code_edit(text, workspace) for _, kind, text in started),
-                "outside_references": [text[:240] for _, kind, text in started
-                                       if outside_reference(kind, text, workspace)][:20]}
-    if first_edit is None:
-        return evidence
-    boundary, source = first_edit.get("event_bytes"), "poll"
-    if boundary is None:  # Unpolled: use the first logged code edit instead.
-        boundary = next((offset for offset, kind, text in started if kind == "edit" and code_edit(text, workspace)), None)
-        source = None if boundary is None else "event"
-    before = [(kind, text) for offset, kind, text in started if boundary is not None and offset <= boundary]
-    evidence["reorientation"] = {
-        "seconds": first_edit.get("seconds"), "boundary": source,
-        "commands": sum(kind == "command" for kind, _ in before) if boundary is not None else None,
-        "planning_read": any(kind != "edit" and ".planning" in text for kind, text in before) if boundary is not None else None,
-        "tokens": main_loop_usage(rows, boundary) if boundary is not None else None}
-    return evidence
-
-
-def regressions(checkpoint: dict, final: dict, on_final: dict | None, before: dict, after: dict, probe: bool) -> dict:
-    """(a) compatibility lost after the checkpoint; (b) checkpoint tests failing, deleted or weakened; (c) clauses.
-
-    A part whose observation is missing stays None instead of reading as a regression or as none.
-    """
-    outcomes, final_tests = checkpoint.get("tests"), final.get("tests") or {}
-    tests = None
-    if outcomes is not None and on_final is not None:
-        passed = sorted(name for name, outcome in outcomes.items() if outcome == "passed")
-        tests = {"failing": [name for name in passed if on_final.get(name) != "passed"],
-                 # Absent both from the final run and from the final source; an import failure is not a deletion.
-                 "deleted": [name for name in passed if name not in final_tests and name not in after],
-                 "weakened": [name for name in passed if final_tests.get(name) == "skipped"
-                              or name in after and after[name] < before.get(name, 0)]}
-    probes = final.get("probes")
-    result = {"compatibility": checkpoint["compatibility"]["passed"] and not final["compatibility"]["passed"],
-              "tests": tests,
-              "withheld_clauses": None if probe and probes is None else
-              [name for name, status in (probes or {}).items() if status == "fail"] if probe else []}
-    parts = [result["compatibility"], None if tests is None else any(tests.values()),
-             None if result["withheld_clauses"] is None else bool(result["withheld_clauses"])]
-    result["any"] = True if True in parts else None if None in parts else False
-    return result
-
-
 def analyze_attempt(trial: Path, case: str, manifest: dict, sessions: list[dict]) -> dict:
     workspace = trial / "workspace"
     checkpoint = json.loads((trial / "checkpoint.json").read_text())
@@ -642,7 +479,7 @@ def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str
             "cli_versions": versions}
 
 
-def select(manifest: dict, directory: Path, attempt: str | None) -> list[dict]:
+def select(manifest: dict, attempt: str | None) -> list[dict]:
     items = [item for item in manifest["trials"] if attempt in (None, item["id"])]
     if not items:
         raise ValueError(f"Unknown attempt: {attempt}")
@@ -652,7 +489,7 @@ def select(manifest: dict, directory: Path, attempt: str | None) -> list[dict]:
 def run(directory: Path, attempt: str | None = None) -> dict:
     """Attempt pending rows serially; stop after a session fails without timing out."""
     manifest = read_manifest(directory)
-    items = select(manifest, directory, attempt)
+    items = select(manifest, attempt)
     if attempt is not None and (directory / attempt / "attempt.json").exists():
         raise ValueError(f"{attempt} was already attempted; prepare a new directory to repeat it")
     halted = None
@@ -674,7 +511,7 @@ def analyze(directory: Path, attempt: str | None = None) -> dict:
     """Recompute usage, checks and session analysis for attempts whose sessions finished."""
     manifest = read_manifest(directory)
     with locked(directory):
-        for item in select(manifest, directory, attempt):
+        for item in select(manifest, attempt):
             trial = directory / item["id"]
             sessions = (read(trial / "trial.json").get("runner") or {}).get("sessions") or []
             if read(trial / "attempt.json").get("status") in ("completed", "error") and sessions:
@@ -682,149 +519,8 @@ def analyze(directory: Path, attempt: str | None = None) -> dict:
     return report(directory)
 
 
-def attempt_row(directory: Path, item: dict) -> dict:
-    trial = directory / item["id"]
-    attempt, result, analysis, checkpoint, telemetry = (read(trial / name) for name in (
-        "attempt.json", "result.json", "session-break.json", "checkpoint.json", "telemetry.json"))
-    status = attempt.get("status", "pending")
-    if status == "running":
-        status = "interrupted"
-    quality = (result.get("common_quality") or {}).get("success")
-    common = ("pending" if status == "pending" else "passed" if quality is True and status == "completed"
-              else "failed" if quality is False or status != "completed" else "unknown")
-    sessions = analysis.get("sessions") or []
-    seconds = [row.get("seconds") for row in (result.get("runner") or {}).get("sessions") or []]
-    final = analysis.get("final") or {}
-    return {
-        "id": item["id"], "arm": item["arm"], "case": item["case"], "block": item["block"], "status": status,
-        "common_quality": common, "workflow": (result.get("workflow") or {}).get("success"),
-        "behavior": (result.get("behavior") or {}).get("success"),
-        "cleanup": (result.get("cleanup") or {}).get("success"),
-        "reported_telemetry": {"totals": telemetry.get("totals") or dict.fromkeys((*TOKENS, "total_tokens")),
-                               "reported_cost_usd": telemetry.get("reported_cost_usd")},
-        "attempt_seconds": known_total([row.get("process", {}).get("seconds") for row in
-                                        (result.get("runner") or {}).get("sessions") or []]) if seconds else None,
-        "sessions": [{key: row.get(key) for key in ("seconds", "returncode", "timed_out", "commands", "helper_calls")}
-                     for row in sessions],
-        "missing_tools": telemetry.get("missing_tools"),
-        "reorientation": sessions[1].get("reorientation") if len(sessions) == 2 else None,
-        "regressions": analysis.get("regressions"),
-        "probes": final.get("probes"), "checkpoint_unchanged": analysis.get("checkpoint_unchanged"),
-        "checkpoint": {key: checkpoint.get(key) for key in ("changed_files", "planning", "probes", "compatibility")},
-        "final_planning": final.get("planning"),
-        "outside_references": sum(len(row.get("outside_references") or []) for row in sessions) if sessions else None,
-        "rejection": rejection(result, analysis, status),
-    }
-
-
-def rejection(result: dict, analysis: dict, status: str) -> list[str]:
-    """Mechanical, arm-blind reasons behind a rejected attempt."""
-    if status != "completed":
-        return [status]
-    if (result.get("common_quality") or {}).get("success"):
-        return []
-    reasons = []
-    runner_record = result.get("runner") or {}
-    if len(runner_record.get("sessions") or []) == 1:
-        reasons.append("session 1 failure")
-    elif runner_record.get("returncode") != 0:
-        reasons.append("session 2 timeout" if runner_record.get("timed_out") else "session 2 failure")
-    final = analysis.get("final") or {}
-    probes = list((final.get("probes") or {}).values())
-    if final and not (final.get("compatibility") or {}).get("passed"):
-        reasons.append("compatibility regression" if (analysis.get("regressions") or {}).get("compatibility")
-                       else "compatibility")
-    elif final and not (final.get("oracle") or {}).get("passed"):
-        reasons.append("unfinished feature" if "missing" in probes else
-                       "clause" if any(value != "pass" for value in probes) else "feature")
-    if (result.get("tests") or {}).get("returncode") != 0:
-        reasons.append("candidate tests")
-    if result.get("outside_scope"):
-        reasons.append("scope")
-    if result.get("evaluator_changed") or not (result.get("plugin_provenance") or {}).get("success"):
-        reasons.append("provenance")
-    if (result.get("cleanup") or {}).get("success") is False:
-        reasons.append("cleanup review")
-    return reasons
-
-
-def summarize(rows: list[dict]) -> dict:
-    common = accepted_outcomes(rows, status_key="common_quality")
-    total = known_total([row["reported_telemetry"]["totals"]["total_tokens"] for row in rows])
-    reoriented = [row["reorientation"] for row in rows if row["reorientation"]]
-    seconds = [value["seconds"] for value in reoriented if value.get("seconds") is not None]
-    observed = [row["regressions"] for row in rows if row["regressions"] and row["regressions"]["any"] is not None]
-    return {
-        "scheduled": common["scheduled"], "accepted": common["accepted"], "accepted_rate": common["accepted_rate"],
-        "statuses": dict(Counter(row["status"] for row in rows)),
-        "workflow": dict(Counter(str(row["workflow"]) for row in rows)),
-        "total_tokens": {"total": total, "per_accepted": total / common["accepted"]
-                         if total is not None and common["accepted"] else None},
-        "tokens": common["tokens"], "reported_cost_usd": common["reported_cost_usd"],
-        "elapsed_seconds": common["elapsed_seconds"],
-        "reorientation": {"median_seconds": statistics.median(seconds) if seconds else None,
-                          "planning_read": sum(value.get("planning_read") is True for value in reoriented),
-                          "observed": len(reoriented)},
-        "regressions": {"attempts": sum(value["any"] for value in observed),
-                        "compatibility": sum(value["compatibility"] is True for value in observed),
-                        "tests": sum(bool(value["tests"]) and any(value["tests"].values()) for value in observed),
-                        "withheld_clauses": sum(bool(value["withheld_clauses"]) for value in observed),
-                        "observed": len(observed), "unobserved": len(rows) - len(observed)},
-        "helper_calls": sum(sum(session.get("helper_calls") or 0 for session in row["sessions"]) for row in rows),
-        "outside_references": known_total([row["outside_references"] for row in rows]),
-        "rejections": dict(Counter(reason for row in rows for reason in row["rejection"])),
-    }
-
-
-def beats(first: dict, second: dict) -> bool:
-    """More accepted without more regressed attempts, or fewer regressed without fewer accepted."""
-    more, fewer = first["accepted"], first["regressions"]["attempts"]
-    other, regressed = second["accepted"], second["regressions"]["attempts"]
-    return (more > other and fewer <= regressed) or (fewer < regressed and more >= other)
-
-
-def decide(arms: dict, blockers: list[str]) -> dict:
-    """Apply the protocol's decision rule to complete observations only; small samples cannot establish an effect."""
-    if set(arms) != set(ARMS):
-        blockers = [*blockers, "the decision rule needs all three arms"]
-    if blockers:
-        return {"complete": False, "blockers": blockers}
-    forge, notes = arms["forge-lean"], arms["notes"]
-    forge_tokens, notes_tokens = forge["total_tokens"]["total"], notes["total_tokens"]["total"]
-    ratio = forge_tokens / notes_tokens if forge_tokens is not None and notes_tokens else None
-    pairs = {f"{first}>{second}": beats(arms[first], arms[second]) for first in ARMS for second in ARMS if first != second}
-    h2 = pairs["forge-lean>notes"] and (None if ratio is None else ratio <= 1.5)
-    return {"complete": True, "blockers": [], "H1": pairs["forge-lean>plain"] and pairs["notes>plain"], "H2": h2,
-            "H0": not any(pairs.values()), "pairs": pairs, "forge_to_notes_tokens": ratio}
-
-
 def report(directory: Path) -> dict:
-    manifest = read_manifest(directory)
-    rows = [attempt_row(directory, item) for item in manifest["trials"]]
-    keys = sorted({(row["arm"], row["case"]) for row in rows})
-    groups = [{"arm": arm, "case": case, **summarize([row for row in rows if (row["arm"], row["case"]) == (arm, case)])}
-              for arm, case in keys]
-    arms = {arm: summarize([row for row in rows if row["arm"] == arm]) for arm in dict.fromkeys(row["arm"] for row in rows)}
-    blocks = {item["block"] for item in manifest["trials"]}
-    reviewed = [row for row in reviews(directory) if row["valid"]]
-    blockers = [text for count, text in (
-        (sum(row["status"] in ("pending", "interrupted") for row in rows), "attempts not run to the end"),
-        (len(blocks) - len(reviewed), "blocks without a valid blind review"),
-        (sum(summary["regressions"]["unobserved"] for summary in arms.values()), "attempts with unobserved regressions"),
-    ) if count for text in [f"{count} {text}"]]
-    result = {
-        "protocol": PROTOCOL, "settings": manifest["settings"], "probe": manifest["probe"],
-        "cli_versions": manifest["cli_versions"], "timeout": manifest["timeout"], "groups": groups, "arms": arms,
-        "decision": decide(arms, blockers), "comparative_review": {"expected": len(blocks), "completed": len(reviewed)},
-        "attempts": rows,
-        "limits": "Every scheduled attempt counts, including failures, timeouts and pending work. Accepted means the "
-                  "common-quality verdict, which needs an independent blind cleanup review. Tokens sum both sessions "
-                  "and stay unknown when either session's usage is missing; Claude totals include subagents. "
-                  "Re-orientation time is polled to the first src/ or tests/ change in session 2; Codex reports "
-                  "usage per session only, so its tokens before that edit are unknown. A renamed test counts as "
-                  "deleted. Probe failures are evidence, not certainty, and four repetitions per arm and case are "
-                  "observations, not statistically established effects.",
-    }
+    result = build_report(directory, read_manifest(directory))
     write(directory / "report.json", result)
     return result
 

@@ -454,6 +454,8 @@
   "tools/publication_trial_checks.py",
   "tools/retry_trial_checks.py",
   "tools/session_break_checks.py",
+  "tools/session_break_evidence.py",
+  "tools/session_break_report.py",
   "tools/session_break_trials.py",
   "tools/stream_trial_checks.py",
   "tools/sync_release.py",

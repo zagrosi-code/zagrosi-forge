@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("session_break_trials", ROOT / "tools/session_break_trials.py")
 breaks = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(breaks)
-checks = sys.modules["session_break_checks"]
+checks, evidence, reporting = (sys.modules[f"session_break_{name}"] for name in ("checks", "evidence", "report"))
 CLARIFICATION = "Tax rounds down per line; never round again over the combined subtotal."
 
 FAKE_CODEX = r'''
@@ -329,17 +329,17 @@ def summary(accepted, regressed, tokens):
 
 def test_decision_rule_needs_dominance_and_bounded_tokens():
     state = {"forge-lean": summary(4, 0, 140), "notes": summary(3, 1, 100), "plain": summary(2, 2, 50)}
-    assert breaks.decide(state, []) | {"pairs": None} == {"complete": True, "blockers": [], "H1": True, "H2": True,
+    assert reporting.decide(state, []) | {"pairs": None} == {"complete": True, "blockers": [], "H1": True, "H2": True,
                                                           "H0": False, "pairs": None, "forge_to_notes_tokens": 1.4}
     state["forge-lean"] = summary(4, 0, 151)
-    assert breaks.decide(state, [])["H2"] is False and breaks.decide(state, [])["H1"]
+    assert reporting.decide(state, [])["H2"] is False and reporting.decide(state, [])["H1"]
     state["forge-lean"] = summary(4, 0, None)
-    assert breaks.decide(state, [])["H2"] is None  # Unknown usage leaves the token bound unknown.
+    assert reporting.decide(state, [])["H2"] is None  # Unknown usage leaves the token bound unknown.
     alike = {arm: summary(3, 1, 100) for arm in breaks.ARMS}
-    assert breaks.decide(alike, [])["H0"] and not breaks.decide(alike, [])["H1"]
+    assert reporting.decide(alike, [])["H0"] and not reporting.decide(alike, [])["H1"]
     mixed = {**alike, "notes": summary(4, 2, 100)}
-    assert breaks.decide(mixed, [])["H0"]  # More accepted but more regressed attempts beats no arm.
-    assert breaks.decide(alike, ["2 blocks without a valid blind review"]) == {
+    assert reporting.decide(mixed, [])["H0"]  # More accepted but more regressed attempts beats no arm.
+    assert reporting.decide(alike, ["2 blocks without a valid blind review"]) == {
         "complete": False, "blockers": ["2 blocks without a valid blind review"]}
 
 
@@ -390,11 +390,11 @@ def test_probe_needs_a_runtime_only_plugin_snapshot(tmp_path, writer):
 def test_missing_observations_stay_unknown_instead_of_regressions():
     checkpoint = {"tests": {"t.T.test_a": "passed"}, "compatibility": {"passed": True}}
     final = {"tests": None, "probes": None, "compatibility": {"passed": True}}
-    found = breaks.regressions(checkpoint, final, None, {"t.T.test_a": 2}, {"t.T.test_a": 2}, True)
+    found = evidence.regressions(checkpoint, final, None, {"t.T.test_a": 2}, {"t.T.test_a": 2}, True)
     assert found == {"compatibility": False, "tests": None, "withheld_clauses": None, "any": None}
     # A module that fails to import at the end still defines its tests, so they are failing, not deleted.
     final = {"tests": {"unittest.loader._FailedTest.t": "error"}, "probes": {"c": "pass"}, "compatibility": {"passed": True}}
-    found = breaks.regressions(checkpoint, final, {"t.T.test_a": "error"}, {"t.T.test_a": 2}, {"t.T.test_a": 2}, True)
+    found = evidence.regressions(checkpoint, final, {"t.T.test_a": "error"}, {"t.T.test_a": 2}, {"t.T.test_a": 2}, True)
     assert found["tests"] == {"failing": ["t.T.test_a"], "deleted": [], "weakened": []} and found["any"] is True
 
 
@@ -410,4 +410,4 @@ def test_missing_observations_stay_unknown_instead_of_regressions():
 def test_outside_references_name_the_matrix_or_parent_paths(tmp_path, kind, text, outside):
     workspace = tmp_path / "matrix/attempt/workspace"
     text = text.format(matrix=tmp_path / "matrix", workspace=workspace)
-    assert breaks.outside_reference(kind, text, workspace) is outside
+    assert evidence.outside_reference(kind, text, workspace) is outside
