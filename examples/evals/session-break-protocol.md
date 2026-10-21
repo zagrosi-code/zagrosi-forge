@@ -53,8 +53,11 @@ observation, not a statistically established effect.
 Every arm uses the same host, CLI version, model, effort, tools, timeouts and
 task text. Claude writers now share `Read, Edit, Write, Bash, Glob, Grep, Skill,
 Agent, TaskCreate, TaskGet, TaskList, TaskUpdate`; only `forge-lean` loads the
-plugin. Standing instructions appear at the start of both session prompts, as a
-repository instruction file would.
+plugin, and only it may read the plugin tree (`--add-dir`), because
+`--restricted` keeps file tools inside working directories. Claude writers start
+without the launching session's environment and with auto-memory off. Standing
+instructions appear at the start of both session prompts, as a repository
+instruction file would.
 
 | Arm | Preparation | Standing instruction | Durable state |
 |---|---|---|---|
@@ -132,8 +135,8 @@ them early, record the overshoot.
 | Metric | Definition |
 |---|---|
 | Accepted outcome | `coding_trials.py check --review` common-quality verdict: the same behavior, scope, oracle and cleanup rules for every arm. Both cases require cleanup, so every attempt needs an independent review blind to the arm; without one, cleanup fails. Report Forge workflow completion separately. |
-| Total tokens | Session 1 plus session 2 `totals`. Claude `totals` come from the result's per-model usage, which includes subagents (`totals_source: modelUsage`); `top_level_totals` keep the result `usage`. Report uncached input, cache reads, cache writes and output separately, plus the CLI's cost estimate. |
-| Re-orientation | Session-2 seconds and tokens before its first `src/` or `tests/` change, polled every half second. Claude: main-loop assistant usage through the event that made that edit, deduplicated by message ID; subagent usage is not attributable. Codex reports usage once per session, so its re-orientation tokens are unknown; the commands before the edit and whether they read `.planning/` stand in. |
+| Total tokens | Session 1 plus session 2 `totals`. Claude `totals` come from the result's per-model usage, which includes subagents (`totals_source: modelUsage`); `top_level_totals` keep the result `usage`. Report uncached input, cache reads, cache writes and output separately, plus the CLI's cost estimate. A Claude session that times out reports no totals; its observed input tokens (uncached input, cache reads and writes, subagents included, from the log) survive, but the log holds no final output counts. |
+| Re-orientation | Session-2 seconds and tokens before its first `src/` or `tests/` change, polled every half second. Claude: main-loop input usage through the event that made that edit, deduplicated by message ID; the log repeats each response's first output count, so output is left out, and subagent usage is not attributable. Codex reports usage once per session, so its re-orientation tokens are unknown; the commands before the edit and whether they read `.planning/` stand in. |
 | Wall time | Runner seconds for both sessions, excluding harness checks and review. |
 | Regressions | (a) the compatibility-only oracle passes at the checkpoint but fails at the end; (b) a test passing at the checkpoint fails against the final source, is deleted or renamed, is skipped, or loses `assert` statements or `assert*`/`fail*` calls; (c) a clause probe gives a wrong answer at the end. Each probe checks one withheld clause, so the oracle's first failure cannot mask it; a feature that is still missing counts as unfinished, not as a clause failure. |
 | Tool parity | `missing_tools` is empty in every Claude session. The CLI drops unknown or disabled tool names silently, so the init event is the only proof every arm had the same tools. |
@@ -243,6 +246,8 @@ retained sessions, and `session_break_report.py` builds the report.
 - Removing clauses changes what the brief says, not the oracle. Plain agents
   can still guess correctly, so probe failures are evidence, not certainty.
 - Forge's planning text can show in the code, so blinding is partial.
-- Hosts may keep their own memory between sessions. Before a Claude run,
-  confirm that session 1 writes nothing under Claude Code's auto-memory
-  directory for the workspace; otherwise clarifications reach every arm.
+- Hosts may keep their own memory between sessions. Claude Code's auto-memory
+  is on by default and keyed by the workspace path, so the runner turns it off
+  (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`). After a Claude run, confirm that no
+  `memory/` folder appeared under `~/.claude/projects` for any workspace;
+  otherwise clarifications reach every arm.

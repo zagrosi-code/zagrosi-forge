@@ -34,6 +34,8 @@ def attempt_row(directory: Path, item: dict) -> dict:
         "cleanup": (result.get("cleanup") or {}).get("success"),
         "reported_telemetry": {"totals": telemetry.get("totals") or dict.fromkeys((*TOKENS, "total_tokens")),
                                "reported_cost_usd": telemetry.get("reported_cost_usd")},
+        "observed_input_tokens": known_total([known_total(list(row["input_usage"].values())) if row.get("input_usage")
+                                              else None for row in sessions]) if sessions else None,
         "attempt_seconds": known_total([row.get("process", {}).get("seconds") for row in
                                         (result.get("runner") or {}).get("sessions") or []]) if seconds else None,
         "sessions": [{key: row.get(key) for key in ("seconds", "returncode", "timed_out", "commands", "helper_calls")}
@@ -83,6 +85,7 @@ def rejection(result: dict, analysis: dict, status: str) -> list[str]:
 def summarize(rows: list[dict]) -> dict:
     common = accepted_outcomes(rows, status_key="common_quality")
     total = known_total([row["reported_telemetry"]["totals"]["total_tokens"] for row in rows])
+    observed = known_total([row["observed_input_tokens"] for row in rows])
     reoriented = [row["reorientation"] for row in rows if row["reorientation"]]
     seconds = [value["seconds"] for value in reoriented if value.get("seconds") is not None]
     observed = [row["regressions"] for row in rows if row["regressions"] and row["regressions"]["any"] is not None]
@@ -92,6 +95,8 @@ def summarize(rows: list[dict]) -> dict:
         "workflow": dict(Counter(str(row["workflow"]) for row in rows)),
         "total_tokens": {"total": total, "per_accepted": total / common["accepted"]
                          if total is not None and common["accepted"] else None},
+        "observed_input_tokens": {"total": observed, "per_accepted": observed / common["accepted"]
+                                  if observed is not None and common["accepted"] else None},
         "tokens": common["tokens"], "reported_cost_usd": common["reported_cost_usd"],
         "elapsed_seconds": common["elapsed_seconds"],
         "reorientation": {"median_seconds": statistics.median(seconds) if seconds else None,
@@ -152,8 +157,11 @@ def build_report(directory: Path, manifest: dict) -> dict:
         "limits": "Every scheduled attempt counts, including failures, timeouts and pending work. Accepted means the "
                   "common-quality verdict, which needs an independent blind cleanup review. Tokens sum both sessions "
                   "and stay unknown when either session's usage is missing; Claude totals include subagents. "
-                  "Re-orientation time is polled to the first src/ or tests/ change in session 2; Codex reports "
-                  "usage per session only, so its tokens before that edit are unknown. A renamed test counts as "
+                  "A Claude session that times out reports no totals; observed input tokens (uncached input, cache "
+                  "reads and writes, subagents included) come from its log and survive timeouts, but the log holds "
+                  "no final output counts. Re-orientation time is polled to the first src/ or tests/ change in "
+                  "session 2, and its Claude tokens are main-loop input only; Codex reports usage per session only, "
+                  "so its tokens before that edit are unknown. A renamed test counts as "
                   "deleted. Probe failures are evidence, not certainty, and four repetitions per arm and case are "
                   "observations, not statistically established effects.",
     }

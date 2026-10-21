@@ -174,6 +174,7 @@ def test_sessions_are_isolated_and_retain_their_own_evidence(tmp_path, writer):
     assert not analysis["regressions"]["any"]
     row = result["attempts"][0]
     assert row["reported_telemetry"]["totals"]["total_tokens"] == 3100 and row["outside_references"] == 0
+    assert row["observed_input_tokens"] is None  # Codex logs carry no per-response usage: unknown, not zero.
     assert read(trial / "result.json")["reported_telemetry"]["totals"]["total_tokens"] == 3100
     # Cleanup still awaits an independent blind review, so nothing is accepted and nothing is decided yet.
     assert row["common_quality"] == "failed" and row["rejection"] == ["cleanup review"]
@@ -189,6 +190,27 @@ def test_reorientation_ends_at_the_first_code_edit(tmp_path, writer):
     assert reorientation["boundary"] == "poll" and 0.3 <= reorientation["seconds"] < 30
     assert reorientation["commands"] == 1 and reorientation["planning_read"] is True
     assert reorientation["tokens"] is None  # Codex reports usage per session only.
+
+
+def test_claude_logs_count_input_usage_once_and_survive_a_timeout(tmp_path):
+    workspace = tmp_path / "workspace"
+    usage = {"input_tokens": 2, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 10, "output_tokens": 8}
+
+    def assistant(identity, content, parent=None):
+        return {"type": "assistant", "parent_tool_use_id": parent, "message": {"id": identity, "usage": usage, "content": content}}
+
+    edit = {"type": "tool_use", "id": "edit", "name": "Edit", "input": {"file_path": str(workspace / "src/orders.py")}}
+    # One response logged per block, a subagent response and no result event: the session timed out.
+    events = [assistant("one", [{"type": "thinking"}]), assistant("one", [{"type": "text"}]),
+              assistant("sub", [{"type": "text"}], parent="task"), assistant("two", [edit]), assistant("three", [])]
+    log = tmp_path / "events.jsonl"
+    log.write_text("".join(json.dumps(event) + "\n" for event in events))
+    found = evidence.session_evidence(log, workspace, {"seconds": 5.0, "event_bytes": None})
+    assert found["input_usage"] == {"input_tokens": 8, "cache_read_input_tokens": 400, "cache_creation_input_tokens": 40}
+    # The main loop through the edit; logged output counts are each response's first, not its final, count.
+    assert found["reorientation"]["boundary"] == "event"
+    assert found["reorientation"]["tokens"] == {"input_tokens": 4, "cache_read_input_tokens": 200,
+                                                "cache_creation_input_tokens": 20}
 
 
 @pytest.mark.parametrize(("mode", "kind"), [("regress", "failing"), ("delete", "deleted"), ("weaken", "weakened")])

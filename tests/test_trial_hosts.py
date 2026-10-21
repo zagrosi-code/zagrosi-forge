@@ -45,12 +45,15 @@ def test_claude_writer_loads_only_explicit_trial_plugin_and_preserves_login():
     argv = writer_command("claude", "exact-claude", "selected-model", "high", {"plugin_root": "/plugin with spaces"})
     assert argv[0] == "exact-claude"
     assert argv[argv.index("--plugin-dir") + 1] == "/plugin with spaces"
+    # --restricted confines Read and Grep to working directories; the skills read their own references.
+    assert argv[argv.index("--add-dir") + 1] == "/plugin with spaces" and "--restricted" in argv
     assert "--bare" not in argv and "--safe-mode" not in argv
     assert argv[argv.index("--setting-sources") + 1] == ""
     assert argv[argv.index("--permission-prompts") + 1] == "none"
     # A later session cannot find this one's transcript on disk.
     assert "--no-session-persistence" in argv
-    assert "--plugin-dir" not in writer_command("claude", "claude", "model", "high", {"plain_agent": True, "plugin_root": "/plugin"})
+    plain = writer_command("claude", "claude", "model", "high", {"plain_agent": True, "plugin_root": "/plugin"})
+    assert "--plugin-dir" not in plain and "--add-dir" not in plain
 
 
 def test_claude_writer_environment_drops_host_session_variables_and_auto_memory():

@@ -11,6 +11,7 @@ from coding_trial_outcomes import known_total
 
 EDIT_TOOLS = {"Edit", "Write"}
 PARENT = re.compile(r"(?:^|[\s'\"=:;&|(/\\])\.\.(?:$|[\s'\";&|)/\\])")
+INPUT_USAGE = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 
 
 def assertion_counts(tests: Path) -> dict:
@@ -106,27 +107,30 @@ def outside_reference(kind: str, text: str, workspace: Path) -> bool:
     return bool(PARENT.search(text)) or any(root in text for root in spellings(workspace.parent.parent))
 
 
-def main_loop_usage(rows, boundary: int) -> dict | None:
-    """Claude top-level assistant usage through the boundary, counted once per message ID."""
+def input_usage(rows, boundary: int | None = None, *, main_loop: bool = False) -> dict | None:
+    """Claude input-side usage through the boundary, counted once per message ID.
+
+    Each response's events repeat its opening usage, so their output counts are not final and stay out.
+    Unlike the result's totals, this survives a timeout; a response cut off before its first block is missed.
+    """
     messages = {}
     for offset, event in rows:
         message = event.get("message")
-        if offset > boundary:
+        if boundary is not None and offset > boundary:
             break
-        if (event.get("type") == "assistant" and not event.get("parent_tool_use_id") and isinstance(message, dict)
-                and isinstance(message.get("usage"), dict)):
+        if (event.get("type") == "assistant" and not (main_loop and event.get("parent_tool_use_id"))
+                and isinstance(message, dict) and isinstance(message.get("usage"), dict)):
             messages[message.get("id") or offset] = message["usage"]
     if not messages:
         return None
-    return {key: known_total([usage.get(key) for usage in messages.values()]) for key in
-            ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens")}
+    return {key: known_total([usage.get(key) for usage in messages.values()]) for key in INPUT_USAGE}
 
 
 def session_evidence(path: Path, workspace: Path, first_edit: dict | None = None) -> dict:
     rows = event_rows(path)
     started = [(offset, kind, text) for offset, event in rows for kind, text in actions(event)]
     commands = [text for _, kind, text in started if kind == "command"]
-    evidence = {"events": len(rows), "commands": len(commands),
+    evidence = {"events": len(rows), "commands": len(commands), "input_usage": input_usage(rows),
                 "helper_calls": sum("zagrosi_skills.py" in text for text in commands),
                 "code_edits": sum(kind == "edit" and code_edit(text, workspace) for _, kind, text in started),
                 "outside_references": [text[:240] for _, kind, text in started
@@ -142,7 +146,7 @@ def session_evidence(path: Path, workspace: Path, first_edit: dict | None = None
         "seconds": first_edit.get("seconds"), "boundary": source,
         "commands": sum(kind == "command" for kind, _ in before) if boundary is not None else None,
         "planning_read": any(kind != "edit" and ".planning" in text for kind, text in before) if boundary is not None else None,
-        "tokens": main_loop_usage(rows, boundary) if boundary is not None else None}
+        "tokens": input_usage(rows, boundary, main_loop=True) if boundary is not None else None}
     return evidence
 
 
