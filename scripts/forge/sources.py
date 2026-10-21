@@ -77,7 +77,7 @@ TEST_MANIFEST = {
     "test_invoice_contract.py": "2e3ca21e6dd00c8efd134e66658cd2efe1816b32cc95ac41f78dcf3632832f23",
     "test_mutable_state.py": "c2a1bd08ce23094d4001a7e1998beac79c4c4ecf06f39dcf84a821ad86287b9e",
     "test_mutable_state_safety.py": "03b956534c4837d187dc19e43e99d673c1004a4ed7628e92abbf80c87f944f25",
-    "test_native_host_selection.py": "f187bb83e5af72f0ffb339b07da2d0251841c73efa0f492267999deeaf8295d1",
+    "test_native_host_selection.py": "c6ca27edba021ac859cc8da49fc64be073eec211aea6b5362625d6df1e514592",
     "test_native_package_identity.py": "1f4666b3b8c50e96828c3b8ee36485fabf440dd5437af8949f63bfba3f5aa524",
     "test_native_process.py": "5757b225cc4aac67c81fc61b0e5f498d3ab2364c9ef0c76d7a0760bbfc84c07f",
     "test_native_workflow_trials.py": "b3e45332b47ff0bf244945e1e7fe0b0b135105d8cc7caf901de7420b9e426a48",

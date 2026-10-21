@@ -43,7 +43,8 @@ elif args[:2] == ["plugin", "details"]:
     row = next(row for row in data["installed"] if args[2] in {row["id"], row["id"].split("@")[0]})
     names = sorted(path.parent.name for path in Path(row["installPath"]).glob("skills/*/SKILL.md"))
     names = names[1:] if mode == "missing-skill" else names
-    sys.exit(print(f"Component inventory\n  Skills ({len(names)})  {', '.join(names)}\n  Agents (0)"))
+    agents = sorted(path.stem for path in Path(row["installPath"]).glob("agents/*.md"))
+    sys.exit(print(f"Component inventory\n  Skills ({len(names)})  {', '.join(names)}\n  Agents ({len(agents)})  {', '.join(agents)}"))
 else:
     sys.exit(f"unsupported {args}")
 state.parent.mkdir(parents=True, exist_ok=True)
