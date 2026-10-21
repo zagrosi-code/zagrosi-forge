@@ -9,6 +9,7 @@ import re
 import shutil
 import tomllib
 
+from . import codex_config as _codex_config
 from . import hosts as _hosts
 from . import output as _output
 from . import policy as _policy
@@ -26,7 +27,7 @@ def local_tool_status(names: list[str] | None = None) -> dict[str, dict[str, Any
 
 def load_toml_config(path: Path | None) -> tuple[dict[str, Any], list[str], str | None]:
     if path is None:
-        default = Path.home() / ".codex" / "config.toml"
+        default = _codex_config.default_codex_config_path()
         path = default if default.exists() else None
     if path is None:
         return {}, ["No Codex config file found."], None

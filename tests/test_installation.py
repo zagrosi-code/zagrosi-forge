@@ -10,6 +10,7 @@ import pytest
 from forge_test_helpers import (
     PLUGIN_VERSION,
     ROOT,
+    home_env,
     run_cmd,
     run_script_raw,
 )
@@ -95,6 +96,19 @@ def test_update_check_reports_cache_and_config_status(tmp_path: Path) -> None:
     assert status["restart_required"] is True
     assert any("self-update" in item for item in status["next_steps"])
     assert not config.exists()
+
+
+@pytest.mark.parametrize("use_codex_home", [True, False], ids=["codex-home", "home-fallback"])
+def test_update_check_resolves_default_codex_config_path(tmp_path: Path, use_codex_home: bool) -> None:
+    home = tmp_path / "home"
+    codex_home = tmp_path / "codex" if use_codex_home else home / ".codex"
+
+    status = run_cmd("update-check", "--plugin-root", str(ROOT),
+                     env=home_env(home, codex_home if use_codex_home else None))
+
+    assert Path(status["config_path"]) == codex_home / "config.toml"
+    assert Path(status["codex_home"]) == codex_home
+    assert not (codex_home / "config.toml").exists()
 
 
 @pytest.mark.parametrize("manifest_text", [

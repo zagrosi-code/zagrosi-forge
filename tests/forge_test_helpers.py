@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from functools import cache
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -75,6 +76,15 @@ def run_text(*args: str, cwd: Path | None = None, timeout: float = CLI_TIMEOUT_S
     result = run_raw(*args, cwd=cwd, timeout=timeout)
     assert result.returncode == 0, result.stderr + result.stdout
     return result.stdout
+
+
+def home_env(home: Path, codex_home: Path | None = None) -> dict[str, str]:
+    # Windows reads the home directory from USERPROFILE, not HOME.
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+    env.pop("CODEX_HOME", None)
+    if codex_home:
+        env["CODEX_HOME"] = str(codex_home)
+    return env
 
 
 def load_zagrosi_module(script: Path = SCRIPT):
