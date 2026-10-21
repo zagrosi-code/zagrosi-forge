@@ -48,7 +48,7 @@ TEST_MANIFEST = {
     "test_cross_host_resume.py": "b4308e20b080cb61bbce8f2a569104d7d26a0217de734630f9c2847ee1e62958",
     "test_detached_authorities.py": "9df8993eebb931d4211201f4d2d1b76fc5f35f64e147dcb7aeb4d087d8b47d3b",
     "test_detached_dependencies.py": "8fb4070e2a9507c0d3248b0e047525cb35728bd08be846584fbc7339828f1878",
-    "test_detached_locks.py": "dcbdc69d937f92b0ccf98661ec5c59bc5591221a676263aecb8fa4a8c2d83e2a",
+    "test_detached_locks.py": "aa1e8f3a0e3e7a29823e44d3b17064d354bfe02fabcf91b10725b789e8f818c1",
     "test_detached_recording.py": "9801dc1698bb642a9b0dda4f7e18ff699a490f9de83b0f2c430a2e699cb6915e",
     "test_detached_recovery.py": "ec67066cbf4f0c505aa5573d2848bd0f332fc11a8ad0a82359dab36b5f09b9c0",
     "test_detached_resources.py": "87b343b4576d73408a641313eb881ce25ec76a2e22185121d9943abaddd617b7",

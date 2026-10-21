@@ -275,7 +275,9 @@ def test_global_and_u_lock_fds_are_noninheritable_closed_and_reverse_released(
         with ExitStack() as stack:
             stack.enter_context(module.locks.detached_global_lock(time.monotonic() + 2.0))
             stack.enter_context(module.locks.section_record_lock(root_fd, root))
-            locked_fds = [file_fd for file_fd, operation in operations if operation & module.locks.fcntl.LOCK_EX]
+            # Other processes holding the global lock make non-blocking attempts repeat on the same descriptor.
+            locked_fds = list(dict.fromkeys(
+                file_fd for file_fd, operation in operations if operation & module.locks.fcntl.LOCK_EX))
             assert len(locked_fds) == 2
             assert all(os.get_inheritable(file_fd) is False for file_fd in locked_fds)
         unlock_fds = [file_fd for file_fd, operation in operations if operation == module.locks.fcntl.LOCK_UN]
