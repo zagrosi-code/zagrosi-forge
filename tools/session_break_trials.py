@@ -32,7 +32,7 @@ from coding_trial_process import execute  # noqa: E402
 from coding_trial_runner import EFFORT_CHOICES, require_effort  # noqa: E402
 from session_break_checks import CLAUSES, derived_brief  # noqa: E402
 from session_break_evidence import assertion_counts, regressions, session_evidence  # noqa: E402
-from session_break_report import ARMS, TOKENS, build_report  # noqa: E402
+from session_break_report import ARMS, CORE_ARMS, TOKENS, build_report  # noqa: E402
 from trial_matrix import read, schedule  # noqa: E402
 
 PROTOCOL = "session-break/v1"
@@ -47,6 +47,8 @@ STATE_FIRST = "Use Forge's opt-in state-first lean mode: pass `--state-first` to
 STATE_REFERENCE = "skills/zagrosi-implement/references/state-first.md"
 # Each Forge arm loads its own frozen snapshot, recorded under this identity part.
 FORGE_ARMS = {"forge-lean": "plugin", "forge-state": "state_plugin"}
+# Under --probe a Forge prompt points at its snapshot, so the tree must hold no evaluator files or history.
+EVALUATOR_PATHS = ("examples", "tools", "tests", ".git")
 FIRST_SESSION = "In this session, complete sections 1 and 2 only, then stop."
 SECOND_SESSION = ("An earlier session that you cannot see worked on this task in this workspace. Complete every "
                   "remaining section and the task's acceptance requirements.")
@@ -129,6 +131,14 @@ def plugin_roots(manifest: dict) -> dict:
     """Snapshot per identity part; a matrix without forge-state records only the forge-lean root."""
     return {"plugin": Path(manifest["plugin_root"]),
             **({"state_plugin": Path(manifest["state_plugin_root"])} if manifest.get("state_plugin_root") else {})}
+
+
+def evaluator_leak(roots: dict, arms) -> str | None:
+    """Evaluator paths inside a scheduled Forge arm's snapshot, which could reveal the withheld clauses."""
+    found = [str(roots[part] / name) for arm, part in FORGE_ARMS.items() if arm in arms
+             for name in EVALUATOR_PATHS if os.path.lexists(roots[part] / name)]
+    return ("--probe needs runtime-only plugin snapshots without examples/, tools/, tests/ or .git: "
+            + ", ".join(found)) if found else None
 
 
 def cli_versions(hosts, executables: dict) -> dict:
@@ -428,7 +438,10 @@ def read_manifest(directory: Path) -> dict:
 
 def require_identity(manifest: dict) -> None:
     """Refuse a run when evaluator, plugin, fixture or CLI bytes differ from preparation."""
-    current = identity(plugin_roots(manifest), manifest["cases"])
+    roots = plugin_roots(manifest)
+    if manifest["probe"] and (leak := evaluator_leak(roots, {item["arm"] for item in manifest["trials"]})):
+        raise ValueError(leak)  # Added after preparation, where the byte identity does not look.
+    current = identity(roots, manifest["cases"])
     drift = [f"{part}:{name}" for part in current for name in changed_files(manifest["identity"][part], current[part])]
     if cli_versions(manifest["cli_versions"], manifest["executables"]) != manifest["cli_versions"]:
         drift.append("cli_versions")
@@ -445,6 +458,8 @@ def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str
         raise ValueError(f"Cases must be distinct members of {sorted(PLANS)}")
     if not arms or set(arms) - set(ARMS) or len(set(arms)) != len(arms):
         raise ValueError(f"Arms must be distinct members of {list(ARMS)}")
+    if state_plugin_root is not None and "forge-state" not in arms:
+        raise ValueError("--state-plugin-root needs the forge-state arm")
     if repeats < 1 or not 0 < timeout <= 7200:
         raise ValueError("Use at least one repetition and a per-session timeout of 1 to 7200 seconds")
     resume_host = resume_host or host
@@ -461,10 +476,8 @@ def prepare(directory: Path, *, cases, arms, repeats: int, host: str, model: str
     if "state_plugin" in roots and not all((roots["state_plugin"] / name).is_file()
                                            for name in ("scripts/zagrosi_skills.py", STATE_REFERENCE)):
         raise ValueError(f"The state plugin root must contain scripts/zagrosi_skills.py and {STATE_REFERENCE}")
-    if probe and any(arm in arms and any((roots[part] / name).exists() for name in ("examples", "tools", "tests"))
-                     for arm, part in FORGE_ARMS.items()):
-        # The Forge prompt points at this tree; an evaluator checkout holds the withheld clauses.
-        raise ValueError("--probe needs runtime-only plugin snapshots without examples/, tools/ or tests/")
+    if probe and (leak := evaluator_leak(roots, arms)):
+        raise ValueError(leak)
     executables = {"codex": codex, "claude": claude}
     versions = cli_versions({host, resume_host}, executables)
     compatibility = {}
@@ -574,7 +587,8 @@ def main() -> int:
     parser.add_argument("operation", choices=("prepare", "run", "analyze", "report", "blind", "apply-reviews"))
     parser.add_argument("directory", type=Path)
     parser.add_argument("--cases", nargs="+", default=list(PLANS))
-    parser.add_argument("--arms", nargs="+", default=list(ARMS))
+    parser.add_argument("--arms", nargs="+", default=list(CORE_ARMS), help=f"Any of {', '.join(ARMS)}; "
+                        "forge-state is opt-in")
     parser.add_argument("--repeats", type=int, default=4)
     parser.add_argument("--host", choices=("codex", "claude"), default="codex")
     parser.add_argument("--resume-host", choices=("codex", "claude"), help="Session-2 host for the host-switch variant")

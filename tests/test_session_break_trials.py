@@ -88,7 +88,7 @@ def change(path, text):
 
 emit(type="thread.started", thread_id=f"fake-{session}")
 emit(type="turn.started")
-if mode == "fail":
+if mode == "fail" or mode == "fail-2" and session == 2:
     emit(type="turn.failed", error={"message": "service unavailable"})
     sys.exit(1)
 for step in helpers:
@@ -298,6 +298,48 @@ def test_forge_state_helper_calls_count_against_the_section_budget(tmp_path, wri
     assert result["arms"]["forge-state"]["helper_calls"] == 8
 
 
+def test_cut_short_sessions_leave_per_attempt_helper_calls_out_or_unknown(tmp_path, writer, monkeypatch):
+    directory = prepare(tmp_path, writer, arms=("forge-state",))
+    monkeypatch.setenv("FAKE_WRITER_MODE", "fail-2")
+    result = breaks.run(directory)
+    assert result["halted"]["failed_sessions"] == [2] and result["attempts"][0]["helper_calls"] == 3
+    assert result["arms"]["forge-state"]["helper_calls"] == 3  # The total still counts what ran.
+    assert result["arms"]["forge-state"]["helper_calls_per_attempt"] == {
+        "median": None, "max": None, "median_over_budget": None, "observed": 0}
+    (directory / "import-preview-lean-1-forge-state/session-2-events.jsonl").write_text("")
+    assert breaks.analyze(directory)["attempts"][0]["helper_calls"] is None  # No events: unknown, not zero.
+
+
+def test_matrices_without_section_counts_leave_budgets_unknown(tmp_path, writer):
+    directory = prepare(tmp_path, writer)
+    breaks.run(directory)
+    manifest = read(directory / "matrix.json")
+    del manifest["sections"]  # As in matrices prepared before forge-state existed.
+    breaks.write(directory / "matrix.json", manifest)
+    result = breaks.report(directory)
+    assert result["attempts"][0]["helper_budget"] is None and result["attempts"][0]["helper_calls"] == 0
+    assert result["arms"]["notes"]["helper_calls_per_attempt"]["median_over_budget"] is None
+
+
+def test_cli_defaults_to_the_first_three_arms(tmp_path, writer, monkeypatch, capsys):
+    root = plugin(tmp_path)
+    argv = ["session_break_trials.py", "prepare", str(tmp_path / "matrix"), "--cases", "import-preview", "--repeats", "1",
+            "--model", "fake-model", "--effort", "medium", "--plugin-root", str(root), "--codex", writer["codex"]]
+    monkeypatch.setattr(sys, "argv", [*argv, "--state-plugin-root", str(root)])
+    assert breaks.main() == 2 and "needs the forge-state arm" in capsys.readouterr().err
+    monkeypatch.setattr(sys, "argv", argv)
+    assert breaks.main() == 0
+    assert [item["arm"] for item in read(tmp_path / "matrix/matrix.json")["trials"]] == list(reporting.CORE_ARMS)
+
+
+def test_probe_rechecks_snapshots_for_evaluator_files_before_each_run(tmp_path, writer):
+    directory = prepare(tmp_path, writer, arms=("forge-lean",), probe=True)
+    (tmp_path / "plugin/.git").mkdir()
+    with pytest.raises(ValueError, match="runtime-only plugin snapshots"):
+        breaks.run(directory)
+    assert writer["calls"]() == [] and not (directory / "import-preview-lean-1-forge-lean/attempt.json").exists()
+
+
 def godfile_control(workspace, violation=None):
     """Known-good summary over three implementation modules, for checking the evaluator only."""
     source = workspace / "src"
@@ -407,6 +449,11 @@ def test_decision_rule_needs_dominance_and_bounded_tokens():
     assert reporting.decide(mixed, [])["H0"]  # More accepted but more regressed attempts beats no arm.
     assert reporting.decide(alike, ["2 blocks without a valid blind review"]) == {
         "complete": False, "blockers": ["2 blocks without a valid blind review"]}
+
+
+def test_first_run_decision_reproduces():
+    published = json.loads((ROOT / "examples/evals/session-break-results-2026-10-20.json").read_text())["main"]
+    assert reporting.decide(published["arms"], []) == published["decision"]
 
 
 def test_decision_rule_compares_forge_state_with_forge_lean_and_notes():

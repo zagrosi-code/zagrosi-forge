@@ -40,7 +40,9 @@ def attempt_row(directory: Path, item: dict, sections: int | None = None) -> dic
                                         (result.get("runner") or {}).get("sessions") or []]) if seconds else None,
         "sessions": [{key: row.get(key) for key in ("seconds", "returncode", "timed_out", "commands", "helper_calls")}
                      for row in sessions],
-        "helper_calls": sum(row.get("helper_calls") or 0 for row in sessions) if sessions else None,
+        # A session without logged events leaves the attempt's helper calls unknown rather than zero.
+        "helper_calls": sum(row["helper_calls"] for row in sessions)
+        if sessions and all(row.get("events") for row in sessions) else None,
         # The state-first proposal's allowance: one helper call per section plus three.
         "helper_budget": None if sections is None else sections + 3,
         "missing_tools": telemetry.get("missing_tools"),
@@ -91,7 +93,9 @@ def summarize(rows: list[dict]) -> dict:
     reoriented = [row["reorientation"] for row in rows if row["reorientation"]]
     seconds = [value["seconds"] for value in reoriented if value.get("seconds") is not None]
     observed = [row["regressions"] for row in rows if row["regressions"] and row["regressions"]["any"] is not None]
-    calls = [row for row in rows if row["helper_calls"] is not None]
+    # Per-attempt figures use attempts whose sessions both ended on their own; a cut-short session undercounts.
+    calls = [row for row in rows if row["helper_calls"] is not None and all(
+        session["returncode"] == 0 and not session["timed_out"] for session in row["sessions"])]
     return {
         "scheduled": common["scheduled"], "accepted": common["accepted"], "accepted_rate": common["accepted_rate"],
         "statuses": dict(Counter(row["status"] for row in rows)),
@@ -108,7 +112,7 @@ def summarize(rows: list[dict]) -> dict:
                         "tests": sum(bool(value["tests"]) and any(value["tests"].values()) for value in observed),
                         "withheld_clauses": sum(bool(value["withheld_clauses"]) for value in observed),
                         "observed": len(observed), "unobserved": len(rows) - len(observed)},
-        "helper_calls": sum(row["helper_calls"] for row in calls),
+        "helper_calls": sum(row["helper_calls"] or 0 for row in rows),
         "helper_calls_per_attempt": {
             "median": statistics.median(row["helper_calls"] for row in calls) if calls else None,
             "max": max((row["helper_calls"] for row in calls), default=None),
