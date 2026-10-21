@@ -11,6 +11,9 @@ from runtime_support import load_runtime
 from test_compact_plan import make_plan
 from test_state_first import PLAN, cli, ready, write_workspace
 
+sys.path.insert(0, str(ROOT / "tools"))
+from coding_trials import workflow_verdict  # noqa: E402
+
 
 PASS = [sys.executable, "-c", "print('3 passed')"]
 FAIL = [sys.executable, "-c", "import sys; print('1 failed'); sys.exit(1)"]
@@ -116,6 +119,15 @@ def test_finish_captures_suite_and_postflight(run, workspace):
     code, payload = run("implement-verify", "--planning-dir", str(planning), "--", *FAIL)
     assert code == 1 and payload["final"]["outcome"] == "failed"
     assert payload["postflight"]["blocking_gates"] == ["final-verification"]
+
+
+def test_trial_workflow_verdict_accepts_a_finished_plan(run, workspace):
+    planning = ready(run, workspace)
+    finish_sections(run, planning)
+    code, payload = run("implement-verify", "--planning-dir", str(planning), "--target-dir", str(workspace), "--", *PASS)
+    assert code == 0, payload
+    verdict = workflow_verdict(workspace, "lean")
+    assert verdict["success"] and verdict["report"]["sections_recorded_complete"], verdict["report"]
 
 
 def test_postflight_blocks_only_structural_gaps(run, workspace):

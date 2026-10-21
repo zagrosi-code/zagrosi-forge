@@ -37,10 +37,10 @@ for their overhead, and whether free-form notes do the same for less.
   `forge-state`, meets the [proposal's](../../docs/proposals/state-first-lean.md)
   rollout bar. It accepts at least as many attempts as `forge-lean` and `notes`,
   has no more regressed attempts than either, uses at most half of
-  `forge-lean`'s total tokens per accepted result, and its median attempt needs
-  at most N + 3 helper calls for N sections. The report also applies H2 with
-  `forge-state` in place of `forge-lean`. H0–H2 still compare only the first
-  three arms.
+  `forge-lean`'s total tokens per accepted result, and its median finished
+  attempt needs at most N + 3 helper calls for N sections (see
+  [Metrics](#metrics)). The report also applies H2 with `forge-state` in place
+  of `forge-lean`. H0–H2 still compare only the first three arms.
 
 Read results as follows:
 
@@ -54,7 +54,8 @@ Read results as follows:
   state benefit.
 - H3 holds: propose state-first as the default `lean`; the user decides. H3
   fails: keep today's `lean` and remove only the gates the evaluation shows
-  unused.
+  unused. H3 unknown (usage or helper calls unobserved): name what is missing
+  and do not adopt.
 
 With four repetitions per arm and case, a one-attempt difference is an
 observation, not a statistically established effect.
@@ -149,7 +150,8 @@ them early, record the overshoot.
 | Wall time | Runner seconds for both sessions, excluding harness checks and review. |
 | Regressions | (a) the compatibility-only oracle passes at the checkpoint but fails at the end; (b) a test passing at the checkpoint fails against the final source, is deleted or renamed, is skipped, or loses `assert` statements or `assert*`/`fail*` calls; (c) a clause probe gives a wrong answer at the end. Each probe checks one withheld clause, so the oracle's first failure cannot mask it; a feature that is still missing counts as unfinished, not as a clause failure. |
 | Tool parity | `missing_tools` is empty in every Claude session. The CLI drops unknown or disabled tool names silently, so the init event is the only proof every arm had the same tools. |
-| Secondary | Forge helper calls (commands naming `zagrosi_skills.py`) per attempt, against N + 3 for N sections; `.planning/` size, whether session 2 read the state before its first edit, and session-1 overshoot or undershoot. |
+| Helper calls | Commands naming `zagrosi_skills.py` per attempt, over both sessions; a command that chains several helpers counts once. H3 takes the median over attempts whose two sessions ended on their own, without failing or timing out, against N + 3 for N sections. A session without logged events leaves the attempt's count unknown. |
+| Secondary | `.planning/` size, whether session 2 read the state before its first edit, and session-1 overshoot or undershoot. |
 
 Count every scheduled attempt, including failures and timeouts. Compute per
 accepted figures the way `trial_matrix.py report` does.
@@ -192,9 +194,12 @@ runtime-only snapshot:
 mkdir /frozen/plugin && git -C /frozen/evaluator archive HEAD scripts skills .codex-plugin .claude-plugin | tar -x -C /frozen/plugin
 ```
 
-`forge-state` loads `--state-plugin-root`, another runtime-only snapshot, or
-`--plugin-root` when that tree already carries the state-first mode. Both roots
-are frozen into `matrix.json`.
+`--arms` defaults to the first three arms. Add the fourth with
+`--arms forge-lean forge-state notes plain`. `forge-state` loads
+`--state-plugin-root`, another runtime-only snapshot, or `--plugin-root` when
+that tree already carries the state-first mode. Both roots are frozen into
+`matrix.json`, and under `--probe` each run rechecks that neither holds
+`examples/`, `tools/`, `tests/` or `.git`.
 
 For the host-switch variant, add
 `--resume-host claude --resume-model YOUR_CLAUDE_MODEL --resume-effort high` and
