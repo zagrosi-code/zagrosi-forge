@@ -116,6 +116,7 @@ def test_claude_details_inventory_rejects_count_mismatch():
     details = "Component inventory\n  Skills (2)  zagrosi-plan, zagrosi-forge\n  Agents (0)\n  Hooks (0)\n"
     assert native.inventory(details, "Skills") == ["zagrosi-forge", "zagrosi-plan"]
     assert native.inventory(details, "Agents") == []
+    assert native.inventory(details.replace("Agents (0)", "Agents (1)  forge-reviewer"), "Agents") == ["forge-reviewer"]
     for broken in (details.replace("Skills (2)", "Skills (3)"), details.replace("Agents (0)", "Agents (1)"),
                    details.replace("  Skills (2)  zagrosi-plan, zagrosi-forge\n", "")):
         component = "Agents" if "Agents (1)" in broken else "Skills"
