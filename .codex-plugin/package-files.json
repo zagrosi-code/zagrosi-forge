@@ -85,6 +85,8 @@
   "examples/evals/golden/typescript-auth-preferences-forge-score.json",
   "examples/evals/performance.json",
   "examples/evals/session-break-protocol.md",
+  "examples/evals/session-break-results-2026-10-20.json",
+  "examples/evals/session-break-results-2026-10-20.md",
   "examples/evals/suite.json",
   "examples/first-task/README.md",
   "examples/first-task/labels.py",

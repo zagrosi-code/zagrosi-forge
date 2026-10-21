@@ -1,0 +1,3839 @@
+{
+ "schema": "session-break-results/v1",
+ "environment": {
+  "host": "Codex CLI 0.154.0",
+  "model": "gpt-5.6-terra",
+  "effort": "medium",
+  "platform": "macOS 26.6.2 arm64",
+  "python": "3.14.7",
+  "reviewers": "Fresh Claude Opus 5.5 subagents, one per case-repetition block, packets only",
+  "claude_arms": "Not run: the standalone claude CLI was not signed in"
+ },
+ "main": {
+  "evaluator_commit": "bc6ee27",
+  "protocol": "session-break/v1",
+  "probe": true,
+  "settings": {
+   "host": "codex",
+   "model": "gpt-5.6-terra",
+   "effort": "medium",
+   "resume_host": "codex",
+   "resume_model": "gpt-5.6-terra",
+   "resume_effort": "medium"
+  },
+  "cli_versions": {
+   "codex": "codex-cli 0.154.0"
+  },
+  "timeout_seconds": 1800,
+  "compatibility_assertions": {
+   "godfile": 69,
+   "import-preview": 504
+  },
+  "groups": [
+   {
+    "arm": "forge-lean",
+    "case": "godfile",
+    "scheduled": 4,
+    "accepted": 2,
+    "accepted_rate": 0.5,
+    "statuses": {
+     "completed": 4
+    },
+    "workflow": {
+     "True": 3,
+     "False": 1
+    },
+    "total_tokens": {
+     "total": 15052726,
+     "per_accepted": 7526363.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 14865801,
+      "observed_attempts": 4,
+      "total": 14865801,
+      "per_accepted": 7432900.5
+     },
+     "cached_input_tokens": {
+      "observed": 14021888,
+      "observed_attempts": 4,
+      "total": 14021888,
+      "per_accepted": 7010944.0
+     },
+     "uncached_input_tokens": {
+      "observed": 843913,
+      "observed_attempts": 4,
+      "total": 843913,
+      "per_accepted": 421956.5
+     },
+     "output_tokens": {
+      "observed": 186925,
+      "observed_attempts": 4,
+      "total": 186925,
+      "per_accepted": 93462.5
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 3522.1940000000004,
+     "observed_attempts": 4,
+     "total": 3522.1940000000004,
+     "per_accepted": 1761.0970000000002
+    },
+    "reorientation": {
+     "median_seconds": 81.1,
+     "planning_read": 4,
+     "observed": 4
+    },
+    "regressions": {
+     "attempts": 1,
+     "compatibility": 1,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 4,
+     "unobserved": 0
+    },
+    "helper_calls": 125,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 1,
+     "cleanup review": 2,
+     "compatibility regression": 1
+    }
+   },
+   {
+    "arm": "forge-lean",
+    "case": "import-preview",
+    "scheduled": 4,
+    "accepted": 4,
+    "accepted_rate": 1.0,
+    "statuses": {
+     "completed": 4
+    },
+    "workflow": {
+     "True": 3,
+     "False": 1
+    },
+    "total_tokens": {
+     "total": 11994555,
+     "per_accepted": 2998638.75
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 11853365,
+      "observed_attempts": 4,
+      "total": 11853365,
+      "per_accepted": 2963341.25
+     },
+     "cached_input_tokens": {
+      "observed": 11142912,
+      "observed_attempts": 4,
+      "total": 11142912,
+      "per_accepted": 2785728.0
+     },
+     "uncached_input_tokens": {
+      "observed": 710453,
+      "observed_attempts": 4,
+      "total": 710453,
+      "per_accepted": 177613.25
+     },
+     "output_tokens": {
+      "observed": 141190,
+      "observed_attempts": 4,
+      "total": 141190,
+      "per_accepted": 35297.5
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 2416.409,
+     "observed_attempts": 4,
+     "total": 2416.409,
+     "per_accepted": 604.10225
+    },
+    "reorientation": {
+     "median_seconds": 76.05,
+     "planning_read": 4,
+     "observed": 4
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 4,
+     "unobserved": 0
+    },
+    "helper_calls": 116,
+    "outside_references": 0,
+    "rejections": {}
+   },
+   {
+    "arm": "notes",
+    "case": "godfile",
+    "scheduled": 4,
+    "accepted": 2,
+    "accepted_rate": 0.5,
+    "statuses": {
+     "completed": 4
+    },
+    "workflow": {
+     "None": 4
+    },
+    "total_tokens": {
+     "total": 2849611,
+     "per_accepted": 1424805.5
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 2769430,
+      "observed_attempts": 4,
+      "total": 2769430,
+      "per_accepted": 1384715.0
+     },
+     "cached_input_tokens": {
+      "observed": 2492928,
+      "observed_attempts": 4,
+      "total": 2492928,
+      "per_accepted": 1246464.0
+     },
+     "uncached_input_tokens": {
+      "observed": 276502,
+      "observed_attempts": 4,
+      "total": 276502,
+      "per_accepted": 138251.0
+     },
+     "output_tokens": {
+      "observed": 80181,
+      "observed_attempts": 4,
+      "total": 80181,
+      "per_accepted": 40090.5
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 1245.734,
+     "observed_attempts": 4,
+     "total": 1245.734,
+     "per_accepted": 622.867
+    },
+    "reorientation": {
+     "median_seconds": 112.75,
+     "planning_read": 4,
+     "observed": 4
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 4,
+     "unobserved": 0
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 2,
+     "cleanup review": 2
+    }
+   },
+   {
+    "arm": "notes",
+    "case": "import-preview",
+    "scheduled": 4,
+    "accepted": 4,
+    "accepted_rate": 1.0,
+    "statuses": {
+     "completed": 4
+    },
+    "workflow": {
+     "None": 4
+    },
+    "total_tokens": {
+     "total": 1450853,
+     "per_accepted": 362713.25
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 1415261,
+      "observed_attempts": 4,
+      "total": 1415261,
+      "per_accepted": 353815.25
+     },
+     "cached_input_tokens": {
+      "observed": 1257728,
+      "observed_attempts": 4,
+      "total": 1257728,
+      "per_accepted": 314432.0
+     },
+     "uncached_input_tokens": {
+      "observed": 157533,
+      "observed_attempts": 4,
+      "total": 157533,
+      "per_accepted": 39383.25
+     },
+     "output_tokens": {
+      "observed": 35592,
+      "observed_attempts": 4,
+      "total": 35592,
+      "per_accepted": 8898.0
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 591.812,
+     "observed_attempts": 4,
+     "total": 591.812,
+     "per_accepted": 147.953
+    },
+    "reorientation": {
+     "median_seconds": 46.900000000000006,
+     "planning_read": 4,
+     "observed": 4
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 4,
+     "unobserved": 0
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {}
+   },
+   {
+    "arm": "plain",
+    "case": "godfile",
+    "scheduled": 4,
+    "accepted": 0,
+    "accepted_rate": 0.0,
+    "statuses": {
+     "completed": 4
+    },
+    "workflow": {
+     "None": 4
+    },
+    "total_tokens": {
+     "total": 2323555,
+     "per_accepted": null
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 2252842,
+      "observed_attempts": 4,
+      "total": 2252842,
+      "per_accepted": null
+     },
+     "cached_input_tokens": {
+      "observed": 2001664,
+      "observed_attempts": 4,
+      "total": 2001664,
+      "per_accepted": null
+     },
+     "uncached_input_tokens": {
+      "observed": 251178,
+      "observed_attempts": 4,
+      "total": 251178,
+      "per_accepted": null
+     },
+     "output_tokens": {
+      "observed": 70713,
+      "observed_attempts": 4,
+      "total": 70713,
+      "per_accepted": null
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 971.194,
+     "observed_attempts": 4,
+     "total": 971.194,
+     "per_accepted": null
+    },
+    "reorientation": {
+     "median_seconds": 98.35,
+     "planning_read": 1,
+     "observed": 4
+    },
+    "regressions": {
+     "attempts": 4,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 4,
+     "observed": 4,
+     "unobserved": 0
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {
+     "clause": 3,
+     "cleanup review": 4,
+     "compatibility": 1
+    }
+   },
+   {
+    "arm": "plain",
+    "case": "import-preview",
+    "scheduled": 4,
+    "accepted": 4,
+    "accepted_rate": 1.0,
+    "statuses": {
+     "completed": 4
+    },
+    "workflow": {
+     "None": 4
+    },
+    "total_tokens": {
+     "total": 1433801,
+     "per_accepted": 358450.25
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 1401019,
+      "observed_attempts": 4,
+      "total": 1401019,
+      "per_accepted": 350254.75
+     },
+     "cached_input_tokens": {
+      "observed": 1232896,
+      "observed_attempts": 4,
+      "total": 1232896,
+      "per_accepted": 308224.0
+     },
+     "uncached_input_tokens": {
+      "observed": 168123,
+      "observed_attempts": 4,
+      "total": 168123,
+      "per_accepted": 42030.75
+     },
+     "output_tokens": {
+      "observed": 32782,
+      "observed_attempts": 4,
+      "total": 32782,
+      "per_accepted": 8195.5
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 620.286,
+     "observed_attempts": 4,
+     "total": 620.286,
+     "per_accepted": 155.0715
+    },
+    "reorientation": {
+     "median_seconds": 33.1,
+     "planning_read": 1,
+     "observed": 4
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 4,
+     "unobserved": 0
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {}
+   }
+  ],
+  "arms": {
+   "forge-lean": {
+    "scheduled": 8,
+    "accepted": 6,
+    "accepted_rate": 0.75,
+    "statuses": {
+     "completed": 8
+    },
+    "workflow": {
+     "True": 6,
+     "False": 2
+    },
+    "total_tokens": {
+     "total": 27047281,
+     "per_accepted": 4507880.166666667
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 26719166,
+      "observed_attempts": 8,
+      "total": 26719166,
+      "per_accepted": 4453194.333333333
+     },
+     "cached_input_tokens": {
+      "observed": 25164800,
+      "observed_attempts": 8,
+      "total": 25164800,
+      "per_accepted": 4194133.3333333335
+     },
+     "uncached_input_tokens": {
+      "observed": 1554366,
+      "observed_attempts": 8,
+      "total": 1554366,
+      "per_accepted": 259061.0
+     },
+     "output_tokens": {
+      "observed": 328115,
+      "observed_attempts": 8,
+      "total": 328115,
+      "per_accepted": 54685.833333333336
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 5938.603,
+     "observed_attempts": 8,
+     "total": 5938.603,
+     "per_accepted": 989.7671666666666
+    },
+    "reorientation": {
+     "median_seconds": 80.3,
+     "planning_read": 8,
+     "observed": 8
+    },
+    "regressions": {
+     "attempts": 1,
+     "compatibility": 1,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 8,
+     "unobserved": 0
+    },
+    "helper_calls": 241,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 1,
+     "cleanup review": 2,
+     "compatibility regression": 1
+    }
+   },
+   "notes": {
+    "scheduled": 8,
+    "accepted": 6,
+    "accepted_rate": 0.75,
+    "statuses": {
+     "completed": 8
+    },
+    "workflow": {
+     "None": 8
+    },
+    "total_tokens": {
+     "total": 4300464,
+     "per_accepted": 716744.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 4184691,
+      "observed_attempts": 8,
+      "total": 4184691,
+      "per_accepted": 697448.5
+     },
+     "cached_input_tokens": {
+      "observed": 3750656,
+      "observed_attempts": 8,
+      "total": 3750656,
+      "per_accepted": 625109.3333333334
+     },
+     "uncached_input_tokens": {
+      "observed": 434035,
+      "observed_attempts": 8,
+      "total": 434035,
+      "per_accepted": 72339.16666666667
+     },
+     "output_tokens": {
+      "observed": 115773,
+      "observed_attempts": 8,
+      "total": 115773,
+      "per_accepted": 19295.5
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 1837.546,
+     "observed_attempts": 8,
+     "total": 1837.546,
+     "per_accepted": 306.2576666666667
+    },
+    "reorientation": {
+     "median_seconds": 79.6,
+     "planning_read": 8,
+     "observed": 8
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 8,
+     "unobserved": 0
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 2,
+     "cleanup review": 2
+    }
+   },
+   "plain": {
+    "scheduled": 8,
+    "accepted": 4,
+    "accepted_rate": 0.5,
+    "statuses": {
+     "completed": 8
+    },
+    "workflow": {
+     "None": 8
+    },
+    "total_tokens": {
+     "total": 3757356,
+     "per_accepted": 939339.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 3653861,
+      "observed_attempts": 8,
+      "total": 3653861,
+      "per_accepted": 913465.25
+     },
+     "cached_input_tokens": {
+      "observed": 3234560,
+      "observed_attempts": 8,
+      "total": 3234560,
+      "per_accepted": 808640.0
+     },
+     "uncached_input_tokens": {
+      "observed": 419301,
+      "observed_attempts": 8,
+      "total": 419301,
+      "per_accepted": 104825.25
+     },
+     "output_tokens": {
+      "observed": 103495,
+      "observed_attempts": 8,
+      "total": 103495,
+      "per_accepted": 25873.75
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 1591.48,
+     "observed_attempts": 8,
+     "total": 1591.48,
+     "per_accepted": 397.87
+    },
+    "reorientation": {
+     "median_seconds": 42.849999999999994,
+     "planning_read": 2,
+     "observed": 8
+    },
+    "regressions": {
+     "attempts": 4,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 4,
+     "observed": 8,
+     "unobserved": 0
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {
+     "clause": 3,
+     "cleanup review": 4,
+     "compatibility": 1
+    }
+   }
+  },
+  "decision": {
+   "complete": true,
+   "blockers": [],
+   "H1": true,
+   "H2": false,
+   "H0": false,
+   "pairs": {
+    "forge-lean>notes": false,
+    "forge-lean>plain": true,
+    "notes>forge-lean": true,
+    "notes>plain": true,
+    "plain>forge-lean": false,
+    "plain>notes": false
+   },
+   "forge_to_notes_tokens": 6.289386680134981
+  },
+  "comparative_review": {
+   "expected": 8,
+   "completed": 8
+  },
+  "attempts": [
+   {
+    "id": "godfile-lean-1-forge-lean",
+    "arm": "forge-lean",
+    "case": "godfile",
+    "block": "godfile-lean-1",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": true,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 3488634,
+      "cached_input_tokens": 3276032,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 212602,
+      "output_tokens": 47179,
+      "reasoning_output_tokens": 5399,
+      "total_tokens": 3535813
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 869.562,
+    "sessions": [
+     {
+      "seconds": 565.014,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 30,
+      "helper_calls": 14
+     },
+     {
+      "seconds": 304.548,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 17,
+      "helper_calls": 13
+     }
+    ],
+    "reorientation": {
+     "seconds": 79.1,
+     "boundary": "poll",
+     "commands": 6,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "compatibility",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 16,
+      "bytes": 37616
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_pricing.py",
+      "src/order_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-1-notes",
+    "arm": "notes",
+    "case": "godfile",
+    "block": "godfile-lean-1",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 786846,
+      "cached_input_tokens": 697856,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 88990,
+      "output_tokens": 19875,
+      "reasoning_output_tokens": 4157,
+      "total_tokens": 806721
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 386.375,
+    "sessions": [
+     {
+      "seconds": 134.409,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 7,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 251.966,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 7,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 132.2,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 910
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/dispatch_pricing.py",
+      "src/dispatch_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-1-plain",
+    "arm": "plain",
+    "case": "godfile",
+    "block": "godfile-lean-1",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": null,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 629152,
+      "cached_input_tokens": 566528,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 62624,
+      "output_tokens": 19369,
+      "reasoning_output_tokens": 4067,
+      "total_tokens": 648521
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 152.833,
+    "sessions": [
+     {
+      "seconds": 63.675,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 7,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 89.158,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 46.4,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": false,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [
+      "status_counts_zero"
+     ],
+     "any": true
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "fail"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "clause",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_validation.py",
+      "src/pricing.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-1-notes",
+    "arm": "notes",
+    "case": "import-preview",
+    "block": "import-preview-lean-1",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 330921,
+      "cached_input_tokens": 289280,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 41641,
+      "output_tokens": 8172,
+      "reasoning_output_tokens": 1526,
+      "total_tokens": 339093
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 125.731,
+    "sessions": [
+     {
+      "seconds": 44.549,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 4,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 81.182,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 4,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 37.0,
+     "boundary": "poll",
+     "commands": 2,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 946
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-1-plain",
+    "arm": "plain",
+    "case": "import-preview",
+    "block": "import-preview-lean-1",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 344340,
+      "cached_input_tokens": 308736,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 35604,
+      "output_tokens": 8392,
+      "reasoning_output_tokens": 2174,
+      "total_tokens": 352732
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 126.79,
+    "sessions": [
+     {
+      "seconds": 81.659,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 45.131,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 19.3,
+     "boundary": "poll",
+     "commands": 2,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-1-forge-lean",
+    "arm": "forge-lean",
+    "case": "import-preview",
+    "block": "import-preview-lean-1",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": true,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 3244521,
+      "cached_input_tokens": 3065600,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 178921,
+      "output_tokens": 35521,
+      "reasoning_output_tokens": 7637,
+      "total_tokens": 3280042
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 720.3720000000001,
+    "sessions": [
+     {
+      "seconds": 333.285,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 22,
+      "helper_calls": 13
+     },
+     {
+      "seconds": 387.087,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 23,
+      "helper_calls": 19
+     }
+    ],
+    "reorientation": {
+     "seconds": 70.6,
+     "boundary": "poll",
+     "commands": 6,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 16,
+      "bytes": 35396
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-2-plain",
+    "arm": "plain",
+    "case": "godfile",
+    "block": "godfile-lean-2",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": null,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 601444,
+      "cached_input_tokens": 532480,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 68964,
+      "output_tokens": 17717,
+      "reasoning_output_tokens": 3037,
+      "total_tokens": 619161
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 319.381,
+    "sessions": [
+     {
+      "seconds": 127.751,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 191.63,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 7,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 123.2,
+     "boundary": "poll",
+     "commands": 4,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [
+      "status_counts_zero"
+     ],
+     "any": true
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "fail"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "compatibility",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/money.py",
+      "src/validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-2-forge-lean",
+    "arm": "forge-lean",
+    "case": "godfile",
+    "block": "godfile-lean-2",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": false,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 4299919,
+      "cached_input_tokens": 4057600,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 242319,
+      "output_tokens": 53032,
+      "reasoning_output_tokens": 8037,
+      "total_tokens": 4352951
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 1078.9940000000001,
+    "sessions": [
+     {
+      "seconds": 543.157,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 28,
+      "helper_calls": 16
+     },
+     {
+      "seconds": 535.837,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 24,
+      "helper_calls": 20
+     }
+    ],
+    "reorientation": {
+     "seconds": 295.4,
+     "boundary": "poll",
+     "commands": 13,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": true,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": true
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "compatibility regression",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 16,
+      "bytes": 21852
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_pricing.py",
+      "src/order_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-2-notes",
+    "arm": "notes",
+    "case": "godfile",
+    "block": "godfile-lean-2",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": null,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 569363,
+      "cached_input_tokens": 504064,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 65299,
+      "output_tokens": 18475,
+      "reasoning_output_tokens": 2665,
+      "total_tokens": 587838
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 258.775,
+    "sessions": [
+     {
+      "seconds": 57.209,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 201.566,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 4,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 107.9,
+     "boundary": "poll",
+     "commands": 2,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "compatibility",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 1152
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_validation.py",
+      "src/pricing.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-2-forge-lean",
+    "arm": "forge-lean",
+    "case": "import-preview",
+    "block": "import-preview-lean-2",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": true,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 2373103,
+      "cached_input_tokens": 2206464,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 166639,
+      "output_tokens": 32580,
+      "reasoning_output_tokens": 5821,
+      "total_tokens": 2405683
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 645.027,
+    "sessions": [
+     {
+      "seconds": 356.097,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 19,
+      "helper_calls": 12
+     },
+     {
+      "seconds": 288.93,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 19,
+      "helper_calls": 17
+     }
+    ],
+    "reorientation": {
+     "seconds": 81.5,
+     "boundary": "poll",
+     "commands": 8,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 17,
+      "bytes": 47067
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-2-notes",
+    "arm": "notes",
+    "case": "import-preview",
+    "block": "import-preview-lean-2",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 424614,
+      "cached_input_tokens": 383488,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 41126,
+      "output_tokens": 10645,
+      "reasoning_output_tokens": 3201,
+      "total_tokens": 435259
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 165.029,
+    "sessions": [
+     {
+      "seconds": 59.302,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 7,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 105.727,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 65.9,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 1234
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-2-plain",
+    "arm": "plain",
+    "case": "import-preview",
+    "block": "import-preview-lean-2",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 387866,
+      "cached_input_tokens": 345088,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 42778,
+      "output_tokens": 8415,
+      "reasoning_output_tokens": 1485,
+      "total_tokens": 396281
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 176.47,
+    "sessions": [
+     {
+      "seconds": 92.059,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 84.411,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 34.2,
+     "boundary": "poll",
+     "commands": 2,
+     "planning_read": false,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-3-notes",
+    "arm": "notes",
+    "case": "godfile",
+    "block": "godfile-lean-3",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": null,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 796823,
+      "cached_input_tokens": 735488,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 61335,
+      "output_tokens": 22486,
+      "reasoning_output_tokens": 3227,
+      "total_tokens": 819309
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 265.545,
+    "sessions": [
+     {
+      "seconds": 77.009,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 188.536,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 117.6,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "compatibility",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 1763
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_pricing.py",
+      "src/order_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-3-plain",
+    "arm": "plain",
+    "case": "godfile",
+    "block": "godfile-lean-3",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": null,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 524987,
+      "cached_input_tokens": 464384,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 60603,
+      "output_tokens": 16081,
+      "reasoning_output_tokens": 2407,
+      "total_tokens": 541068
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 270.862,
+    "sessions": [
+     {
+      "seconds": 118.247,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 152.615,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 105.3,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": false,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [
+      "status_counts_zero"
+     ],
+     "any": true
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "fail"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "clause",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 276
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/pricing.py",
+      "src/validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-3-forge-lean",
+    "arm": "forge-lean",
+    "case": "godfile",
+    "block": "godfile-lean-3",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": true,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 3673997,
+      "cached_input_tokens": 3474944,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 199053,
+      "output_tokens": 45513,
+      "reasoning_output_tokens": 6203,
+      "total_tokens": 3719510
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 829.217,
+    "sessions": [
+     {
+      "seconds": 568.812,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 28,
+      "helper_calls": 14
+     },
+     {
+      "seconds": 260.405,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 17,
+      "helper_calls": 15
+     }
+    ],
+    "reorientation": {
+     "seconds": 83.1,
+     "boundary": "poll",
+     "commands": 6,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 16,
+      "bytes": 33906
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_pricing.py",
+      "src/order_validation.py",
+      "tests/test_dispatch_regression.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-3-plain",
+    "arm": "plain",
+    "case": "import-preview",
+    "block": "import-preview-lean-3",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 323208,
+      "cached_input_tokens": 269312,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 53896,
+      "output_tokens": 7641,
+      "reasoning_output_tokens": 1799,
+      "total_tokens": 330849
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 129.905,
+    "sessions": [
+     {
+      "seconds": 80.482,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 49.423,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 32.0,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": false,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-3-forge-lean",
+    "arm": "forge-lean",
+    "case": "import-preview",
+    "block": "import-preview-lean-3",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": false,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 3246460,
+      "cached_input_tokens": 3050496,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 195964,
+      "output_tokens": 39648,
+      "reasoning_output_tokens": 6096,
+      "total_tokens": 3286108
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 784.5,
+    "sessions": [
+     {
+      "seconds": 455.716,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 25,
+      "helper_calls": 16
+     },
+     {
+      "seconds": 328.784,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 16,
+      "helper_calls": 12
+     }
+    ],
+    "reorientation": {
+     "seconds": 255.9,
+     "boundary": "poll",
+     "commands": 10,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 15,
+      "bytes": 32926
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-3-notes",
+    "arm": "notes",
+    "case": "import-preview",
+    "block": "import-preview-lean-3",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 315182,
+      "cached_input_tokens": 284416,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 30766,
+      "output_tokens": 8011,
+      "reasoning_output_tokens": 1495,
+      "total_tokens": 323193
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 123.12,
+    "sessions": [
+     {
+      "seconds": 34.775,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 88.345,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 4,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 51.2,
+     "boundary": "poll",
+     "commands": 2,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 834
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-4-forge-lean",
+    "arm": "forge-lean",
+    "case": "godfile",
+    "block": "godfile-lean-4",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": true,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 3403251,
+      "cached_input_tokens": 3213312,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 189939,
+      "output_tokens": 41201,
+      "reasoning_output_tokens": 6510,
+      "total_tokens": 3444452
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 744.421,
+    "sessions": [
+     {
+      "seconds": 427.184,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 20,
+      "helper_calls": 16
+     },
+     {
+      "seconds": 317.237,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 19,
+      "helper_calls": 17
+     }
+    ],
+    "reorientation": {
+     "seconds": 71.1,
+     "boundary": "poll",
+     "commands": 5,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 16,
+      "bytes": 34584
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_money.py",
+      "src/order_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-4-notes",
+    "arm": "notes",
+    "case": "godfile",
+    "block": "godfile-lean-4",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 616398,
+      "cached_input_tokens": 555520,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 60878,
+      "output_tokens": 19345,
+      "reasoning_output_tokens": 2374,
+      "total_tokens": 635743
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 335.039,
+    "sessions": [
+     {
+      "seconds": 143.385,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 191.654,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 93.3,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 956
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_pricing.py",
+      "src/order_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-4-plain",
+    "arm": "plain",
+    "case": "godfile",
+    "block": "godfile-lean-4",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": null,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 497259,
+      "cached_input_tokens": 438272,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 58987,
+      "output_tokens": 17546,
+      "reasoning_output_tokens": 2594,
+      "total_tokens": 514805
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 228.118,
+    "sessions": [
+     {
+      "seconds": 46.833,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 181.285,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 91.4,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": false,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [
+      "status_counts_zero"
+     ],
+     "any": true
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "fail"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "clause",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_pricing.py",
+      "src/order_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-4-notes",
+    "arm": "notes",
+    "case": "import-preview",
+    "block": "import-preview-lean-4",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 344544,
+      "cached_input_tokens": 300544,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 44000,
+      "output_tokens": 8764,
+      "reasoning_output_tokens": 1490,
+      "total_tokens": 353308
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 177.93200000000002,
+    "sessions": [
+     {
+      "seconds": 101.912,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 76.02,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 4,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 42.6,
+     "boundary": "poll",
+     "commands": 2,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 1477
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-4-plain",
+    "arm": "plain",
+    "case": "import-preview",
+    "block": "import-preview-lean-4",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 345605,
+      "cached_input_tokens": 309760,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 35845,
+      "output_tokens": 8334,
+      "reasoning_output_tokens": 2662,
+      "total_tokens": 353939
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 187.12099999999998,
+    "sessions": [
+     {
+      "seconds": 105.222,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 81.899,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 39.3,
+     "boundary": "poll",
+     "commands": 2,
+     "planning_read": false,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-4-forge-lean",
+    "arm": "forge-lean",
+    "case": "import-preview",
+    "block": "import-preview-lean-4",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": true,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 2989281,
+      "cached_input_tokens": 2820352,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 168929,
+      "output_tokens": 33441,
+      "reasoning_output_tokens": 5397,
+      "total_tokens": 3022722
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 266.51,
+    "sessions": [
+     {
+      "seconds": 109.483,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 10,
+      "helper_calls": 6
+     },
+     {
+      "seconds": 157.027,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 27,
+      "helper_calls": 21
+     }
+    ],
+    "reorientation": {
+     "seconds": 62.0,
+     "boundary": "poll",
+     "commands": 12,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 10,
+      "bytes": 14392
+     },
+     "changed_files": []
+    }
+   }
+  ],
+  "limits": "Every scheduled attempt counts, including failures, timeouts and pending work. Accepted means the common-quality verdict, which needs an independent blind cleanup review. Tokens sum both sessions and stay unknown when either session's usage is missing; Claude totals include subagents. Re-orientation time is polled to the first src/ or tests/ change in session 2; Codex reports usage per session only, so its tokens before that edit are unknown. A renamed test counts as deleted. Probe failures are evidence, not certainty, and four repetitions per arm and case are observations, not statistically established effects."
+ },
+ "pilot": {
+  "evaluator_commit": "e7460bf",
+  "protocol": "session-break/v1",
+  "probe": false,
+  "settings": {
+   "host": "codex",
+   "model": "gpt-5.6-terra",
+   "effort": "medium",
+   "resume_host": "codex",
+   "resume_model": "gpt-5.6-terra",
+   "resume_effort": "medium"
+  },
+  "cli_versions": {
+   "codex": "codex-cli 0.154.0"
+  },
+  "timeout_seconds": 1800,
+  "compatibility_assertions": {
+   "godfile": 69,
+   "import-preview": 504
+  },
+  "groups": [
+   {
+    "arm": "forge-lean",
+    "case": "godfile",
+    "scheduled": 1,
+    "accepted": 0,
+    "accepted_rate": 0.0,
+    "statuses": {
+     "completed": 1
+    },
+    "workflow": {
+     "True": 1
+    },
+    "total_tokens": {
+     "total": 2483781,
+     "per_accepted": null
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 2446730,
+      "observed_attempts": 1,
+      "total": 2446730,
+      "per_accepted": null
+     },
+     "cached_input_tokens": {
+      "observed": 2271232,
+      "observed_attempts": 1,
+      "total": 2271232,
+      "per_accepted": null
+     },
+     "uncached_input_tokens": {
+      "observed": 175498,
+      "observed_attempts": 1,
+      "total": 175498,
+      "per_accepted": null
+     },
+     "output_tokens": {
+      "observed": 37051,
+      "observed_attempts": 1,
+      "total": 37051,
+      "per_accepted": null
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 687.569,
+     "observed_attempts": 1,
+     "total": 687.569,
+     "per_accepted": null
+    },
+    "reorientation": {
+     "median_seconds": 73.0,
+     "planning_read": 1,
+     "observed": 1
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 1
+    },
+    "helper_calls": 22,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 1,
+     "cleanup review": 1
+    }
+   },
+   {
+    "arm": "forge-lean",
+    "case": "import-preview",
+    "scheduled": 1,
+    "accepted": 1,
+    "accepted_rate": 1.0,
+    "statuses": {
+     "completed": 1
+    },
+    "workflow": {
+     "True": 1
+    },
+    "total_tokens": {
+     "total": 2472951,
+     "per_accepted": 2472951.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 2444545,
+      "observed_attempts": 1,
+      "total": 2444545,
+      "per_accepted": 2444545.0
+     },
+     "cached_input_tokens": {
+      "observed": 2292992,
+      "observed_attempts": 1,
+      "total": 2292992,
+      "per_accepted": 2292992.0
+     },
+     "uncached_input_tokens": {
+      "observed": 151553,
+      "observed_attempts": 1,
+      "total": 151553,
+      "per_accepted": 151553.0
+     },
+     "output_tokens": {
+      "observed": 28406,
+      "observed_attempts": 1,
+      "total": 28406,
+      "per_accepted": 28406.0
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 365.901,
+     "observed_attempts": 1,
+     "total": 365.901,
+     "per_accepted": 365.901
+    },
+    "reorientation": {
+     "median_seconds": 83.2,
+     "planning_read": 1,
+     "observed": 1
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 1
+    },
+    "helper_calls": 29,
+    "outside_references": 0,
+    "rejections": {}
+   },
+   {
+    "arm": "notes",
+    "case": "godfile",
+    "scheduled": 1,
+    "accepted": 0,
+    "accepted_rate": 0.0,
+    "statuses": {
+     "completed": 1
+    },
+    "workflow": {
+     "None": 1
+    },
+    "total_tokens": {
+     "total": 572421,
+     "per_accepted": null
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 555563,
+      "observed_attempts": 1,
+      "total": 555563,
+      "per_accepted": null
+     },
+     "cached_input_tokens": {
+      "observed": 494848,
+      "observed_attempts": 1,
+      "total": 494848,
+      "per_accepted": null
+     },
+     "uncached_input_tokens": {
+      "observed": 60715,
+      "observed_attempts": 1,
+      "total": 60715,
+      "per_accepted": null
+     },
+     "output_tokens": {
+      "observed": 16858,
+      "observed_attempts": 1,
+      "total": 16858,
+      "per_accepted": null
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 218.34,
+     "observed_attempts": 1,
+     "total": 218.34,
+     "per_accepted": null
+    },
+    "reorientation": {
+     "median_seconds": 99.4,
+     "planning_read": 1,
+     "observed": 1
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 1
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 1,
+     "cleanup review": 1
+    }
+   },
+   {
+    "arm": "notes",
+    "case": "import-preview",
+    "scheduled": 1,
+    "accepted": 1,
+    "accepted_rate": 1.0,
+    "statuses": {
+     "completed": 1
+    },
+    "workflow": {
+     "None": 1
+    },
+    "total_tokens": {
+     "total": 334134,
+     "per_accepted": 334134.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 325896,
+      "observed_attempts": 1,
+      "total": 325896,
+      "per_accepted": 325896.0
+     },
+     "cached_input_tokens": {
+      "observed": 282368,
+      "observed_attempts": 1,
+      "total": 282368,
+      "per_accepted": 282368.0
+     },
+     "uncached_input_tokens": {
+      "observed": 43528,
+      "observed_attempts": 1,
+      "total": 43528,
+      "per_accepted": 43528.0
+     },
+     "output_tokens": {
+      "observed": 8238,
+      "observed_attempts": 1,
+      "total": 8238,
+      "per_accepted": 8238.0
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 201.28199999999998,
+     "observed_attempts": 1,
+     "total": 201.28199999999998,
+     "per_accepted": 201.28199999999998
+    },
+    "reorientation": {
+     "median_seconds": 45.8,
+     "planning_read": 1,
+     "observed": 1
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 1
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {}
+   },
+   {
+    "arm": "plain",
+    "case": "godfile",
+    "scheduled": 1,
+    "accepted": 0,
+    "accepted_rate": 0.0,
+    "statuses": {
+     "completed": 1
+    },
+    "workflow": {
+     "None": 1
+    },
+    "total_tokens": {
+     "total": 469934,
+     "per_accepted": null
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 454829,
+      "observed_attempts": 1,
+      "total": 454829,
+      "per_accepted": null
+     },
+     "cached_input_tokens": {
+      "observed": 398336,
+      "observed_attempts": 1,
+      "total": 398336,
+      "per_accepted": null
+     },
+     "uncached_input_tokens": {
+      "observed": 56493,
+      "observed_attempts": 1,
+      "total": 56493,
+      "per_accepted": null
+     },
+     "output_tokens": {
+      "observed": 15105,
+      "observed_attempts": 1,
+      "total": 15105,
+      "per_accepted": null
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 175.656,
+     "observed_attempts": 1,
+     "total": 175.656,
+     "per_accepted": null
+    },
+    "reorientation": {
+     "median_seconds": 41.0,
+     "planning_read": 0,
+     "observed": 1
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 1
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 1,
+     "cleanup review": 1
+    }
+   },
+   {
+    "arm": "plain",
+    "case": "import-preview",
+    "scheduled": 1,
+    "accepted": 1,
+    "accepted_rate": 1.0,
+    "statuses": {
+     "completed": 1
+    },
+    "workflow": {
+     "None": 1
+    },
+    "total_tokens": {
+     "total": 459857,
+     "per_accepted": 459857.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 448734,
+      "observed_attempts": 1,
+      "total": 448734,
+      "per_accepted": 448734.0
+     },
+     "cached_input_tokens": {
+      "observed": 407040,
+      "observed_attempts": 1,
+      "total": 407040,
+      "per_accepted": 407040.0
+     },
+     "uncached_input_tokens": {
+      "observed": 41694,
+      "observed_attempts": 1,
+      "total": 41694,
+      "per_accepted": 41694.0
+     },
+     "output_tokens": {
+      "observed": 11123,
+      "observed_attempts": 1,
+      "total": 11123,
+      "per_accepted": 11123.0
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 107.89500000000001,
+     "observed_attempts": 1,
+     "total": 107.89500000000001,
+     "per_accepted": 107.89500000000001
+    },
+    "reorientation": {
+     "median_seconds": 20.7,
+     "planning_read": 0,
+     "observed": 1
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 1
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {}
+   }
+  ],
+  "arms": {
+   "forge-lean": {
+    "scheduled": 2,
+    "accepted": 1,
+    "accepted_rate": 0.5,
+    "statuses": {
+     "completed": 2
+    },
+    "workflow": {
+     "True": 2
+    },
+    "total_tokens": {
+     "total": 4956732,
+     "per_accepted": 4956732.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 4891275,
+      "observed_attempts": 2,
+      "total": 4891275,
+      "per_accepted": 4891275.0
+     },
+     "cached_input_tokens": {
+      "observed": 4564224,
+      "observed_attempts": 2,
+      "total": 4564224,
+      "per_accepted": 4564224.0
+     },
+     "uncached_input_tokens": {
+      "observed": 327051,
+      "observed_attempts": 2,
+      "total": 327051,
+      "per_accepted": 327051.0
+     },
+     "output_tokens": {
+      "observed": 65457,
+      "observed_attempts": 2,
+      "total": 65457,
+      "per_accepted": 65457.0
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 1053.47,
+     "observed_attempts": 2,
+     "total": 1053.47,
+     "per_accepted": 1053.47
+    },
+    "reorientation": {
+     "median_seconds": 78.1,
+     "planning_read": 2,
+     "observed": 2
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 2
+    },
+    "helper_calls": 51,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 1,
+     "cleanup review": 1
+    }
+   },
+   "notes": {
+    "scheduled": 2,
+    "accepted": 1,
+    "accepted_rate": 0.5,
+    "statuses": {
+     "completed": 2
+    },
+    "workflow": {
+     "None": 2
+    },
+    "total_tokens": {
+     "total": 906555,
+     "per_accepted": 906555.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 881459,
+      "observed_attempts": 2,
+      "total": 881459,
+      "per_accepted": 881459.0
+     },
+     "cached_input_tokens": {
+      "observed": 777216,
+      "observed_attempts": 2,
+      "total": 777216,
+      "per_accepted": 777216.0
+     },
+     "uncached_input_tokens": {
+      "observed": 104243,
+      "observed_attempts": 2,
+      "total": 104243,
+      "per_accepted": 104243.0
+     },
+     "output_tokens": {
+      "observed": 25096,
+      "observed_attempts": 2,
+      "total": 25096,
+      "per_accepted": 25096.0
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 419.62199999999996,
+     "observed_attempts": 2,
+     "total": 419.62199999999996,
+     "per_accepted": 419.62199999999996
+    },
+    "reorientation": {
+     "median_seconds": 72.6,
+     "planning_read": 2,
+     "observed": 2
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 2
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 1,
+     "cleanup review": 1
+    }
+   },
+   "plain": {
+    "scheduled": 2,
+    "accepted": 1,
+    "accepted_rate": 0.5,
+    "statuses": {
+     "completed": 2
+    },
+    "workflow": {
+     "None": 2
+    },
+    "total_tokens": {
+     "total": 929791,
+     "per_accepted": 929791.0
+    },
+    "tokens": {
+     "input_tokens": {
+      "observed": 903563,
+      "observed_attempts": 2,
+      "total": 903563,
+      "per_accepted": 903563.0
+     },
+     "cached_input_tokens": {
+      "observed": 805376,
+      "observed_attempts": 2,
+      "total": 805376,
+      "per_accepted": 805376.0
+     },
+     "uncached_input_tokens": {
+      "observed": 98187,
+      "observed_attempts": 2,
+      "total": 98187,
+      "per_accepted": 98187.0
+     },
+     "output_tokens": {
+      "observed": 26228,
+      "observed_attempts": 2,
+      "total": 26228,
+      "per_accepted": 26228.0
+     }
+    },
+    "reported_cost_usd": {
+     "observed": null,
+     "observed_attempts": 0,
+     "total": null,
+     "per_accepted": null
+    },
+    "elapsed_seconds": {
+     "observed": 283.55100000000004,
+     "observed_attempts": 2,
+     "total": 283.55100000000004,
+     "per_accepted": 283.55100000000004
+    },
+    "reorientation": {
+     "median_seconds": 30.85,
+     "planning_read": 0,
+     "observed": 2
+    },
+    "regressions": {
+     "attempts": 0,
+     "compatibility": 0,
+     "tests": 0,
+     "withheld_clauses": 0,
+     "observed": 2
+    },
+    "helper_calls": 0,
+    "outside_references": 0,
+    "rejections": {
+     "compatibility": 1,
+     "cleanup review": 1
+    }
+   }
+  },
+  "decision": {
+   "complete": false,
+   "blockers": [
+    "probe-free calibration run; the decision rule applies to the main run only"
+   ]
+  },
+  "comparative_review": {
+   "expected": 2,
+   "completed": 2
+  },
+  "attempts": [
+   {
+    "id": "godfile-lean-1-forge-lean",
+    "arm": "forge-lean",
+    "case": "godfile",
+    "block": "godfile-lean-1",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": true,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 2446730,
+      "cached_input_tokens": 2271232,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 175498,
+      "output_tokens": 37051,
+      "reasoning_output_tokens": 4306,
+      "total_tokens": 2483781
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 687.569,
+    "sessions": [
+     {
+      "seconds": 365.035,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 17,
+      "helper_calls": 11
+     },
+     {
+      "seconds": 322.534,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 15,
+      "helper_calls": 11
+     }
+    ],
+    "reorientation": {
+     "seconds": 73.0,
+     "boundary": "poll",
+     "commands": 6,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "compatibility",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 16,
+      "bytes": 41518
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_pricing.py",
+      "src/order_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-1-notes",
+    "arm": "notes",
+    "case": "godfile",
+    "block": "godfile-lean-1",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": null,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 555563,
+      "cached_input_tokens": 494848,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 60715,
+      "output_tokens": 16858,
+      "reasoning_output_tokens": 2212,
+      "total_tokens": 572421
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 218.34,
+    "sessions": [
+     {
+      "seconds": 55.851,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 162.489,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 99.4,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "compatibility",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 1038
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/order_pricing.py",
+      "src/order_validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "godfile-lean-1-plain",
+    "arm": "plain",
+    "case": "godfile",
+    "block": "godfile-lean-1",
+    "status": "completed",
+    "common_quality": "failed",
+    "workflow": null,
+    "behavior": false,
+    "cleanup": false,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 454829,
+      "cached_input_tokens": 398336,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 56493,
+      "output_tokens": 15105,
+      "reasoning_output_tokens": 2141,
+      "total_tokens": 469934
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 175.656,
+    "sessions": [
+     {
+      "seconds": 107.924,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 67.732,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 41.0,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": false,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "latest_created_on_all_orders": "pass",
+     "status_counts_zero": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [
+     "compatibility",
+     "cleanup review"
+    ],
+    "checkpoint": {
+     "compatibility": false,
+     "oracle": false,
+     "probes": {
+      "latest_created_on_all_orders": "missing",
+      "status_counts_zero": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/dispatch.py",
+      "src/pricing.py",
+      "src/validation.py",
+      "tests/test_dispatch.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-1-notes",
+    "arm": "notes",
+    "case": "import-preview",
+    "block": "import-preview-lean-1",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 325896,
+      "cached_input_tokens": 282368,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 43528,
+      "output_tokens": 8238,
+      "reasoning_output_tokens": 1470,
+      "total_tokens": 334134
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 201.28199999999998,
+    "sessions": [
+     {
+      "seconds": 99.005,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 4,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 102.277,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 5,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 45.8,
+     "boundary": "poll",
+     "commands": 2,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 1,
+      "bytes": 1224
+     },
+     "changed_files": [
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-1-plain",
+    "arm": "plain",
+    "case": "import-preview",
+    "block": "import-preview-lean-1",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": null,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 448734,
+      "cached_input_tokens": 407040,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 41694,
+      "output_tokens": 11123,
+      "reasoning_output_tokens": 3455,
+      "total_tokens": 459857
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 107.89500000000001,
+    "sessions": [
+     {
+      "seconds": 59.142,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     },
+     {
+      "seconds": 48.753,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 6,
+      "helper_calls": 0
+     }
+    ],
+    "reorientation": {
+     "seconds": 20.7,
+     "boundary": "poll",
+     "commands": 3,
+     "planning_read": false,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 0,
+      "bytes": 0
+     },
+     "changed_files": [
+      "src/order_csv.py",
+      "src/orders.py",
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   },
+   {
+    "id": "import-preview-lean-1-forge-lean",
+    "arm": "forge-lean",
+    "case": "import-preview",
+    "block": "import-preview-lean-1",
+    "status": "completed",
+    "common_quality": "passed",
+    "workflow": true,
+    "behavior": true,
+    "cleanup": true,
+    "reported_telemetry": {
+     "totals": {
+      "input_tokens": 2444545,
+      "cached_input_tokens": 2292992,
+      "cache_creation_input_tokens": null,
+      "uncached_input_tokens": 151553,
+      "output_tokens": 28406,
+      "reasoning_output_tokens": 6045,
+      "total_tokens": 2472951
+     },
+     "reported_cost_usd": null
+    },
+    "attempt_seconds": 365.901,
+    "sessions": [
+     {
+      "seconds": 152.75,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 19,
+      "helper_calls": 14
+     },
+     {
+      "seconds": 213.151,
+      "returncode": 0,
+      "timed_out": false,
+      "commands": 18,
+      "helper_calls": 15
+     }
+    ],
+    "reorientation": {
+     "seconds": 83.2,
+     "boundary": "poll",
+     "commands": 7,
+     "planning_read": true,
+     "tokens": null
+    },
+    "regressions": {
+     "compatibility": false,
+     "tests": {
+      "failing": [],
+      "deleted": [],
+      "weakened": []
+     },
+     "withheld_clauses": [],
+     "any": false
+    },
+    "probes": {
+     "tax_per_line": "pass"
+    },
+    "checkpoint_unchanged": true,
+    "outside_references": 0,
+    "rejection": [],
+    "checkpoint": {
+     "compatibility": true,
+     "oracle": false,
+     "probes": {
+      "tax_per_line": "missing"
+     },
+     "planning": {
+      "files": 17,
+      "bytes": 40600
+     },
+     "changed_files": [
+      "src/orders.py",
+      "src/receipts.py",
+      "tests/test_orders.py"
+     ]
+    }
+   }
+  ],
+  "limits": "Every scheduled attempt counts, including failures, timeouts and pending work. Accepted means the common-quality verdict, which needs an independent blind cleanup review. Tokens sum both sessions and stay unknown when either session's usage is missing; Claude totals include subagents. Re-orientation time is polled to the first src/ or tests/ change in session 2; Codex reports usage per session only, so its tokens before that edit are unknown. A renamed test counts as deleted. Probe failures are evidence, not certainty, and four repetitions per arm and case are observations, not statistically established effects."
+ }
+}

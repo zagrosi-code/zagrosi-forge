@@ -49,7 +49,9 @@ state is Forge's core value. It forces a session break after section 2 of a
 five-section task and compares Forge `lean`, a plain agent keeping
 `.planning/NOTES.md`, and a plain agent. It reuses the existing coding oracles.
 `tools/session_break_trials.py` runs it, including the withheld-decision probe;
-every run needs model usage and the user's approval.
+every run needs model usage and the user's approval. In the
+[first Codex run](session-break-results-2026-10-20.md), free-form notes kept a
+pre-break decision as well as Forge `lean` did, at a sixth of its tokens.
 
 ## Comparison Protocol
 
