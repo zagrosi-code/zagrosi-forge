@@ -51,7 +51,10 @@ five-section task and compares Forge `lean`, a plain agent keeping
 `tools/session_break_trials.py` runs it, including the withheld-decision probe;
 every run needs model usage and the user's approval. In the
 [first Codex run](session-break-results-2026-10-20.md), free-form notes kept a
-pre-break decision as well as Forge `lean` did, at a sixth of its tokens.
+pre-break decision as well as Forge `lean` did, at a sixth of its tokens. A
+[second run](session-break-results-2026-10-21.md) added state-first `lean` as a
+fourth arm: it cost 0.57× today's `lean` but missed all four of its rollout
+criteria.
 
 ## Comparison Protocol
 

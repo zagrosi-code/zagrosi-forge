@@ -451,8 +451,9 @@ def test_decision_rule_needs_dominance_and_bounded_tokens():
         "complete": False, "blockers": ["2 blocks without a valid blind review"]}
 
 
-def test_first_run_decision_reproduces():
-    published = json.loads((ROOT / "examples/evals/session-break-results-2026-10-20.json").read_text())["main"]
+@pytest.mark.parametrize("date", ["2026-10-20", "2026-10-21"])
+def test_published_decisions_reproduce(date):
+    published = json.loads((ROOT / f"examples/evals/session-break-results-{date}.json").read_text())["main"]
     assert reporting.decide(published["arms"], []) == published["decision"]
 
 

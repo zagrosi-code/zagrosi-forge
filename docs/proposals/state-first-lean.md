@@ -4,7 +4,9 @@ Status: built as an opt-in mode in 0.5.0 (`plan-setup --state-first`, described 
 [state-first](../../skills/zagrosi-implement/references/state-first.md)). Defaults stay
 unchanged until the user approves. Its finish also blocks while a section is not done.
 Validate it with the [session-break protocol](../../examples/evals/session-break-protocol.md)
-before adopting it.
+before adopting it. The first such run, on Codex, missed all four rollout criteria in
+step 3 ([results](../../examples/evals/session-break-results-2026-10-21.md)), so step 4
+applies for now.
 
 ## Summary
 
