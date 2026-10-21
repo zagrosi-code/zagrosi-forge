@@ -1,5 +1,9 @@
 # Releases
 
+## 0.4.5 — Codex home in capability inventory
+
+- `capability-inventory` without `--config` reads `$CODEX_HOME/config.toml` when `CODEX_HOME` is set, as `install-codex`, `update-check` and `self-update` already do. All four share one default-path helper.
+
 ## 0.4.4 — Claude Code host parity
 
 - `doctor` and `update-check` compare Claude Code installs of Forge that apply to the current project with the source release and name the fix: `claude plugin marketplace update zagrosi`, then `claude plugin update zagrosi-forge@zagrosi`. They honor `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_PLUGIN_CACHE_DIR`. Doctor reports this without findings, so preflight scores do not change.

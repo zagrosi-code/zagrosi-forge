@@ -17,7 +17,7 @@ import tempfile
 import time
 
 from . import codex_config as _codex_config
-from .codex_config import expected_codex_config
+from .codex_config import default_codex_config_path, expected_codex_config
 from . import child_process as _child_process
 from .doctor import SKILL_NAMES
 from . import gates as _gates
@@ -115,13 +115,6 @@ def _release_check(args: argparse.Namespace, config_path: Path) -> int:
     if not success or getattr(args, "verbose", False):
         payload["results"] = results
     return _output.print_json(payload, 0 if success else 1)
-
-
-def default_codex_config_path() -> Path:
-    codex_home = os.environ.get("CODEX_HOME")
-    if codex_home:
-        return Path(codex_home).expanduser() / "config.toml"
-    return Path.home() / ".codex" / "config.toml"
 
 
 def codex_home_for_config(config_path: Path, explicit_config: bool) -> Path:

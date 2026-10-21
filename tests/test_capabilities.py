@@ -10,6 +10,7 @@ import pytest
 
 from forge_test_helpers import (
     ROOT,
+    home_env,
     load_zagrosi_module,
     run_cmd,
     run_raw,
@@ -49,6 +50,20 @@ def test_capability_inventory_handles_missing_config(tmp_path: Path) -> None:
     assert payload["success"] is True
     assert {"gh", "codex", "claude", "gemini"} <= set(payload["local_tools"])
     assert payload["warnings"]
+
+
+@pytest.mark.parametrize("use_codex_home", [True, False], ids=["codex-home", "home-fallback"])
+def test_capability_inventory_reads_default_codex_config(tmp_path: Path, use_codex_home: bool) -> None:
+    home = tmp_path / "home"
+    config = (tmp_path / "codex" if use_codex_home else home / ".codex") / "config.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text('[plugins."config-probe@forge-test"]\nenabled = true\n')
+
+    payload = run_cmd("capability-inventory", "--plugin-root", str(ROOT),
+                      env=home_env(home, config.parent if use_codex_home else None))
+
+    assert "config-probe@forge-test" in {item["id"] for item in payload["plugins"]["configured"]}
+    assert Path(payload["config_path"]) == config
 
 
 def test_review_capabilities_preserves_codex_baseline_alias(tmp_path: Path) -> None:

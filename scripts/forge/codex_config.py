@@ -1,4 +1,4 @@
-"""Small, byte-preserving edits to Forge-owned Codex settings."""
+"""Locate Codex settings and make small, byte-preserving edits to Forge-owned ones."""
 
 from __future__ import annotations
 
@@ -125,6 +125,13 @@ def _signature(observed):
 def _unchanged(path, original):
     raw, observed = read_config(path)
     return raw == original[0] and _signature(observed) == _signature(original[1])
+
+
+def default_codex_config_path() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    return Path.home() / ".codex" / "config.toml"
 
 
 def read_config(path):
