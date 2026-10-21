@@ -299,7 +299,8 @@ def writer_command(host: str, executable: str, model: str, effort: str, record: 
                "--mcp-config", '{"mcpServers":{}}', "--permission-mode", "acceptEdits",
                "--permission-prompts", "none", "--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_TOOLS]
     if record.get("plugin_root") and not record.get("plain_agent"):
-        command.extend(["--plugin-dir", record["plugin_root"]])
+        # --restricted keeps file tools inside working directories, and Forge's skills read their references.
+        command.extend(["--plugin-dir", record["plugin_root"], "--add-dir", record["plugin_root"]])
     return command
 
 
