@@ -73,6 +73,10 @@ def _status(args: argparse.Namespace) -> int:
     else:
         planning_dir = path
 
+    from . import state_first
+
+    if state_first.active(planning_dir):
+        return _output.print_json(state_first.status_payload(planning_dir))
     project_state = planning_dir / ".zagrosi-project" / "session.json"
     legacy_project_state = planning_dir / ".deep-project" / "session.json"
     if not project_state.exists() and legacy_project_state.exists():

@@ -5,6 +5,7 @@ import json
 import re
 
 from . import markdown as _markdown
+from . import policy as _policy
 from . import storage as _storage
 
 SCAFFOLD_MARKER = "<!-- FORGE_SCAFFOLD -->"
@@ -118,7 +119,10 @@ def create_plan_scaffold(spec_file: Path, depth: str, *, detached: bool = False)
     index = planning_dir / "sections/index.md"
     section = planning_dir / "sections/section-01-contract.md"
     created = []
-    existing = any((planning_dir / name).exists() or (planning_dir / name).is_symlink() for name in ("codex-plan.md", "claude-plan.md", "sections"))
+    from . import artifacts
+
+    existing = artifacts.plan_file(planning_dir) or any(
+        (planning_dir / name).exists() or (planning_dir / name).is_symlink() for name in (*_policy.LEGACY_PLAN_FILES, "sections"))
     if not detached and not existing:
         lines, ids = visible_source(_storage.read_text(spec_file))
         ids = ids or ["REQ-001"]

@@ -11,6 +11,7 @@ import re
 
 from . import artifacts as _artifacts
 from . import output as _output
+from . import policy as _policy
 from . import quality as _quality
 from . import scoring as _scoring
 from . import sections as _sections
@@ -74,7 +75,7 @@ def eval_suite_benchmarks(root: Path, default_depth: str) -> tuple[str, Path | N
 
     suite_path = root / "evals" / "suite.json"
     if not suite_path.exists():
-        markers = sorted(path for pattern in ("**/codex-plan.md", "**/claude-plan.md", "**/sections/index.md") for path in root.glob(pattern))
+        markers = sorted(path for name in (*_policy.PLAN_FILES, "sections/index.md") for path in root.glob(f"**/{name}"))
         benchmarks = []
         seen: set[Path] = set()
         for marker in markers:

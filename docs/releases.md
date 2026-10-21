@@ -1,5 +1,15 @@
 # Releases
 
+## 0.5.0 — opt-in state-first lean
+
+- `plan-setup --state-first` keeps a lean plan as `plan.md` (goal, acceptance and a section table), `status.json` (each section pending, active or done, with files, host and time) and append-only `notes.md`. Setup drafts `plan.md` from the brief and checks only structure; every failure names the field with an example.
+- `implement-progress --stage done --notes ... [-- <check>]` finishes a section in one call. `implement-verify -- <full suite>` captures the final receipt and runs the structural postflight, which blocks only on the plan, section statuses and that receipt. `status` prints the goal, section states, latest notes, last verification and files changed since the last status write.
+- A `risk:` tag, whole-word risk terms, public-interface phrases, REQ IDs in a row or configured team coordination give that section standard evidence: a review verdict, a captured check, and a red checkpoint or a baseline bound to the original source, which `done` reruns as the same explicit check.
+- Section risk estimates match whole words and their forms outside compatibility metadata, so `author` and `metadata` no longer count as `auth` and `data`, while `authorized`, `OAuth`, `passwords` and `migrate` do.
+- Plan readers, team preparation, eval discovery and trial tools accept the host-neutral `plan.md` after `codex-plan.md` and `claude-plan.md`; a `plan.md` counts as a standard plan only with Forge metadata, so scratch files change nothing.
+
+Default workflows are unchanged; the mode is described in [state-first](../skills/zagrosi-implement/references/state-first.md). No model trials were run for this release.
+
 ## 0.4.4 — session-break trials
 
 - Run the [session-break protocol](../examples/evals/session-break-protocol.md) end to end with `tools/session_break_trials.py`: any arm through a forced break after section 2, a checkpoint with per-test, oracle and clause-probe results, and a fresh second session that cannot read the first session's files. Reports add re-orientation time, regressions against the checkpoint and blind review through the existing comparison packets.

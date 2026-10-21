@@ -156,6 +156,58 @@ def test_copied_package_runs_shared_workflows_and_resumes(package, tmp_path, dep
     assert not (package / "project planning").exists()
 
 
+def test_copied_package_runs_state_first_workflow(package, tmp_path):
+    target = tmp_path / "state target with spaces"
+    planning = target / ".planning"
+    for path in (planning, target / "src", target / "tests"):
+        path.mkdir(parents=True)
+    spec = planning / "spec.md"
+    spec.write_text("# Labels\n\nTrim label edges; keep internal spaces and case.\n", encoding="utf-8")
+    source = target / "src/labels.py"
+    source.write_text("def normalize(value):\n    return value\n", encoding="utf-8")
+    (target / "tests/test_labels.py").write_text(
+        "import unittest\nfrom src.labels import normalize\n\n"
+        "class LabelTests(unittest.TestCase):\n"
+        "    def test_trim_edges(self):\n"
+        "        self.assertEqual(normalize(' Ada  Lovelace '), 'Ada  Lovelace')\n", encoding="utf-8")
+    setup = helper(package, "plan-setup", "--file", spec, "--target-dir", target, "--state-first")
+    draft = run(setup, target, success=False)
+    assert draft["created"] == ["plan.md", "status.json", "notes.md"]
+    (planning / "plan.md").write_text(
+        "# Plan: labels\n\n## Goal\nTrim label edges.\n\n## Acceptance\n- Internal spaces and case stay.\n\n"
+        "## Sections\n| Section | Files | Done when |\n|---|---|---|\n"
+        "| section-01-trim | src/labels.py | `python -m unittest discover -s tests` passes |\n"
+        "| section-02-docs | README.md | README shows trimming |\n", encoding="utf-8")
+    plan = run(setup, target)
+    suite = [sys.executable, "-m", "unittest", "discover", "-s", "tests"]
+
+    def follow(command, values):
+        assert command[:2] == helper(package)
+        argv = [values.get(value, value) for value in command]
+        if "<check>" in values:
+            argv = argv[:argv.index("--") + 1] + values["<check>"]
+        return run(argv, target)
+
+    follow(plan["commands"]["start"], {})
+    source.write_text("def normalize(value):\n    return value.strip()\n", encoding="utf-8")
+    note = "Trimmed with str.strip; the user wants case kept."
+    done = follow(plan["commands"]["done"], {"<what changed, decisions, next step>": note, "<check>": suite})
+    assert done["entry"]["files"] == ["src/labels.py"] and done["next_section"] == "section-02-docs"
+
+    resumed = run(helper(package, "status", "--path", planning), target)
+    assert [item["state"] for item in resumed["sections"]] == ["done", "pending"]
+    assert resumed["notes"][-1]["text"] == note and resumed["last_verification"]["fresh"] is True
+    pretty = run_process(helper(package, "status", "--path", planning, "--pretty"), cwd=target).stdout
+    assert all(text in pretty for text in ("Goal: Trim label edges.", "section-01-trim: done", note))
+    (target / "README.md").write_text("Labels are trimmed.\n", encoding="utf-8")
+    run(helper(package, "implement-progress", "--planning-dir", planning, "--section", "section-02-docs",
+               "--stage", "done", "--notes", "Documented trimming."), target)
+    finish = follow(resumed["commands"]["finish"], {"<check>": suite})
+    assert finish["final"]["outcome"] == "passed" and finish["postflight"]["success"]
+    assert run(helper(package, "postflight", "--phase", "implement", "--planning-dir", planning), target)["success"]
+    assert not (package / ".planning").exists() and not (target / "sections").exists()
+
+
 def test_copied_package_preserves_codex_configuration_and_is_idempotent(package, tmp_path):
     config = tmp_path / "codex home with spaces" / "config.toml"
     config.parent.mkdir()

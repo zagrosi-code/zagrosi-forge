@@ -69,7 +69,9 @@ def _plan(workflow):
     for name, entry in workflow.items():
         path = PurePosixPath(name)
         index = name.endswith("/sections/index.md")
-        if path.name not in {"codex-plan.md", "claude-plan.md"} and not index:
+        # A host-neutral plan.md marks a state-first plan only beside its status.json.
+        if not index and path.name not in {"codex-plan.md", "claude-plan.md"} and not (
+                path.name == "plan.md" and str(path.parent / "status.json") in workflow):
             continue
         require(entry["type"] == "file", "Workflow plan marker must be a regular file")
         root = path.parent.parent if index else path.parent
