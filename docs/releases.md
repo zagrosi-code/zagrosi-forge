@@ -1,5 +1,12 @@
 # Releases
 
+## 0.4.7 — Claude session-break run
+
+- Claude writers no longer inherit the launching Claude Code session's environment. A trial started from inside Claude Code received that session's id, messaging socket, entrypoint and plugin data, plus the effort and model aliases from its settings, such as `ANTHROPIC_DEFAULT_OPUS_MODEL`. Only credentials and `CLAUDE_CONFIG_DIR` pass through, and telemetry lists the removed names.
+- Claude auto-memory is off for every writer (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`). It is on by default and keyed by the workspace path, so a second session could read what the first one saved.
+
+Runtime code is unchanged apart from regenerated manifests.
+
 ## 0.4.4 — session-break trials
 
 - Run the [session-break protocol](../examples/evals/session-break-protocol.md) end to end with `tools/session_break_trials.py`: any arm through a forced break after section 2, a checkpoint with per-test, oracle and clause-probe results, and a fresh second session that cannot read the first session's files. Reports add re-orientation time, regressions against the checkpoint and blind review through the existing comparison packets.
