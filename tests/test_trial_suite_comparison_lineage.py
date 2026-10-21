@@ -32,7 +32,7 @@ def applied_case(tmp_path, monkeypatch, capsys):
     compare(path, directory, monkeypatch, capsys)
     form = blind_and_review(directory, monkeypatch, capsys)
     status, report, stderr = invoke(matrix_cli, monkeypatch, capsys, "apply-reviews", directory)
-    assert status == 0 and not stderr and report["study_complete"] is True
+    assert status == 0 and not stderr and report["study_complete"] is True, (status, stderr, report and report.get("errors", report.get("error")))
     return directory, form, boundary
 
 
@@ -156,5 +156,6 @@ def test_latest_failed_application_never_falls_back_to_a_completed_one(tmp_path,
     before = bytes_at(directory)
     current = comparisons.report_suite(directory)
     assert current["study_complete"] is False and current["success"] is False
+    assert any("Explicit synthetic second-row application failure" in error["message"] for error in current["errors"])
     assert current["accepted_outcomes"]["scheduled"] == 3
     assert len(calls) == 2 and bytes_at(directory) == before

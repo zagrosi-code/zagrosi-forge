@@ -70,3 +70,28 @@ def test_non_ascii_runtime_paths_require_version_bump(tmp_path):
     commit(repo, "skills/\u00fcnicode/SKILL.md", "new\n")
     code, report = check(repo, "base")
     assert code == 1 and report["unreleased"] == ["skills/\u00fcnicode/SKILL.md"]
+
+
+def test_manifest_only_changes_need_no_release(tmp_path):
+    repo = released_repo(tmp_path)
+    block = "# BEGIN RUNTIME MANIFEST\nRUNTIME_MANIFEST = {}\n# END RUNTIME MANIFEST\n"
+    commit(repo, "scripts/zagrosi_skills.py", "import sys\n" + block)
+    git(repo, "branch", "-f", "base")
+    commit(repo, "scripts/zagrosi_skills.py", "import sys\n" + block.replace("{}", '{"forge/a.py": "1"}'))
+    assert check(repo, "base") == (0, {"success": True, "changed": [], "unreleased": []})
+    commit(repo, "scripts/zagrosi_skills.py", "import os\n" + block.replace("{}", '{"forge/a.py": "1"}'))
+    code, report = check(repo, "base")
+    assert code == 1 and report["unreleased"] == ["scripts/zagrosi_skills.py"]
+
+
+def test_mode_changes_and_deletions_count(tmp_path):
+    repo = released_repo(tmp_path)
+    commit(repo, "scripts/forge/sources.py", "# BEGIN TEST MANIFEST\nTEST_MANIFEST = {}\n# END TEST MANIFEST\n")
+    commit(repo, "scripts/forge/extra.py", "VALUE = 1\n")
+    git(repo, "branch", "-f", "base")
+    git(repo, "update-index", "--chmod=+x", "scripts/forge/sources.py")
+    git(repo, "commit", "-qm", "Make sources executable")
+    git(repo, "rm", "-q", "scripts/forge/extra.py")
+    git(repo, "commit", "-qm", "Delete extra")
+    code, report = check(repo, "base")
+    assert code == 1 and report["unreleased"] == ["scripts/forge/extra.py", "scripts/forge/sources.py"]

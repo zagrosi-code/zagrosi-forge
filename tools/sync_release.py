@@ -3,11 +3,14 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import subprocess
 import tomllib
 
 # Hosts that pin a manifest version (Claude Code) only refresh installs when it changes.
 RUNTIME_PREFIXES = ("skills/", "scripts/")
+# Generated hash manifests change with every test edit but ship no new behavior.
+GENERATED_MANIFESTS = {"scripts/forge/sources.py": "TEST", "scripts/zagrosi_skills.py": "RUNTIME"}
 
 
 def project_version(text: str) -> str:
@@ -19,17 +22,31 @@ def project_version(text: str) -> str:
 
 def unreleased_changes(root: Path, base: str) -> list[str]:
     """Runtime paths changed since base while the release version stayed the same."""
-    def git(*args: str) -> str:
-        result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=False)
+    def git(*args: str) -> bytes:
+        result = subprocess.run(["git", *args], cwd=root, capture_output=True, check=False)
         if result.returncode:
-            raise ValueError(f"Cannot compare with {base}: {result.stderr.strip() or 'git failed'}")
+            message = result.stderr.decode("utf-8", "replace").strip() or "git failed"
+            raise ValueError(f"Cannot compare with {base}: {message}")
         return result.stdout
 
-    # Without rename detection, moving a runtime file out of skills/ or scripts/ still counts;
-    # -z keeps non-ASCII paths unquoted.
-    changed = [path for path in git("diff", "--name-only", "--no-renames", "-z", f"{base}...HEAD").split("\0")
-               if path.startswith(RUNTIME_PREFIXES)]
-    if changed and project_version(git("show", f"{base}:pyproject.toml")) == project_version(
+    def manifest_only(path: str, kind: str) -> bool:
+        block = re.compile(rb"^# BEGIN " + kind.encode() + rb" MANIFEST$.*?^# END " + kind.encode() + rb" MANIFEST$",
+                           re.DOTALL | re.MULTILINE)
+        return block.sub(b"", git("show", f"{merge_base}:{path}")) == block.sub(b"", git("show", f"HEAD:{path}"))
+
+    merge_base = git("merge-base", base, "HEAD").decode().strip()
+    # Without rename detection, moving a runtime file out of skills/ or scripts/ still counts; -z keeps
+    # non-ASCII paths unquoted. Additions, deletions and mode changes always count.
+    entries = git("diff", "--raw", "--no-renames", "-z", f"{merge_base}..HEAD").decode().split("\0")
+    changed = []
+    for meta, path in zip(entries[0::2], entries[1::2]):
+        if not path.startswith(RUNTIME_PREFIXES):
+            continue
+        old_mode, new_mode, *_, status = meta.lstrip(":").split()
+        kind = GENERATED_MANIFESTS.get(path)
+        if status != "M" or old_mode != new_mode or kind is None or not manifest_only(path, kind):
+            changed.append(path)
+    if changed and project_version(git("show", f"{base}:pyproject.toml").decode()) == project_version(
             (root / "pyproject.toml").read_text()):
         return changed
     return []

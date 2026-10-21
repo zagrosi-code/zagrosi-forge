@@ -331,8 +331,11 @@ def _application(context, reference, index, forms):
     _, result = _read_file(context, f"review-history/applications/{numbers[-1]:06d}/result.json")
     fields(result, "schema matrix packets forms assessments status error", "Review application")
     require(result["schema"] == "coding-trial-review-application/v1" and result["matrix"] == context["matrix_ref"]
-            and result["packets"] == reference and result["status"] == "completed" and result["error"] is None,
-            "review-stale: Latest review application is incomplete or stale")
+            and result["packets"] == reference, "review-stale: Latest review application is stale")
+    if result["status"] == "failed" and isinstance(result["error"], dict):
+        raise ValueError(f"review-stale: Latest review application failed: {result['error'].get('message')}")
+    require(result["status"] == "completed" and result["error"] is None,
+            "review-stale: Latest review application is incomplete")
     require(type(result["forms"]) is list and len(result["forms"]) == len(forms), "review-stale: Applied form set differs")
     for saved, form in zip(result["forms"], forms):
         fields(saved, "block path sha256 snapshot", "Applied form")
