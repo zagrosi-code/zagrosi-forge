@@ -63,7 +63,7 @@ before/after behavioral checks. Before delivery, review the changed code and
 relevant callers once for unnecessary complexity and regressions. Record broader
 debt separately instead of expanding a completed PR indefinitely.
 
-When the user requests multiple providers/models, or an independent perspective
+When the user requests multiple providers/models, or another provider's perspective
 addresses a concrete risk, use [provider reviews](references/providers.md).
 Keep one primary writer and consolidate findings into the existing review.
 Never substitute another provider/model silently or treat reviewer agreement as

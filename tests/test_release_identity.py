@@ -67,3 +67,11 @@ def test_native_smoke_detects_same_version_stale_content_and_missing_references(
     (source / "README.md").write_text("new, same release")
     assert native.mismatches(source, installed, ["README.md"]) == ["README.md"]
     assert native.check_references(installed) == ["skills/example/SKILL.md: references/missing.md"]
+
+
+def test_native_smoke_reads_each_claude_component_row():
+    native = tool("native_plugin_smoke")
+    details = "Component inventory\n  Skills (2)  zagrosi-plan, zagrosi-forge\n  Agents (0)\n  Hooks (0)\n"
+    assert native.inventory(details, "Skills") == ["zagrosi-forge", "zagrosi-plan"]
+    assert native.inventory(details, "Agents") == []
+    assert native.inventory(details.replace("Agents (0)", "Agents (1)  forge-reviewer"), "Agents") == ["forge-reviewer"]

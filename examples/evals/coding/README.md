@@ -332,7 +332,7 @@ exercise POSIX process groups.
 ### Provenance and measurements
 
 Preparation fingerprints the launcher, all runtime Python modules under
-`scripts/forge`, and skill Markdown. Checking reports plugin drift separately from
+`scripts/forge`, and skill and agent Markdown. Checking reports plugin drift separately from
 behavior. Older records without runtime coverage report `incomplete`, not verified;
 prepare a fresh trial for a complete comparison. Oracle and fixture drift also
 invalidate the result. The actual runtime still performs its own integrity check.

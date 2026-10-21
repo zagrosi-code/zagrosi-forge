@@ -108,6 +108,12 @@ def mismatches(source: Path, installed: Path, members: list[str]) -> list[str]:
             or (installed / name).read_bytes() != (source / name).read_bytes()]
 
 
+def inventory(details: str, component: str) -> list[str]:
+    """Names on one `claude plugin details` component row, such as `Agents (1)  forge-reviewer`."""
+    match = re.search(rf"^\s*{component} \(\d+\)[ \t]*([^\n]*)", details, re.MULTILINE)
+    return sorted(name.strip() for name in match[1].split(",") if name.strip()) if match else []
+
+
 def check_references(root: Path) -> list[str]:
     missing = []
     for skill in (root / "skills").glob("*/SKILL.md"):
@@ -120,6 +126,8 @@ def check_references(root: Path) -> list[str]:
 def smoke(root: Path, host: str, executable: str, *, upgrade: bool = False) -> dict:
     members = json.loads((root / ".codex-plugin/package-files.json").read_text())
     expected = sorted(path.parent.name for path in (root / "skills").glob("*/SKILL.md"))
+    # Codex loads plugin skills only; Claude Code also loads the plugin's agents.
+    expected_agents = sorted(path.stem for path in (root / "agents").glob("*.md")) if host == "claude" else None
     with tempfile.TemporaryDirectory(prefix=f"forge-{host}-native-") as temporary:
         base = Path(temporary)
         source, settings = base / "source with spaces", base / "settings"
@@ -174,9 +182,9 @@ def smoke(root: Path, host: str, executable: str, *, upgrade: bool = False) -> d
         references = check_references(installed)
         if host == "claude":
             details = run([executable, "plugin", "details", "zagrosi-forge"], base, env)
-            match = re.search(r"Skills \(\d+\)\s+([^\n]+)", details)
-            discovered = sorted(name.strip() for name in match[1].split(",")) if match else []
+            discovered, agents = inventory(details, "Skills"), inventory(details, "Agents")
         else:
+            agents = None
             skills = codex_skills(executable, base, env)
             discovered = sorted(item["name"].removeprefix("zagrosi-forge:") for item in skills if item.get("enabled"))
             if any(not Path(item["path"]).resolve().is_relative_to(installed.resolve()) for item in skills):
@@ -184,9 +192,10 @@ def smoke(root: Path, host: str, executable: str, *, upgrade: bool = False) -> d
         doctor = json.loads(run([sys.executable, str(installed / "scripts/zagrosi_skills.py"), "doctor",
                                  "--plugin-root", str(installed), "--strict"], base, env))
         return {"success": not initial_mismatches and not missing and not references and discovered == expected and doctor["success"]
-                           and (not upgrade_report or upgrade_report["version_changed"]),
+                           and agents == expected_agents and (not upgrade_report or upgrade_report["version_changed"]),
                 "host": host, "cli_version": version, "plugin_version": item["version"],
-                "expected_skills": expected, "discovered_skills": discovered, "file_count": len(members),
+                "expected_skills": expected, "discovered_skills": discovered,
+                "expected_agents": expected_agents, "discovered_agents": agents, "file_count": len(members),
                 "mismatched_files": missing, "missing_references": references, "upgrade": upgrade_report,
                 "model_calls": 0, "settings": "disposable", "limits": "Native loading and local-source upgrades only; no model-led skill use or hosted marketplace propagation."}
 

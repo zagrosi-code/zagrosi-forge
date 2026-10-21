@@ -65,6 +65,13 @@ def test_runtime_change_requires_version_bump(tmp_path):
     assert code == 1 and report["success"] is False and "missing-base" in report["error"]
 
 
+def test_agent_change_requires_version_bump(tmp_path):
+    repo = released_repo(tmp_path)
+    commit(repo, "agents/reviewer.md", "new\n")
+    code, report = check(repo, "base")
+    assert code == 1 and report["unreleased"] == ["agents/reviewer.md"]
+
+
 def test_non_ascii_runtime_paths_require_version_bump(tmp_path):
     repo = released_repo(tmp_path)
     commit(repo, "skills/\u00fcnicode/SKILL.md", "new\n")
