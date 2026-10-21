@@ -30,7 +30,7 @@ five sections. Two full-suite runs of 23 minutes each dominated wall time. The
 real defects came from the full suite and a fresh-context reviewer subagent, not
 from per-section ceremony.
 
-**This change (0.4.3, lean, four sections).** Forge built it, which gives a
+**This change (0.4.6, lean, four sections).** Forge built it, which gives a
 second Claude data point:
 
 - The plan was admitted on the third postflight. Two failures named gates
