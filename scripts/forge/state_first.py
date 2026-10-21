@@ -573,6 +573,8 @@ def postflight_report(planning_dir: Path, phase: str) -> dict[str, Any]:
         "message": "Rerun plan-setup so every plan section has a status, and restore the rows of started sections."}))
     if phase == "implement":
         unfinished = [name for name in rows if name in status["sections"] and status["sections"][name]["state"] != "done"]
+        # Trial and eval readers take completion from the same field as a standard postflight.
+        extras["sections_recorded_complete"] = bool(rows) and not missing and not removed and not unfinished
         checks.append(gates.direct_gate("state-sections", not unfinished, {
             "unfinished_sections": unfinished, "message": "Mark each finished section done with implement-progress --stage done."}))
         try:
