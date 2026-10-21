@@ -5,7 +5,7 @@ from collections import Counter
 from pathlib import Path
 import statistics
 
-from coding_trial_comparison import reviews
+from coding_trial_comparison import applied_review, reviews
 from coding_trial_outcomes import accepted_outcomes, known_total
 from trial_matrix import read
 
@@ -130,6 +130,19 @@ def decide(arms: dict, blockers: list[str]) -> dict:
             "H0": not any(pairs.values()), "pairs": pairs, "forge_to_notes_tokens": ratio}
 
 
+def unapplied(directory: Path, reviewed: list[dict]) -> int:
+    """Attempts whose recorded verdict does not yet rest on their block's valid blind review."""
+    key = read(directory / "blind-key.json")
+    count = 0
+    for block in reviewed:
+        for label, row in block["review"]["candidates"].items():
+            trial = directory / key[f"{block['block']}/{label}"]
+            used = (read(trial / "result.json").get("cleanup") or {}).get("review_file")
+            count += not (read(trial / "review.json") == applied_review(block["review"], row) and used
+                          and Path(used).resolve() == (trial / "review.json").resolve())
+    return count
+
+
 def build_report(directory: Path, manifest: dict) -> dict:
     """Per arm and case, per arm overall, and the decision rule once every observation is complete."""
     rows = [attempt_row(directory, item) for item in manifest["trials"]]
@@ -142,6 +155,7 @@ def build_report(directory: Path, manifest: dict) -> dict:
     blockers = [text for count, text in (
         (sum(row["status"] in ("pending", "interrupted") for row in rows), "attempts not run to the end"),
         (len(blocks) - len(reviewed), "blocks without a valid blind review"),
+        (unapplied(directory, reviewed), "attempts whose result predates their blind review"),
         (sum(summary["regressions"]["unobserved"] for summary in arms.values()), "attempts with unobserved regressions"),
     ) if count for text in [f"{count} {text}"]]
     result = {

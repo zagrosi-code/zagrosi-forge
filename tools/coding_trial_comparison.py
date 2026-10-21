@@ -115,6 +115,12 @@ def packets(directory: Path) -> dict:
     return {"packets": str(destination), "blocks": len(blocks), "private_key": str(directory / "blind-key.json")}
 
 
+def applied_review(form: dict, row: dict) -> dict:
+    """The per-attempt cleanup evidence a valid comparative form grants one candidate."""
+    evidence = {name: row.get(name) for name in ("baseline_sha256", "candidate_sha256", "verdict", "cleanup")}
+    return {**evidence, "reviewer": form["reviewer"], "independent": True}
+
+
 def reviews(directory: Path, *, apply: bool = False) -> list[dict] | dict:
     selected = _suite_operation(directory, "apply_suite_reviews" if apply else "report_suite")
     if selected is not None:
@@ -178,9 +184,7 @@ def reviews(directory: Path, *, apply: bool = False) -> list[dict] | dict:
         if apply:
             for label, row in candidates.items():
                 trial = directory / key[f"{block}/{label}"]
-                evidence = {name: row.get(name) for name in ("baseline_sha256", "candidate_sha256", "verdict", "cleanup")}
-                evidence.update(reviewer=data["reviewer"], independent=True)
-                (trial / "review.json").write_text(json.dumps(evidence, indent=2) + "\n")
+                (trial / "review.json").write_text(json.dumps(applied_review(data, row), indent=2) + "\n")
         results.append({"block": block, "valid": bool(valid), "review": data,
                         "preferred_trials": [key[f"{block}/{label}"] for label in preferred] if valid else []})
     return results

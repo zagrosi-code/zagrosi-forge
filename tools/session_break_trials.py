@@ -486,8 +486,16 @@ def select(manifest: dict, attempt: str | None) -> list[dict]:
     return items
 
 
+def require_hiding() -> None:
+    """Session-1 evidence is hidden with file modes, which root and Windows do not enforce."""
+    if os.name != "posix" or os.geteuid() == 0:
+        raise ValueError("run needs an unprivileged POSIX user: file modes keep session-1 evidence from session 2, "
+                         "and root or Windows ignores them")
+
+
 def run(directory: Path, attempt: str | None = None) -> dict:
     """Attempt pending rows serially; stop after a session fails without timing out."""
+    require_hiding()
     manifest = read_manifest(directory)
     items = select(manifest, attempt)
     if attempt is not None and (directory / attempt / "attempt.json").exists():

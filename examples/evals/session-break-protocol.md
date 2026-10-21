@@ -203,7 +203,8 @@ pinned writer adapter and the unchanged oracles:
   per attempt. Arm order rotates within each case-repetition block, as in
   `trial_matrix.py`. `session-1.md` and `session-2.md` sit beside each workspace.
 - `run` attempts each pending row once, serially, under a lock, and refuses to
-  start while any recorded identity differs. Session 1's events and telemetry
+  start while any recorded identity differs. It needs an unprivileged POSIX
+  user, because root and Windows ignore the file modes that hide evidence. Session 1's events and telemetry
   become `session-1-*`. The workspace is copied to `checkpoint/workspace`; its
   tests (per test), the compatibility-only and full oracles and the clause
   probes run against a scratch copy (`checkpoint.json`). Session 2 is a fresh
@@ -221,8 +222,8 @@ pinned writer adapter and the unchanged oracles:
 - `report` writes `report.json` per arm and case and per arm overall and lists,
   for each rejection, the failed checks without arm labels. It applies the
   decision rule only when every attempt has finished, every block has a valid
-  blind review and every regression was observed; otherwise it names what is
-  missing. A missing observation stays unknown rather than counting as a
+  blind review that `apply-reviews` has applied, and every regression was
+  observed; otherwise it names what is missing. A missing observation stays unknown rather than counting as a
   regression or as none. Commands, tool inputs and edits that reach past the
   workspace, through `..` or the matrix path, appear as `outside_references`.
 

@@ -155,8 +155,7 @@ def test_sessions_are_isolated_and_retain_their_own_evidence(tmp_path, writer):
     assert second["prompt"].startswith(breaks.NOTES) and "rounds down per line" not in second["prompt"]
     assert "rounds down per line" not in (trial / "workspace/prompt.md").read_text()
     assert first["args"] == second["args"] and "fake-model" in first["args"]
-    if os.geteuid() != 0:  # Permission bits do not restrict root.
-        assert second["readable"] == [] and len(first["readable"]) == 4  # Session 1 sees both prompts and the matrix.
+    assert second["readable"] == [] and len(first["readable"]) == 4  # Session 1 sees both prompts and the matrix.
     assert not (directory / "hidden-modes.json").exists() and not (directory / "run.lock").exists()
     assert CLARIFICATION in (trial / "session-1.md").read_text()  # Readable again after session 2.
     assert not (trial / "agent-events.jsonl").exists()
@@ -411,3 +410,31 @@ def test_outside_references_name_the_matrix_or_parent_paths(tmp_path, kind, text
     workspace = tmp_path / "matrix/attempt/workspace"
     text = text.format(matrix=tmp_path / "matrix", workspace=workspace)
     assert evidence.outside_reference(kind, text, workspace) is outside
+
+
+def test_runs_refuse_users_whose_file_modes_cannot_hide_evidence(tmp_path, writer, monkeypatch):
+    directory = prepare(tmp_path, writer)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    with pytest.raises(ValueError, match="unprivileged POSIX user"):
+        breaks.run(directory)
+    assert writer["calls"]() == [] and not (directory / "import-preview-lean-1-notes/attempt.json").exists()
+
+
+def test_decision_waits_until_blind_reviews_are_applied(tmp_path, writer):
+    directory = prepare(tmp_path, writer)
+    breaks.run(directory)
+    breaks.packets(directory)
+    form_path = next((directory / "blind").glob("*/review.json"))
+    form = read(form_path)
+    form.update(reviewer="test-reviewer", independent=True, preferred=["A"],
+                rationale="The only candidate builds the preview on the shared import path.")
+    for row in form["candidates"].values():
+        row.update(verdict="pass", criteria=dict.fromkeys(row["criteria"], "src/orders.py preview_import reuses import_orders."))
+        row["cleanup"] = {"meaningful": True, "changed_files": ["src/orders.py"],
+                          "rationale": "The preview reuses the validated import path instead of parsing again.",
+                          "regression_evidence": "Characterization and fixture tests pass before and after."}
+    form_path.write_text(json.dumps(form))
+    assert "1 attempts whose result predates their blind review" in breaks.report(directory)["decision"]["blockers"]
+    result = breaks.apply_reviews(directory)
+    assert not any("predates" in text for text in result["decision"]["blockers"])
+    assert result["attempts"][0]["common_quality"] == "passed"
