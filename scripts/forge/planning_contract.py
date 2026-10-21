@@ -63,8 +63,11 @@ def analyze_contract(source: Path, text: str, planning_dir: Path) -> dict | None
                 source_spans[req_id] = first, last
         if not link:
             errors.append(f"{req_id} needs a valid Source: path.md#L1-L2 in the selected brief.")
-        if not re.search(r"(?im)^Behavior:\s*\S", contract) or not _markdown.has_verification(contract):
-            errors.append(f"{req_id} needs Behavior, Expected, and runnable verification.")
+        gaps = _markdown.verification_gaps(contract)
+        if not re.search(r"(?im)^Behavior:\s*\S", contract):
+            gaps.insert(0, "Add a `Behavior:` line.")
+        if gaps:
+            errors.append(f"{req_id} needs Behavior, Expected, and runnable verification: {' '.join(gaps[:2])}")
         if re.search(r"(?im)^\w[\w ]*:\s*(?:TBD|TODO|pending|<[^>]*>)\s*$", contract):
             errors.append(f"{req_id} still has unfinished contract fields.")
     if not ids:

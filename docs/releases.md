@@ -1,5 +1,11 @@
 # Releases
 
+## 0.4.3 — plan gates that explain themselves
+
+- Verification findings name the exact gap: a case without `Expected:` or `Command:`, an unread label such as `Expected failure now:`, or an inspection rationale that does not cover the whole section.
+- Sections of a multi-section compact plan are checked as deltas: a verified section contract supplies tests, implementation and acceptance, owned files show ownership, and goal, dependency, risk and rollback coverage comes from the shared plan and index.
+- Unrecognized index dependencies suggest the full section names; word-budget findings explain how Forge counts words.
+
 ## 0.4.2 — same-host independent review
 
 - Add the read-only `forge-reviewer` agent. Claude Code runs same-host independent review in a fresh context that reads the repository itself, without a second CLI sign-in; other hosts with subagents use the same instructions.

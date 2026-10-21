@@ -361,14 +361,24 @@ def is_test_command(command: str) -> bool:
     return False
 
 
-def has_verification(text: str) -> bool:
-    """Read visible regression/inspection contracts once for every quality gate."""
+VERIFICATION_LABELS = {"case", "expected", "command", "verification_mode", "inspection", "test_rationale"}
+INSPECTION_SCOPE_RE = re.compile(r"\b(?:docs?|documentation|cosmetic|formatting)[ -]only\b", re.IGNORECASE)
+
+
+def _case_name(raw: str) -> str:
+    named = re.search(r"`([^`]+)`", raw)
+    return f"`{named.group(1) if named else ' '.join(raw.split()[:6])}`"
+
+
+def verification_gaps(text: str) -> list[str]:
+    """Explain what keeps visible text from a regression or inspection contract; empty when it has one."""
     blocks, plain_lines = split_markdown_fences_with_closure(visible_markdown(text))
     if any(not closed for _, _, closed in blocks):
-        return False
+        return ["Close every Markdown code fence."]
     fields: dict[str, str] = {}
     cases: list[dict[str, str]] = []
     body = []
+    unread = []
     aliases = {"test_case": "case", "behavior": "case", "test_command": "command"}
     for line in plain_lines:
         line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line).replace("**", "")
@@ -376,31 +386,52 @@ def has_verification(text: str) -> bool:
         if not match:
             body.append(line)
             continue
-        key, value = match.groups()
-        key = re.sub(r"\s+", "_", key.strip().lower())
+        label, raw = match.group(1).strip(), match.group(2)
+        key = re.sub(r"\s+", "_", label.lower())
         key = aliases.get(key, key)
-        if key not in {"case", "expected", "command", "verification_mode", "inspection", "test_rationale"}:
+        if key not in VERIFICATION_LABELS:
+            if key.startswith("expected"):
+                unread.append(label)
             body.append(line)
             continue
-        value = value.strip().strip("`* ")
+        value = raw.strip().strip("`* ")
         if key == "case" and (not cases or cases[-1].get("case") != value):
-            cases.append({})
+            cases.append({"name": _case_name(raw)})
         record = cases[-1] if cases and key in {"case", "expected", "command"} else fields
-        if value.lower().rstrip(".") in {"", "none", "n/a", "tbd", "todo", "pending"} or key in record and record[key] != value:
-            return False
+        if value.lower().rstrip(".") in {"", "none", "n/a", "tbd", "todo", "pending"}:
+            return [f"`{label}:` has no actual value."]
+        if key in record and record[key] != value:
+            return [f"`{label}:` appears twice with different values; keep one." if record is fields else
+                    f"`{label}:` appears twice in one case with different values; start each case with its own "
+                    "`Case:` or `Behavior:` line."]
         record[key] = value
-    if fields.get("verification_mode", "").lower() == "inspection":
-        rationale = fields.get("test_rationale", "")
-        scope = re.search(r"\b(?:docs?|documentation|cosmetic|formatting)[ -]only\b", rationale, re.I)
-        return bool(scope and fields.get("inspection") and fields.get("expected"))
-    if fields.get("verification_mode", "").lower() not in {"", "test", "automated"}:
-        return False
+    mode = fields.get("verification_mode", "")
+    if mode.lower() == "inspection":
+        gaps = []
+        if not INSPECTION_SCOPE_RE.search(fields.get("test_rationale", "")):
+            gaps.append("`verification_mode: inspection` covers the whole section; give a docs-only, documentation-only, "
+                        "cosmetic-only or formatting-only `test_rationale:`, or move tested requirements to another section.")
+        if not fields.get("inspection"):
+            gaps.append("Add an `Inspection:` line naming the actual check.")
+        if not fields.get("expected"):
+            gaps.append("In inspection mode put `Expected:` before the first `Case:` or `Behavior:` line, or move "
+                        "tested cases to another section." if cases else "Add an `Expected:` line with the observable result.")
+        return gaps
+    if mode.lower() not in {"", "test", "automated"}:
+        return [f"Unknown `verification_mode: {mode}`; use test or inspection."]
     plain = "\n".join(body)
     code = "\n".join("\n".join(lines) for language, lines, _ in blocks if language not in {"", "text", "txt", "plain", "plaintext", "markdown", "md"})
     commands = re.findall(r"`([^`\n]+)`", plain) + code.splitlines() + re.findall(r"(?im)^\s*run\s+(.+)$", plain)
     command = fields.get("command") or any(is_test_command(item) for item in commands)
     if cases:
-        return all(case.get("expected") and (case.get("command") or command) for case in cases)
+        unread_hint = f" (`{unread[0]}:` is not read; use `Expected:`)" if unread else ""
+        gaps = []
+        for case in cases:
+            if not case.get("expected"):
+                gaps.append(f"Case {case['name']} has no `Expected:` line{unread_hint}.")
+            if not (case.get("command") or command):
+                gaps.append(f"Case {case['name']} has no `Command:` line, and the text names no test command.")
+        return gaps
     case = re.search(
         r"\b(?:test_[A-Za-z0-9_]+|Test[A-Z][A-Za-z0-9_]*)\b(?![.:])|"
         r"\b(?:it|test)\(\s*[\"'][^\"']+[\"']|"
@@ -408,7 +439,22 @@ def has_verification(text: str) -> bool:
         r"(?i:write\s+(?:red|failing)\b[^\n]*|(?:test\s+)?cases?\s*:)\s*`[a-z][a-z0-9_]*_[a-z0-9_]+`",
         plain + "\n" + code,
     )
-    return bool(command and case)
+    gaps = []
+    if not case:
+        gaps.append("Name a test case: a `Case:` or `Behavior:` line, or a `test_*` name.")
+    if not command:
+        gaps.append("Give the test command on a `Command:` line or in backticks.")
+    return gaps
+
+
+def verification_hint(text: str) -> str | None:
+    """The first verification gaps as one recommendation."""
+    return "; ".join(verification_gaps(text)[:3]) or None
+
+
+def has_verification(text: str) -> bool:
+    """Read visible regression/inspection contracts once for every quality gate."""
+    return not verification_gaps(text)
 
 
 def section_owned_test_names(text: str) -> list[str]:

@@ -87,7 +87,18 @@ def _section_dependency_analysis(index_text: str, sections: list[str]) -> tuple[
         if any(match.start() not in starts for match in re.finditer(r"\bsection-", predecessors)):
             errors.append(f"Malformed predecessor reference for {section}: {predecessors!r}")
         if not deps and predecessors.strip("`* .").lower() not in {"", "none", "-", "—", "n/a", "no dependencies", "independent"}:
-            errors.append(f"Unrecognized dependencies for {section}: {predecessors!r}")
+            parts = {name: re.findall(r"[a-z0-9]+", name.lower()) for name in known}
+
+            def matches(token: str, name: str) -> bool:
+                return any(token == part or token.isdigit() and part.isdigit() and int(token) == int(part)
+                           for part in parts[name])
+
+            # Words shared by every name, such as "section", cannot point at one.
+            tokens = [token for token in re.findall(r"[a-z0-9]+", predecessors.lower())
+                      if not all(matches(token, name) for name in known)]
+            names = [name for name in sorted(known) if any(matches(token, name) for token in tokens)]
+            hint = f"; name full sections such as {', '.join(names[:3])}" if names else "; name full sections from the manifest"
+            errors.append(f"Unrecognized dependencies for {section}: {predecessors!r}{hint}")
         if section in deps:
             errors.append(f"Section cannot depend on itself: {section}")
         current = dependencies.setdefault(section, [])

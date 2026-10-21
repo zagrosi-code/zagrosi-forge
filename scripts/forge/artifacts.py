@@ -42,6 +42,18 @@ def compact_plan_descriptor(planning_dir: Path) -> dict[str, Any] | None:
     return _session.cached_analysis("compact_plan", planning_dir, lambda observe: _compact_plan_descriptor(planning_dir, observe))
 
 
+def shared_contract_text(planning_dir: Path) -> str:
+    """Shared plan and index text that sections of a multi-section compact plan inherit for coverage terms."""
+    canonical = compact_plan_descriptor(planning_dir)
+    # Only a physical plan beside two or more sections is shared; compare paths, not directory names.
+    if not canonical or canonical["errors"] or canonical["path"].parent != planning_dir:
+        return ""
+    if len(_sections.check_section_progress(planning_dir).get("sections", [])) < 2:
+        return ""
+    index = planning_dir / "sections" / "index.md"
+    return "\n".join(_storage.read_text(path) for path in (canonical["path"], index) if path.is_file())
+
+
 def _compact_plan_descriptor(planning_dir: Path, observe) -> dict[str, Any] | None:
     """Resolve the explicitly selected canonical plan; legacy files win."""
     for name in ("codex-plan.md", "claude-plan.md", "sections/index.md"):
@@ -144,8 +156,10 @@ def compact_plan_findings(planning_dir: Path, *, depth: str | None = None, allow
             findings.append(_quality.finding("high", "incomplete-compact-plan", f"Compact plan needs a substantive {title} heading.", path))
     if not headings.get("owned files") or not _ownership.extract_section_owned_paths(text):
         findings.append(_quality.finding("high", "compact-plan-no-ownership", "Compact plan has no explicit owned files.", path))
-    if not _markdown.has_verification(headings.get("contract" if contract else "tests first", "")):
-        findings.append(_quality.finding("high", "compact-plan-no-tests", "Tests first needs a regression case and command, or justified inspection with an expected result.", path))
+    verification = headings.get("contract" if contract else "tests first", "")
+    if not _markdown.has_verification(verification):
+        findings.append(_quality.finding("high", "compact-plan-no-tests", "Tests first needs a regression case and command, or justified inspection with an expected result.", path,
+                                         _markdown.verification_hint(verification)))
     if not _markdown.passing_review(headings.get("review", "")):
         findings.append(_quality.finding("high", "compact-review-incomplete", "Embedded review needs pass/fixed plus concrete Reviewed scope; blocked findings must be resolved.", path))
     return findings

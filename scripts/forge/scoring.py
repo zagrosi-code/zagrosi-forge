@@ -177,6 +177,7 @@ def implementation_readiness_analysis(
         ], {"section_progress": progress}
     deps = _sections.dependency_graph(planning_dir, progress)
     findings = _artifacts.compact_plan_findings(planning_dir)
+    shared = _artifacts.shared_contract_text(planning_dir)
     section_payloads: list[dict[str, Any]] = []
     for section in progress["sections"]:
         path = planning_dir / "sections" / f"{section}.md"
@@ -188,7 +189,10 @@ def implementation_readiness_analysis(
         section_payloads.append(metrics)
         verified = _markdown.has_verification(text)
         terms = {key: value for key, value in _policy.READINESS_TERMS.items() if not verified or key not in {"tdd", "commands"}}
-        _quality.add_term_findings(findings, text, terms, path, "medium")
+        if shared and metrics["file_count"]:
+            terms.pop("ownership", None)  # The section's owned file list is its ownership.
+        for term_text, groups in _quality.shared_term_texts(terms, text, shared):
+            _quality.add_term_findings(findings, term_text, groups, path, "medium")
         if metrics["file_count"] == 0:
             findings.append(_quality.finding("medium", "no-file-ownership", f"{section} names no implementation files.", path))
         if metrics["file_count"] > max_files:
@@ -202,7 +206,8 @@ def implementation_readiness_analysis(
                 )
             )
         if not verified:
-            findings.append(_quality.finding("medium", "missing-verification", f"{section} needs a regression case and command, or justified inspection with an expected result.", path))
+            findings.append(_quality.finding("medium", "missing-verification", f"{section} needs a regression case and command, or justified inspection with an expected result.", path,
+                                             _markdown.verification_hint(text)))
     return findings, {
         "planning_dir": str(planning_dir),
         "section_progress": progress,
