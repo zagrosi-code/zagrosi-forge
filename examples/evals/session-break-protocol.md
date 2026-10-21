@@ -228,6 +228,8 @@ pinned writer adapter and the unchanged oracles:
 
 [`tools/session_break_checks.py`](../../tools/session_break_checks.py) holds the
 withheld clauses, their brief edits and probes, and the per-test runner.
+`session_break_evidence.py` derives re-orientation and regressions from the
+retained sessions, and `session_break_report.py` builds the report.
 
 ## Threats to validity
 
