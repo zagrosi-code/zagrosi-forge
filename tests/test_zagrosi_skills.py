@@ -120,6 +120,26 @@ def test_reviewer_agent_is_read_only_packaged_and_requested() -> None:
     assert "## Same-host review" in providers and "{plugin_root}/agents/forge-reviewer.md" in providers
 
 
+def test_delegated_agents_finish_within_the_turn() -> None:
+    # Headless `claude -p` exits when the main turn ends and stops a background agent with it.
+    providers = ROOT / "skills/zagrosi-forge/references/providers.md"
+    _, heading, rest = providers.read_text().partition("\n## Delegated agents\n")
+    assert heading
+    rule = " ".join(rest.split("\n## ", 1)[0].split())
+    for phrase in ("In Claude Code", "foreground `Agent` call", "never with `run_in_background`",
+                   "Never end a turn while a delegated agent still runs", "`claude -p` exits when the main turn ends"):
+        assert phrase in rule, phrase
+    for path in ("zagrosi-implement/SKILL.md", "zagrosi-cleanup/SKILL.md", "zagrosi-plan/references/research.md",
+                 "zagrosi-implement/references/compatibility.md", "zagrosi-implement/references/state-first.md"):
+        source = ROOT / "skills" / path
+        targets = re.findall(r"\]\(([^)#]+)#delegated-agents\)", source.read_text())
+        assert [(source.parent / target).resolve() for target in targets] == [providers], path
+    compatibility = " ".join((ROOT / "skills/zagrosi-implement/references/compatibility.md").read_text().split())
+    assert "in Claude Code, use a [foreground `Agent` call](" in compatibility
+    # Codex trials never delegated; the writer-derived path stays as it was.
+    assert "If delegation is unavailable, derive the checks yourself and say `writer`." in compatibility
+
+
 def test_skills_preapprove_only_safe_helper_commands() -> None:
     expected = [f'Bash({launcher} "${{CLAUDE_PLUGIN_ROOT}}/scripts/zagrosi_skills.py" {command} *)'
                 for launcher in HELPER_LAUNCHERS for command in SAFE_HELPER_COMMANDS]

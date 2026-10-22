@@ -1,5 +1,13 @@
 # Releases
 
+## 0.5.5 — delegated agents finish within the turn
+
+- In Claude Code, Forge now runs every delegated agent (same-host review, check derivation or research) as a foreground `Agent` call and uses its result in the same turn. Headless `claude -p` exits when the main turn ends and stops background agents: in the partial Claude session-break run, three Forge `lean` sessions ended their turn while a background agent was still deriving characterization tests, and that work was lost.
+- [Delegated agents](../skills/zagrosi-forge/references/providers.md#delegated-agents) states the rule once. Compatibility checks, Implement, Cleanup, state-first and research link to it, and none of them may end a turn while a delegated agent still runs.
+- Codex behavior is unchanged: Codex trials never delegated, and without delegation the writer still derives the checks.
+
+Runtime code is unchanged apart from regenerated manifests. No model trials were run for this release.
+
 ## 0.5.4 — clean native Claude sessions
 
 - Native workflow trials (`native_workflow_trials.py run` and `resume`) start Claude sessions without the launching Claude Code session's environment, as coding and session-break writers do since 0.5.3. Credentials, `CLAUDE_CONFIG_DIR`, client certificates and provider routing pass through, auto-memory is off, and each session's `session.json` lists the removed names. Codex sessions are unchanged.
