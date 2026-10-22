@@ -54,7 +54,9 @@ every run needs model usage and the user's approval. In the
 pre-break decision as well as Forge `lean` did, at a sixth of its tokens. A
 [second run](session-break-results-2026-10-21.md) added state-first `lean` as a
 fourth arm: it cost 0.57× today's `lean` but missed all four of its rollout
-criteria.
+criteria. A [partial Claude Code run](session-break-results-2026-10-21-claude.md)
+stopped after two of four repetitions, without blind review. Its `plain` agents
+kept notes on their own, so the probe could not separate them from `notes`.
 
 ## Comparison Protocol
 

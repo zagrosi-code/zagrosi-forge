@@ -4,7 +4,9 @@ Status: [`tools/session_break_trials.py`](../../tools/session_break_trials.py)
 runs this protocol end to end; see [Harness](#harness). The first Codex run
 supports H1, not H2: [results from 20 October 2026](session-break-results-2026-10-20.md).
 The rerun with the state-first fourth arm repeats that decision and rejects H3:
-[results from 21 October 2026](session-break-results-2026-10-21.md).
+[results from 21 October 2026](session-break-results-2026-10-21.md). A partial
+Claude Code run has mechanical outcomes only, without acceptance verdicts:
+[Claude results](session-break-results-2026-10-21-claude.md).
 Every run consumes model usage, so start each pilot or main run only after the
 user approves its budget.
 
