@@ -1,7 +1,9 @@
 # Proposal: state-first `lean`
 
-Status: proposal only. Defaults stay unchanged until the user approves. Validate
-it with the [session-break protocol](../../examples/evals/session-break-protocol.md)
+Status: built as an opt-in mode in 0.5.0 (`plan-setup --state-first`, described in
+[state-first](../../skills/zagrosi-implement/references/state-first.md)). Defaults stay
+unchanged until the user approves. Its finish also blocks while a section is not done.
+Validate it with the [session-break protocol](../../examples/evals/session-break-protocol.md)
 before adopting it.
 
 ## Summary

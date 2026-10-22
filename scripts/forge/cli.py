@@ -117,6 +117,7 @@ def add_plan_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--target-dir")
     p.add_argument("--write-evidence", action="store_true")
     p.add_argument("--for-detached", action="store_true", help="Prepare physical artifacts for detached implementation.")
+    p.add_argument("--state-first", action="store_true", help="Opt into a lean plan kept as plan.md, status.json and notes.md.")
     p.add_argument("--review-mode", choices=["agent_review", "codex_review", "external_llm", "skip"], default="agent_review")
     p.add_argument("--depth", choices=sorted(_policy.DEPTH_MODES), default=_policy.DEFAULT_DEPTH)
     add_flight_args(p)
@@ -329,10 +330,17 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--implementation-root", help="External detached implementation root created by implement-setup.")
     p.add_argument("--section", required=True)
-    p.add_argument("--stage", choices=["started", "red", "green", "refactor", "review", "verified", "recorded"], required=True)
+    p.add_argument("--stage", choices=["started", "red", "green", "refactor", "review", "verified", "recorded", "baseline", "done"],
+                   required=True, help="baseline and done apply to state-first plans.")
     p.add_argument("--command")
     p.add_argument("--result")
     p.add_argument("--notes")
+    p.add_argument("--file", action="append", dest="files", default=[],
+                   help="State-first done: files the section changed; defaults to files changed since the last status write.")
+    p.add_argument("--review-status", choices=["pass", "fixed", "blocked"], help="State-first done: the review verdict.")
+    p.add_argument("--timeout", type=float, default=540, help="Seconds before a state-first check stops.")
+    p.add_argument("--allowance-seconds", type=float, help="Optional total seconds for this plan's checks; persists across calls.")
+    p.add_argument("command_argv", nargs=argparse.REMAINDER, help="State-first baseline or done: the check after --.")
     p.set_defaults(func=invoke_command, handler=('scheduling', 'implement_progress'))
 
 

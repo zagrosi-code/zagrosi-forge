@@ -393,6 +393,13 @@ def preflight(args: argparse.Namespace) -> int:
 
 
 def postflight(args: argparse.Namespace) -> int:
+    if args.phase in {"plan", "implement"} and (args.planning_dir or args.sections_dir):
+        from . import state_first
+
+        planning_dir = _storage.resolve_path(args.planning_dir or str(_storage.resolve_path(args.sections_dir).parent))
+        if state_first.active(planning_dir):
+            payload = state_first.postflight_report(planning_dir, args.phase)
+            return _output.print_json(payload, 0 if payload["success"] else 1)
     if args.phase == "project":
         if not args.planning_dir:
             return _output.print_json({"success": False, "error": "--planning-dir is required for project postflight"}, 1)

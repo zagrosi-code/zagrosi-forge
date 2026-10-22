@@ -141,17 +141,22 @@ def _text(value) -> bool:
     return isinstance(value, str) and value.strip().lower() not in {"", "none", "pending", "todo", "tbd", "n/a"}
 
 
+def _forge_plan_md(marker: Path) -> bool:
+    """A host-neutral plan.md is Forge's only with Forge metadata or a state-first status beside it."""
+    return (marker.parent / "status.json").is_file() or "<!-- FORGE_META" in marker.read_text(encoding="utf-8", errors="replace")
+
+
 def planning_root(workspace: Path) -> Path:
     """Find the single plan permitted beneath .planning without selecting among rivals."""
     root = workspace / ".planning"
     if root.is_symlink() or not root.resolve().is_relative_to(workspace.resolve()):
         raise ValueError("Trial planning must stay within the workspace without a root symlink")
     candidates = set()
-    for pattern in ("codex-plan.md", "claude-plan.md", "sections/index.md"):
+    for pattern in ("codex-plan.md", "claude-plan.md", "plan.md", "sections/index.md"):
         for marker in root.rglob(pattern):
             if marker.is_symlink() or not marker.resolve().is_relative_to(root.resolve()):
                 raise ValueError("Trial plan markers must be regular files inside .planning")
-            if marker.is_file():
+            if marker.is_file() and (pattern != "plan.md" or _forge_plan_md(marker)):
                 candidates.add(marker.parent.parent if pattern.startswith("sections/") else marker.parent)
     if len(candidates) > 1:
         raise ValueError("Trial contains multiple planning roots; cannot choose a completion result")

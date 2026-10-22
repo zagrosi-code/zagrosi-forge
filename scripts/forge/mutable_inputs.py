@@ -266,6 +266,37 @@ def source_paths(target_dir: Path) -> dict[Path, list[str]]:
     return paths
 
 
+def source_identities(target_dir: Path, paths: dict[Path, list[str]], observed: list[str]) -> dict[str, dict]:
+    """Hash observed files; bind links and directories without reading outside the target."""
+    identities, files = {}, []
+    for name in observed:
+        path = target_dir / name
+        if path.is_symlink():
+            if not path.parent.resolve().is_relative_to(target_dir):
+                raise ValueError(f"Observed code path must stay within the target directory: {name}")
+            try:
+                linked_mode = path.stat().st_mode
+            except FileNotFoundError:
+                linked_mode = 0
+            if not linked_mode or stat.S_ISDIR(linked_mode):
+                # Bind the entry, never enumerate linked directories or read outside source roots.
+                identities[name] = {"content": None, "mode": stat.S_IMODE(path.lstat().st_mode),
+                                    "link": os.readlink(path), "target_type": "directory" if linked_mode else "missing"}
+                continue
+        elif path.is_dir():
+            identities[name] = {"content": None, "mode": stat.S_IMODE(path.stat().st_mode), "target_type": "directory"}
+            continue
+        files.append(name)
+    for name, content in code_observations(target_dir, files).items():
+        path = target_dir / name
+        identities[name] = {"content": content, "mode": stat.S_IMODE(path.lstat().st_mode) if content is not None else None,
+                            "link": os.readlink(path) if path.is_symlink() else None}
+    for name, identity in identities.items():
+        if metadata := paths[target_dir / name]:
+            identity["gitlink"] = sorted(metadata)
+    return identities
+
+
 def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | None = None) -> dict:
     """Bind verification to source files and link identities, without traversing linked directories."""
     prepared = prepared_contract(planning_dir, target_dir)
@@ -318,32 +349,7 @@ def verification_snapshot(planning_dir: Path, target_dir: Path, section: str | N
     observed = [path.relative_to(target_dir).as_posix() for path in paths
                 if path not in containers and not any(
                     path == excluded_path or path.is_relative_to(excluded_path) for excluded_path in excluded)]
-    identities, files = {}, []
-    for name in observed:
-        path = target_dir / name
-        if path.is_symlink():
-            if not path.parent.resolve().is_relative_to(target_dir):
-                raise ValueError(f"Observed code path must stay within the target directory: {name}")
-            try:
-                linked_mode = path.stat().st_mode
-            except FileNotFoundError:
-                linked_mode = 0
-            if not linked_mode or stat.S_ISDIR(linked_mode):
-                # Bind the entry, never enumerate linked directories or read outside source roots.
-                identities[name] = {"content": None, "mode": stat.S_IMODE(path.lstat().st_mode),
-                                    "link": os.readlink(path), "target_type": "directory" if linked_mode else "missing"}
-                continue
-        elif path.is_dir():
-            identities[name] = {"content": None, "mode": stat.S_IMODE(path.stat().st_mode), "target_type": "directory"}
-            continue
-        files.append(name)
-    for name, content in code_observations(target_dir, files).items():
-        path = target_dir / name
-        identities[name] = {"content": content, "mode": stat.S_IMODE(path.lstat().st_mode) if content is not None else None,
-                            "link": os.readlink(path) if path.is_symlink() else None}
-    for name, identity in identities.items():
-        if metadata := paths[target_dir / name]:
-            identity["gitlink"] = sorted(metadata)
+    identities = source_identities(target_dir, paths, observed)
     return {"version": 1, "planning_dir": str(planning_dir), "target_dir": str(target_dir),
             "section": section, "contract_digest": digest(contracts), "source_digest": digest(identities),
             "source_file_count": len(identities)}

@@ -25,7 +25,8 @@ Use the least process that preserves correctness. Apply the all-depth
 ownership, and verify behavior before/after refactors; prefer readability over
 code golf. Read the admitted plan's depth;
 use it as `{depth}` throughout. Require `sections/index.md`; its parent is
-`planning_dir`; `target_dir` defaults to the repo.
+`planning_dir`; `target_dir` defaults to the repo. A state-first plan (`status.json`
+beside `plan.md`) follows [state-first](references/state-first.md) instead.
 
 Resolve absolute `plugin_root`: the plugin directory two levels above this skill's
 folder, containing `scripts/zagrosi_skills.py`; never the target repo. Claude Code
