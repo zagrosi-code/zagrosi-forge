@@ -72,9 +72,10 @@ python3 "{plugin_root}/scripts/zagrosi_skills.py" implement-verify --planning-di
 
 This captures the final receipt and runs the postflight. Postflight blocks only on a
 missing or unparseable plan, a section without a status or not yet done, and a
-missing, failing or stale final receipt. Later source edits stale it; notes and status
-do not. Run long suites in the background with a larger `--timeout`. Where the host
-supports subagents, run one fresh-context review before finish.
+missing, failing or stale final receipt. Later edits to source, `plan.md` or the
+brief stale it; notes and status do not. Run long suites in the background with a
+larger `--timeout`. Where the host supports subagents, run one fresh-context review
+before finish.
 
 A new session starts with `status --path "{planning_dir}"`: the goal, section states,
 latest notes, last verification and files changed since the last status write.

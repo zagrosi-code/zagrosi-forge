@@ -1,5 +1,14 @@
 # Releases
 
+## 0.5.2 — state-first arm for session-break trials
+
+- `tools/session_break_trials.py` adds a fourth arm, `forge-state`: Forge `lean` in the opt-in state-first mode, loaded from its own frozen snapshot (`--state-plugin-root`, which defaults to `--plugin-root`). Its standing instruction names the mode; the other arms' prompts are unchanged.
+- Reports count helper calls per attempt against N + 3 for N sections. With `forge-state` present, the decision rule adds `state_first`: H2 with `forge-state` in place of `forge-lean`, and H3, the state-first proposal's rollout bar against `forge-lean` and `notes`. H0–H2 still compare the first three arms, so the first run's decision reproduces unchanged.
+- A state-first implement postflight now reports `sections_recorded_complete`, so trial and eval readers count a finished state-first plan as complete.
+- State-first final receipts also cover `plan.md` and the brief, so changing the requirements after `implement-verify` makes the receipt stale. Status, notes and implementation state stay outside it.
+- `--arms` still defaults to the first three arms. Under `--probe`, plugin snapshots may not hold `.git`, and every run rechecks them. A session without logged events leaves helper calls unknown.
+- Second [Codex results](../examples/evals/session-break-results-2026-10-21.md): state-first `lean` used 0.57× the tokens of today's `lean` but accepted 4/8 against 5/8, lost one withheld decision and ran a median of 19.5 helper commands against a bar of 8, so it missed all four rollout criteria. The first three arms repeated H1 true and H2 false.
+
 ## 0.5.1 — session-break trials
 
 - Run the [session-break protocol](../examples/evals/session-break-protocol.md) end to end with `tools/session_break_trials.py`: any arm through a forced break after section 2, a checkpoint with per-test, oracle and clause-probe results, and a fresh second session that cannot read the first session's files. Reports add re-orientation time, regressions against the checkpoint and blind review through the existing comparison packets.

@@ -11,6 +11,9 @@ from runtime_support import load_runtime
 from test_compact_plan import make_plan
 from test_state_first import PLAN, cli, ready, write_workspace
 
+sys.path.insert(0, str(ROOT / "tools"))
+from coding_trials import workflow_verdict  # noqa: E402
+
 
 PASS = [sys.executable, "-c", "print('3 passed')"]
 FAIL = [sys.executable, "-c", "import sys; print('1 failed'); sys.exit(1)"]
@@ -100,6 +103,7 @@ def test_finish_captures_suite_and_postflight(run, workspace):
     code, payload = run("implement-verify", "--planning-dir", str(planning), "--target-dir", str(workspace), "--", *PASS)
     assert code == 0, payload
     assert payload["final"]["outcome"] == "passed" and payload["postflight"]["success"]
+    assert payload["postflight"]["sections_recorded_complete"] is True
     assert json.loads((planning / "status.json").read_text())["final"]["result"] == "3 passed"
     assert "| plan | finish |" in (planning / "notes.md").read_text()
 
@@ -117,6 +121,29 @@ def test_finish_captures_suite_and_postflight(run, workspace):
     assert payload["postflight"]["blocking_gates"] == ["final-verification"]
 
 
+@pytest.mark.parametrize(("name", "old", "new"), [
+    ("plan.md", "- Internal spaces stay.\n", "- Internal spaces stay.\n- Tabs count as edges.\n"),
+    ("spec.md", "REQ-001: Trim label edges.\n", "REQ-001: Trim label edges and tabs.\n"),
+])
+def test_requirement_edits_stale_the_final_receipt(run, workspace, name, old, new):
+    planning = ready(run, workspace)
+    finish_sections(run, planning)
+    assert run("implement-verify", "--planning-dir", str(planning), "--target-dir", str(workspace), "--", *PASS)[0] == 0
+    path = planning / name
+    path.write_text(path.read_text().replace(old, new))
+    code, payload = run("postflight", "--phase", "implement", "--planning-dir", str(planning))
+    assert code == 1 and payload["blocking_gates"] == ["final-verification"]
+
+
+def test_trial_workflow_verdict_accepts_a_finished_plan(run, workspace):
+    planning = ready(run, workspace)
+    finish_sections(run, planning)
+    code, payload = run("implement-verify", "--planning-dir", str(planning), "--target-dir", str(workspace), "--", *PASS)
+    assert code == 0, payload
+    verdict = workflow_verdict(workspace, "lean")
+    assert verdict["success"] and verdict["report"]["sections_recorded_complete"], verdict["report"]
+
+
 def test_postflight_blocks_only_structural_gaps(run, workspace):
     planning = ready(run, workspace)
     code, payload = run("postflight", "--phase", "plan", "--planning-dir", str(planning), "--strict")
@@ -125,6 +152,7 @@ def test_postflight_blocks_only_structural_gaps(run, workspace):
 
     code, payload = run("postflight", "--phase", "implement", "--planning-dir", str(planning))
     assert code == 1 and payload["blocking_gates"] == ["state-sections", "final-verification"]
+    assert payload["sections_recorded_complete"] is False
 
     (planning / "plan.md").write_text(PLAN + "| section-03-more | src/more.py | more works |\n")
     code, payload = run("postflight", "--phase", "plan", "--planning-dir", str(planning))

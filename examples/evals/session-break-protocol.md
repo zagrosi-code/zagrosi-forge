@@ -3,6 +3,8 @@
 Status: [`tools/session_break_trials.py`](../../tools/session_break_trials.py)
 runs this protocol end to end; see [Harness](#harness). The first Codex run
 supports H1, not H2: [results from 20 October 2026](session-break-results-2026-10-20.md).
+The rerun with the state-first fourth arm repeats that decision and rejects H3:
+[results from 21 October 2026](session-break-results-2026-10-21.md).
 Every run consumes model usage, so start each pilot or main run only after the
 user approves its budget.
 
@@ -33,6 +35,14 @@ for their overhead, and whether free-form notes do the same for less.
   outcome or regressions, at total tokens no worse than 1.5× `notes`.
 - **H0, state is not the bottleneck:** all three arms finish alike; any
   difference is overhead.
+- **H3, state-first `lean` can become the default:** the fourth arm,
+  `forge-state`, meets the [proposal's](../../docs/proposals/state-first-lean.md)
+  rollout bar. It accepts at least as many attempts as `forge-lean` and `notes`,
+  has no more regressed attempts than either, uses at most half of
+  `forge-lean`'s total tokens per accepted result, and its median finished
+  attempt needs at most N + 3 helper calls for N sections (see
+  [Metrics](#metrics)). The report also applies H2 with `forge-state` in place
+  of `forge-lean`. H0–H2 still compare only the first three arms.
 
 Read results as follows:
 
@@ -44,6 +54,10 @@ Read results as follows:
   with it as a fourth arm.
 - H0 holds: these tasks do not stress state. Report that and do not claim a
   state benefit.
+- H3 holds: propose state-first as the default `lean`; the user decides. H3
+  fails: keep today's `lean` and remove only the gates the evaluation shows
+  unused. H3 unknown (usage or helper calls unobserved): name what is missing
+  and do not adopt.
 
 With four repetitions per arm and case, a one-attempt difference is an
 observation, not a statistically established effect.
@@ -52,13 +66,14 @@ observation, not a statistically established effect.
 
 Every arm uses the same host, CLI version, model, effort, tools, timeouts and
 task text. Claude writers now share `Read, Edit, Write, Bash, Glob, Grep, Skill,
-Agent, TaskCreate, TaskGet, TaskList, TaskUpdate`; only `forge-lean` loads the
+Agent, TaskCreate, TaskGet, TaskList, TaskUpdate`; only the Forge arms load the
 plugin. Standing instructions appear at the start of both session prompts, as a
 repository instruction file would.
 
 | Arm | Preparation | Standing instruction | Durable state |
 |---|---|---|---|
 | `forge-lean` | `coding_trials.py prepare --depth lean --plugin-root …` | The prepared Forge workflow text | `.planning/` plan, progress and receipts |
+| `forge-state` | The same, from the state-first snapshot (`--state-plugin-root`) | "Use Forge's opt-in state-first lean mode: pass `--state-first` to `plan-setup` and follow `<snapshot>/skills/zagrosi-implement/references/state-first.md`.", then the prepared Forge workflow text | `.planning/` `plan.md`, `status.json`, `notes.md` and the final receipt |
 | `notes` | `coding_trials.py prepare --plain-agent` | "Keep `.planning/NOTES.md` as your durable working notes: the plan, each section's status, decisions and clarifications, verification results and the next step. Update it whenever one of these changes. When continuing work, read it before acting." | `.planning/NOTES.md` |
 | `plain` | `coding_trials.py prepare --plain-agent` | none | whatever the agent leaves |
 
@@ -137,7 +152,8 @@ them early, record the overshoot.
 | Wall time | Runner seconds for both sessions, excluding harness checks and review. |
 | Regressions | (a) the compatibility-only oracle passes at the checkpoint but fails at the end; (b) a test passing at the checkpoint fails against the final source, is deleted or renamed, is skipped, or loses `assert` statements or `assert*`/`fail*` calls; (c) a clause probe gives a wrong answer at the end. Each probe checks one withheld clause, so the oracle's first failure cannot mask it; a feature that is still missing counts as unfinished, not as a clause failure. |
 | Tool parity | `missing_tools` is empty in every Claude session. The CLI drops unknown or disabled tool names silently, so the init event is the only proof every arm had the same tools. |
-| Secondary | Forge helper calls, `.planning/` size, whether session 2 read the state before its first edit, and session-1 overshoot or undershoot. |
+| Helper calls | Commands naming `zagrosi_skills.py` per attempt, over both sessions; a command that chains several helpers counts once. H3 takes the median over attempts whose two sessions ended on their own, without failing or timing out, against N + 3 for N sections. A session without logged events leaves the attempt's count unknown. |
+| Secondary | `.planning/` size, whether session 2 read the state before its first edit, and session-1 overshoot or undershoot. |
 
 Count every scheduled attempt, including failures and timeouts. Compute per
 accepted figures the way `trial_matrix.py report` does.
@@ -169,7 +185,8 @@ python3 /frozen/evaluator/tools/session_break_trials.py report /saved/break-pilo
 ```
 
 **Main run.** Two cases × three arms × four repetitions: 24 attempts, 48
-sessions. Prepare a new directory with `--repeats 4 --probe`; `--probe`
+sessions; with `forge-state` as a fourth arm, 32 attempts and 64 sessions.
+Prepare a new directory with `--repeats 4 --probe`; `--probe`
 derives each brief without the withheld clauses before the baseline is recorded
 and gives the clauses in session 1 only. The Forge prompt names the plugin tree,
 and an evaluator checkout holds the clauses, so `--probe` requires a
@@ -178,6 +195,13 @@ runtime-only snapshot:
 ```bash
 mkdir /frozen/plugin && git -C /frozen/evaluator archive HEAD scripts skills .codex-plugin .claude-plugin | tar -x -C /frozen/plugin
 ```
+
+`--arms` defaults to the first three arms. Add the fourth with
+`--arms forge-lean forge-state notes plain`. `forge-state` loads
+`--state-plugin-root`, another runtime-only snapshot, or `--plugin-root` when
+that tree already carries the state-first mode. Both roots are frozen into
+`matrix.json`, and under `--probe` each run rechecks that neither holds
+`examples/`, `tools/`, `tests/` or `.git`.
 
 For the host-switch variant, add
 `--resume-host claude --resume-model YOUR_CLAUDE_MODEL --resume-effort high` and
@@ -226,6 +250,8 @@ pinned writer adapter and the unchanged oracles:
   observed; otherwise it names what is missing. A missing observation stays unknown rather than counting as a
   regression or as none. Commands, tool inputs and edits that reach past the
   workspace, through `..` or the matrix path, appear as `outside_references`.
+  With `forge-state` present, `decision.state_first` adds H2 for that arm and
+  H3 with each of its criteria.
 
 [`tools/session_break_checks.py`](../../tools/session_break_checks.py) holds the
 withheld clauses, their brief edits and probes, and the per-test runner.

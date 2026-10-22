@@ -52,6 +52,9 @@ if args == ["--version"]:
     sys.exit(print("codex-cli 0.154.0"))
 prompt = sys.stdin.read()
 session = 1 if "complete sections 1 and 2 only" in prompt else 2
+# The state-first helper path for five sections: setup, one call per section, resume status and finish.
+helpers = (("plan-setup --state-first", "done", "done") if session == 1 else ("status", "done", "done", "done", "verify")
+           ) if "--state-first" in prompt else ()
 mode = os.environ.get("FAKE_WRITER_MODE", "")
 readable = []
 for pattern in ("../session-1.md", "../checkpoint.json", "../checkpoint/workspace/src/orders.py", "../../matrix.json",
@@ -85,9 +88,11 @@ def change(path, text):
 
 emit(type="thread.started", thread_id=f"fake-{session}")
 emit(type="turn.started")
-if mode == "fail":
+if mode == "fail" or mode == "fail-2" and session == 2:
     emit(type="turn.failed", error={"message": "service unavailable"})
     sys.exit(1)
+for step in helpers:
+    command(f"python3 plugin/scripts/zagrosi_skills.py {step}")
 if session == 1:
     command("python3 -m unittest discover -s tests")
     change(".planning/NOTES.md", "Sections 1 and 2 done.\n")
@@ -124,19 +129,23 @@ def writer(tmp_path, monkeypatch):
     return {"codex": str(executable), "calls": lambda: [json.loads(line) for line in log.read_text().splitlines()]}
 
 
-def plugin(tmp_path):
-    root = tmp_path / "plugin"
+def plugin(tmp_path, name="plugin", *, state_first=True):
+    root = tmp_path / name
     (root / "scripts").mkdir(parents=True)
     (root / "scripts/zagrosi_skills.py").write_text("# launcher\n")
     (root / "skills/zagrosi-forge").mkdir(parents=True)
     (root / "skills/zagrosi-forge/SKILL.md").write_text("# Forge\n")
+    if state_first:
+        (root / breaks.STATE_REFERENCE).parent.mkdir(parents=True)
+        (root / breaks.STATE_REFERENCE).write_text("# State-first lean\n")
     return root
 
 
-def prepare(tmp_path, writer, *, arms=("notes",), probe=False, repeats=1):
+def prepare(tmp_path, writer, *, arms=("notes",), probe=False, repeats=1, state_plugin_root=None):
     directory = tmp_path / "matrix"
     breaks.prepare(directory, cases=["import-preview"], arms=arms, repeats=repeats, host="codex", model="fake-model",
-                   effort="medium", plugin_root=plugin(tmp_path), timeout=60, probe=probe, codex=writer["codex"])
+                   effort="medium", plugin_root=plugin(tmp_path), timeout=60, probe=probe,
+                   state_plugin_root=state_plugin_root, codex=writer["codex"])
     return directory
 
 
@@ -178,7 +187,7 @@ def test_sessions_are_isolated_and_retain_their_own_evidence(tmp_path, writer):
     assert row["common_quality"] == "failed" and row["rejection"] == ["cleanup review"]
     assert result["decision"] == {"complete": False, "blockers": [
         "1 attempts not run to the end", "2 blocks without a valid blind review",
-        "1 attempts with unobserved regressions", "the decision rule needs all three arms"]}
+        "1 attempts with unobserved regressions", "the decision rule needs the forge-lean, notes and plain arms"]}
 
 
 def test_reorientation_ends_at_the_first_code_edit(tmp_path, writer):
@@ -228,12 +237,107 @@ def test_changed_evaluator_inputs_block_a_run_before_any_session(tmp_path, write
 def test_arm_order_rotates_and_only_forge_loads_the_plugin(tmp_path, writer):
     directory = prepare(tmp_path, writer, arms=breaks.ARMS, repeats=2)
     order = [item["arm"] for item in read(directory / "matrix.json")["trials"]]
-    assert order == ["forge-lean", "notes", "plain", "notes", "plain", "forge-lean"]
+    assert order == ["forge-lean", "forge-state", "notes", "plain", "forge-state", "notes", "plain", "forge-lean"]
     prompts = {arm: (directory / f"import-preview-lean-1-{arm}/session-1.md").read_text() for arm in breaks.ARMS}
     assert "Use Forge at lean depth" in prompts["forge-lean"] and "Do not read or invoke Forge" in prompts["plain"]
     assert prompts["notes"].startswith(breaks.NOTES) and breaks.NOTES not in prompts["plain"]
+    # The first three arms keep their prompts: only notes has a standing instruction before the case prompt.
+    for arm in ("forge-lean", "plain"):
+        assert prompts[arm].startswith((directory / f"import-preview-lean-1-{arm}/prompt.md").read_text().rstrip())
     tail = lambda text: text.split("Section plan:", 1)[1]
-    assert tail(prompts["forge-lean"]) == tail(prompts["notes"]) == tail(prompts["plain"])
+    assert len({tail(text) for text in prompts.values()}) == 1
+
+
+def test_forge_state_loads_its_own_snapshot_and_instruction(tmp_path, writer):
+    state = plugin(tmp_path, "state-plugin")
+    directory = prepare(tmp_path, writer, arms=("forge-lean", "forge-state"), state_plugin_root=state)
+    manifest = read(directory / "matrix.json")
+    assert manifest["plugin_root"] == str(tmp_path / "plugin") and manifest["state_plugin_root"] == str(state)
+    assert manifest["identity"]["state_plugin"] == breaks.plugin_files(state) and manifest["sections"] == {"import-preview": 5}
+    instruction = breaks.STATE_FIRST.format(reference=state / breaks.STATE_REFERENCE)
+    for arm, root in (("forge-lean", tmp_path / "plugin"), ("forge-state", state)):
+        trial = directory / f"import-preview-lean-1-{arm}"
+        assert read(trial / "trial.json")["plugin_root"] == str(root) and not read(trial / "trial.json")["plain_agent"]
+        for session in (1, 2):
+            text = (trial / f"session-{session}.md").read_text()
+            assert f"Use Forge at lean depth from {root};" in text
+            assert text.startswith(instruction) is (arm == "forge-state")
+    (state / breaks.STATE_REFERENCE).write_text("# Changed\n")
+    with pytest.raises(ValueError, match="state_plugin:skills/zagrosi-implement/references/state-first.md"):
+        breaks.run(directory)
+    assert writer["calls"]() == []
+
+
+def test_forge_state_needs_the_mode_and_runtime_only_snapshots_under_probe(tmp_path, writer):
+    options = {"cases": ["godfile"], "repeats": 1, "host": "codex", "model": "fake-model", "effort": "medium",
+               "timeout": 60, "codex": writer["codex"]}
+    lean, older = plugin(tmp_path), plugin(tmp_path, "older", state_first=False)
+    with pytest.raises(ValueError, match="state plugin root must contain"):
+        breaks.prepare(tmp_path / "matrix", arms=["forge-state"], plugin_root=older, **options)
+    (tmp_path / "state/tools").mkdir(parents=True)
+    with pytest.raises(ValueError, match="runtime-only plugin snapshots"):
+        breaks.prepare(tmp_path / "matrix", arms=["forge-lean", "forge-state"], plugin_root=lean, probe=True,
+                       state_plugin_root=plugin(tmp_path, "state"), **options)
+    assert not (tmp_path / "matrix").exists()
+    # Without its own snapshot, forge-state uses the forge-lean tree; other matrices record no second root.
+    breaks.prepare(tmp_path / "matrix", arms=["forge-state"], plugin_root=lean, probe=True, **options)
+    assert read(tmp_path / "matrix/matrix.json")["state_plugin_root"] == str(lean)
+    breaks.prepare(tmp_path / "other", arms=["forge-lean", "notes"], plugin_root=lean, **options)
+    manifest = read(tmp_path / "other/matrix.json")
+    assert "state_plugin_root" not in manifest and "state_plugin" not in manifest["identity"]
+
+
+def test_forge_state_helper_calls_count_against_the_section_budget(tmp_path, writer):
+    directory = prepare(tmp_path, writer, arms=("forge-state",))
+    result = breaks.run(directory)
+    row = result["attempts"][0]
+    assert [session["helper_calls"] for session in row["sessions"]] == [3, 5]
+    assert (row["helper_calls"], row["helper_budget"]) == (8, 8)
+    assert result["arms"]["forge-state"]["helper_calls_per_attempt"] == {
+        "median": 8, "max": 8, "median_over_budget": 0, "observed": 1}
+    assert result["arms"]["forge-state"]["helper_calls"] == 8
+
+
+def test_cut_short_sessions_leave_per_attempt_helper_calls_out_or_unknown(tmp_path, writer, monkeypatch):
+    directory = prepare(tmp_path, writer, arms=("forge-state",))
+    monkeypatch.setenv("FAKE_WRITER_MODE", "fail-2")
+    result = breaks.run(directory)
+    assert result["halted"]["failed_sessions"] == [2] and result["attempts"][0]["helper_calls"] == 3
+    assert result["arms"]["forge-state"]["helper_calls"] == 3  # The total still counts what ran.
+    assert result["arms"]["forge-state"]["helper_calls_per_attempt"] == {
+        "median": None, "max": None, "median_over_budget": None, "observed": 0}
+    (directory / "import-preview-lean-1-forge-state/session-2-events.jsonl").write_text("")
+    assert breaks.analyze(directory)["attempts"][0]["helper_calls"] is None  # No events: unknown, not zero.
+
+
+def test_matrices_without_section_counts_leave_budgets_unknown(tmp_path, writer):
+    directory = prepare(tmp_path, writer)
+    breaks.run(directory)
+    manifest = read(directory / "matrix.json")
+    del manifest["sections"]  # As in matrices prepared before forge-state existed.
+    breaks.write(directory / "matrix.json", manifest)
+    result = breaks.report(directory)
+    assert result["attempts"][0]["helper_budget"] is None and result["attempts"][0]["helper_calls"] == 0
+    assert result["arms"]["notes"]["helper_calls_per_attempt"]["median_over_budget"] is None
+
+
+def test_cli_defaults_to_the_first_three_arms(tmp_path, writer, monkeypatch, capsys):
+    root = plugin(tmp_path)
+    argv = ["session_break_trials.py", "prepare", str(tmp_path / "matrix"), "--cases", "import-preview", "--repeats", "1",
+            "--model", "fake-model", "--effort", "medium", "--plugin-root", str(root), "--codex", writer["codex"]]
+    monkeypatch.setattr(sys, "argv", [*argv, "--state-plugin-root", str(root)])
+    assert breaks.main() == 2 and "needs the forge-state arm" in capsys.readouterr().err
+    monkeypatch.setattr(sys, "argv", argv)
+    assert breaks.main() == 0
+    assert [item["arm"] for item in read(tmp_path / "matrix/matrix.json")["trials"]] == list(reporting.CORE_ARMS)
+
+
+def test_probe_rechecks_snapshots_for_evaluator_files_before_each_run(tmp_path, writer):
+    directory = prepare(tmp_path, writer, arms=("forge-lean",), probe=True)
+    (tmp_path / "plugin/.git").mkdir()
+    with pytest.raises(ValueError, match="runtime-only plugin snapshots"):
+        breaks.run(directory)
+    assert writer["calls"]() == [] and not (directory / "import-preview-lean-1-forge-lean/attempt.json").exists()
 
 
 def godfile_control(workspace, violation=None):
@@ -318,12 +422,17 @@ def test_protocol_texts_match_the_orchestrator():
     text = " ".join((ROOT / "examples/evals/session-break-protocol.md").read_text().split())
     plans = [f"{number}. {step}" for steps in breaks.PLANS.values() for number, step in enumerate(steps, 1)]
     clauses = [clause["clarification"].rstrip(".") for rows in checks.CLAUSES.values() for clause in rows]
-    for expected in [breaks.NOTES, breaks.FIRST_SESSION, breaks.SECOND_SESSION, *plans, *clauses]:
+    state_first = breaks.STATE_FIRST.split("{reference}")
+    for expected in [breaks.NOTES, *state_first, breaks.STATE_REFERENCE, breaks.FIRST_SESSION, breaks.SECOND_SESSION,
+                     *plans, *clauses]:
         assert expected in text, expected
 
 
-def summary(accepted, regressed, tokens):
-    return {"accepted": accepted, "regressions": {"attempts": regressed}, "total_tokens": {"total": tokens}}
+def summary(accepted, regressed, tokens, over_budget=0):
+    return {"accepted": accepted, "regressions": {"attempts": regressed},
+            "total_tokens": {"total": tokens, "per_accepted": tokens / accepted if tokens is not None and accepted else None},
+            "helper_calls_per_attempt": {"median": None if over_budget is None else 8 + over_budget,
+                                         "median_over_budget": over_budget}}
 
 
 def test_decision_rule_needs_dominance_and_bounded_tokens():
@@ -334,12 +443,41 @@ def test_decision_rule_needs_dominance_and_bounded_tokens():
     assert reporting.decide(state, [])["H2"] is False and reporting.decide(state, [])["H1"]
     state["forge-lean"] = summary(4, 0, None)
     assert reporting.decide(state, [])["H2"] is None  # Unknown usage leaves the token bound unknown.
-    alike = {arm: summary(3, 1, 100) for arm in breaks.ARMS}
+    alike = {arm: summary(3, 1, 100) for arm in reporting.CORE_ARMS}
     assert reporting.decide(alike, [])["H0"] and not reporting.decide(alike, [])["H1"]
     mixed = {**alike, "notes": summary(4, 2, 100)}
     assert reporting.decide(mixed, [])["H0"]  # More accepted but more regressed attempts beats no arm.
     assert reporting.decide(alike, ["2 blocks without a valid blind review"]) == {
         "complete": False, "blockers": ["2 blocks without a valid blind review"]}
+
+
+@pytest.mark.parametrize("date", ["2026-10-20", "2026-10-21"])
+def test_published_decisions_reproduce(date):
+    published = json.loads((ROOT / f"examples/evals/session-break-results-{date}.json").read_text())["main"]
+    assert reporting.decide(published["arms"], []) == published["decision"]
+
+
+def test_decision_rule_compares_forge_state_with_forge_lean_and_notes():
+    core = {"forge-lean": summary(4, 0, 140), "notes": summary(3, 1, 100), "plain": summary(2, 2, 50)}
+    decision = reporting.decide({**core, "forge-state": summary(4, 0, 60)}, [])
+    keys = ("H1", "H2", "H0", "forge_to_notes_tokens")
+    assert {key: decision[key] for key in keys} == {key: reporting.decide(core, [])[key] for key in keys}
+    assert decision["state_first"] == {
+        "H2": True, "H3": True, "criteria": {"accepted": True, "regressions": True, "tokens_per_accepted": True,
+                                             "helper_calls": True},
+        "state_to_notes_tokens": 0.6, "state_to_lean_tokens_per_accepted": 15 / 35, "median_helper_calls": 8}
+    assert decision["pairs"]["forge-state>notes"] and not decision["pairs"]["forge-state>forge-lean"]
+    # Each criterion of the proposal's bar blocks adoption on its own; unknown evidence leaves it undecided.
+    for state, failed in ((summary(4, 0, 80), "tokens_per_accepted"), (summary(3, 0, 30), "accepted"),
+                          (summary(4, 1, 60), "regressions"), (summary(4, 0, 60, over_budget=1), "helper_calls")):
+        result = reporting.decide({**core, "forge-state": state}, [])["state_first"]
+        assert result["H3"] is False and [name for name, value in result["criteria"].items() if not value] == [failed]
+    assert reporting.decide({**core, "forge-state": summary(4, 0, 60, over_budget=None)}, [])["state_first"]["H3"] is None
+    assert reporting.decide({**core, "forge-state": summary(4, 0, None)}, [])["state_first"]["H3"] is None
+    nothing = reporting.decide({**core, "forge-state": summary(0, 0, 60)}, [])["state_first"]["criteria"]
+    assert nothing["tokens_per_accepted"] is False
+    lean_nothing = {**core, "forge-lean": summary(0, 0, 140), "forge-state": summary(4, 0, 60)}
+    assert reporting.decide(lean_nothing, [])["state_first"]["criteria"]["tokens_per_accepted"] is True
 
 
 def test_missing_session_usage_stays_unknown(tmp_path, writer):
