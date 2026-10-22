@@ -260,8 +260,9 @@ def test_path_preservation_invalid_section_does_not_probe_destination(workspace,
         return check
 
     with monkeypatch.context() as patch:
-        patch.setattr(Path, "stat", guarded(Path.stat))
-        patch.setattr(Path, "lstat", guarded(Path.lstat))
+        # Python 3.14's Path predicates call os.path directly instead of Path.stat/lstat.
+        for name in ("stat", "lstat", "exists", "is_file", "is_dir", "is_symlink"):
+            patch.setattr(Path, name, guarded(getattr(Path, name)))
         code, result = verify(workspace, capsys, "--section", str(outside.with_suffix("")))
     assert code == 1 and result["error"] == "Verification requires a complete section index."
     assert captured == [] and outside.read_bytes() == b"user bytes"
