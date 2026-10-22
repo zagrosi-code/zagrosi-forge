@@ -11,7 +11,7 @@ import threading
 import time
 
 from coding_trial_process import _execute
-from coding_trial_runner import ClaudeTelemetry, Telemetry, writer_command
+from coding_trial_runner import ClaudeTelemetry, Telemetry, writer_command, writer_environment
 from native_plugin_smoke import live_flags
 
 _processes = importlib.import_module(_execute.__module__)
@@ -118,10 +118,11 @@ def run_session(command, workspace, destination, prompt, *, host, plugin_root, t
         finally:
             stream.close()
 
+    environment, removed = writer_environment(host, os.environ)
     with tempfile.TemporaryFile() as stdin:
         stdin.write(prompt.encode()); stdin.seek(0)
         process = subprocess.Popen(command, cwd=workspace, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   start_new_session=os.name == "posix", env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"})
+                                   start_new_session=os.name == "posix", env={**environment, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONOPTIMIZE": "0"})
         threads = [threading.Thread(target=read_events, args=(process.stdout,), daemon=True),
                    threading.Thread(target=stderr.drain, args=(process.stderr,), daemon=True)]
         for thread in threads:
@@ -153,7 +154,8 @@ def run_session(command, workspace, destination, prompt, *, host, plugin_root, t
     stderr_text, stderr_bytes = stderr.snapshot()
     exceeded = evidence["stdout_bytes"] > output_limit
     (destination / "stderr.txt").write_text(stderr_text)
-    report = {"host": host, "command": command, "cli_version": version["stdout"].strip() or None, "seconds": round(time.monotonic() - start, 3),
+    report = {"host": host, "command": command, "removed_environment": removed,
+              "cli_version": version["stdout"].strip() or None, "seconds": round(time.monotonic() - start, 3),
               "returncode": process.returncode, "stop": stop, "termination_error": termination_error,
               "checkpoint": checkpoint, "stderr_bytes": stderr_bytes, "output_exceeded": exceeded,
               **evidence, "telemetry": telemetry.summary()}

@@ -21,6 +21,25 @@ with open(os.environ["FAKE_CLAUDE_ENV"], "w") as handle:
     json.dump({"names": sorted(os.environ), "auto_memory": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}, handle)
 print(json.dumps({"type": "result", "is_error": False, "result": "done"}), flush=True)
 '''
+# Variables a writer started from inside Claude Code would inherit.
+HOST_SESSION = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "parent", "CLAUDE_CODE_EFFORT_LEVEL": "low",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "older-model"}
+
+
+def fake_claude(directory):
+    """Write a POSIX `claude` into directory; return it and the path to pass as FAKE_CLAUDE_ENV."""
+    directory.mkdir(parents=True, exist_ok=True)
+    script, executable = directory / "fake_claude.py", directory / "claude"
+    script.write_text(FAKE_CLAUDE)
+    executable.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+    executable.chmod(0o755)
+    return executable, directory / "environment.json"
+
+
+def assert_started_without_host_session(seen, removed):
+    observed = json.loads(seen.read_text())
+    assert observed["auto_memory"] == "1" and "CLAUDE_CONFIG_DIR" in observed["names"]
+    assert set(HOST_SESSION).isdisjoint(observed["names"]) and set(HOST_SESSION) <= set(removed)
 
 
 def test_claude_final_usage_is_counted_once_and_missing_stays_unknown():
@@ -78,21 +97,14 @@ def test_claude_writer_environment_drops_host_session_variables_and_auto_memory(
 def test_claude_writer_starts_without_the_launching_session_environment(tmp_path):
     workspace = tmp_path / "trial/workspace"
     workspace.mkdir(parents=True)
-    script, executable, seen = tmp_path / "fake_claude.py", tmp_path / "claude", tmp_path / "environment.json"
-    script.write_text(FAKE_CLAUDE)
-    executable.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
-    executable.chmod(0o755)
-    inherited = {**os.environ, "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "parent", "CLAUDE_CODE_EFFORT_LEVEL": "low",
-                 "CLAUDE_CONFIG_DIR": str(tmp_path / "config"), "FAKE_CLAUDE_ENV": str(seen)}
+    executable, seen = fake_claude(tmp_path)
+    inherited = {**os.environ, **HOST_SESSION, "CLAUDE_CONFIG_DIR": str(tmp_path / "config"), "FAKE_CLAUDE_ENV": str(seen)}
     result = subprocess.run([sys.executable, str(trials.ROOT / "tools/coding_trial_runner.py"), "--host", "claude",
                              "--model", "model", "--effort", "max", "--claude", str(executable)],
                             cwd=workspace, input="task", env=inherited, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
-    observed = json.loads(seen.read_text())
-    assert observed["auto_memory"] == "1" and "CLAUDE_CONFIG_DIR" in observed["names"]
-    assert {"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EFFORT_LEVEL"}.isdisjoint(observed["names"])
     telemetry = json.loads((tmp_path / "trial/telemetry.json").read_text())
-    assert {"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EFFORT_LEVEL"} <= set(telemetry["removed_environment"])
+    assert_started_without_host_session(seen, telemetry["removed_environment"])
 
 
 @pytest.mark.parametrize("host,effort,accepted", [

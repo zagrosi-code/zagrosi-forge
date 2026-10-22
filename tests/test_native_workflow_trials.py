@@ -15,6 +15,7 @@ import native_plugin_smoke as native
 import native_trial_session as sessions
 import native_workflow_checks as checks
 import native_workflow_trials as trials
+from test_trial_hosts import HOST_SESSION, assert_started_without_host_session, fake_claude
 
 
 @pytest.fixture
@@ -110,6 +111,20 @@ def test_claude_registration_and_skill_use_come_from_native_events(workspace, tm
         host="claude", plugin_root=ROOT, timeout=3)
     assert report["success"] and set(report["registered_skills"]) == sessions.EXPECTED_SKILLS
     assert report["plugin_actions"] == [{"kind": "skill", "name": "zagrosi-forge:zagrosi-forge"}]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="The fake writer uses a POSIX executable script")
+def test_claude_session_starts_without_the_launching_session_environment(workspace, tmp_path, monkeypatch):
+    executable, seen = fake_claude(tmp_path / "bin")
+    for name, value in {**HOST_SESSION, "CLAUDE_CONFIG_DIR": str(tmp_path / "config"), "FAKE_CLAUDE_ENV": str(seen),
+                        "PATH": f"{executable.parent}{os.pathsep}{os.environ['PATH']}"}.items():
+        monkeypatch.setenv(name, value)
+    command = sessions.native_command("claude", "model", "max", {"claude_plugin": str(tmp_path / "plugin")})
+    sessions.run_session(command, workspace, tmp_path / "attempt", "task", host="claude",
+                         plugin_root=tmp_path / "plugin", timeout=30)
+    retained = json.loads((tmp_path / "attempt/session.json").read_text())
+    assert retained["success"], retained
+    assert_started_without_host_session(seen, retained["removed_environment"])
 
 
 @pytest.mark.parametrize("events", [

@@ -1,5 +1,11 @@
 # Releases
 
+## 0.5.4 — clean native Claude sessions
+
+- Native workflow trials (`native_workflow_trials.py run` and `resume`) start Claude sessions without the launching Claude Code session's environment, as coding and session-break writers do since 0.5.3. Credentials, `CLAUDE_CONFIG_DIR`, client certificates and provider routing pass through, auto-memory is off, and each session's `session.json` lists the removed names. Codex sessions are unchanged.
+
+Runtime code is unchanged apart from regenerated manifests. No model trials were run for this release.
+
 ## 0.5.3 — Claude session-break run
 
 - Partial [Claude Code results](../examples/evals/session-break-results-2026-10-21-claude.md): two of four repetitions, `claude-opus-5-5` at max effort, no blind review. Forge `lean` reached no code before the break and left three of four attempts unfinished. `plain` agents kept the withheld decisions in notes they wrote on their own, so the probe could not separate them from `notes`.
