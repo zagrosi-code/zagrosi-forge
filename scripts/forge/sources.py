@@ -171,7 +171,7 @@ TEST_MANIFEST = {
     "test_trial_suite_resource_bounds.py": "b7d7cb09491b3d0774cd20f5687fb561ebbb5205200546e35ffc93e10d89bb9b",
     "test_trial_suite_review_boundaries.py": "62503ad6662248f1b59b7634af3050cc2e2f739d23339c80d20f2d114ac1d546",
     "test_trial_suite_setup_readback.py": "c43cece17a709237ed117d616a880b5217543f8489f8b8b641a181070d3359f8",
-    "test_trial_suite_windows_identity.py": "b7f344bfaa04ef1acc178e7688f7e8e312c89f9f49e6d9a54c9664e1e965f05b",
+    "test_trial_suite_windows_identity.py": "fe8c896178bdd65938c8738e913145b62cf348a8a68c4ad3074a05d40c30d66c",
     "test_trial_suite_workflow.py": "77a3434713c5def66cc4fad30f30135989b09e11ef507ef517215abefcb948e4",
     "test_trial_workspaces.py": "56f3cf95406268ec2dd6b413b1bf54ff1f6bca7f0f0b60fe9f8e3f80dc5b008d",
     "test_typescript_contract.py": "56505d33575982a78c65601b31e2791fd744e4e3de9a5652e2f1b30390ced3dc",
