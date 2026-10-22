@@ -1,6 +1,7 @@
 """Offline native stream contracts; no live model results are implied."""
 import pytest
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,8 +9,18 @@ import sys
 
 from test_coding_trials import trials
 
-from coding_trial_runner import ClaudeTelemetry, writer_command
+from coding_trial_runner import ClaudeTelemetry, writer_command, writer_environment
 from trial_matrix import accepted_outcomes
+
+FAKE_CLAUDE = r'''
+import json, os, sys
+if sys.argv[1:] == ["--version"]:
+    sys.exit(print("2.1.304 (Claude Code)"))
+sys.stdin.read()
+with open(os.environ["FAKE_CLAUDE_ENV"], "w") as handle:
+    json.dump({"names": sorted(os.environ), "auto_memory": os.environ.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY")}, handle)
+print(json.dumps({"type": "result", "is_error": False, "result": "done"}), flush=True)
+'''
 
 
 def test_claude_final_usage_is_counted_once_and_missing_stays_unknown():
@@ -34,12 +45,54 @@ def test_claude_writer_loads_only_explicit_trial_plugin_and_preserves_login():
     argv = writer_command("claude", "exact-claude", "selected-model", "high", {"plugin_root": "/plugin with spaces"})
     assert argv[0] == "exact-claude"
     assert argv[argv.index("--plugin-dir") + 1] == "/plugin with spaces"
+    # --restricted confines Read and Grep to working directories; the skills read their own references.
+    assert argv[argv.index("--add-dir") + 1] == "/plugin with spaces" and "--restricted" in argv
     assert "--bare" not in argv and "--safe-mode" not in argv
     assert argv[argv.index("--setting-sources") + 1] == ""
     assert argv[argv.index("--permission-prompts") + 1] == "none"
     # A later session cannot find this one's transcript on disk.
     assert "--no-session-persistence" in argv
-    assert "--plugin-dir" not in writer_command("claude", "claude", "model", "high", {"plain_agent": True, "plugin_root": "/plugin"})
+    plain = writer_command("claude", "claude", "model", "high", {"plain_agent": True, "plugin_root": "/plugin"})
+    assert "--plugin-dir" not in plain and "--add-dir" not in plain
+
+
+def test_claude_writer_environment_drops_host_session_variables_and_auto_memory():
+    provider = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": "https://bedrock", "AWS_REGION": "us-east-1",
+                "CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "project", "CLAUDE_CODE_SKIP_VERTEX_AUTH": "1",
+                "CLAUDE_CODE_CLIENT_CERT": "/cert.pem", "ANTHROPIC_CUSTOM_HEADERS": "X-Gateway: trial"}
+    inherited = {"PATH": "/bin", "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "parent", "CLAUDE_PLUGIN_DATA": "/data",
+                 "CLAUDE_CODE_EFFORT_LEVEL": "low", "ANTHROPIC_DEFAULT_OPUS_MODEL": "older-model",
+                 "CLAUDE_CODE_USE_POWERSHELL_TOOL": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0",
+                 "CLAUDE_CONFIG_DIR": "/config", "ANTHROPIC_API_KEY": "key", **provider}
+    environment, removed = writer_environment("claude", inherited)
+    assert removed == ["ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDECODE", "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+                       "CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_USE_POWERSHELL_TOOL",
+                       "CLAUDE_PLUGIN_DATA"]
+    # Provider routing stays, so Bedrock, Vertex AI and gateway writers reach the backend they are configured for.
+    assert environment == {"PATH": "/bin", "CLAUDE_CONFIG_DIR": "/config", "ANTHROPIC_API_KEY": "key", **provider,
+                           "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
+    assert writer_environment("codex", inherited) == (inherited, [])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="The fake writer uses a POSIX executable script")
+def test_claude_writer_starts_without_the_launching_session_environment(tmp_path):
+    workspace = tmp_path / "trial/workspace"
+    workspace.mkdir(parents=True)
+    script, executable, seen = tmp_path / "fake_claude.py", tmp_path / "claude", tmp_path / "environment.json"
+    script.write_text(FAKE_CLAUDE)
+    executable.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n')
+    executable.chmod(0o755)
+    inherited = {**os.environ, "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "parent", "CLAUDE_CODE_EFFORT_LEVEL": "low",
+                 "CLAUDE_CONFIG_DIR": str(tmp_path / "config"), "FAKE_CLAUDE_ENV": str(seen)}
+    result = subprocess.run([sys.executable, str(trials.ROOT / "tools/coding_trial_runner.py"), "--host", "claude",
+                             "--model", "model", "--effort", "max", "--claude", str(executable)],
+                            cwd=workspace, input="task", env=inherited, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(seen.read_text())
+    assert observed["auto_memory"] == "1" and "CLAUDE_CONFIG_DIR" in observed["names"]
+    assert {"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EFFORT_LEVEL"}.isdisjoint(observed["names"])
+    telemetry = json.loads((tmp_path / "trial/telemetry.json").read_text())
+    assert {"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EFFORT_LEVEL"} <= set(telemetry["removed_environment"])
 
 
 @pytest.mark.parametrize("host,effort,accepted", [
