@@ -57,13 +57,19 @@ def test_claude_writer_loads_only_explicit_trial_plugin_and_preserves_login():
 
 
 def test_claude_writer_environment_drops_host_session_variables_and_auto_memory():
+    provider = {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": "https://bedrock", "AWS_REGION": "us-east-1",
+                "CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "project", "CLAUDE_CODE_SKIP_VERTEX_AUTH": "1",
+                "CLAUDE_CODE_CLIENT_CERT": "/cert.pem", "ANTHROPIC_CUSTOM_HEADERS": "X-Gateway: trial"}
     inherited = {"PATH": "/bin", "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "parent", "CLAUDE_PLUGIN_DATA": "/data",
                  "CLAUDE_CODE_EFFORT_LEVEL": "low", "ANTHROPIC_DEFAULT_OPUS_MODEL": "older-model",
-                 "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0", "CLAUDE_CONFIG_DIR": "/config", "ANTHROPIC_API_KEY": "key"}
+                 "CLAUDE_CODE_USE_POWERSHELL_TOOL": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0",
+                 "CLAUDE_CONFIG_DIR": "/config", "ANTHROPIC_API_KEY": "key", **provider}
     environment, removed = writer_environment("claude", inherited)
     assert removed == ["ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDECODE", "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
-                       "CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PLUGIN_DATA"]
-    assert environment == {"PATH": "/bin", "CLAUDE_CONFIG_DIR": "/config", "ANTHROPIC_API_KEY": "key",
+                       "CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_USE_POWERSHELL_TOOL",
+                       "CLAUDE_PLUGIN_DATA"]
+    # Provider routing stays, so Bedrock, Vertex AI and gateway writers reach the backend they are configured for.
+    assert environment == {"PATH": "/bin", "CLAUDE_CONFIG_DIR": "/config", "ANTHROPIC_API_KEY": "key", **provider,
                            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}
     assert writer_environment("codex", inherited) == (inherited, [])
 

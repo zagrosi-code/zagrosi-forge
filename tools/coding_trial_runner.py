@@ -22,10 +22,12 @@ CLAUDE_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,Skill,Agent,TaskCreate,TaskGet,Ta
 # The init event reports the Agent tool as Task.
 REQUESTED_CLAUDE_TOOLS = frozenset("Task" if name == "Agent" else name for name in CLAUDE_TOOLS.split(","))
 # A writer started from inside Claude Code would inherit that session's variables: its session and messaging
-# ids, entrypoint and plugin data, plus the effort and model aliases from its settings. Only credentials and
-# the config location pass through.
-CLAUDE_PASSTHROUGH = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-                                "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"})
+# ids, entrypoint and plugin data, plus the effort and model aliases from its settings. Credentials, the config
+# location, client certificates and provider routing (Bedrock, Vertex AI, Foundry, gateways) pass through.
+CLAUDE_PASSTHROUGH = re.compile(
+    r"ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL|CUSTOM_HEADERS|SMALL_FAST_MODEL_AWS_REGION|(BEDROCK|VERTEX|FOUNDRY|AWS)_\w+)"
+    r"|CLAUDE_CONFIG_DIR|CLAUDE_CODE_(OAUTH_TOKEN|CLIENT_CERT|CLIENT_KEY|CLIENT_KEY_PASSPHRASE"
+    r"|(USE|SKIP)_(BEDROCK|VERTEX|FOUNDRY|GATEWAY|MANTLE|ANTHROPIC_AWS|ANTHROPIC_GOOGLE_CLOUD)(_AUTH)?)")
 
 
 def require_effort(host: str, effort: str) -> str:
@@ -43,7 +45,7 @@ def writer_environment(host: str, environ) -> tuple[dict, list[str]]:
     if host != "claude":
         return dict(environ), []
     removed = sorted(name for name in environ
-                     if name.startswith(("CLAUDE", "ANTHROPIC_")) and name not in CLAUDE_PASSTHROUGH)
+                     if name.startswith(("CLAUDE", "ANTHROPIC_")) and not CLAUDE_PASSTHROUGH.fullmatch(name))
     environment = {name: value for name, value in environ.items() if name not in removed}
     environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
     return environment, removed
