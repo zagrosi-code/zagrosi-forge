@@ -1,4 +1,4 @@
-"""Windows partitions preserve the compatibility suite and its compiler setup."""
+"""Windows partitions and latest runtimes preserve the suite and its compiler setup."""
 from collections import Counter
 import re
 import shlex
@@ -8,6 +8,11 @@ import pytest
 from forge_test_helpers import ROOT
 
 WORKFLOW = ROOT / ".github/workflows/validate.yml"
+
+
+def job(text, name):
+    """Slice one top-level job, ending before the next job or at the end of the workflow."""
+    return re.split(r"^  (?=\S)", text.split(f"\n  {name}:\n", 1)[1], maxsplit=1, flags=re.M)[0]
 
 
 def job_steps(text):
@@ -44,7 +49,7 @@ def pytest_selectors(steps, name, prefix, condition=None, *, full_suite=False):
 
 
 def compatibility(text):
-    text = text.split("  compatibility:\n", 1)[1].split("  native-plugins:\n", 1)[0]
+    text = job(text, "compatibility")
     matrix = text.split("include:\n", 1)[1].split("    runs-on:", 1)[0]
     rows = [dict(re.findall(r"^\s*(os|python|group): [\"']?([^\s\"']+)", item, re.M))
             for item in re.split(r"^          - ", matrix, flags=re.M)[1:]]
@@ -53,7 +58,7 @@ def compatibility(text):
 
 def test_windows_partitions_cover_linux_and_macos_once():
     text = WORKFLOW.read_text()
-    validation = text.split("  validate:\n", 1)[1].split("  compatibility:\n", 1)[0]
+    validation = job(text, "validate")
     pytest_selectors(job_steps(validation), "Run tests", "uv run --with pytest python -m pytest",
                      full_suite=True)
     rows, steps = compatibility(text)
@@ -104,11 +109,20 @@ def test_native_ci_pins_component_validating_claude():
 
 def test_type_contract_compiler_is_installed_for_full_and_compatibility_tests():
     text = WORKFLOW.read_text()
-    for name, following in (("validate", "compatibility"), ("compatibility", "native-plugins")):
-        job = text.split(f"  {name}:\n", 1)[1].split(f"  {following}:\n", 1)[0]
-        install = re.search(r"^      - name: Install trial compiler\n        run: npm ci --prefix tools$", job, re.M)
+    for name in ("validate", "compatibility", "latest-runtimes"):
+        body = job(text, name)
+        install = re.search(r"^      - name: Install trial compiler\n        run: npm ci --prefix tools$", body, re.M)
         assert install, f"{name} must install the pinned compiler without a partition guard"
-        assert install.start() < job.index("-m pytest")
+        assert install.start() < body.index("-m pytest")
+
+
+def test_latest_runtimes_run_the_full_suite():
+    latest = job(WORKFLOW.read_text(), "latest-runtimes")
+    versions = re.findall(r'^ +(python|node)-version: "([^"]*)"$', latest, re.M)
+    assert versions == [("python", "3.14"), ("node", "26")], "latest-runtimes must pin Python 3.14 and Node 26"
+    assert "--durations" not in latest, "ci_guard_workflow strips duration reporting from its five steps only"
+    pytest_selectors(job_steps(latest), "Run tests on Python 3.14 and Node 26", "python -m pytest -q",
+                     full_suite=True)
 
 
 _REPORT_PAIR = " --durations=20 --durations-min=1"

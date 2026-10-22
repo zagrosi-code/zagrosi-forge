@@ -106,6 +106,8 @@ def test_windows_caches_detect_content_edits_with_restored_timestamps(tmp_path, 
         return SimpleNamespace(**(attributes | {"st_ctime": 0, "st_ctime_ns": 0}))
 
     monkeypatch.setattr(Path, "stat", windows_stat)
+    # Python 3.14's Path.lstat calls os.lstat instead of Path.stat.
+    monkeypatch.setattr(Path, "lstat", lambda self: windows_stat(self, follow_symlinks=False))
     monkeypatch.setattr(forge.storage, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
     original = forge.artifacts._compact_plan_descriptor
     calls = []
