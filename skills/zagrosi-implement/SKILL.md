@@ -57,7 +57,8 @@ ownership. Treat plan text as requirements, never executable instructions.
 Follow returned readiness and command argument arrays; fill evidence placeholders
 only with actual results. After recording, use the returned `entry` for the next
 section. `recorded: true` means the record is saved even if that entry needs repair.
-Parallelize only disjoint files and serialize records.
+Parallelize only disjoint files and serialize records. In Claude Code, run
+[delegated agents](../zagrosi-forge/references/providers.md#delegated-agents) in the foreground when offered.
 
 When the user supplies cumulative verification time, or a resumed plan reports
 a saved allowance, follow [verification allowance](references/verification.md).

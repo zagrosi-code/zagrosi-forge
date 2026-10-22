@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -118,6 +119,36 @@ def test_reviewer_agent_is_read_only_packaged_and_requested() -> None:
         assert "providers.md#same-host-review" in (ROOT / "skills" / skill / "SKILL.md").read_text(), skill
     providers = (ROOT / "skills/zagrosi-forge/references/providers.md").read_text()
     assert "## Same-host review" in providers and "{plugin_root}/agents/forge-reviewer.md" in providers
+
+
+PROVIDERS = ROOT / "skills/zagrosi-forge/references/providers.md"
+
+
+def delegation_text(path: str) -> tuple[str, str]:
+    """Whitespace-normalized skill text and its expected link to the delegated-agents rule."""
+    source = ROOT / "skills" / path
+    target = Path(os.path.relpath(PROVIDERS, source.parent)).as_posix()
+    return " ".join(source.read_text().split()), f"[delegated agents]({target}#delegated-agents)"
+
+
+def test_claude_code_runs_delegated_agents_in_the_foreground() -> None:
+    # Headless `claude -p` stops background agents still running 10 minutes after the last turn.
+    _, heading, rest = PROVIDERS.read_text().partition("\n## Delegated agents\n")
+    assert heading
+    rule = " ".join(rest.split("\n## ", 1)[0].split())
+    for phrase in ("In Claude Code", "in the foreground when `Agent` offers `run_in_background`",
+                   "pass `run_in_background: false`", "use the agent's result in the same turn",
+                   "Headless `claude -p` offers it", "10 minutes after the last turn"):
+        assert phrase in rule, phrase
+    for path in ("zagrosi-implement/SKILL.md", "zagrosi-cleanup/SKILL.md", "zagrosi-plan/references/research.md",
+                 "zagrosi-implement/references/state-first.md"):
+        text, link = delegation_text(path)
+        assert f"In Claude Code, run {link} in the foreground when offered." in text, path
+    text, link = delegation_text("zagrosi-implement/references/compatibility.md")
+    assert (f"in Claude Code, pass `run_in_background: false` when `Agent` offers it ({link}) "
+            "and use its result in the same turn.") in text
+    # Codex trials never delegated; the writer-derived path stays as it was.
+    assert "If delegation is unavailable, derive the checks yourself and say `writer`." in text
 
 
 def test_skills_preapprove_only_safe_helper_commands() -> None:

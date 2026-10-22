@@ -1,5 +1,13 @@
 # Releases
 
+## 0.5.5 — foreground delegated agents when Claude Code offers the choice
+
+- Wherever Claude Code's `Agent` offers `run_in_background`, Forge now runs every delegated agent (same-host review, check derivation or research) in the foreground: it passes `false` and uses the result in the same turn. Headless `claude -p` offers the choice and by default stops background agents still running 10 minutes after the last turn. In the partial Claude session-break run, three Forge `lean` sessions ended their turn while a background agent was still deriving characterization tests, and each agent was stopped.
+- [Delegated agents](../skills/zagrosi-forge/references/providers.md#delegated-agents) states the rule once; compatibility checks, Implement, Cleanup, state-first and research link to it. Where `Agent` offers no such parameter, the host still decides how agents run.
+- Codex behavior is unchanged: the new wording applies only in Claude Code, and without delegation the writer still derives the checks.
+
+Runtime code is unchanged apart from regenerated manifests. No model trials were run for this release.
+
 ## 0.5.4 — clean native Claude sessions
 
 - Native workflow trials (`native_workflow_trials.py run` and `resume`) start Claude sessions without the launching Claude Code session's environment, as coding and session-break writers do since 0.5.3. Credentials, `CLAUDE_CONFIG_DIR`, client certificates and provider routing pass through, auto-memory is off, and each session's `session.json` lists the removed names. Codex sessions are unchanged.
