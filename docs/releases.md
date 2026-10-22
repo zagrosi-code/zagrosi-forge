@@ -1,10 +1,10 @@
 # Releases
 
-## 0.5.5 — delegated agents finish within the turn
+## 0.5.5 — foreground delegated agents when Claude Code offers the choice
 
-- In Claude Code, Forge now runs every delegated agent (same-host review, check derivation or research) as a foreground `Agent` call and uses its result in the same turn. Headless `claude -p` exits when the main turn ends and stops background agents: in the partial Claude session-break run, three Forge `lean` sessions ended their turn while a background agent was still deriving characterization tests, and that work was lost.
-- [Delegated agents](../skills/zagrosi-forge/references/providers.md#delegated-agents) states the rule once. Compatibility checks, Implement, Cleanup, state-first and research link to it, and none of them may end a turn while a delegated agent still runs.
-- Codex behavior is unchanged: Codex trials never delegated, and without delegation the writer still derives the checks.
+- Wherever Claude Code's `Agent` offers `run_in_background`, Forge now runs every delegated agent (same-host review, check derivation or research) in the foreground: it passes `false` and uses the result in the same turn. Headless `claude -p` offers the choice and by default stops background agents still running 10 minutes after the last turn. In the partial Claude session-break run, three Forge `lean` sessions ended their turn while a background agent was still deriving characterization tests, and each agent was stopped.
+- [Delegated agents](../skills/zagrosi-forge/references/providers.md#delegated-agents) states the rule once; compatibility checks, Implement, Cleanup, state-first and research link to it. Where `Agent` offers no such parameter, the host still decides how agents run.
+- Codex behavior is unchanged: the new wording applies only in Claude Code, and without delegation the writer still derives the checks.
 
 Runtime code is unchanged apart from regenerated manifests. No model trials were run for this release.
 

@@ -28,10 +28,11 @@ Claude or Gemini from Codex.
 ## Delegated agents
 
 In Claude Code, run every delegated agent (same-host review, check derivation or
-research) as a foreground `Agent` call, never with `run_in_background`, and use
-its result in the same turn; several calls in one message still run concurrently.
-Never end a turn while a delegated agent still runs: headless `claude -p` exits
-when the main turn ends and stops it, so its work is lost.
+research) in the foreground when `Agent` offers `run_in_background`: pass
+`run_in_background: false` and use the agent's result in the same turn; several
+calls in one message still run concurrently. Headless `claude -p` offers it and
+by default stops background agents still running 10 minutes after the last turn,
+so their work is lost. Without that parameter, the host decides how agents run.
 
 ## Native authentication
 
