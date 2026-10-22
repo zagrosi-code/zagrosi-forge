@@ -593,8 +593,11 @@ failure; failed attempts are never overwritten. Diagnose shared defects before
 preparing a new matrix. Missing authentication is blocked, not passed or failed.
 Codex inherits native settings unchanged and uses matching per-process plugin
 overrides for discovery/execution. Claude uses session-only `--plugin-dir` on
-its installed copy. Authentication stays with each CLI; the harness never copies
-credential stores.
+its installed copy. Claude sessions start without the launching Claude Code
+session's environment and with auto-memory off. Credentials,
+`CLAUDE_CONFIG_DIR`, client certificates and provider routing pass through, and
+each `session.json` lists the removed names. Authentication stays with each CLI;
+the harness never copies credential stores.
 
 `--resume-host codex` permits Codex-only acceptance while preserving direct rows'
 cross-host checks as pending. Keep the matrix, frozen evaluator/plugin trees and
