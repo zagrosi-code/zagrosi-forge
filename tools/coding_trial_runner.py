@@ -275,7 +275,7 @@ def writer_command(host: str, executable: str, model: str, effort: str, record: 
                 "--sandbox", "workspace-write", "--skip-git-repo-check", "--model", model,
                 "-c", 'approval_policy="never"', "-c", f'model_reasoning_effort="{effort}"', "-"]
     command = [executable, "--print", "--output-format", "stream-json", "--verbose", "--model", model,
-               "--effort", effort, "--restricted", "--setting-sources", "", "--strict-mcp-config",
+               "--effort", effort, "--restricted", "--setting-sources", "", "--no-session-persistence", "--strict-mcp-config",
                "--mcp-config", '{"mcpServers":{}}', "--permission-mode", "acceptEdits",
                "--permission-prompts", "none", "--tools", CLAUDE_TOOLS, "--allowedTools", CLAUDE_TOOLS]
     if record.get("plugin_root") and not record.get("plain_agent"):

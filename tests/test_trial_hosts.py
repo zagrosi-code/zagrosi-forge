@@ -37,6 +37,8 @@ def test_claude_writer_loads_only_explicit_trial_plugin_and_preserves_login():
     assert "--bare" not in argv and "--safe-mode" not in argv
     assert argv[argv.index("--setting-sources") + 1] == ""
     assert argv[argv.index("--permission-prompts") + 1] == "none"
+    # A later session cannot find this one's transcript on disk.
+    assert "--no-session-persistence" in argv
     assert "--plugin-dir" not in writer_command("claude", "claude", "model", "high", {"plain_agent": True, "plugin_root": "/plugin"})
 
 

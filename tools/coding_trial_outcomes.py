@@ -11,6 +11,11 @@ CRITERIA = {
 }
 
 
+def known_total(values):
+    """Sum finite non-negative numbers; one missing or invalid value leaves the total unknown."""
+    return sum(values) if all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in values) else None
+
+
 def accepted_outcomes(attempts: list[dict], *, status_key: str = "status") -> dict:
     """Charge every scheduled attempt to accepted work; unknown is never free."""
     accepted = sum(row.get(status_key) == "passed" for row in attempts)
