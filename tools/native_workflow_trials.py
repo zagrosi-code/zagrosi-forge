@@ -12,16 +12,19 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import time
 
 from coding_trial_evidence import files, plugin_files
 from coding_trial_process import execute
-from native_plugin_smoke import codex_skills, live_flags, prepare_live
+from coding_trial_runner import EFFORT_CHOICES, require_effort
+from native_plugin_smoke import claude_skills, codex_skills, live_flags, prepare_live
 from native_trial_session import EXPECTED_SKILLS, native_command, read_json, run_session
 from native_workflow_checks import completed, interrupted, planned, runtime_module
 
 ROOT = Path(__file__).resolve().parents[1]
+HOSTS = ("codex", "claude")
 
 
 def generated_bytecode(root, name):
@@ -68,39 +71,68 @@ def evaluator_identity():
             **{f"examples/first-task/{name}": value for name, value in files(ROOT / "examples/first-task").items()}}
 
 
-def matrix():
+def matrix(hosts=HOSTS):
+    """Direct rows continue on the other prepared host; a single-host matrix continues on the same host."""
+    other = {"codex": "claude", "claude": "codex"}
     rows = [{"id": f"{host}-{depth}-{trigger}", "host": host, "depth": depth, "trigger": trigger,
-             "resume_host": host if trigger == "indirect" else ("claude" if host == "codex" else "codex")}
-            for host in ("codex", "claude") for depth in ("lean", "standard", "deep") for trigger in ("direct", "indirect")]
-    return rows + [{"id": host + "-unsupported", "host": host, "trigger": "unsupported"} for host in ("codex", "claude")]
+             "resume_host": other[host] if trigger == "direct" and other[host] in hosts else host}
+            for host in hosts for depth in ("lean", "standard", "deep") for trigger in ("direct", "indirect")]
+    return rows + [{"id": host + "-unsupported", "host": host, "trigger": "unsupported"} for host in hosts]
 
 
 def write(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
-def prepare(directory, root, models, efforts, *, timeout=600, total_timeout=1500):
+def prepare(directory, root, models, efforts, *, timeout=600, total_timeout=1500, hosts=HOSTS):
     if not 0 < timeout <= 3600 or not timeout <= total_timeout <= 10800:
         raise ValueError("Use positive bounded per-session and total-row deadlines")
+    if not hosts or len(set(hosts)) != len(hosts) or set(hosts) - set(HOSTS):
+        raise ValueError("Prepare codex, claude or both")
+    hosts = tuple(host for host in HOSTS if host in hosts)
     identity = package_identity(root)
+    for host in hosts:
+        require_effort(host, efforts.get(host))
     directory.mkdir(parents=True, exist_ok=False)
-    installation = prepare_live(root, directory / "native")
-    if any(package_identity(Path(installation[host + "_plugin"])) != identity for host in ("codex", "claude")):
+    installation = prepare_live(root, directory / "native", hosts=hosts)
+    try:
+        return record_matrix(directory, root, identity, installation, hosts, models, efforts, timeout, total_timeout)
+    except BaseException:
+        # matrix.json is written last, so nothing would record this namespace in the user's Codex cache.
+        if installation.get("temporary_cache"):
+            shutil.rmtree(installation["temporary_cache"], ignore_errors=True)
+        raise
+
+
+def record_matrix(directory, root, identity, installation, hosts, models, efforts, timeout, total_timeout):
+    if any(package_identity(Path(installation[host + "_plugin"])) != identity for host in hosts):
         raise ValueError("Staged native package changed")
-    discovery = codex_skills("codex", directory, os.environ, flags=live_flags(installation),
-                             plugin_id="zagrosi-forge@" + installation["marketplace_name"])
-    if {row["name"] for row in discovery if row.get("enabled")} != EXPECTED_SKILLS:
-        raise ValueError("Native Codex did not register all five requested skills")
-    if any(not Path(row["path"]).resolve().is_relative_to(Path(installation["codex_plugin"]).resolve()) for row in discovery):
-        raise ValueError("Native skills resolved outside the exact staged package")
-    rows = matrix()
-    record = {"plugin_root": str(root), "package_identity": identity, "installation": installation,
+    discovered = {}
+    if "codex" in hosts:
+        discovery = codex_skills("codex", directory, os.environ, flags=live_flags(installation),
+                                 plugin_id="zagrosi-forge@" + installation["marketplace_name"])
+        if {row["name"] for row in discovery if row.get("enabled")} != EXPECTED_SKILLS:
+            raise ValueError("Native Codex did not register all five requested skills")
+        if any(not Path(row["path"]).resolve().is_relative_to(Path(installation["codex_plugin"]).resolve()) for row in discovery):
+            raise ValueError("Native skills resolved outside the exact staged package")
+        discovered.update(codex_discovery=[{key: row.get(key) for key in ("name", "path", "pluginId", "enabled")} for row in discovery],
+                          codex_configuration="Native user configuration plus the same per-process plugin overrides used for discovery")
+    if "claude" in hosts:
+        names = claude_skills("claude", directory, {**os.environ, "CLAUDE_CONFIG_DIR": installation["claude_settings"]},
+                              "zagrosi-forge@" + installation["marketplace_name"])
+        if {"zagrosi-forge:" + name for name in names} != EXPECTED_SKILLS:
+            raise ValueError("Native Claude did not register all five requested skills")
+        discovered["claude_discovery"] = names
+    rows = matrix(hosts)
+    # Two-host budgets also cover later cross-host continuations; one host runs three sessions per workflow row.
+    calls = sum(1 if row["trigger"] == "unsupported" else 3 for row in rows)
+    planned, maximum = (41, 50) if len(hosts) == 2 else (calls, calls)
+    record = {"plugin_root": str(root), "package_identity": identity, "installation": installation, "hosts": list(hosts),
               "evaluator_root": str(ROOT), "evaluator_sha256": evaluator_identity(),
-              "models": models, "efforts": efforts, "timeout": timeout, "total_timeout": total_timeout,
-              "rows": rows, "codex_discovery": [{key: row.get(key) for key in ("name", "path", "pluginId", "enabled")} for row in discovery],
-              "planned_model_calls": 41, "maximum_model_calls": 50, "followups": "fresh sessions using persisted plan", "model_calls": 0,
-              "codex_configuration": "Native user configuration plus the same per-process plugin overrides used for discovery",
-              "cli_versions": {host: execute([host, "--version"], directory, timeout=15)["stdout"].strip() for host in ("codex", "claude")}}
+              "models": {host: models.get(host) for host in hosts}, "efforts": {host: efforts[host] for host in hosts},
+              "timeout": timeout, "total_timeout": total_timeout, "rows": rows, **discovered,
+              "planned_model_calls": planned, "maximum_model_calls": maximum, "followups": "fresh sessions using persisted plan", "model_calls": 0,
+              "cli_versions": {host: execute([host, "--version"], directory, timeout=15)["stdout"].strip() for host in hosts}}
     for row in rows:
         trial = directory / row["id"]
         shutil.copytree(ROOT / "examples/first-task", trial / "workspace", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -137,6 +169,13 @@ def authenticated(host):
     return result["returncode"] == 0
 
 
+def prepared(record, host):
+    """Reject a host absent from a single-host matrix before any attempt is retained."""
+    if host not in record.get("hosts", HOSTS):
+        raise ValueError(f"{host} was not prepared in this matrix")
+    return host
+
+
 def unattempted(path):
     previous = read_json(path, {})
     return not path.exists() or (previous.get("status") == "blocked" and not previous.get("sessions"))
@@ -148,6 +187,7 @@ def run(directory, identity, *, resume_host=None):
     row = next((item for item in record["rows"] if item["id"] == identity), None)
     if row is None:
         raise ValueError("Unknown matrix row")
+    actual_resume = prepared(record, resume_host or row.get("resume_host", row["host"]))
     trial = directory / identity
     result_path = trial / "result.json"
     if result_path.exists():
@@ -156,7 +196,6 @@ def run(directory, identity, *, resume_host=None):
         result_path.rename(trial / f"blocked-{len(list(trial.glob('blocked-*.json'))) + 1:03}.json")
     result = {"id": identity, "success": False, "status": "running", "sessions": [], "checks": {}}
     write(result_path, result)
-    actual_resume = resume_host or row.get("resume_host", row["host"])
     hosts = {row["host"], actual_resume}
     missing = [host for host in sorted(hosts) if not record["models"].get(host) or not authenticated(host)]
     if missing:
@@ -272,6 +311,8 @@ def resume(directory, identity, *, model=None):
 
 def report(directory, host=None):
     record = read_json(directory / "matrix.json")
+    if host:
+        prepared(record, host)
     rows = []
     for row in record["rows"]:
         if host and row["host"] != host:
@@ -300,24 +341,29 @@ def main():
     parser.add_argument("directory", type=Path)
     parser.add_argument("--plugin-root", type=Path, default=ROOT)
     parser.add_argument("--case")
-    parser.add_argument("--host", choices=("codex", "claude"), help="Run unattempted rows for one host, stopping at the first failure; or filter report")
-    parser.add_argument("--resume-host", choices=("codex", "claude"), help="Also verify same-host continuation while preserving cross-host work as pending")
+    parser.add_argument("--host", choices=HOSTS, help="Prepare only this host; run its unattempted rows, stopping at the first failure; or filter report")
+    parser.add_argument("--resume-host", choices=HOSTS, help="Also verify same-host continuation while preserving cross-host work as pending")
     parser.add_argument("--codex-model")
     parser.add_argument("--claude-model")
-    parser.add_argument("--effort", choices=("low", "medium", "high"), default="medium")
+    parser.add_argument("--effort", choices=EFFORT_CHOICES, default="medium")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--total-timeout", type=int, default=1500)
     args = parser.parse_args()
     try:
         if args.operation == "prepare":
+            hosts = (args.host,) if args.host else HOSTS
             result = prepare(args.directory.resolve(), args.plugin_root.resolve(), {"codex": args.codex_model or "gpt-5.5", "claude": args.claude_model},
-                             {host: args.effort for host in ("codex", "claude")}, timeout=args.timeout, total_timeout=args.total_timeout)
+                             {host: args.effort for host in hosts}, timeout=args.timeout, total_timeout=args.total_timeout, hosts=hosts)
         elif args.operation in {"run", "resume"}:
             directory = args.directory.resolve()
             record = read_json(directory / "matrix.json")
             require_package_provenance(record)
+            for host in (args.host, args.resume_host):
+                if host:
+                    prepared(record, host)
             for host, model in (("codex", args.codex_model), ("claude", args.claude_model)):
                 if model:
+                    prepared(record, host)
                     if record["models"].get(host) not in (None, model):
                         parser.error("Changing an already pinned model requires a fresh matrix")
                     record["models"][host] = model
@@ -344,7 +390,7 @@ def main():
             result = report(args.directory.resolve(), args.host)
         print(json.dumps(result, indent=2))
         return 0 if result.get("success", True) is not False else 1
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         parser.exit(1, str(exc) + "\n")
 
 

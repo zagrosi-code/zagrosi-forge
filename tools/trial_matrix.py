@@ -17,6 +17,7 @@ if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 from coding_trial_comparison import packets, reviews  # noqa: E402
 from coding_trial_outcomes import accepted_outcomes  # noqa: E402
+from coding_trial_runner import EFFORT_CHOICES, require_effort  # noqa: E402
 import coding_trial_suite_matrix as suite_matrix  # noqa: E402
 from coding_trial_suite_cli import _error  # noqa: E402
 
@@ -161,7 +162,7 @@ def main() -> int:
     parser.add_argument("--plugin-root", type=Path)
     parser.add_argument("--previous-root", type=Path, help="Optional third comparison arm; omit for current Forge versus plain")
     parser.add_argument("--model")
-    parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh"))
+    parser.add_argument("--effort", choices=EFFORT_CHOICES)
     parser.add_argument("--host", choices=("codex", "claude"))
     parser.add_argument("--codex")
     parser.add_argument("--claude")
@@ -195,6 +196,10 @@ def main() -> int:
         if comparison:
             if not args.model or not args.effort or args.jobs != 1 or args.runner:
                 parser.error("compare requires --model, --effort, serial --jobs 1 and the pinned built-in runner")
+            try:
+                require_effort(args.host, args.effort)
+            except ValueError as exc:
+                parser.error(str(exc))
             runner = [sys.executable, str(ROOT / "tools/coding_trial_runner.py"), "--model", args.model,
                       "--effort", args.effort, "--host", args.host, "--codex", args.codex, "--claude", args.claude]
         elif not args.runner:
