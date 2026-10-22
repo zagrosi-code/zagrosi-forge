@@ -55,6 +55,8 @@ def windows_metadata(monkeypatch, path, *, descriptor_change=None, opened_change
         return SimpleNamespace(**values)
 
     monkeypatch.setattr(Path, "stat", path_stat)
+    # Python 3.14's Path.lstat calls os.lstat instead of Path.stat.
+    monkeypatch.setattr(Path, "lstat", lambda self: path_stat(self, follow_symlinks=False))
     # Isolate the platform projection to the reviewed modules. Globally changing
     # os.name would incorrectly make POSIX pathlib instantiate WindowsPath.
     projected_os = SimpleNamespace(**{**vars(os), "name": "nt", "fstat": descriptor_stat})

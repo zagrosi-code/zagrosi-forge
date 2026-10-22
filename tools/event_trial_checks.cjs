@@ -20,17 +20,17 @@ for (const [object, names] of [
 }
 
 let assertions = 0;
-function equal(actual, expected, message) {
+function equal(actual, expected, ...message) {
   assertions += 1;
-  assert.deepEqual(actual, expected, message);
+  assert.deepEqual(actual, expected, ...message);
 }
-function identical(actual, expected, message) {
+function identical(actual, expected, ...message) {
   assertions += 1;
-  assert.strictEqual(actual, expected, message);
+  assert.strictEqual(actual, expected, ...message);
 }
-function throws(fn, expected, message) {
+function throws(fn, expected, ...message) {
   assertions += 1;
-  assert.throws(fn, expected, message);
+  assert.throws(fn, expected, ...message);
 }
 
 try {
