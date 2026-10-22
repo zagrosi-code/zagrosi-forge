@@ -23,10 +23,12 @@ checks, the probes and the decision inputs.
   `tools/session_break_trials.py` with `--probe` and
   `--arms forge-lean forge-state notes plain`. Three clauses left the briefs and
   reached session 1 only, as the user's answers.
-- Evaluator: a frozen export of commit `66d841e` (release 0.5.1). That commit merges
-  the session-break harness with the state-first mode and adds the fourth arm. The
-  pilot ran `4dbdba1`. A fresh-context review between the pilot and the main run
-  led to the fixes in `66d841e`.
+- Evaluator: a frozen export of commit `66d841e`, tagged
+  `eval/session-break-2026-10-21`. It was version 0.5.1 on its PR branch; main
+  released this work as 0.5.2. That commit merges the session-break harness with
+  the state-first mode and adds the fourth arm. The pilot ran `4dbdba1`, tagged
+  `eval/session-break-2026-10-21-pilot`. A fresh-context review between the pilot
+  and the main run led to the fixes in `66d841e`.
 - Forge arms: both loaded one runtime-only snapshot of `66d841e` (`scripts/`,
   `skills/` and the plugin manifests). That tree carries today's `lean` and the
   opt-in state-first mode, so the two arms differed only in `forge-state`'s
@@ -35,7 +37,7 @@ checks, the probes and the decision inputs.
   `<snapshot>/skills/zagrosi-implement/references/state-first.md`." The other
   three arms' prompts are unchanged from the
   [first run](session-break-results-2026-10-20.md). `forge-lean` therefore ran
-  release 0.5.1 here, against 0.4.4 in the first run.
+  the code of `66d841e` here, against `bc6ee27` in the first run.
 - Host: Codex CLI 0.154.0 with `gpt-5.6-terra` at medium effort for every arm, on
   macOS 26.6.2 arm64 and Python 3.14.7. Backend revisions are unverified.
 - Schedule: two cases × four arms × four repetitions, so 32 attempts and 64
@@ -193,7 +195,7 @@ helper-call median down.
 - `forge-state`'s instruction is the only prompt difference from `forge-lean`.
   It names the mode and its reference but adds nothing about where to keep the
   brief or how to record decisions.
-- `forge-lean` ran release 0.5.1, which also changed risk-term matching on default
+- `forge-lean` ran `66d841e`, which also changed risk-term matching on default
   paths, so it is not byte-identical to the first run's arm.
 - After the run, a code review made state-first final receipts also cover
   `plan.md` and the brief, not only the source. Trial workspaces ignore
@@ -218,6 +220,7 @@ helper-call median down.
 ## Reproduce
 
 ```bash
+git fetch origin tag eval/session-break-2026-10-21
 mkdir -p /frozen/evaluator /frozen/plugin
 git archive 66d841e | tar -x -C /frozen/evaluator
 git archive 66d841e scripts skills .codex-plugin .claude-plugin | tar -x -C /frozen/plugin

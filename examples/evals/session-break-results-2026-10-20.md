@@ -20,9 +20,11 @@ checks, the probes and the decision inputs.
 - Protocol: [session-break protocol](session-break-protocol.md), run by
   `tools/session_break_trials.py`. The main run used `--probe`: three clauses
   left the briefs and reached session 1 only, as the user's answers.
-- Evaluator: a frozen export of commit `bc6ee27` (release 0.4.4). The Forge arm
-  received a runtime-only snapshot of the same commit (`scripts/`, `skills/` and
-  the plugin manifests), so its plugin tree held no copy of the withheld clauses.
+- Evaluator: a frozen export of commit `bc6ee27`, tagged
+  `eval/session-break-2026-10-20`. It was version 0.4.4 on its PR branch; main
+  released this work as 0.5.1. The Forge arm received a runtime-only snapshot of
+  the same commit (`scripts/`, `skills/` and the plugin manifests), so its plugin
+  tree held no copy of the withheld clauses.
 - Host: Codex CLI 0.154.0 with `gpt-5.6-terra` at medium effort for every arm,
   on macOS 26.6.2 arm64 and Python 3.14.7. Earlier trials requested `gpt-5.5`,
   which Codex no longer accepts with a ChatGPT account. Backend revisions are
@@ -122,8 +124,9 @@ tasks and a clean break at a section boundary.
 
 ## Pilot
 
-The probe-free pilot (one repetition per arm and case, commit `e7460bf`) checked
-prompts, timeouts and metric extraction. All six attempts ran without timeouts.
+The probe-free pilot (one repetition per arm and case, commit `e7460bf`, tagged
+`eval/session-break-2026-10-20-pilot`) checked prompts, timeouts and metric
+extraction. All six attempts ran without timeouts.
 Import-preview was accepted in every arm, and godfile failed public-import
 compatibility in every arm. Forge used 4.96M tokens against 0.91M for notes and
 0.93M for plain. An independent review of the harness after the pilot led to the
@@ -150,6 +153,7 @@ attempt, and the Forge arm under `--probe` receives a runtime-only plugin tree.
 ## Reproduce
 
 ```bash
+git fetch origin tag eval/session-break-2026-10-20
 mkdir -p /frozen/evaluator /frozen/plugin
 git archive bc6ee27 | tar -x -C /frozen/evaluator
 git archive bc6ee27 scripts skills .codex-plugin .claude-plugin | tar -x -C /frozen/plugin
