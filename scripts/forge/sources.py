@@ -59,7 +59,7 @@ TEST_MANIFEST = {
     "test_evidence_discovery.py": "1e2671eacebdbadda57d9f87a4570d7e1eb633574b8a01c78690d75d7bbcf0ce",
     "test_gate_diagnostics.py": "7a7ed7d49c18e427c5fddb081b7e277ccc2fd113d28f42203f063441264c9b4f",
     "test_gate_reports.py": "4986d356f1261f95771993ea10a82956895f11313b595f302766d04868317b4f",
-    "test_handoff_authority.py": "f8915d3bccbb20751c48ae3c95bd80bea29389691a76fa054c4507bfd519b09f",
+    "test_handoff_authority.py": "ef0711726d228f55b01bc4f5518527058ec5686668ec03c1459b2a7700ab6a2c",
     "test_handoff_failures.py": "228106db7ad96d04057647fffce839721b449e8a2884626ba55eea7264beb6f0",
     "test_handoff_readiness.py": "b1eb9f207136d7d397887b26a6a2fa204493f89ec3cf56e641e02412ac7b5925",
     "test_handoff_transport.py": "104517f15aa1c085e9da2fd45bb104ea1f021f77b851cb5e8fb7d592948e8cae",

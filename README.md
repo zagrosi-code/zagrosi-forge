@@ -204,10 +204,6 @@ Package membership changes: stage intended files, then run
 `python3 tools/update_package_manifest.py`.
 CI covers Linux/macOS/Windows and native packaging. Native validators require their CLIs.
 
-Keep internal evaluation reports and quality follow-ups under `docs/development/`
-(ignored by Git and excluded from plugin packages). Historical citations point to
-frozen repository snapshots.
-
 ```bash
 python3 tools/update_runtime_manifest.py --check
 python3 tools/update_package_manifest.py --check

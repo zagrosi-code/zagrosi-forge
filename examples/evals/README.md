@@ -2,6 +2,10 @@
 
 This directory documents the benchmark surface used by `eval-suite`.
 
+Keep internal evaluation reports and quality follow-ups under `docs/development/`
+(ignored by Git and excluded from plugin packages). Historical citations point to
+frozen repository snapshots.
+
 ## Current Valid Tracks
 
 - `examples/saas/01-authentication`: Python-style SaaS OAuth foundation.
