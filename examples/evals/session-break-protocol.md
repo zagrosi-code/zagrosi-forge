@@ -2,11 +2,11 @@
 
 Status: [`tools/session_break_trials.py`](../../tools/session_break_trials.py)
 runs this protocol end to end; see [Harness](#harness). The first Codex run
-supports H1, not H2: [results from 20 October 2026](session-break-results-2026-10-20.md).
+supports H1, not H2: [results from 20 October 2026](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/session-break-results-2026-10-20.md).
 The rerun with the state-first fourth arm repeats that decision and rejects H3:
-[results from 21 October 2026](session-break-results-2026-10-21.md). A partial
+[results from 21 October 2026](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/session-break-results-2026-10-21.md). A partial
 Claude Code run has mechanical outcomes only, without acceptance verdicts:
-[Claude results](session-break-results-2026-10-21-claude.md).
+[Claude results](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/session-break-results-2026-10-21-claude.md).
 Every run consumes model usage, so start each pilot or main run only after the
 user approves its budget.
 
@@ -18,8 +18,8 @@ depth, so Forge's records were never needed:
 
 | Evidence | Forge | Plain agent |
 |---|---|---|
-| [Behavior-contract trial](coding/behavior-contract-results-2026-10-02.md), accepted | 8/12 (previous and new) | 9/12 |
-| [Quality trial](coding/quality-results-2026-10-02.md), accepted | 6/8 | 6/8 |
+| [Behavior-contract trial](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/coding/behavior-contract-results-2026-10-02.md), accepted | 8/12 (previous and new) | 9/12 |
+| [Quality trial](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/coding/quality-results-2026-10-02.md), accepted | 6/8 | 6/8 |
 | Seconds per accepted result | 484–712 | 153–192 |
 | Tokens per accepted result (uncached input, cache reads, output) | 2.3–14× plain | baseline |
 

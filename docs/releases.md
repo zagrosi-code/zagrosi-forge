@@ -16,7 +16,7 @@ Runtime code is unchanged apart from regenerated manifests. No model trials were
 
 ## 0.5.3 — Claude session-break run
 
-- Partial [Claude Code results](../examples/evals/session-break-results-2026-10-21-claude.md): two of four repetitions, `claude-opus-5-5` at max effort, no blind review. Forge `lean` reached no code before the break and left three of four attempts unfinished. `plain` agents kept the withheld decisions in notes they wrote on their own, so the probe could not separate them from `notes`.
+- Partial [Claude Code results](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/session-break-results-2026-10-21-claude.md): two of four repetitions, `claude-opus-5-5` at max effort, no blind review. Forge `lean` reached no code before the break and left three of four attempts unfinished. `plain` agents kept the withheld decisions in notes they wrote on their own, so the probe could not separate them from `notes`.
 - Claude writers no longer inherit the launching Claude Code session's environment. A trial started from inside Claude Code received that session's id, messaging socket, entrypoint and plugin data, plus the effort and model aliases from its settings, such as `ANTHROPIC_DEFAULT_OPUS_MODEL`. Credentials, `CLAUDE_CONFIG_DIR`, client certificates and provider routing (Bedrock, Vertex AI, Foundry, gateways) pass through, and telemetry lists the removed names.
 - Claude auto-memory is off for every writer (`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`). It is on by default and keyed by the workspace path, so a second session could read what the first one saved.
 - Claude Forge arms may read their plugin tree (`--add-dir`). Under `--restricted`, Forge's skills could not open their own references with `Read` and fell back to shell commands.
@@ -31,14 +31,14 @@ Runtime code is unchanged apart from regenerated manifests.
 - A state-first implement postflight now reports `sections_recorded_complete`, so trial and eval readers count a finished state-first plan as complete.
 - State-first final receipts also cover `plan.md` and the brief, so changing the requirements after `implement-verify` makes the receipt stale. Status, notes and implementation state stay outside it.
 - `--arms` still defaults to the first three arms. Under `--probe`, plugin snapshots may not hold `.git`, and every run rechecks them. A session without logged events leaves helper calls unknown.
-- Second [Codex results](../examples/evals/session-break-results-2026-10-21.md): state-first `lean` used 0.57× the tokens of today's `lean` but accepted 4/8 against 5/8, lost one withheld decision and ran a median of 19.5 helper commands against a bar of 8, so it missed all four rollout criteria. The first three arms repeated H1 true and H2 false.
+- Second [Codex results](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/session-break-results-2026-10-21.md): state-first `lean` used 0.57× the tokens of today's `lean` but accepted 4/8 against 5/8, lost one withheld decision and ran a median of 19.5 helper commands against a bar of 8, so it missed all four rollout criteria. The first three arms repeated H1 true and H2 false.
 
 ## 0.5.1 — session-break trials
 
 - Run the [session-break protocol](../examples/evals/session-break-protocol.md) end to end with `tools/session_break_trials.py`: any arm through a forced break after section 2, a checkpoint with per-test, oracle and clause-probe results, and a fresh second session that cannot read the first session's files. Reports add re-orientation time, regressions against the checkpoint and blind review through the existing comparison packets.
 - `--probe` removes the withheld decision clauses from each brief before the baseline is recorded and gives them in session 1 only. Tests confirm that violating each clause fails the unchanged oracle while a good control passes.
 - Claude writers no longer save session transcripts (`--no-session-persistence`), so a later session cannot find an earlier one on disk.
-- First [Codex results](../examples/evals/session-break-results-2026-10-20.md): both stateful arms kept a pre-break decision that plain agents lost in 4 of 4 attempts. Notes matched Forge `lean` (6/8 accepted each, plain 4/8) at a sixth of its tokens, which supports H1 but not H2.
+- First [Codex results](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/session-break-results-2026-10-20.md): both stateful arms kept a pre-break decision that plain agents lost in 4 of 4 attempts. Notes matched Forge `lean` (6/8 accepted each, plain 4/8) at a sixth of its tokens, which supports H1 but not H2.
 
 Runtime code is unchanged apart from regenerated manifests.
 

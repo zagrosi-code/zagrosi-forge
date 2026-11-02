@@ -315,6 +315,7 @@ def test_fixed_gate_runner_metadata_is_exact_and_no_follow(
     raw = b"fixed-runner-source\n"
     runner.write_bytes(raw)
     runner.chmod(0o555)
+    runner_stat = runner.stat()
     real_fstat = os.fstat
 
     def fake_parent(path):
@@ -322,7 +323,7 @@ def test_fixed_gate_runner_metadata_is_exact_and_no_follow(
 
     def fake_fstat(file_fd):
         observed = real_fstat(file_fd)
-        if observed.st_ino != runner.stat().st_ino:
+        if (observed.st_dev, observed.st_ino) != (runner_stat.st_dev, runner_stat.st_ino):
             return observed
         return SimpleNamespace(
             st_dev=observed.st_dev,
@@ -337,13 +338,14 @@ def test_fixed_gate_runner_metadata_is_exact_and_no_follow(
         )
 
     monkeypatch.setattr(module.handoff_host, "open_root_owned_nonwritable_directory_chain", fake_parent)
-    monkeypatch.setattr(os, "fstat", fake_fstat)
-    if accepted:
-        assert module.handoff_host.read_fixed_gate_runner(contract) == raw
-    else:
-        with pytest.raises(module.models.DetachedImplementationError) as caught:
-            module.handoff_host.read_fixed_gate_runner(contract)
-        assert caught.value.code == "unsafe-handoff-dependency"
+    with monkeypatch.context() as metadata:
+        metadata.setattr(os, "fstat", fake_fstat)
+        if accepted:
+            assert module.handoff_host.read_fixed_gate_runner(contract) == raw
+        else:
+            with pytest.raises(module.models.DetachedImplementationError) as caught:
+                module.handoff_host.read_fixed_gate_runner(contract)
+            assert caught.value.code == "unsafe-handoff-dependency"
 
     runner.unlink()
     runner.symlink_to(tmp_path / "mutable-repository-runner.py")
@@ -379,6 +381,7 @@ def test_fixed_stat_dependency_accepts_supported_link_count_only_with_safe_metad
     executable = dependency_parent / "stat"
     executable.write_bytes(b"fixed stat executable")
     executable.chmod(0o555)
+    executable_stat = executable.stat()
     real_fstat = os.fstat
 
     monkeypatch.setattr(
@@ -388,7 +391,9 @@ def test_fixed_stat_dependency_accepts_supported_link_count_only_with_safe_metad
     )
 
     def fake_fstat(file_fd):
-        real_fstat(file_fd)
+        observed = real_fstat(file_fd)
+        if (observed.st_dev, observed.st_ino) != (executable_stat.st_dev, executable_stat.st_ino):
+            return observed
         return SimpleNamespace(
             st_mode=stat.S_IFREG | mode,
             st_nlink=link_count,
