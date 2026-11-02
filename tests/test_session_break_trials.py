@@ -489,10 +489,11 @@ def test_arm_summary_sums_observed_input_tokens_beside_regressions():
         "total": None, "per_accepted": None}
 
 
-@pytest.mark.parametrize("date", ["2026-10-20", "2026-10-21"])
-def test_published_decisions_reproduce(date):
-    published = json.loads((ROOT / f"examples/evals/session-break-results-{date}.json").read_text())["main"]
-    assert reporting.decide(published["arms"], []) == published["decision"]
+@pytest.mark.parametrize("case", json.loads(
+    (ROOT / "tests/fixtures/session_break_decisions.json").read_text()),
+    ids=lambda case: case["name"])
+def test_frozen_decisions_reproduce(case):
+    assert reporting.decide(case["arms"], []) == case["decision"]
 
 
 def test_decision_rule_compares_forge_state_with_forge_lean_and_notes():

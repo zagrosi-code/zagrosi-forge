@@ -188,10 +188,10 @@ blockers, recovery commands and complete reports (`--full-output`).
 
 Runtime loading verifies SHA-256 source bindings; writes are locked and atomic.
 
-[Helper benchmarks](examples/evals/performance.json) measure fixed fixtures.
+[Helper benchmarks](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/performance.json) measure fixed fixtures.
 [Suite comparisons](examples/evals/coding/README.md#manifest-driven-suites) use frozen
 tasks, isolated checks and blind review.
-[Historical results](examples/evals/coding/behavior-contract-results-2026-10-02.md)
+[Historical results](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/coding/behavior-contract-results-2026-10-02.md)
 retain failures; adapter support proves neither speed nor quality.
 
 ## Contribute
@@ -203,6 +203,10 @@ Runtime/test edits: run `python3 tools/update_runtime_manifest.py`.
 Package membership changes: stage intended files, then run
 `python3 tools/update_package_manifest.py`.
 CI covers Linux/macOS/Windows and native packaging. Native validators require their CLIs.
+
+Keep internal evaluation reports and quality follow-ups under `docs/development/`
+(ignored by Git and excluded from plugin packages). Historical citations point to
+frozen repository snapshots.
 
 ```bash
 python3 tools/update_runtime_manifest.py --check

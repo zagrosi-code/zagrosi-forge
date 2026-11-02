@@ -5,7 +5,7 @@ Status: built as an opt-in mode in 0.5.0 (`plan-setup --state-first`, described 
 unchanged until the user approves. Its finish also blocks while a section is not done.
 Validate it with the [session-break protocol](../../examples/evals/session-break-protocol.md)
 before adopting it. The first such run, on Codex, missed all four rollout criteria in
-step 3 ([results](../../examples/evals/session-break-results-2026-10-21.md)), so step 4
+step 3 ([results](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/session-break-results-2026-10-21.md)), so step 4
 applies for now.
 
 ## Summary

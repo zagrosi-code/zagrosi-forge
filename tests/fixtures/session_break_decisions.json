@@ -1,0 +1,132 @@
+[
+  {
+    "name": "three-arm",
+    "arms": {
+      "forge-lean": {
+        "accepted": 6,
+        "regressions": {
+          "attempts": 1
+        },
+        "total_tokens": {
+          "total": 27047281
+        }
+      },
+      "notes": {
+        "accepted": 6,
+        "regressions": {
+          "attempts": 0
+        },
+        "total_tokens": {
+          "total": 4300464
+        }
+      },
+      "plain": {
+        "accepted": 4,
+        "regressions": {
+          "attempts": 4
+        },
+        "total_tokens": {
+          "total": 3757356
+        }
+      }
+    },
+    "decision": {
+      "complete": true,
+      "blockers": [],
+      "H1": true,
+      "H2": false,
+      "H0": false,
+      "pairs": {
+        "forge-lean>notes": false,
+        "forge-lean>plain": true,
+        "notes>forge-lean": true,
+        "notes>plain": true,
+        "plain>forge-lean": false,
+        "plain>notes": false
+      },
+      "forge_to_notes_tokens": 6.289386680134981
+    }
+  },
+  {
+    "name": "state-first",
+    "arms": {
+      "forge-lean": {
+        "accepted": 5,
+        "regressions": {
+          "attempts": 0
+        },
+        "total_tokens": {
+          "total": 25486668,
+          "per_accepted": 5097333.6
+        }
+      },
+      "forge-state": {
+        "accepted": 4,
+        "regressions": {
+          "attempts": 1
+        },
+        "total_tokens": {
+          "total": 14478615,
+          "per_accepted": 3619653.75
+        },
+        "helper_calls_per_attempt": {
+          "median": 19.5,
+          "median_over_budget": 11.5
+        }
+      },
+      "notes": {
+        "accepted": 4,
+        "regressions": {
+          "attempts": 1
+        },
+        "total_tokens": {
+          "total": 3985657
+        }
+      },
+      "plain": {
+        "accepted": 4,
+        "regressions": {
+          "attempts": 6
+        },
+        "total_tokens": {
+          "total": 3620732
+        }
+      }
+    },
+    "decision": {
+      "complete": true,
+      "blockers": [],
+      "H1": true,
+      "H2": false,
+      "H0": false,
+      "pairs": {
+        "forge-lean>forge-state": true,
+        "forge-lean>notes": true,
+        "forge-lean>plain": true,
+        "forge-state>forge-lean": false,
+        "forge-state>notes": false,
+        "forge-state>plain": true,
+        "notes>forge-lean": false,
+        "notes>forge-state": false,
+        "notes>plain": true,
+        "plain>forge-lean": false,
+        "plain>forge-state": false,
+        "plain>notes": false
+      },
+      "forge_to_notes_tokens": 6.394596424127816,
+      "state_first": {
+        "H2": false,
+        "H3": false,
+        "criteria": {
+          "accepted": false,
+          "regressions": false,
+          "tokens_per_accepted": false,
+          "helper_calls": false
+        },
+        "state_to_notes_tokens": 3.632679630986811,
+        "state_to_lean_tokens_per_accepted": 0.7101072902114941,
+        "median_helper_calls": 19.5
+      }
+    }
+  }
+]

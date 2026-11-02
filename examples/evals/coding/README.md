@@ -1,11 +1,11 @@
 # Coding trials
 
-[Latest comparison](behavior-contract-results-2026-10-02.md): 36 attempts across
+[Latest comparison](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/coding/behavior-contract-results-2026-10-02.md): 36 attempts across
 four independently authored task families. Previous/new Forge accepted 8/12 each;
 plain Codex accepted 9/12. The separate preservation audit records valid final
 pairs, rebuilt histories and coverage limits; no overall quality gain is established.
-The [twelve-attempt follow-up](quality-followup-2026-10-02.md),
-[earlier sixteen-attempt experiment](quality-results-2026-10-02.md) and interruption
+The [twelve-attempt follow-up](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/coding/quality-followup-2026-10-02.md),
+[earlier sixteen-attempt experiment](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/coding/quality-results-2026-10-02.md) and interruption
 checks remain unchanged.
 
 ## Manifest-driven suites
@@ -386,12 +386,12 @@ statistically established speedup.
 
 Scope permits `.gitignore` entries only for local planning and generated Python/pytest caches; ignoring source or tests fails the trial.
 
-See the [2026-09-24 observations](results-2026-09-24.md) for repeated tasks across
+See the [2026-09-24 observations](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/coding/results-2026-09-24.md) for repeated tasks across
 all three depths, including failed and cancelled attempts and comparison limits.
 
 ### Controlled Forge/plain comparison
 
-[24 September controlled pilot](controlled-results-2026-09-24.md): lower observed input use, incomplete Forge outcomes, and independent review failures.
+[24 September controlled pilot](https://github.com/zagrosi-code/zagrosi-forge/blob/557c5be148189b659e6f146095a9328ed50e8728/examples/evals/coding/controlled-results-2026-09-24.md): lower observed input use, incomplete Forge outcomes, and independent review failures.
 
 The historical measurements use Codex CLI and do not cover Claude Code. The
 legacy adapter also supports Claude; new runs must report their own outcomes.
