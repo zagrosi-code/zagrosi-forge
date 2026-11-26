@@ -8,19 +8,9 @@ from pathlib import Path
 import re
 import subprocess
 
+from . import delivery_stages as stages
 from . import group_evidence, output, storage, team_state
 from .team_git import _REPOSITORY_ENV
-
-
-OUTCOMES = {
-    "review": {"approved", "changes_requested", "pending", "dismissed"},
-    "merge": {"merged", "open", "closed"},
-    "ci": {"passed", "failed", "skipped", "pending"},
-    "deploy": {"passed", "failed", "skipped", "pending"},
-    "live": {"passed", "failed", "skipped", "pending"},
-    "acceptance": {"accepted", "rejected", "pending", "skipped"},
-}
-ENV_STAGES = {"deploy", "live", "acceptance"}
 
 
 class Repository:
@@ -64,10 +54,6 @@ class Repository:
         return self.git("merge-base", "--is-ancestor", commit, tip, check=False).returncode == 0
 
 
-def _latest(events):
-    return max(reversed(events), key=lambda event: event["observed_at"], default=None)
-
-
 def _provenance(args):
     if not args.source.strip() or not args.actor.strip():
         raise ValueError("Identify the evidence source and the actor who produced it.")
@@ -90,7 +76,7 @@ def _parents(prs, key):
 
 
 def _identity(repo, row):
-    latest = _latest([e for e in row["observations"] if e["stage"] == "merge"])
+    latest = stages.latest([e for e in row["observations"] if e["stage"] == "merge"])
     if latest and latest["outcome"] == "merged":
         # Hosted PRs close on landing. A branch with the same name can later be reused.
         return {**latest["basis"], "merged_sha": latest["sha"]}
@@ -139,49 +125,14 @@ def _test_status(row, snapshot):
         groups.setdefault(key, []).append(test)
     checks = []
     for key in sorted(groups):
-        test = _latest(groups[key])
+        test = stages.latest(groups[key])
         changed = [field for field in snapshot if test["snapshot"].get(field) != snapshot[field]]
         status = "recheck" if changed else ("current" if test["outcome"] == "passed" else test["outcome"])
         checks.append({"status": status, "test": test, "changed": changed})
     statuses = {check["status"] for check in checks}
     summary = next((s for s in ("recheck", "failed", "timed_out", "skipped", "current") if s in statuses), "untested")
-    return {"status": summary, "test": _latest(row["tests"]), "checks": checks,
+    return {"status": summary, "test": stages.latest(row["tests"]), "checks": checks,
             "changed": sorted({field for check in checks for field in check["changed"]})}
-
-
-def _stages(row, snapshot, environment):
-    stages = {}
-    for stage in OUTCOMES:
-        scope = environment if stage in ENV_STAGES else None
-        events = [e for e in row["observations"] if e["stage"] == stage and e["environment"] == scope]
-        applicable = []
-        for event in events:
-            if stage == "merge":
-                matches = event["head_sha"] == snapshot["head_sha"]
-            elif stage == "review":
-                matches = event["sha"] == snapshot["head_sha"] and event["basis"] == _review_basis(snapshot)
-            elif stage == "ci":
-                if snapshot["merged_sha"]:
-                    matches = event["ref"] == snapshot["base_ref"] and event["sha"] == snapshot["merged_sha"]
-                else:
-                    matches = event["ref"] == snapshot["head_ref"] and event["basis"] == _review_basis(snapshot)
-            else:
-                matches = event["sha"] == (snapshot["merged_sha"] or snapshot["head_sha"])
-            if matches:
-                applicable.append(event)
-        current = _latest(applicable)
-        if current:
-            stages[stage] = current
-        elif last := _latest(events):
-            stages[stage] = {**last, "previous_outcome": last["outcome"], "outcome": "stale"}
-        else:
-            stages[stage] = {"outcome": "unknown"}
-    return stages
-
-
-def _review_basis(snapshot):
-    # Landing a PR preserves the approval on its source head. Upstream changes still invalidate it.
-    return {k: v for k, v in snapshot.items() if k != "merged_sha"}
 
 
 def _report(repo, prs, selected, environment, history):
@@ -191,11 +142,13 @@ def _report(repo, prs, selected, environment, history):
         row = prs[key]
         snapshot = _snapshot(prs, key, identities)
         head = snapshot["head_sha"]
+        environments = {e["environment"] for e in row["observations"] if e["environment"]}
+        environments.update(row.get("required_acceptance", {}))
         result[key] = {
             **snapshot, "pr": key, "parent": row["parent"], "expected_base_sha": row["expected_base_sha"],
             "base_tip_sha": repo.ref(row["base_ref"]), "tree_sha": repo.tree(head) if head else None, "verification": _test_status(row, snapshot),
-            "stages": _stages(row, snapshot, environment),
-            "environments": sorted({e["environment"] for e in row["observations"] if e["environment"]}),
+            "stages": stages.stage_report(row, snapshot, environment),
+            "environments": sorted(environments),
         }
         if history:
             result[key].update(tests=row["tests"], observations=row["observations"])
@@ -220,6 +173,9 @@ def _change(repo, prs, args):
         _parents(prs, key)
         return
     row = prs[key]
+    if args.delivery_action == "require":
+        stages.configure(row, args.stage, args.environment, args.name or [])
+        return
     snapshot = _snapshot(prs, key, cache(lambda pr: _identity(repo, prs[pr])))
     receipt = _provenance(args)
     if args.delivery_action == "test":
@@ -267,15 +223,17 @@ def _record_test(repo, row, snapshot, receipt, args):
 
 def _observe(repo, row, snapshot, receipt, args):
     stage = args.stage
-    if args.outcome not in OUTCOMES[stage]:
-        raise ValueError(f"Choose a {stage} outcome from {', '.join(sorted(OUTCOMES[stage]))}.")
+    if args.outcome not in stages.OUTCOMES[stage]:
+        raise ValueError(f"Choose a {stage} outcome from {', '.join(sorted(stages.OUTCOMES[stage]))}.")
     env = args.environment.strip() if args.environment else None
-    if (stage in ENV_STAGES) != bool(env):
+    if (stage in stages.ENV_STAGES) != bool(env):
         raise ValueError("Supply an environment for deploy, live and acceptance only.")
     sha = repo.commit(args.sha)
     if (stage == "merge") != bool(args.head_sha):
         raise ValueError("Supply --head-sha for merge observations only.")
     event = {**receipt, "stage": stage, "outcome": args.outcome, "environment": env, "sha": sha}
+    if args.name is not None:
+        event["name"] = stages.observation_name(row, stage, env, args.name)
     if (stage == "ci") != bool(args.ref):
         raise ValueError("Supply the run's --ref for CI observations only.")
     branch_ci = stage == "ci" and args.ref == row["head_ref"]
@@ -294,7 +252,7 @@ def _observe(repo, row, snapshot, receipt, args):
             except ValueError:
                 pass  # Retain prior or incomplete evidence, never bind it to this current stack.
             else:
-                event["basis"] = _review_basis(snapshot)
+                event["basis"] = stages.review_basis(snapshot)
     elif stage == "merge":
         source_head = repo.commit(args.head_sha)
         event["head_sha"] = source_head
@@ -311,7 +269,7 @@ def _observe(repo, row, snapshot, receipt, args):
                 base = repo.git("rev-parse", "--verify", sha + "^1").stdout.strip()
             if not repo.includes(sha, base):
                 raise ValueError("The pre-merge base must be an ancestor of the landing. Check --base-sha.")
-            event["basis"] = {**_review_basis(snapshot), "head_sha": source_head, "base_sha": base}
+            event["basis"] = {**stages.review_basis(snapshot), "head_sha": source_head, "base_sha": base}
     elif args.base_sha:
         raise ValueError("Use --base-sha only for review, PR CI or a merge.")
     row["observations"].append(event)
@@ -331,7 +289,8 @@ def _read(path):
 def run(args):
     try:
         repo = Repository(args.target_dir)
-        env = getattr(args, "environment", None)
+        environment = getattr(args, "environment", None)
+        env = environment.strip() if environment is not None else None
         if args.delivery_action == "status":
             prs = _read(repo.ledger)
             result = _report(repo, prs, args.pr, env, args.history)

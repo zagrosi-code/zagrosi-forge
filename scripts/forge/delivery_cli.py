@@ -7,6 +7,7 @@ def add_delivery_commands(sub, invoke_command):
     actions = parser.add_subparsers(dest="delivery_action", required=True)
     for name, help_text in (
         ("track", "Register or retarget a PR and its expected base."),
+        ("require", "Set the required CI checks or environment sign-offs."),
         ("test", "Record the exact checkout or CI merge tested."),
         ("observe", "Record one independent delivery observation."),
         ("status", "Compare current local refs with recorded evidence."),
@@ -20,6 +21,11 @@ def add_delivery_commands(sub, invoke_command):
             command.add_argument("--base-ref", required=True, help="Full local branch or remote-tracking ref.")
             command.add_argument("--expected-base", help="Full base commit observed when choosing these refs.")
             command.add_argument("--parent", help="Previously tracked parent PR. Omit for a stack root.")
+        if name == "require":
+            command.add_argument("--stage", choices=("ci", "acceptance"), required=True)
+            selection = command.add_mutually_exclusive_group(required=True)
+            selection.add_argument("--name", action="append", help="Required name. Repeat for the complete list.")
+            selection.add_argument("--clear", action="store_true", help="Remove requirements from this scope.")
         if name == "test":
             subject = command.add_mutually_exclusive_group(required=True)
             subject.add_argument("--tested-sha", help="Exact commit exercised by the cited external check.")
@@ -28,6 +34,7 @@ def add_delivery_commands(sub, invoke_command):
             command.add_argument("--outcome", choices=("passed", "failed", "skipped"), help="Manual result, default passed. Group reports supply their outcome.")
             command.add_argument("--check", help="Stable name for a manual check, default pr.")
         if name == "observe":
+            command.add_argument("--name", help="Required CI check or acceptance sign-off this observation covers.")
             command.add_argument("--stage", choices=("review", "merge", "ci", "deploy", "live", "acceptance"), required=True)
             command.add_argument("--outcome", required=True, help="Stage-specific outcome listed in docs/delivery.md.")
             command.add_argument("--sha", required=True, help="Exact observed commit (landing commit for a merge).")
@@ -38,7 +45,7 @@ def add_delivery_commands(sub, invoke_command):
             command.add_argument("--source", required=True, help="Evidence URL, file reference or other locator.")
             command.add_argument("--actor", required=True, help="Person or system that produced the observation.")
             command.add_argument("--observed-at", help="ISO 8601 timestamp with timezone, default now.")
-        if name in ("observe", "status"):
+        if name in ("require", "observe", "status"):
             command.add_argument("--environment", help="Named environment for deploy, live check and acceptance.")
         if name == "status":
             command.add_argument("--format", choices=("json", "markdown"), default="json")
