@@ -113,7 +113,7 @@ hosts. Stale tasks retain ownership. [Team setup and limits](docs/collaboration.
 
 [Section groups](docs/section-groups.md) verify a PR and hand it to another
 worktree. [Delivery status](docs/delivery.md) tracks stacked PRs, checks,
-deployment and acceptance. [Build reports](docs/build-measurements.md) show
+deployment and acceptance. [Try the runnable handoff](examples/release-handoff/README.md). [Build reports](docs/build-measurements.md) show
 verification time and available usage measurements.
 
 ## Workflows
