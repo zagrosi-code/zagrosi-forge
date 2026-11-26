@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePath, PureWindowsPath
 import re
 import subprocess
 
@@ -17,6 +17,10 @@ def _json_object(pairs) -> dict:
             raise ValueError(f"Compatibility JSON repeats {key!r}.")
         value[key] = item
     return value
+
+
+def _paths_overlap(first: PurePath, second: PurePath) -> bool:
+    return first.is_relative_to(second) or second.is_relative_to(first)
 
 
 def parse_declaration(text: str) -> dict | None:
@@ -60,24 +64,23 @@ def parse_declaration(text: str) -> dict | None:
         if len(set(normalized)) != len(paths) or any(Path(name).anchor or ".." in Path(name).parts or "\0" in name for name in paths):
             raise ValueError(f"Compatibility {field} must use distinct paths within the target directory.")
         value[field] = normalized
-    if any(Path(source).is_relative_to(Path(check)) or Path(check).is_relative_to(Path(source))
+    if any(_paths_overlap(Path(source), Path(check))
            for source in value["source_paths"] for check in value["check_paths"]):
         raise ValueError("Compatibility source and check paths must not overlap.")
     if "source_moves" in value:
         moves = value["source_moves"]
         if not isinstance(moves, dict) or not moves or not set(moves).issubset(value["source_paths"]):
             raise ValueError("Compatibility source moves must map declared originals to replacement files.")
-        inputs = [PureWindowsPath(path) for path in [*value["source_paths"], *value["check_paths"]]]
+        inputs = {name: PureWindowsPath(name) for name in [*value["source_paths"], *value["check_paths"]]}
         for old, new in moves.items():
             if (not isinstance(new, str) or not new or Path(new).as_posix() != new or "\\" in new
                     or PureWindowsPath(new).anchor or Path(new).anchor or ".." in Path(new).parts or "\0" in new):
                 raise ValueError("Compatibility source move destinations must be literal target-relative file paths.")
-            # Either end nested under another source or check would observe one move twice.
-            for path in inputs:
-                if (PureWindowsPath(new).is_relative_to(path) or path.is_relative_to(PureWindowsPath(new))
-                        or path != PureWindowsPath(old) and PureWindowsPath(old).is_relative_to(path)):
+            original, destination = inputs[old], PureWindowsPath(new)
+            for name, path in inputs.items():
+                if _paths_overlap(destination, path) or (name != old and _paths_overlap(original, path)):
                     raise ValueError("Compatibility source moves must have disjoint originals, destinations and checks.")
-            inputs.append(PureWindowsPath(new))
+            inputs[new] = destination
     return value
 
 
