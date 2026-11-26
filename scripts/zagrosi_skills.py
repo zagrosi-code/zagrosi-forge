@@ -204,7 +204,7 @@ RUNTIME_MANIFEST = {
     "forge/planning_snapshot.py": "4e38bb61e6c601cfdea492c1aa74e485792592f9b6594db58ce3fd2d3635d32e",
     "forge/planning_tools.py": "da9e40ad58022eb14561fcac28306ee4253dba299298c1f045d6e559c1eff5a5",
     "forge/plugin_cache.py": "78a040cf3839b0c9db92525d11fcfd208e6a548b5160a8572210fab0ff33d399",
-    "forge/policy.py": "4c60d45e722572d725e6e0c153a747b23ce907c061c47a9268f6541c665095d8",
+    "forge/policy.py": "735fa28c3ed8a1399bc8955d97f982c2fbfcc2b28a6d2bf857f9b76566e42e5f",
     "forge/processes.py": "c9dbfda15593d10f7904749252fe3bf05beb069cd3565a9a884ee52e2bd10e66",
     "forge/projects.py": "496988d203dc08dfcd96e0be894a4b7bee5b87848106ca84fa2b86c483c75dac",
     "forge/prompts.py": "98165c170b655fb72078c09d02e294f48f944d815385449d83abfd9fbae6e1eb",
