@@ -18,20 +18,25 @@ COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
 def _file_identity(path: Path) -> dict:
     """Hash a regular file in bounded memory and detect replacement or edits during the read."""
-    if not stat.S_ISREG(path.stat().st_mode):
+    source = path.stat()
+    if not stat.S_ISREG(source.st_mode):
         raise ValueError("The artifact must be a regular file.")
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     with os.fdopen(os.open(path, flags), "rb") as stream:
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise ValueError("The artifact must be a regular file.")
+        if not os.path.samestat(source, before):
+            raise ValueError("The artifact changed while opening it. Retry with a completed file.")
         checksum = hashlib.sha256()
         size = 0
         while chunk := stream.read(1024 * 1024):
             checksum.update(chunk)
             size += len(chunk)
-        after = path.stat()
-        if (not os.path.samestat(before, after) or before.st_size != after.st_size
+        current = path.stat()
+        # Windows path stat and fstat can use different clocks for ctime.
+        after = os.fstat(stream.fileno())
+        if (not os.path.samestat(before, current) or before.st_size != after.st_size
                 or before.st_mtime_ns != after.st_mtime_ns or before.st_ctime_ns != after.st_ctime_ns):
             raise ValueError("The artifact changed while it was being hashed. Retry with a completed file.")
     return {"kind": "file", "filename": path.name, "size_bytes": size, "digest": "sha256:" + checksum.hexdigest()}

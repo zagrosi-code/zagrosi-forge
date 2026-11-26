@@ -213,6 +213,44 @@ def test_concurrent_file_edit_fails_the_hash_observation(tmp_path, monkeypatch):
         artifacts._file_identity(package)
 
 
+def test_unchanged_file_with_different_path_and_handle_ctimes(tmp_path, monkeypatch):
+    package = tmp_path / 'package.zip'
+    package.write_bytes(b'original')
+    artifacts = load_zagrosi_module().delivery_artifacts
+    original_stat = Path.stat
+
+    def path_stat(path, **options):
+        info = original_stat(path, **options)
+        if path != package:
+            return info
+        # CPython 3.12 on Windows reports creation time here and change time on fstat.
+        return SimpleNamespace(st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino,
+                               st_size=info.st_size, st_mtime_ns=info.st_mtime_ns, st_ctime_ns=0)
+
+    monkeypatch.setattr(Path, 'stat', path_stat)
+    assert artifacts._file_identity(package)['digest'] == 'sha256:' + hashlib.sha256(b'original').hexdigest()
+
+
+def test_path_rebound_to_different_file_during_hashing(tmp_path, monkeypatch):
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    package = Path('package.zip')
+    for directory in (first, second):
+        directory.mkdir()
+        (directory / package).write_bytes(b'identical')
+    artifacts = load_zagrosi_module().delivery_artifacts
+    monkeypatch.chdir(first)
+    original_fstat = os.fstat
+
+    def rebind_after_open(fd):
+        # The relative pathname now selects another file, while the handle still reads the first.
+        monkeypatch.chdir(second)
+        return original_fstat(fd)
+
+    monkeypatch.setattr(os, 'fstat', rebind_after_open)
+    with pytest.raises(ValueError, match='changed'):
+        artifacts._file_identity(package)
+
+
 def test_byte_count_describes_the_stream_even_when_stat_reports_an_advisory_size(tmp_path, monkeypatch):
     # Some Linux virtual regular files report a placeholder size such as 0 or 4096.
     path = tmp_path / 'version'

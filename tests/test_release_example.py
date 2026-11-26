@@ -2,10 +2,23 @@
 import hashlib
 import json
 import os
+import runpy
 import subprocess
 import sys
 
+import pytest
+
 from forge_test_helpers import ROOT
+
+
+def test_walkthrough_preserves_artifact_verifier_errors(tmp_path):
+    script = ROOT / "examples" / "release-handoff" / "run.py"
+    forge = runpy.run_path(str(script))["forge"]
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Supply a successful delivery artifact record"):
+        forge(tmp_path, "delivery", "artifact", "verify", "--receipt", receipt,
+              "--file", tmp_path / "altered.zip", expected=1)
 
 
 def test_walkthrough_reproduces_handoff_and_recovery(tmp_path):

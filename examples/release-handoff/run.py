@@ -31,7 +31,10 @@ def git(repo, *args):
 
 
 def forge(repo, *args, expected=0):
-    return json.loads(invoke(repo, sys.executable, "-X", "utf8", LAUNCHER, *args, expected=expected))
+    result = json.loads(invoke(repo, sys.executable, "-X", "utf8", LAUNCHER, *args, expected=expected))
+    if result.get("error"):
+        raise RuntimeError(result["error"])
+    return result
 
 
 def save(path, document):
@@ -103,8 +106,8 @@ def verify_package(author, reviewer, directory, head):
     altered.parent.mkdir()
     with ZipFile(altered, "w") as archive:
         archive.writestr(ZipInfo("migration.sql"), b"SELECT 1;\n")
-    if forge(reviewer, *check, altered, expected=1)["matched"]:
-        raise RuntimeError("Unexpected match for altered ZIP.")
+    if forge(reviewer, *check, altered, expected=1).get("matched") is not False:
+        raise RuntimeError("The verifier did not report a mismatch for the altered ZIP.")
     print("Original ZIP verified. Altered ZIP rejected.")
 
 
