@@ -90,6 +90,11 @@ def test_windows_partitions_cover_linux_and_macos_once():
     assert "tests/test_native_process.py" not in selected["all"], "Native process tests must run only in their dedicated step"
     assert all(count == 1 for count in selected["all"].values())
     assert {
+        "tests/test_required_delivery.py", "tests/test_delivery_artifacts.py",
+        "tests/test_engineering_guidance.py", "tests/test_release_handoff.py",
+        "tests/test_release_example.py",
+    } <= selected["shared"].keys(), "Release and engineering coverage must run in the shared group"
+    assert {
         "tests/test_compatibility_checks.py", "tests/test_compatibility_workflows.py",
         "tests/test_compatibility_admission.py", "tests/test_heldout_contracts.py",
         "tests/test_team_state.py", "tests/test_team_git.py", "tests/test_team_config.py",
