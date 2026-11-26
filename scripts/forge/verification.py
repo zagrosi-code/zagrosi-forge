@@ -165,7 +165,10 @@ def implement_verify(args) -> int:
     planning = storage.resolve_path(args.planning_dir)
     from . import state_first
 
+    journey = getattr(args, "journey", None)
     if state_first.active(planning):
+        if journey is not None:
+            return output.print_json({"success": False, "error": "Named acceptance journeys require a section contract."}, 1)
         return state_first.finish(args, planning)
     target = mutable_inputs.target_directory(planning, getattr(args, "target_dir", None))
     command = args.command_argv[1:] if args.command_argv[:1] == ["--"] else args.command_argv
@@ -178,6 +181,8 @@ def implement_verify(args) -> int:
             raise ValueError("Provide an explicit command after --, or --source attestation|inspection with --outcome and --evidence.")
         if command and (args.outcome or args.evidence):
             raise ValueError("Captured execution determines its own outcome; omit --outcome and --evidence.")
+        if journey is not None and (not args.section or args.integration or args.stage or not command):
+            raise ValueError("A journey needs one section and an explicit check command.")
         if getattr(args, "stage", None) and (not args.section or args.integration or not command):
             raise ValueError("Compatibility stages require --section and explicit argv; omit --integration and manual evidence.")
         total = getattr(args, "allowance_seconds", None)
@@ -198,6 +203,15 @@ def implement_verify(args) -> int:
             before = mutable_inputs.verification_snapshot(planning, target, args.section)
             path = receipt_path(planning, args.section)
             receipts = {path: before}
+            identity = {}
+            if journey is not None:
+                from . import journeys
+
+                cases = journeys.for_section(planning, args.section)
+                if journey not in cases or cases[journey]["argv"] != command:
+                    raise ValueError("Journey ID and explicit command must match the section declaration.")
+                receipts[journeys.receipt_path(planning, args.section, journey)] = before
+                identity = {"journey": journey, "command": command}
             if args.integration and args.section:
                 receipts[receipt_path(planning)] = {**before, "section": None}
             allowance = verification_allowance.Allowance(planning, target, total) if command else None
@@ -206,7 +220,7 @@ def implement_verify(args) -> int:
                 _archive_receipts(planning, receipts)
                 for destination, snapshot in receipts.items():
                     storage.write_json(destination, {"version": 1, "source": "captured" if command else args.source,
-                                                     "outcome": "pending", "snapshot": snapshot})
+                                                     "outcome": "pending", "snapshot": snapshot, **identity})
                 if command:
                     mutable_inputs.prepared_contract(planning, target)
             if command:
@@ -220,7 +234,7 @@ def implement_verify(args) -> int:
             else:
                 result = {"source": args.source, "outcome": args.outcome,
                           "evidence": markdown.normalize_repeated(args.evidence)}
-            result.update(version=1, completed_at=storage.now_iso(), snapshot=before)
+            result.update(version=1, completed_at=storage.now_iso(), snapshot=before, **identity)
             error, changed = _receipt_status(result, planning, target, args.section)
             error = result.get("error") or error
             if error and result["outcome"] == "passed":

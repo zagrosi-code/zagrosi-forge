@@ -229,8 +229,16 @@ def completion_evidence_findings(planning_dir: Path, section: str, record: Any, 
         findings.append(_quality.finding("high", "missing-review-status", f"{section} lacks a passing review verdict.", path))
     if verification_error:
         findings.append(_quality.finding("high", "missing-verification", f"{section}: {verification_error}", path))
-    from . import compatibility, mutable_inputs
+    from . import compatibility, journeys, mutable_inputs
 
+    section_file = planning_dir / "sections" / f"{section}.md"
+    if section_file.is_file():
+        try:
+            journey_error = journeys.record_error(_storage.read_text(section_file), record.get("journeys"))
+        except (ValueError, OSError) as exc:
+            journey_error = str(exc)
+        if journey_error:
+            findings.append(_quality.finding("high", "invalid-journey-evidence", journey_error, path))
     compatibility_error = compatibility.evidence_error(
         planning_dir, mutable_inputs.target_directory(planning_dir, target_dir), section, record.get("compatibility"),
     )

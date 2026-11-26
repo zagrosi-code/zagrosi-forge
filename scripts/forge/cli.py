@@ -159,6 +159,12 @@ def add_plan_commands(sub: argparse._SubParsersAction) -> None:
     add_quality_args(p)
     p.set_defaults(func=invoke_command, handler=('traceability', 'traceability'))
 
+    p = sub.add_parser("journey-status", help="Show the current evidence for each acceptance journey.")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--target-dir")
+    p.add_argument("--section", required=True)
+    p.set_defaults(func=invoke_command, handler=("journeys", "status"))
+
     p = sub.add_parser("section-estimates")
     p.add_argument("--planning-dir", required=True)
     p.set_defaults(func=invoke_command, handler=('scheduling', 'section_estimates'))
@@ -275,6 +281,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--target-dir")
     p.add_argument("--section", help="Omit for the required final integration receipt.")
+    p.add_argument("--journey", help="Capture one declared acceptance journey with its explicit check argv.")
     p.add_argument("--stage", choices=["baseline", "candidate"], help="Capture the declared caller checks before or after source changes.")
     p.add_argument("--integration", action="store_true", help="With --section, also record final integration from this same full-suite run.")
     p.add_argument("--timeout", type=float, default=540, help="Seconds before the check stops; the default stays under 10-minute host command limits.")

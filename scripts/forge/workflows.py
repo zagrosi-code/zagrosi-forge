@@ -439,6 +439,10 @@ def _mutable_record_section(args: argparse.Namespace) -> int:
             files=_markdown.normalize_repeated(args.files_changed + args.test_files),
         ),
     }
+    from . import journeys
+
+    if cases := journeys.completion(planning_dir, target_dir, args.section):
+        section_record["journeys"] = cases
     findings = _state.completion_evidence_findings(planning_dir, args.section, section_record, target_dir=target_dir)
     if findings:
         return _output.print_json({
