@@ -524,6 +524,14 @@ def add_utility_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--write", action="store_true")
     p.set_defaults(func=invoke_command, handler=('evidence', 'codebase_evidence'))
 
+    p = sub.add_parser("build-report", help="Summarize recorded checks, review rounds and model usage.")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--section", action="append", default=[], help="Limit reporting to this section (repeatable).")
+    p.add_argument("--group", action="append", default=[], metavar="HANDOFF", help="Select a section-group handoff or verification.")
+    p.add_argument("--usage", nargs=2, action="append", default=[], metavar=("SECTION", "FILE"))
+    p.add_argument("--review", nargs=2, action="append", default=[], metavar=("SECTION", "FILE"))
+    p.set_defaults(func=invoke_command, handler=('build_measurements', 'run'))
+
     p = sub.add_parser("report")
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--depth", choices=sorted(_policy.DEPTH_MODES), default=_policy.DEFAULT_DEPTH)

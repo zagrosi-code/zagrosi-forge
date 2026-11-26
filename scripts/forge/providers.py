@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import uuid
 
 from .child_process import execute
 from .output import print_json
@@ -138,6 +139,7 @@ def provider_review(args: argparse.Namespace) -> int:
             workspace = Path(directory)
             argv = review_command(args.provider, args.model, workspace, args.adapter)
             result = execute(argv, workspace, prompt=prompt, timeout=args.timeout, output_limit=OUTPUT_LIMIT)
+        report["review_id"] = uuid.uuid4().hex
         report.update({key: result[key] for key in ("returncode", "seconds", "timed_out")})
         if result.get("termination_error"):
             report["termination_error"] = "".join(char for char in str(result["termination_error"]) if char.isprintable())[:512]

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import contextmanager, nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import stat
 import subprocess
+import uuid
 
 from . import markdown, mutable_inputs, output, storage, verification_allowance
 
@@ -147,8 +149,11 @@ def integration_report(planning_dir: Path, target_dir: Path) -> dict:
 def _capture(command: list[str], target: Path, timeout: float) -> dict:
     from .child_process import execute
 
+    started = datetime.now(timezone.utc)
     result = execute(command, target, timeout=timeout, output_limit=2000)
-    return {"source": "captured", "command": command, "exit_code": result["returncode"],
+    return {"source": "captured", "run_id": uuid.uuid4().hex,
+            "started_at": started.isoformat(), "finished_at": datetime.now(timezone.utc).isoformat(),
+            "command": command, "exit_code": result["returncode"],
             "outcome": "timed_out" if result["timed_out"] else "passed" if result["returncode"] == 0 else "failed",
             "stdout_tail": result["stdout"], "stderr_tail": result["stderr"],
             **{key: result[key] for key in ("seconds", "stdout_bytes", "stderr_bytes", "stdout_truncated", "stderr_truncated", "termination_error") if key in result}}
