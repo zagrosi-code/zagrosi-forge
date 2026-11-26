@@ -153,4 +153,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if not sys.stdout.isatty():
+        sys.stdout.reconfigure(encoding="utf-8")
     main()

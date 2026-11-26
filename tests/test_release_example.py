@@ -22,14 +22,15 @@ def test_walkthrough_reproduces_handoff_and_recovery(tmp_path):
     gitdir = other / ".git"
     protected = [gitdir / name for name in ("config", "index", "HEAD", "refs/heads/main")]
     before = [path.read_bytes() for path in protected]
-    env = {**os.environ, "GIT_DIR": str(gitdir), "GIT_WORK_TREE": str(other),
+    env = {**os.environ, "PYTHONIOENCODING": "ascii", "GIT_DIR": str(gitdir), "GIT_WORK_TREE": str(other),
            "GIT_INDEX_FILE": str(gitdir / "index"), "GIT_COMMON_DIR": str(gitdir)}
-    run = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    run = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, encoding="utf-8", timeout=120)
     assert before == [path.read_bytes() for path in protected]
     assert subprocess.check_output(["git", "-C", str(other), "branch", "--format=%(refname:short)"],
                                    text=True).splitlines() == ["main"]
     assert run.returncode == 0, run.stdout + run.stderr
     initial_summary = (out / "initial.md").read_text(encoding="utf-8")
+    assert initial_summary in run.stdout
     assert "  - `schema` — passed" in initial_summary.splitlines()
     assert "  - `migration` — missing" in initial_summary.splitlines()
     stale_summary = (out / "stale.md").read_text(encoding="utf-8")
