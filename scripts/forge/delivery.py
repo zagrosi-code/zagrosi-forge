@@ -35,7 +35,7 @@ class Repository:
     def git(self, *args, check=True):
         result = subprocess.run(
             ["git", "--no-optional-locks", "--no-replace-objects", *args], cwd=self.target,
-            capture_output=True, text=True, env=self.env,
+            capture_output=True, encoding="utf-8", errors="surrogateescape", env=self.env,
         )
         if check and result.returncode:
             raise ValueError(result.stderr.strip() or f"Git could not read {args[0]}.")

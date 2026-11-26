@@ -292,3 +292,21 @@ def test_late_group_import_uses_observed_finish_time(stack, tmp_path):
     assert row["status"] == "current" and row["test"]["group"]["run_id"] == "a" * 32
     assert row["test"]["observed_at"].startswith("2026-10-02T10:00:01")
     assert call("test", *args, "--observed-at", "2026-11-01T01:02:03Z", ok=False)["error"]
+
+
+def test_non_ascii_checkout_uses_the_real_git_common_directory(stack, tmp_path, monkeypatch):
+    repo, call, *_ = stack
+    moved = tmp_path / 'café µ'
+    repo.rename(moved)
+    # Git emits UTF-8 paths even when Windows defaults redirected text to cp1252.
+    run = subprocess.run
+    def windows_pipe_encoding(*args, **kwargs):
+        if kwargs.get('text'):
+            kwargs.setdefault('encoding', 'cp1252')
+        return run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', windows_pipe_encoding)
+    call('track', '--pr', 'unicode-path', '--head-ref', 'refs/heads/child',
+         '--base-ref', 'refs/heads/main', target=moved)
+    ledger = json.loads((moved / '.git' / 'forge-delivery.json').read_text(encoding='utf-8'))
+    assert 'unicode-path' in ledger['prs']
