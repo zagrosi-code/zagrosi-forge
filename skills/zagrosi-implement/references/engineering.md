@@ -12,6 +12,50 @@ operations separate when their ordering, failure behavior or reasons to change
 differ. Use existing code, native or standard-library facilities, then installed
 dependencies. Introduce an interface when a concrete caller needs the boundary.
 
+## Dependency versions
+
+Start with the latest stable release of each direct dependency the change adds,
+updates or builds on, including development tools and compilers. Check the
+project's configured package registry or upstream release metadata when making
+the choice. Record the source, version and date checked in the existing plan or
+review. Read the upstream migration notes for breaking changes between the
+installed and proposed versions. A documented minimum is a compatibility floor.
+Keep it if the public API still supports it, and test that floor when affected.
+
+Check runtime support, peer ranges and the APIs used by callers. Prefer the
+newest compatible stable version. If a supported runtime, peer, reproducible bug
+or explicit pin excludes a newer release, name the constraint, the chosen
+version and what would allow the upgrade. Use a prerelease only by explicit
+opt-in. When upstream is unavailable, identify the cached evidence and mark
+current freshness unverified.
+
+Use the repository's package manager, manifest conventions and lockfile policy.
+Resolve the scoped change, review the lockfile diff, and verify the actual
+installed version with the affected build or tests. Keep unrelated updates out
+of the diff. A floating tag or a successful install alone cannot establish which
+API the code exercised.
+
+For example, suppose a build uses `example-linter`. In this fixture, the
+registry lists 3.2.0 as stable, requiring Node 22, and 4.0.0-rc.1 as a preview.
+The project's supported Node 20 runtime makes 2.9.1 its newest compatible stable
+release. If the project's minimum rises to Node 22, evaluate the 3.x migration
+and run the lint fixtures with 3.2.0. For an npm v3 lockfile, run this read-only
+Node probe at the project root to compare the declared range, locked selection
+and installed copy.
+
+```javascript
+const name = 'example-linter';
+const declared = require('./package.json').devDependencies[name];
+const locked = require('./package-lock.json').packages[`node_modules/${name}`].version;
+const installed = require(`./node_modules/${name}/package.json`).version;
+console.log(JSON.stringify({declared, locked, installed}));
+```
+
+Seeing `^2.3.0`, `2.9.1` and `2.5.0` means a passing local lint run exercised
+2.5.0. Restore the locked install and rerun the build before reporting 2.9.1.
+
+## Behavior and compatibility
+
 Address encountered bad code, mixed responsibilities, and oversized modules in
 the task's execution path. Fix shared causes once. Plan substantive cleanup with
 the feature; implement it without extra permission when already authorized. If

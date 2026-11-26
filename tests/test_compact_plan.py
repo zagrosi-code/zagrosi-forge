@@ -240,6 +240,7 @@ def test_canonical_section_prompts_include_budget_format_and_engineering(forge, 
     assert str(ROOT / "skills/zagrosi-plan/references/section-format.md") in text
     assert all(f"## {heading}" in text for heading in ("Evidence", "Decisions", "Review"))
     assert "Reviewed:" in text
+    assert "latest stable" in text and "to the planner" in text
     assert forge.markdown.word_count(text) <= 300
 
 
@@ -249,7 +250,19 @@ def test_agent_prompts_link_the_engineering_standard(forge, tmp_path, capsys):
     for path in payload["prompt_files"]:
         text = Path(path).read_text()
         assert str(ROOT / "skills/zagrosi-implement/references/engineering.md") in text
+        assert "Use only evidence from the repository and named planning artifacts" in text
+        if Path(path).stem == "section-writer":
+            assert "latest stable" in text and "to the planner" in text
         assert forge.markdown.word_count(text) <= 300
+
+
+def test_deep_review_board_shares_dependency_evidence_once(forge, tmp_path, capsys):
+    code, payload = invoke(forge, capsys, "review-board-prompts", "--planning-dir", str(tmp_path))
+    assert code == 0, payload
+    context = Path(payload["shared_prompt"]).read_text()
+    assert "supplied release evidence" in context and "latest stable" in context
+    assert all("Read `context.md`" in Path(path).read_text() for path in payload["prompt_files"])
+    assert forge.markdown.word_count(context) <= 300
 
 
 @pytest.mark.parametrize("source_name", ["spec.md", "custom-source.md"])

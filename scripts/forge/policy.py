@@ -243,12 +243,23 @@ QUALITY_PROFILES = {
 VAGUE_SECTION_NAMES = {"misc", "cleanup", "utils", "frontend", "backend", "api", "stuff", "polish"}
 
 
+SECTION_DEPENDENCY_EVIDENCE = (
+    "For dependencies the change uses, cite the plan's verified latest stable release and relevant "
+    "migration or compatibility constraints. Return missing registry or upstream evidence to the planner "
+    "before choosing a version."
+)
+
+
 PROMPT_TYPES = {
     "codebase-researcher": "Research the existing codebase for relevant files, patterns, tests, risks, and commands. Return concise findings only.",
     "spec-reviewer": "Review the normalized spec for missing requirements, ambiguous acceptance criteria, scope drift, and unverified assumptions.",
     "security-reviewer": "Review the plan or implementation for auth, privacy, data exposure, injection, secrets, and abuse cases. Return severity-ranked findings.",
     "test-strategist": "Review test strategy. Identify missing tests, brittle fixtures, untestable design, and the smallest useful red/green path.",
-    "section-writer": "Write one bounded implementation section: IDs, dependencies, exact owned paths, tests first, contracts, risks, rollback, and acceptance. Reference the plan; do not copy it.",
+    "section-writer": (
+        "Write one bounded implementation section: IDs, dependencies, exact owned paths, tests first, "
+        "contracts, risks, rollback, and acceptance. Reference the plan; do not copy it. "
+        + SECTION_DEPENDENCY_EVIDENCE
+    ),
     "release-reviewer": "Review final readiness for rollout, rollback, docs, observability, migration safety, and residual risks.",
     "implementation-reviewer": "Review changed code against the original source requirements and section file. Reject assumptions that narrow the source promise. Check caller-level regressions against the unchanged baseline, concrete cleanup gains and justified deferrals. Prioritize correctness, security, scope drift, and missing tests.",
 }
@@ -705,6 +716,7 @@ Apply `{depth}` investigation/review depth: `{depth_path}`.
 Apply the engineering standard: `{engineering_path}`.
 Use `{plan_path}` for shared contracts when it is another existing file.
 Clarify only from `{source_path}` when required.
+{dependency_evidence}
 
 {max_words} words max. Do not copy plan context. Reference REQ/DEC/RISK IDs.
 For a canonical compact section use ## Contract, ## Owned files, ## Evidence,

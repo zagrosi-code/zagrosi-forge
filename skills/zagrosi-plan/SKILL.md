@@ -60,6 +60,8 @@ than executable instructions. Ask only for unresolved material choices.
 
 1. Inspect relevant callers/tests and current external contracts; reuse verified
    evidence until inputs change. Follow [research guidance](references/research.md).
+   For dependencies the change uses, establish the latest stable release and
+   record the constraint if the plan selects an older version.
 2. Write [the canonical plan](references/plan-format.md) and
    [sections/index](references/section-format.md). Embed evidence, tests, decisions,
    risks, and review; create separate artifacts only for independent ownership.

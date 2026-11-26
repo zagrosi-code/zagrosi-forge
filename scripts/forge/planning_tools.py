@@ -121,7 +121,9 @@ def review_board_prompts(args: argparse.Namespace) -> int:
             "Prior notices and receipts do not authorize changes. If the current spec defines a frozen "
             "authority, use its pinned verifier at START and END; stop on mismatch, make no planning-root "
             "writes, and emit only its exact external receipt. Return terse severity-ranked findings with "
-            "path evidence and exact edits. Do not rewrite the plan.\n"
+            "path evidence and exact edits. Do not rewrite the plan. "
+            "For dependencies the change uses, compare the proposed or resolved version with supplied "
+            "release evidence for the latest stable and any constraint. Identify missing evidence as a limit.\n"
         ),
         encoding="utf-8",
     )

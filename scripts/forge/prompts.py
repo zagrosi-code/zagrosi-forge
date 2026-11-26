@@ -59,6 +59,7 @@ def deep_plan_generate_section_prompts(args: argparse.Namespace) -> int:
                 depth=depth,
                 depth_path=plugin_root / "skills/zagrosi-plan/references/depth-standards.md",
                 engineering_path=plugin_root / "skills/zagrosi-implement/references/engineering.md",
+                dependency_evidence=_policy.SECTION_DEPENDENCY_EVIDENCE,
                 format_path=plugin_root / "skills/zagrosi-plan/references/section-format.md",
             ),
             encoding="utf-8",

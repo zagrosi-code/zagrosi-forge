@@ -41,6 +41,10 @@ If an input is missing, review what you can and name the gap under Limits.
 - Performance. For a hot path, name the workload and the operation that scales.
   Check the evidence for changes in calls, time or memory and identify an
   input that distinguishes the proposed fix. Preserve ordering and freshness.
+- Dependencies. Compare the resolved version with the cited latest stable release.
+  Check the reason for an older pin against runtime and peer constraints, and
+  look for a test of the API the change uses. Identify missing release evidence
+  under Limits.
 
 Use the [engineering standard](../skills/zagrosi-implement/references/engineering.md)
 for concrete examples of shared ownership and measurement.

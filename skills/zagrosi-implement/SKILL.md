@@ -76,8 +76,8 @@ authorization. Keep fresh evidence reusable and unfinished checks visible.
    result before source edits with `implement-progress --planning-dir "{planning_dir}" --section
    "{section}" --stage red --command "{test command}" --result "{observed failure}"`.
    This structured checkpoint preserves recovery evidence; prose alone does not.
-3. Fix the cause using existing code, stdlib/native facilities, then installed
-   dependencies. Prefer direct functions; reject speculative layers/configuration.
+3. Reuse existing code and native facilities. For dependencies, verify the latest
+   stable and the resolved version. Prefer direct functions and avoid speculative layers.
    Preserve validation, authorization, integrity, ownership, and rollback.
 4. Capture targeted checks with `implement-verify --planning-dir "{planning_dir}"
    --target-dir "{target_dir}" --section "{section}" -- <command argv>`.
