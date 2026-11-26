@@ -60,6 +60,7 @@ def test_group_handoff(forge, repositories, capsys, tmp_path):
     code, verified = call(forge, capsys, 'section-group', 'verify', *flags, '--', sys.executable, '-c',
                           'from pathlib import Path; assert Path("README.md").read_text() == "Example\\n"')
     assert code == 0 and verified['verification']['returncode'] == 0, verified
+    assert verified['verification']['started_at'] <= verified['verification']['finished_at']
     assert verified['handoff']['tree_sha'] == git(other, 'rev-parse', 'HEAD^{tree}').stdout.strip()
     code, mutated = call(forge, capsys, 'section-group', 'verify', *flags, '--', sys.executable, '-c',
                          'from pathlib import Path; Path("README.md").write_text("changed")')

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import re
 import os
 from pathlib import Path
@@ -168,13 +169,16 @@ def verify(repo, identity, argv, timeout):
         _check_snapshot(clone, identity['commit_sha'])
         env = {key: value for key, value in os.environ.items() if key not in team_git._REPOSITORY_ENV}
         env['GIT_NO_REPLACE_OBJECTS'] = '1'
+        started_at = datetime.now(timezone.utc).isoformat()
         observed = child_process.execute(argv, clone / identity['target_path'], timeout=timeout,
                                          inherit_env=False, env=env)
+        finished_at = datetime.now(timezone.utc).isoformat()
         try:
             _check_snapshot(clone, identity['commit_sha'])
         except team_state.TeamError as exc:
             observed['snapshot_error'] = str(exc)
-        return {'run_id': uuid.uuid4().hex, 'command': argv, **observed}
+        return {'run_id': uuid.uuid4().hex, 'command': argv, 'started_at': started_at,
+                'finished_at': finished_at, **observed}
 
 
 def run(args):
