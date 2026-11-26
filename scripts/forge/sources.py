@@ -48,7 +48,7 @@ TEST_MANIFEST = {
     "test_context_usability.py": "9c58ff5e03b58c7a305060e2db00289755208bbe3e117c2d227c575bc791f1e0",
     "test_controlled_trials.py": "91e9f91bc55a4601c7ae1db5ccd362a19764a035528957435af0625c839493ed",
     "test_cross_host_resume.py": "b4308e20b080cb61bbce8f2a569104d7d26a0217de734630f9c2847ee1e62958",
-    "test_delivery.py": "399be7d7fa02385ff2a3fe4d50a83e0881e48804873e2ad84977b6e6c69d209b",
+    "test_delivery.py": "99f42fd0f835506fa62161d3f39bddc70c7ca0454a51ebcdc36415227a4248b3",
     "test_delivery_workflow.py": "60cfc74daca7546ee5914d5a78334a1d5c28b0b86664f1fb57ed9af553a6d77a",
     "test_detached_authorities.py": "9df8993eebb931d4211201f4d2d1b76fc5f35f64e147dcb7aeb4d087d8b47d3b",
     "test_detached_dependencies.py": "8fb4070e2a9507c0d3248b0e047525cb35728bd08be846584fbc7339828f1878",
