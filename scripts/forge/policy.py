@@ -278,6 +278,26 @@ EVIDENCE_IGNORE_PARTS = {
 
 COMMAND_CATALOG = [
     {
+        "name": "section-group", "phase": "implement",
+        "summary": "Verify and hand over selected plan sections on a fixed Git tree.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py section-group create --help"],
+    },
+    {
+        "name": "delivery", "phase": "implement",
+        "summary": "Inspect PR dependencies and record revision-specific delivery outcomes.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py delivery status --pr 2"],
+    },
+    {
+        "name": "journey-status", "phase": "implement",
+        "summary": "Inspect current captured checks for declared stakeholder journeys.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py journey-status --planning-dir planning/import --section section-01-import"],
+    },
+    {
+        "name": "build-report", "phase": "utility",
+        "summary": "Report measured work and missing observations by section or pull request.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py build-report --help"],
+    },
+    {
         "name": "team", "phase": "utility",
         "summary": "Coordinate tasks and shared plans across engineers and Git clones.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py team status"],
