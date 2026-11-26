@@ -95,8 +95,14 @@ def _accept_pending(context, snapshot):
                         raise
                     binding_unsaved = True
                 else:
+                    # A narrowed group supersedes the actor's previous local scope.
+                    checkout["bindings"] = {
+                        key: value for key, value in checkout["bindings"].items()
+                        if value["session_id"] != identity or ("sections" not in pending and "sections" not in value)
+                    }
                     checkout["bindings"][pending["binding"]] = {
-                        "session_id": identity, "generation": pending["generation"]}
+                        "session_id": identity, "generation": pending["generation"],
+                        **({"sections": pending["sections"]} if "sections" in pending else {})}
     _cache(context, snapshot)
     if binding_unsaved:
         raise TeamError("team-local-capacity", "Publication confirmed and ownership saved, but the new plan binding did not fit. Existing bindings were retained; finish retained work before adding another binding.",
@@ -237,7 +243,7 @@ def _result(context, pending):
 
 def mutate(context, action, *, identity=None, generation=None, paths=None, binding=None,
            task=None, host=None, state=None, note=None, expect=None, reason=None, plan=_KEEP_PLAN,
-           upgrade_protocol=False, dependencies=_KEEP_DEPENDENCIES):
+           upgrade_protocol=False, dependencies=_KEEP_DEPENDENCIES, binding_sections=None):
     if context["checkout"].get("pending"):
         raise TeamError("team-pending-write", "A previous publication is unresolved; run team retry before another mutation.")
     if upgrade_protocol or (action in {"start", "update"} and expect is not None):
@@ -306,6 +312,9 @@ def mutate(context, action, *, identity=None, generation=None, paths=None, bindi
         if action != "finish":
             context["local"].require_capacity(context["checkout"], identity, binding)
         pending = {"action": action, "session_id": identity, "generation": token, "binding": binding}
+
+        if binding_sections is not None:
+            pending["sections"] = binding_sections
 
         def remember(receipt):
             context["checkout"]["pending"] = {**pending, **receipt}

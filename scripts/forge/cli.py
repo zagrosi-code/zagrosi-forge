@@ -580,7 +580,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_plan_commands(sub)
     add_implement_commands(sub)
     add_utility_commands(sub)
+    from .section_groups import add_commands as add_section_groups
     add_team_commands(sub, invoke_command)
+    add_section_groups(sub, invoke_command)
     return parser
 
 

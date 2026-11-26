@@ -38,7 +38,9 @@ def add_team_commands(sub, invoke_command):
         if action in {"start", "update", "check"}:
             command.add_argument("--path", action="append")
             command.add_argument("--planning-dir")
-            command.add_argument("--section")
+            selection = command.add_mutually_exclusive_group()
+            selection.add_argument("--section")
+            selection.add_argument("--sections", nargs="+", help="Reserve the union of these sections.")
         if action == "prepare":
             command.add_argument("--planning-dir", required=True)
         if action == "start":
@@ -59,7 +61,7 @@ def add_team_commands(sub, invoke_command):
 
 
 def _dispatch(args):
-    from . import team
+    from . import team, team_workflow
     from .team_state import TeamError
     from .team_workflow import _binding_scope, _check_dependencies, _declared_dependencies, _plan_scope
 
@@ -87,37 +89,45 @@ def _dispatch(args):
             return team.retry(context)
         paths, binding = getattr(args, "path", None), None
         plan_fields, contracts = {}, {}
-        if getattr(args, "section", None) and not args.planning_dir:
+        selected = getattr(args, "section", None)
+        if getattr(args, "sections", None):
+            selected = team_workflow.group_selection(args.sections)
+        if selected and not args.planning_dir:
             raise TeamError("team-invalid-plan", "A section selector requires --planning-dir.")
         if getattr(args, "planning_dir", None):
             from . import team_plans
 
             prepared = team_plans.validate(Path(args.planning_dir), Path(args.target_dir))
             binding, declared = _plan_scope(Path(args.planning_dir), Path(args.target_dir), context["repo"].root,
-                                            args.section, prepared=prepared, contracts=contracts)
+                                            selected, prepared=prepared, contracts=contracts)
             paths = sorted(set((paths or []) + declared))
-            plan_fields["plan"] = {**prepared, "section": args.section} if prepared is not None else None
+            plan_fields["plan"] = {**prepared, "section": team_workflow.board_section(selected)} if prepared is not None else None
         if action == "check":
             result = team.check(context, args.session, generation=args.generation, paths=paths or [])
             if plan_fields.get("plan") is not None:
                 current, expected = result["session"].get("plan"), plan_fields["plan"]
                 if current not in (expected, {**expected, "section": None}):
                     raise TeamError("team-plan-binding", "Bind this prepared plan revision before continuing.")
+            if contracts:
+                planning, target = Path(args.planning_dir), Path(args.target_dir)
+                actor = (args.session, args.generation)
+                bindings = context["checkout"].get("bindings", {})
+                bound, bound_section = _binding_scope(planning, target, selected, bindings, actor=actor)
+                grouped = any("sections" in value and (value["session_id"], value["generation"]) == actor
+                              for value in bindings.values())
+                if bound is None and (grouped or isinstance(selected, list)):
+                    raise TeamError("team-plan-binding", "The requested sections are outside the bound group.")
             if contracts and result["protocol_version"] == 2:
                 from . import actions
 
-                planning, target = Path(args.planning_dir), Path(args.target_dir)
-                _, bound_section = _binding_scope(planning, target, args.section,
-                                                  context["checkout"].get("bindings", {}),
-                                                  actor=(args.session, args.generation))
-                if args.section is not None and bound_section is None:
-                    _plan_scope(planning, target, context["repo"].root, None,
+                if selected is not None and selected != bound_section:
+                    _plan_scope(planning, target, context["repo"].root, bound_section,
                                 prepared=prepared, contracts=contracts)
                 try:
                     _check_dependencies(result["session"],
                                         _declared_dependencies(contracts, target, context["repo"].root))
                 except TeamError as exc:
-                    selection = ["--section", bound_section] if bound_section else []
+                    selection = team_workflow.selector_args(bound_section)
                     command = actions.command("team", "update", "--target-dir", str(target),
                                               "--session", args.session, "--generation", args.generation,
                                               "--planning-dir", str(planning), *selection)
@@ -133,6 +143,8 @@ def _dispatch(args):
                     contracts, Path(args.target_dir), context["repo"].root)
         fields = {key: getattr(args, key) for key in ("generation", "task", "host", "state", "note", "expect", "reason", "upgrade_protocol")
                   if hasattr(args, key)}
+        if isinstance(selected, list):
+            plan_fields["binding_sections"] = selected
         return team.mutate(context, action, identity=getattr(args, "session", None), paths=paths,
                            binding=binding, **plan_fields, **fields)
 
