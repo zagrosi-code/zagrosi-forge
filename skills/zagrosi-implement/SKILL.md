@@ -21,9 +21,9 @@ Follow [team coordination](../zagrosi-forge/references/collaboration.md) when co
 reuse the same task across phases and delegated agents.
 
 Use the least process that preserves correctness. Apply the all-depth
-[engineering standard](references/engineering.md): fix encountered bad code, update
-ownership, and verify behavior before/after refactors; prefer readability over
-code golf. Read the admitted plan's depth;
+[engineering standard](references/engineering.md). Keep control flow readable,
+reuse shared behavior with its caller contracts, and measure performance claims.
+Read the admitted plan's depth;
 use it as `{depth}` throughout. Require `sections/index.md`; its parent is
 `planning_dir`; `target_dir` defaults to the repo. A state-first plan (`status.json`
 beside `plan.md`) follows [state-first](references/state-first.md) instead.

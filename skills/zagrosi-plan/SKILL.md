@@ -22,8 +22,9 @@ reuse the same task across phases and delegated agents.
 
 Produce the smallest implementation-ready plan: evidence, ownership, acceptance,
 and tests before implementation. Apply the all-depth
-[engineering standard](../zagrosi-implement/references/engineering.md): trace callers,
-plan root-cause repairs and cohesive modules, and update ownership.
+[engineering standard](../zagrosi-implement/references/engineering.md). Trace callers,
+choose the owner of shared behavior, and identify the workload and observable
+cost when performance drives the design.
 Depth is `lean` by default; honor requested
 `standard`/`deep` using [depth standards](references/depth-standards.md).
 When detached execution is requested, select the

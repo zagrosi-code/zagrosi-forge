@@ -35,22 +35,28 @@ If an input is missing, review what you can and name the gap under Limits.
   secrets and rollback.
 - Tests: whether each assertion fails for a plausible wrong implementation, and
   which changed behavior no test exercises.
-- Cleanup: concrete gains only, such as code the change orphaned, duplicated
-  policy or a needless layer.
+- Readability and reuse. Trace a changed caller. Point out a name that confuses
+  states or units, a branch that obscures error order, or a shared helper that
+  changes a caller's contract. Show the decision a maintainer could get wrong.
+- Performance. For a hot path, name the workload and the operation that scales.
+  Check the evidence for changes in calls, time or memory and identify an
+  input that distinguishes the proposed fix. Preserve ordering and freshness.
 
-Report a finding only when you can name a concrete input, call sequence or failure
-path and point to the code that causes it. Skip style preferences and risks you
-cannot tie to a path.
+Use the [engineering standard](../skills/zagrosi-implement/references/engineering.md)
+for concrete examples of shared ownership and measurement.
+
+Ground each finding in a concrete input, call sequence, failure path or likely
+maintenance change. Cite the affected code and explain the consequence.
 
 ## Report
 
 Findings first, most severe first:
 
-1. `critical|high|medium|low` `path:line`: the input or sequence and the wrong
-   result it produces.
+1. `critical|high|medium|low` `path:line`: the input, call sequence or maintenance
+   change and its concrete consequence.
    - Evidence: the code and callers that make it happen.
-   - Distinguishing check: a test or command that fails while the defect exists
-     and passes once it is fixed.
+   - Distinguishing check: the test, measurement or caller comparison that
+     demonstrates the issue and verifies the fix.
 
 Then:
 
