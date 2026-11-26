@@ -97,7 +97,9 @@ def test_windows_partitions_cover_linux_and_macos_once():
         "tests/test_team_plan_claims.py", "tests/test_team_plans.py",
         "tests/test_team_plan_workflows.py", "tests/test_team_plan_integration.py",
         "tests/test_team_protocol_upgrade.py", "tests/test_team_dependencies.py",
-        "tests/test_team_dependency_workflows.py",
+        "tests/test_team_dependency_workflows.py", "tests/test_section_groups.py",
+        "tests/test_delivery.py", "tests/test_delivery_workflow.py", "tests/test_group_binding.py",
+        "tests/test_acceptance_journeys.py", "tests/test_build_measurements.py",
     } <= selected["all"].keys()
 
 
