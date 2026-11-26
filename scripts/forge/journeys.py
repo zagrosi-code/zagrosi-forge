@@ -96,8 +96,10 @@ def completion(planning: Path, target: Path, section: str) -> dict:
             for row in rows}
 
 
-def record_error(text: str, evidence: dict | None) -> str | None:
-    """Historical completion uses its bound contract, so later unrelated source edits stay independent."""
+def record_error(planning: Path, section: str, text: str, evidence: dict | None) -> str | None:
+    """Check the saved case results, without invalidating a record on unrelated source edits."""
+    from .verification import _check_managed_path
+
     cases = declarations(text)
     if not cases and evidence is None:
         return None
@@ -110,6 +112,13 @@ def record_error(text: str, evidence: dict | None) -> str | None:
                 or not isinstance(row.get("receipt_digest"), str)
                 or not re.fullmatch(r"[0-9a-f]{64}", row["receipt_digest"])):
             return f"Missing or mismatched captured evidence for acceptance journey {name}."
+        path = receipt_path(planning, section, name)
+        if not _check_managed_path(planning, path, single_link=True):
+            return f"Missing recorded receipt for acceptance journey {name}."
+        current = storage.load_json(path)
+        if mutable_inputs.digest(current) != row["receipt_digest"]:
+            outcome = current.get("outcome") if isinstance(current, dict) else "invalid"
+            return f"A newer receipt for acceptance journey {name} is {outcome}. Verify the case and record the section again."
     return None
 
 

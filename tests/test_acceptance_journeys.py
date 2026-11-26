@@ -75,10 +75,22 @@ def test_failed_retry_replaces_a_previously_passing_journey(workspace, capsys):
     row = case("return", argv=[sys.executable, "-c",
                "from pathlib import Path; raise SystemExit(Path('../external-failure').exists())", "test_return"])
     declare(workspace, [row])
-    assert capture(workspace, capsys, row)[0] == 0
+    code, first = capture(workspace, capsys, row)
+    assert code == 0, first
+    assert invoke(workspace, capsys, *record_args(workspace, "--verification-receipt", first["receipt_path"]))[0] == 0
     (workspace[2].parent / "external-failure").touch()
     code, failed = capture(workspace, capsys, row)
     assert code == 1 and failed["outcome"] == "failed"
     code, status = invoke(workspace, capsys, "journey-status", "--planning-dir", str(workspace[1]),
                           "--target-dir", str(workspace[2]), "--section", SECTION)
     assert code == 0 and status["journeys"][0]["status"] == "failed"
+    assert invoke(workspace, capsys, *verify_args(workspace, "--", sys.executable, "-c", "pass"))[0] == 0
+    code, report = invoke(workspace, capsys, "postflight", "--phase", "implement", "--planning-dir",
+                          str(workspace[1]), "--target-dir", str(workspace[2]), "--strict")
+    assert code == 1, report
+    (workspace[2].parent / "external-failure").unlink()
+    code, recovered = capture(workspace, capsys, row)
+    assert code == 0
+    assert invoke(workspace, capsys, *record_args(workspace, "--verification-receipt", recovered["receipt_path"]))[0] == 0
+    assert invoke(workspace, capsys, "postflight", "--phase", "implement", "--planning-dir",
+                  str(workspace[1]), "--target-dir", str(workspace[2]), "--strict")[0] == 0

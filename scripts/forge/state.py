@@ -234,7 +234,7 @@ def completion_evidence_findings(planning_dir: Path, section: str, record: Any, 
     section_file = planning_dir / "sections" / f"{section}.md"
     if section_file.is_file():
         try:
-            journey_error = journeys.record_error(_storage.read_text(section_file), record.get("journeys"))
+            journey_error = journeys.record_error(planning_dir, section, _storage.read_text(section_file), record.get("journeys"))
         except (ValueError, OSError) as exc:
             journey_error = str(exc)
         if journey_error:
