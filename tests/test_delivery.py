@@ -1,11 +1,15 @@
 """Exercise persistent delivery evidence through the public CLI against real local Git refs."""
+from contextlib import redirect_stdout
 import hashlib
+from io import StringIO
 import json
 import subprocess
 
 import pytest
 
 from forge_test_helpers import load_zagrosi_module
+from test_compact_plan import SECTION
+from test_section_groups import SECOND, group_plan
 
 
 def git(repo, *args):
@@ -26,15 +30,7 @@ def stack(tmp_path, capsys):
     git(repo, "init", "-b", "main")
     git(repo, "config", "user.email", "tester@example.org")
     git(repo, "config", "user.name", "Tester")
-    sections = repo / "plan" / "sections"
-    sections.mkdir(parents=True)
-    for name in ("section-01-labels", "section-02-search"):
-        (sections / (name + ".md")).write_text("## Owned files\n- feature.py\n")
-    (sections / "index.md").write_text("<!-- SECTION_MANIFEST\nsection-01-labels\nsection-02-search\nEND_MANIFEST -->\n")
-    (sections.parent / "codex-plan.md").write_text(
-        '<!-- FORGE_META\n{"artifact_type":"compact_plan","depth_mode":"lean","source":"spec.md"}\nEND_FORGE_META -->\n')
-    (sections.parent / "spec.md").write_text("REQ-001 Implement selected labels and search.\n")
-    git(repo, "add", "plan")
+    group_plan(repo)
     base = commit(repo, "base")
     git(repo, "branch", "stable")
     git(repo, "checkout", "-b", "parent")
@@ -240,17 +236,21 @@ def test_checkout_attestation_requires_clean_matching_worktree(stack, tmp_path, 
 
 
 def group_report(repo, sha, name, run_id):
-    files = {}
-    for line in git(repo, "ls-tree", "-rl", sha, "--", "plan").splitlines():
-        header, path = line.split("\t")
-        mode, _, oid, size = header.split()
-        files[path.removeprefix("plan/")] = {"mode": mode, "oid": oid, "size": int(size)}
-    digest = hashlib.sha256(json.dumps(files, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
-    report = {"success": True, "handoff": {"schema": "forge-section-group-v1", "pull_request": "2",
-            "commit_sha": sha, "tree_sha": git(repo, "rev-parse", sha + "^{tree}"), "plan_digest": digest,
-            "plan_path": "plan", "target_path": ".", "sections": [name], "owned_paths": ["feature.py"]},
-            "verification": {"run_id": run_id, "command": ["pytest", name], "returncode": 0,
-                             "timed_out": False, "seconds": 1.2}}
+    checkout = repo.parent / "group-source"
+    if checkout.exists():
+        git(checkout, "checkout", "--detach", sha)
+    else:
+        git(repo, "worktree", "add", "--detach", str(checkout), sha)
+    stream = StringIO()
+    with redirect_stdout(stream):
+        code = load_zagrosi_module().entrypoint.main([
+            "section-group", "create", "--target-dir", str(checkout),
+            "--planning-dir", str(checkout / ".forge/plans/shared"), "--sections", name, "--pr", "2",
+        ])
+    report = json.loads(stream.getvalue())
+    assert code == 0 and report["handoff"]["commit_sha"] == sha, report
+    report["verification"] = {"run_id": run_id, "command": ["pytest", name], "returncode": 0,
+                              "timed_out": False, "seconds": 1.2}
     set_group_history(report)
     return report
 
@@ -265,7 +265,7 @@ def set_group_history(report):
 def test_import_group_report_exposes_independent_checks_and_blocks_old_run_replay(stack, tmp_path):
     repo, call, base, parent, child, tip = stack
     reports = [group_report(repo, child, name, char * 32) for name, char in
-               [("section-01-labels", "a"), ("section-02-search", "b")]]
+               [(SECTION, "a"), (SECOND, "b")]]
     file = tmp_path / "report.json"
     args = ("--pr", "2", "--group-report", str(file), "--source", "handoff/17", "--actor", "ci")
     for report in reports:
@@ -275,7 +275,7 @@ def test_import_group_report_exposes_independent_checks_and_blocks_old_run_repla
     alt = tmp_path / "next"
     git(repo, "worktree", "add", "--detach", str(alt), child)
     checks = call("status", "--pr", "2", target=alt)["prs"]["2"]["verification"]["checks"]
-    assert {c["test"]["group"]["sections"][0] for c in checks} == {"section-01-labels", "section-02-search"}
+    assert {c["test"]["group"]["sections"][0] for c in checks} == {SECTION, SECOND}
     assert all(c["test"]["tested_sha"] == child and c["status"] == "current" for c in checks)
     # Relabeling the same base commit changes the intended PR target, even if bytes match.
     git(repo, "branch", "replacement", parent)
@@ -295,11 +295,11 @@ def test_import_group_rejects_mismatches_and_preserves_timeout(stack, tmp_path):
     file = tmp_path / "report.json"
     args = ("--pr", "2", "--group-report", str(file), "--source", "checks/7", "--actor", "ci")
     for field, value in [("pull_request", "1"), ("tree_sha", "0" * 40), ("plan_digest", "0" * 64), ("sections", ["section-99-missing"])]:
-        data = group_report(repo, child, "section-01-labels", "a" * 32)
+        data = group_report(repo, child, SECTION, "a" * 32)
         data["handoff"][field] = value
         file.write_text(json.dumps(data))
         assert call("test", *args, ok=False)["error"]
-    data = group_report(repo, child, "section-01-labels", "a" * 32)
+    data = group_report(repo, child, SECTION, "a" * 32)
     data["verification"].update(returncode=124, timed_out=True)
     file.write_text(json.dumps(data))
     assert call("test", *args, ok=False)["error"]
@@ -314,7 +314,7 @@ def test_group_dirty_snapshot_downgrades_pass_and_works_with_qualified_pr_id(sta
     repo, call, base, parent, child, tip = stack
     pr = "example/app#42"
     call("track", "--pr", pr, "--head-ref", "refs/heads/child", "--base-ref", "refs/heads/parent")
-    data = group_report(repo, child, "section-01-labels", "a" * 32)
+    data = group_report(repo, child, SECTION, "a" * 32)
     data["handoff"]["pull_request"] = pr
     file = tmp_path / "report.json"
     args = ("--pr", pr, "--group-report", str(file), "--source", "checks/7", "--actor", "ci")
@@ -333,7 +333,7 @@ def test_late_group_import_uses_observed_finish_time(stack, tmp_path):
     file = tmp_path / "report.json"
     args = ("--pr", "2", "--group-report", str(file), "--source", "ci/archived", "--actor", "ci")
     for run, day, code in [("a", "02", 0), ("b", "01", 1)]:
-        data = group_report(repo, child, "section-01-labels", run * 32)
+        data = group_report(repo, child, SECTION, run * 32)
         data["verification"].update(started_at=f"2026-10-{day}T10:00:00Z", finished_at=f"2026-10-{day}T10:00:01Z", returncode=code)
         data["success"] = code == 0
         set_group_history(data)
