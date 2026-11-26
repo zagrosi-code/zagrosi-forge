@@ -136,3 +136,30 @@ def test_rejected_group_does_not_change_existing_records(workspace, mutation):
     assert ledger.read_bytes() == saved
     assert git(root, "show-ref").stdout == refs
     assert git(root, "status", "--porcelain", "--untracked-files=all").stdout == files
+
+
+def test_committed_blocked_review_rejected_by_producer_and_both_consumers(workspace, capsys):
+    root, consume, report = workspace
+    identity = report["handoff"]
+    plan = root / identity["plan_path"]
+    contract = plan / "codex-plan.md"
+    contract.write_text(contract.read_text().replace("Verdict: pass", "Verdict: blocked"))
+    git(root, "add", str(contract))
+    git(root, "commit", "-m", "Block the embedded review")
+
+    forge = load_zagrosi_module()
+    code, created = call(forge, capsys, "section-group", "create", "--target-dir", root,
+                         "--planning-dir", plan, "--sections", SECTION, "--pr", "42")
+    assert code == 1 and "review" in created["error"].lower()
+
+    # Match every Git identity field to the blocked contract. Admission is the remaining difference.
+    repo = forge.team_git.Repository.discover(root)
+    files, _ = forge.team_plans._bundle(repo, identity["plan_path"], committed_only=True)
+    identity.update(commit_sha=repo.head, tree_sha=git(root, "rev-parse", "HEAD^{tree}").stdout.strip(),
+                    plan_digest=forge.team_plans._digest(files))
+    ledger = root / ".git" / "forge-delivery.json"
+    saved = ledger.read_bytes()
+    delivered, measured = consume(report)
+    assert (delivered[0], measured[0]) == (1, 1), (delivered, measured)
+    assert "review" in delivered[1]["error"].lower() and "review" in measured[1]["error"].lower()
+    assert ledger.read_bytes() == saved

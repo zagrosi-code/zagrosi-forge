@@ -315,6 +315,15 @@ def _contract(planning):
         _fail('The committed compact plan needs a complete source, sections, ownership, tests and passing embedded review.')
 
 
+def _materialize_contract(directory, content):
+    """Check the captured Git bundle in a private directory with its original layout."""
+    for name, raw in content.items():
+        path = directory / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    _contract(directory)
+
+
 def _workspace_files(planning, files):
     count = 0
     for directory, directories, names in os.walk(planning, followlinks=False):
@@ -438,11 +447,7 @@ def prepare(planning, target):
             with tempfile.TemporaryDirectory(prefix='forge-plan-', dir=repo.git_dir) as temporary:
                 stage = Path(temporary) / 'workspace'
                 stage.mkdir()
-                for name, raw in content.items():
-                    path = stage / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(raw)
-                _contract(stage)
+                _materialize_contract(stage, content)
                 record = {'version': 1, 'root': str(repo.root), 'git_dir': str(repo.git_dir), 'target': str(target),
                           'canonical': canonical, 'commit': repo.head, 'digest': digest, 'files': files}
                 (stage / MARKER).write_text(_json(record) + '\n', encoding='utf-8')

@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 import re
+import tempfile
 
 from . import markdown, mutable_inputs, ownership, policy, team_git, team_plans, team_state, team_workflow
 
@@ -31,6 +32,9 @@ def describe(repo, plan, target, selected, pr, *, check_checkout=False):
     files, content = team_plans._bundle(repo, plan, committed_only=not check_checkout)
     if check_checkout:
         team_plans._contract(repo.root / plan)
+    else:
+        with tempfile.TemporaryDirectory(prefix="forge-group-plan-") as directory:
+            team_plans._materialize_contract(Path(directory), content)
     manifest = content["sections/index.md"].decode("utf-8")
     known, errors = markdown.parse_numbered_manifest(manifest, "SECTION_MANIFEST", policy.SECTION_RE, prefix="section-")
     if errors or not set(selected).issubset(known):
