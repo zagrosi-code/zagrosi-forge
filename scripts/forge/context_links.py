@@ -72,14 +72,13 @@ class SharedDocuments:
         return path.is_relative_to(self.source_root) and path.relative_to(self.source_root).as_posix() in self.names
 
 
-def _shared_paths(planning: Path) -> SharedDocuments | None:
+def _shared_paths(planning: Path, plan_metadata: dict | None) -> SharedDocuments | None:
     from . import artifacts, team_git, team_plans, team_state
 
-    descriptor = artifacts.compact_plan_descriptor(planning)
-    if not descriptor:
-        return None
-    meta, _ = _markdown.parse_forge_meta(_storage.read_text(descriptor["marker_path"]))
-    names = shared_documents(meta or {})
+    if plan_metadata is None:
+        descriptor = artifacts.compact_plan_descriptor(planning)
+        plan_metadata = descriptor["metadata"] if descriptor else {}
+    names = shared_documents(plan_metadata)
     if not names:
         return None
     marker = planning / team_plans.MARKER
@@ -204,10 +203,11 @@ def linked_contracts(
     planning_dir: Path, seeds: list[tuple[Path, str]], *, known_paths: set[Path] | None = None,
     seed_ranges: dict[Path, list[tuple[int, int]]] | None = None,
     _causes: list[tuple[Path, int, int, dict]] | None = None,
+    _plan_metadata: dict | None = None,
 ) -> dict[Path, list[tuple[int, int, str]]]:
     """Follow explicit local links; return merged source spans in discovery order."""
     root = planning_dir.resolve()
-    sharing = _shared_paths(root)
+    sharing = _shared_paths(root, _plan_metadata)
     allowed = {path.resolve() for path in known_paths or ()}
     queue = deque((path, body, (seed_ranges or {}).get(path.resolve())) for path, body in seeds)
     seen: set[tuple[Path, str]] = set()

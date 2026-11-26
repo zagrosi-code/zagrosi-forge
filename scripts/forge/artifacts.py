@@ -132,7 +132,8 @@ def _compact_plan_descriptor(planning_dir: Path, observe) -> dict[str, Any] | No
             if key in headings:
                 errors.append(f"Compact plan repeats the heading: {title}.")
             headings[key] = body.strip()
-    return {"path": path, "marker_path": marker_path, "source": source, "depth_mode": depth, "headings": headings, "errors": errors}
+    return {"path": path, "marker_path": marker_path, "metadata": meta, "source": source,
+            "depth_mode": depth, "headings": headings, "errors": errors}
 
 
 def implementation_plan_path(planning_dir: Path) -> Path | None:
