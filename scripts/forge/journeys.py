@@ -24,6 +24,7 @@ def declarations(text: str) -> dict[str, dict]:
     _, prose = markdown.split_markdown_fences_with_closure(markdown.visible_markdown(text))
     requirements = set(markdown.requirement_ids("\n".join(prose)))
     cases = {}
+    checks = set()
     commands = set()
     fields = {"id", "requirement", "actor", "starting_state", "action", "expected", "check", "argv"}
     for row in rows:
@@ -40,9 +41,10 @@ def declarations(text: str) -> dict[str, dict]:
             raise ValueError(f"{case_id}: name a requirement owned by this section.")
         if (not isinstance(argv, list) or len(argv) < 2
                 or not all(isinstance(arg, str) and arg and "\0" not in arg for arg in argv)
-                or row["check"] not in argv[1:] or tuple(argv) in commands):
+                or row["check"] not in argv[1:] or row["check"] in checks or tuple(argv) in commands):
             raise ValueError(f"{case_id}: name a distinct check selector and include it as an argument in argv.")
         cases[case_id] = row
+        checks.add(row["check"])
         commands.add(tuple(argv))
     return cases
 

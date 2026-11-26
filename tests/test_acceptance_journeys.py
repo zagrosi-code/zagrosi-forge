@@ -62,6 +62,7 @@ def test_return_and_reopen_require_independent_current_cases(workspace, capsys):
     [case("../return")], [case("return", requirement="REQ-OTHER")],
     [case("return"), case("return")], [case("return"), case("reopen", argv=case("return")["argv"])],
     [case("return", check="irrelevant")],
+    [case("return"), case("reopen", check="test_return", argv=[*case("return")["argv"], "-v"])],
 ])
 def test_invalid_journeys_block_plan_admission(workspace, capsys, rows):
     declare(workspace, rows)
