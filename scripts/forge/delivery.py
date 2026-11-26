@@ -299,11 +299,18 @@ def _observe(repo, row, snapshot, receipt, args):
         source_head = repo.commit(args.head_sha)
         event["head_sha"] = source_head
         if args.outcome == "merged":
+            target = repo.ref(row["base_ref"])
+            if not target or not repo.includes(target, sha):
+                raise ValueError(f"Cannot verify the landing on {row['base_ref']}. Refresh the tracked target ref and retry.")
             base = row["expected_base_sha"]
             if args.base_sha:
                 base = repo.commit(args.base_sha)
+            elif snapshot["merged_sha"] == sha and snapshot["head_sha"] == source_head:
+                base = snapshot["base_sha"]
             elif sha != source_head:
                 base = repo.git("rev-parse", "--verify", sha + "^1").stdout.strip()
+            if not repo.includes(sha, base):
+                raise ValueError("The pre-merge base must be an ancestor of the landing. Check --base-sha.")
             event["basis"] = {**_review_basis(snapshot), "head_sha": source_head, "base_sha": base}
     elif args.base_sha:
         raise ValueError("Use --base-sha only for review, PR CI or a merge.")

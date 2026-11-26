@@ -66,9 +66,9 @@ def record_test(call, pr, sha, **kwargs):
     return call("test", "--pr", pr, "--tested-sha", sha, "--source", "checks/run/22", "--actor", "ci", **kwargs)
 
 
-def observe(call, pr, stage, outcome, sha, *extra):
+def observe(call, pr, stage, outcome, sha, *extra, ok=True):
     return call("observe", "--pr", pr, "--stage", stage, "--outcome", outcome, "--sha", sha,
-                "--source", "delivery-record/7", "--actor", "reviewer", *extra)
+                "--source", "delivery-record/7", "--actor", "reviewer", *extra, ok=ok)
 
 
 def test_stack_drift_only_affects_related_descendants(stack):
@@ -127,9 +127,9 @@ def test_squashed_parent_merge_and_deleted_branch_require_recheck(stack, tmp_pat
     git(repo, "merge", "--squash", "parent")
     git(repo, "commit", "-m", "squash parent")
     landed = git(repo, "rev-parse", "HEAD")
+    git(repo, "branch", "-D", "parent")
     observe(call, "1", "merge", "merged", landed, "--head-sha", parent)
     observe(call, "1", "ci", "passed", parent, "--ref", "refs/heads/parent", "--base-sha", base)
-    git(repo, "branch", "-D", "parent")
     second = tmp_path / "second"
     git(repo, "worktree", "add", "--detach", str(second), child)
     rows = call("status", target=second)["prs"]
@@ -141,6 +141,56 @@ def test_squashed_parent_merge_and_deleted_branch_require_recheck(stack, tmp_pat
     assert record_test(call, "1", landed)["prs"]["1"]["verification"]["status"] == "current"
     observe(call, "1", "ci", "passed", landed, "--ref", "refs/heads/main")
     assert call("status", "--pr", "1")["prs"]["1"]["stages"]["ci"]["sha"] == landed
+
+
+def test_merge_outside_target_does_not_freeze_pr_or_descendants(stack):
+    repo, call, base, parent, child, _ = stack
+    record_test(call, "2", child)
+    git(repo, "checkout", "-b", "unrelated", "main")
+    foreign = commit(repo, "other-change")
+    before = call("status")
+    assert before["prs"]["2"]["verification"]["status"] == "current"
+    error = observe(call, "1", "merge", "merged", foreign, "--head-sha", parent, ok=False)["error"]
+    assert "refs/heads/main" in error and "refresh" in error.lower()
+    assert call("status") == before
+
+
+def test_merge_requires_an_available_tracked_target(stack):
+    repo, call, _, parent, _, _ = stack
+    git(repo, "branch", "-m", "main", "archived-main")
+    before = call("status")
+    error = observe(call, "1", "merge", "merged", parent, "--head-sha", parent, ok=False)["error"]
+    assert "refs/heads/main" in error and "refresh" in error.lower()
+    assert call("status") == before
+
+
+def test_merge_base_must_be_an_ancestor_even_when_target_has_advanced(stack):
+    repo, call, base, parent, child, _ = stack
+    git(repo, "checkout", "main")
+    git(repo, "merge", "--no-ff", "parent", "-m", "merge parent")
+    landing = git(repo, "rev-parse", "HEAD")
+    commit(repo, "later-change")
+    before = call("status")
+    error = observe(call, "1", "merge", "merged", landing, "--head-sha", parent,
+                    "--base-sha", child, ok=False)["error"]
+    assert "ancestor" in error
+    assert call("status") == before
+    row = observe(call, "1", "merge", "merged", landing, "--head-sha", parent, "--base-sha", base)["prs"]["1"]
+    assert row["stages"]["merge"]["sha"] == landing
+
+
+def test_fast_forward_replay_keeps_observed_base_after_source_deletion(stack):
+    repo, call, _, parent, child, _ = stack
+    git(repo, "checkout", "main")
+    git(repo, "merge", "--ff-only", "parent")
+    git(repo, "branch", "-f", "parent", child)
+    git(repo, "merge", "--ff-only", "parent")
+    git(repo, "branch", "-D", "parent")
+    first = observe(call, "1", "merge", "merged", child, "--head-sha", child, "--base-sha", parent)["prs"]["1"]
+    commit(repo, "later-change")
+    replay = observe(call, "1", "merge", "merged", child, "--head-sha", child)["prs"]["1"]
+    assert replay["stages"]["merge"]["basis"] == first["stages"]["merge"]["basis"]
+    assert replay["stages"]["merge"]["basis"]["base_sha"] == parent
 
 
 def test_invalid_inputs_leave_refs_and_existing_state_unchanged(stack):
