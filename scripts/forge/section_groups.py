@@ -24,6 +24,7 @@ def add_commands(sub, invoke_command):
         else:
             parser.add_argument('--handoff', required=True)
         if action == 'verify':
+            parser.add_argument('--omit-output', action='store_true', help='Omit stdout and stderr from the receipt.')
             parser.add_argument('--timeout', type=int, default=540)
             parser.add_argument('argv', nargs=argparse.REMAINDER)
 
@@ -175,6 +176,9 @@ def run(args):
         if args.group_action == 'verify':
             argv = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
             observed = verify(repo, identity, argv, args.timeout)
+            if args.omit_output:
+                observed.pop('stdout', None)
+                observed.pop('stderr', None)
             summary = group_evidence.run_summary(observed)
             result.update(success=summary['passed'], verification=observed)
             if observed.get('snapshot_error'):

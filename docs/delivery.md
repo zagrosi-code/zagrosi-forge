@@ -71,3 +71,5 @@ For a merged PR, refresh the local tracked target ref so its history contains th
 Use `--environment` in status to select deployment, live and customer observations. Status lists available environment names. A green workflow and a skipped production deploy show `ci: passed` and `deploy: skipped`; absent customer evidence shows `acceptance: unknown`. Mismatched evidence is labelled `stale` and retains its previous outcome and source. Historical records remain available with `--history`.
 
 Sources and actors are supplied by the operator. Forge checks local commit identities, ancestry and evidence scope. It does not query or authenticate external systems. Refresh evidence after a restack, deployment, reviewer dismissal or customer decision.
+
+Use `delivery status --pr 42 --environment uat --format markdown` to generate a PR handoff for a reviewer. It lists the sections and exact commits tested, delivery stages, named requirements, artifact identities and next actions. The Markdown omits command arguments, process output and local evidence paths. The default JSON includes the structured evidence used for investigation and reruns.

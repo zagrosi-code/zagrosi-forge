@@ -335,6 +335,11 @@ def run(args):
         if args.delivery_action == "status":
             prs = _read(repo.ledger)
             result = _report(repo, prs, args.pr, env, args.history)
+            if args.format == "markdown":
+                from . import delivery_summary
+
+                print(delivery_summary.markdown(result))
+                return 0
         else:
             lock = repo.ledger.with_suffix(".json.lock")
             if lock.is_symlink() or (lock.exists() and (not lock.is_file() or lock.stat().st_nlink != 1)):

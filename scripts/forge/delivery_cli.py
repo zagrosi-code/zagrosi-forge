@@ -41,4 +41,5 @@ def add_delivery_commands(sub, invoke_command):
         if name in ("observe", "status"):
             command.add_argument("--environment", help="Named environment for deploy, live check and acceptance.")
         if name == "status":
+            command.add_argument("--format", choices=("json", "markdown"), default="json")
             command.add_argument("--history", action="store_true", help="Include all previous tests and stage observations.")
