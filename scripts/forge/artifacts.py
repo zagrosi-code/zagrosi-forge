@@ -85,6 +85,13 @@ def _compact_plan_descriptor(planning_dir: Path, observe) -> dict[str, Any] | No
             return None
         meta = {}
     errors = list(errors)
+    if "shared_documents" in meta:
+        from . import context_links
+
+        try:
+            context_links.shared_documents(meta)
+        except ValueError as exc:
+            errors.append(str(exc))
     depth = meta.get("depth_mode")
     if not isinstance(depth, str):
         depth = None

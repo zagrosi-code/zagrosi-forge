@@ -892,10 +892,16 @@ def test_shared_doc_code_links_and_anchored_markdown_chain(forge, repositories):
 
 
 @pytest.mark.parametrize('names', ['not-a-list', [None], [{'file': 'notes.md'}]])
-def test_malformed_shared_doc_metadata_stops_context_and_prepare(forge, repositories, names):
+def test_malformed_shared_doc_metadata_stops_admission_context_and_prepare(forge, repositories, names, capsys):
     _, (root, _) = repositories
     planning = commit_plan(root)
     declare_shared_docs(root, planning, names, '[Terms](../../../../notes.md)')
+    code = forge.entrypoint.main(['postflight', '--phase', 'plan', '--planning-dir', str(planning),
+                                  '--target-dir', str(root), '--depth', 'lean', '--strict'])
+    flight = json.loads(capsys.readouterr().out)
+    assert code == 1 and 'lint-plan-artifacts' in flight['blocking_gates']
+    assert any(finding['code'] == 'invalid-compact-plan' and 'shared_documents' in finding['message']
+               for finding in flight['diagnostics'])
     assert not forge.context.build_context(planning, SECTION, 10000)['success']
     with pytest.raises(forge.team_state.TeamError):
         forge.team_plans.prepare(planning, root)
