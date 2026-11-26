@@ -117,8 +117,8 @@ def _read(path, limit=FILE_LIMIT):
     return raw
 
 
-def _tree(repo, canonical, commit):
-    output = team_git._run(repo.root, 'ls-tree', '-rlz', commit, '--', canonical)['stdout']
+def _tree(repo, canonical, commit, shared=()):
+    output = team_git._run(repo.root, 'ls-tree', '-rlz', commit, '--', canonical, *shared)['stdout']
     rows = output.split('\0')
     if rows[-1] or len(rows) - 1 > FILE_COUNT:
         _fail('The canonical plan tree is malformed or exceeds 128 files.')
@@ -127,9 +127,11 @@ def _tree(repo, canonical, commit):
     for row in rows[:-1]:
         header, path = row.split('\t', 1)
         mode, kind, oid, size = header.split()
-        if not path.startswith(prefix) or not _OID.fullmatch(oid):
+        if (not path.startswith(prefix) and path not in shared) or not _OID.fullmatch(oid):
             _fail('Git returned an invalid shared plan tree.')
-        name = _name(path[len(prefix):])
+        name = _name(path[len(prefix):]) if path not in shared else context_links.SHARED_DIRECTORY + '/' + path
+        if path not in shared and name.split('/')[0].casefold() == context_links.SHARED_DIRECTORY:
+            _fail('Shared plans reserve the shared document snapshot directory.')
         parts = name.split('/')
         for length in range(1, len(parts) + 1):
             component_path = '/'.join(parts[:length])
@@ -193,31 +195,39 @@ def _blobs(repo, names, entries):
     return {name: found[entries[name]['oid']] for name in names}
 
 
-def _relative(base, value):
+def _relative(base, value, *, origin=None, canonical=None, shared=()):
     link = urlsplit(value)
     if link.scheme in {'https', 'http', 'mailto'} or not link.path and link.fragment:
         return None
     if link.scheme or link.netloc or not link.path or link.path.startswith(('/', '\\')):
         _fail('Shared contract file links must remain inside the canonical directory.')
-    path = posixpath.normpath(posixpath.join(base, unquote(link.path)))
+    decoded = unquote(link.path)
+    if decoded.startswith(('/', '\\')) or '\\' in decoded:
+        _fail('Shared contract links must be relative paths.')
+    if shared:
+        try:
+            return _name(context_links.bundle_path(origin, decoded, canonical, shared))
+        except ValueError as exc:
+            _fail(str(exc))
+    path = posixpath.normpath(posixpath.join(base, decoded))
     if path == '..' or path.startswith('../'):
         _fail('Shared contract file links cannot leave the canonical directory.')
     return _name(path)
 
 
-def _links(name, content):
+def _links(name, content, canonical, shared):
     # Adapt definitions for the existing lexer so comments, fences and inline
     # code retain the same meaning as normal contract-link discovery.
     text = re.sub(r'(?m)^([ \t]{0,3})\[([^\]\n]+)\]:[ \t]*(.+)$',
                   lambda match: f'{match[1]}[{match[2]}]({match[3]})', content.decode('utf-8'))
     return {target for link in context_links.local_links(text)
-            if (target := _relative(posixpath.dirname(name), link)) is not None}
+            if (target := _relative(posixpath.dirname(name), link, origin=name, canonical=canonical, shared=shared)) is not None}
 
 
 def _bundle(repo, canonical):
     entries = _tree(repo, canonical, repo.head)
     plan, pending = _seeds(entries)
-    content = {}
+    content, shared = {}, []
     while pending:
         wanted = sorted(pending - set(content))
         if not wanted:
@@ -228,8 +238,17 @@ def _bundle(repo, canonical):
             _fail('Shared contracts are limited to 128 files and 512 KiB total.')
         content.update(_blobs(repo, wanted, entries))
         pending = set()
+        if plan in wanted:
+            meta, _ = markdown.parse_forge_meta(content[plan].decode('utf-8'))
+            shared = context_links.shared_documents(meta or {})
+            if shared:
+                prefix = '' if canonical == '.' else canonical + '/'
+                if any(name.startswith(prefix) for name in shared):
+                    _fail('Shared documents must name files outside the canonical directory.')
+                entries = _tree(repo, canonical, repo.head, shared)
+                pending.update(context_links.SHARED_DIRECTORY + '/' + name for name in shared)
         for name in wanted:
-            pending.update(_links(name, content[name]))
+            pending.update(_links(name, content[name], canonical, shared))
             if name == plan:
                 meta, errors = markdown.parse_forge_meta(content[name].decode('utf-8'))
                 if (errors or not meta or meta.get('artifact_type') != 'compact_plan'
@@ -246,7 +265,7 @@ def _bundle(repo, canonical):
                 pending.update(f'sections/{section}.md' for section in sections)
     files = {name: entries[name] for name in sorted(content)}
     index = {}
-    output = team_git._run(repo.root, 'ls-files', '--stage', '-z', '--', canonical)['stdout']
+    output = team_git._run(repo.root, 'ls-files', '--stage', '-z', '--', canonical, *shared)['stdout']
     prefix = '' if canonical == '.' else canonical + '/'
     rows = output.split('\0')
     if rows[-1] or len(rows) - 1 > FILE_COUNT:
@@ -254,8 +273,8 @@ def _bundle(repo, canonical):
     for row in rows[:-1]:
         header, path = row.split('\t', 1)
         mode, oid, stage = header.split()
-        name = _name(path[len(prefix):])
-        if not path.startswith(prefix) or stage != '0' or name in index:
+        name = (context_links.SHARED_DIRECTORY + '/' + path if path in shared else _name(path[len(prefix):]))
+        if (not path.startswith(prefix) and path not in shared) or stage != '0' or name in index:
             _fail('Resolve shared plan index conflicts before preparation.', 'team-plan-stale')
         index[name] = {'mode': mode, 'oid': oid}
     if _seeds(index)[1] != _seeds(entries)[1]:
@@ -268,8 +287,12 @@ def _bundle(repo, canonical):
     for name, item in files.items():
         if index.get(name) != {key: item[key] for key in ('mode', 'oid')}:
             _fail('Commit shared contract index changes before preparation.', 'team-plan-stale')
-        path = directory / name
-        _no_links(path, directory)
+        if name.startswith(context_links.SHARED_DIRECTORY + '/'):
+            path = repo.root / name.removeprefix(context_links.SHARED_DIRECTORY + '/')
+            _no_links(path, repo.root)
+        else:
+            path = directory / name
+            _no_links(path, directory)
         if _read(path).replace(b'\r\n', b'\n') != content[name].replace(b'\r\n', b'\n'):
             _fail('Commit shared contract worktree changes before preparation.', 'team-plan-stale')
     return files, content
@@ -350,7 +373,9 @@ def _validate(planning, target, *, recover_legacy=False):
         if not recover_legacy:
             _fail('The recorded source commit is missing; prepare its reviewed current version.')
     elif value['commit'] != repo.head:
-        original = _tree(repo, value['canonical'], value['commit'])
+        shared = [name.removeprefix(context_links.SHARED_DIRECTORY + '/') for name in files
+                  if name.startswith(context_links.SHARED_DIRECTORY + '/')]
+        original = _tree(repo, value['canonical'], value['commit'], shared)
         if any(original.get(name) != item for name, item in files.items()):
             _fail('The prepared marker does not identify its recorded source commit.')
     _workspace_files(planning, files)

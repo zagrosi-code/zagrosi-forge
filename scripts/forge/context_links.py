@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
+import posixpath
+import stat
 import re
 from urllib.parse import unquote, urlsplit
 
@@ -16,6 +19,108 @@ LINK = re.compile(r'(?<!!)\[[^\]\n]+\]\(\s*(?:<([^>\n]+)>|([^\s)]+))(?:\s+["\'][
 INLINE_TOKEN = re.compile(r"`+|(?<!!)\[")
 MAX_CONTRACTS = 64
 MAX_SOURCE_BYTES = 1_048_576
+
+
+# Namespaced copies keep ordinary relative Markdown links readable in Git while
+# prepared workspaces remain self-contained and bound to their source blobs.
+SHARED_DIRECTORY = ".forge-shared-documents"
+
+
+def shared_documents(meta: dict) -> list[str]:
+    from . import team_state
+
+    if "shared_documents" not in meta:
+        return []
+    names = meta["shared_documents"]
+    if not isinstance(names, list) or len(names) > MAX_CONTRACTS:
+        raise ValueError("shared_documents requires at most 64 repository-relative Markdown files.")
+    try:
+        for name in names:
+            if (team_state.normalize_paths([name]) != [name] or not name.endswith(".md")
+                    or any(part.casefold() in {".git", "implementation", "node_modules", SHARED_DIRECTORY}
+                           for part in name.split("/"))):
+                raise ValueError("shared_documents requires explicit portable Markdown paths outside private directories.")
+    except team_state.TeamError as exc:
+        raise ValueError("Invalid shared_documents path: " + str(exc)) from exc
+    if len({team_state._portable(name) for name in names}) != len(names):
+        raise ValueError("shared_documents repeats a portable path.")
+    return names
+
+
+def bundle_path(origin: str, link_path: str, canonical: str, shared) -> str:
+    """Map a normal relative link to its logical location inside the prepared bundle."""
+    origin_path = (origin.removeprefix(SHARED_DIRECTORY + "/") if origin.startswith(SHARED_DIRECTORY + "/")
+                   else posixpath.join(canonical, origin))
+    destination = posixpath.normpath(posixpath.join(posixpath.dirname(origin_path), link_path))
+    local = posixpath.relpath(destination, canonical)
+    if local == ".." or local.startswith("../"):
+        if destination not in shared:
+            raise ValueError("Contract link leaves the planning directory without a shared_documents declaration.")
+        return SHARED_DIRECTORY + "/" + destination
+    if local.split("/")[0].casefold() == SHARED_DIRECTORY:
+        raise ValueError("Contract link uses the reserved shared document directory.")
+    return local
+
+
+@dataclass(frozen=True)
+class SharedDocuments:
+    names: list[str]
+    canonical: str
+    source_root: Path
+
+    def contains(self, path: Path) -> bool:
+        return path.is_relative_to(self.source_root) and path.relative_to(self.source_root).as_posix() in self.names
+
+
+def _shared_paths(planning: Path) -> SharedDocuments | None:
+    from . import artifacts, team_git, team_plans, team_state
+
+    descriptor = artifacts.compact_plan_descriptor(planning)
+    if not descriptor:
+        return None
+    meta, _ = _markdown.parse_forge_meta(_storage.read_text(descriptor["marker_path"]))
+    names = shared_documents(meta or {})
+    if not names:
+        return None
+    marker = planning / team_plans.MARKER
+    if marker.exists():
+        try:
+            prepared = team_plans.validate(planning)
+        except team_state.TeamError as exc:
+            raise ValueError(str(exc)) from exc
+        return SharedDocuments(names, prepared["path"], planning / SHARED_DIRECTORY)
+    if any(part == ".git" for part in planning.parts):
+        raise ValueError("A private prepared plan requires its bound marker for shared documents.")
+    try:
+        git_root = Path(team_git._path_output(planning, "rev-parse", "--show-toplevel")).resolve()
+    except team_state.TeamError as exc:
+        raise ValueError("Shared documents require a plan inside a Git worktree.") from exc
+    if any((git_root / name).is_relative_to(planning) for name in names):
+        raise ValueError("shared_documents names documents outside the planning directory.")
+    return SharedDocuments(names, planning.relative_to(git_root).as_posix(), git_root)
+
+
+def _shared_link(root: Path, origin: Path, name: str, sharing: SharedDocuments) -> Path:
+    # A snapshot copy and a working-copy document have the same logical name.
+    original = (origin.relative_to(root).as_posix() if origin.is_relative_to(root)
+                else SHARED_DIRECTORY + "/" + origin.relative_to(sharing.source_root).as_posix())
+    if not name:
+        return origin
+    if Path(name).is_absolute() or "\\" in name:
+        raise ValueError("Shared contract links must be repository-relative Markdown links.")
+    dest = bundle_path(original, name, sharing.canonical, sharing.names)
+    if not dest.startswith(SHARED_DIRECTORY + "/"):
+        return root / dest
+    path = sharing.source_root / dest.removeprefix(SHARED_DIRECTORY + "/")
+    for current in (path, *path.parents):
+        if _session.observe_path(current).is_symlink():
+            raise ValueError("Shared document paths cannot contain symlinks.")
+        if current == sharing.source_root:
+            break
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError("Shared documents must be regular single-link files.")
+    return path
 
 
 def local_links(text: str, *, line_spans: list[tuple[int, int]] | None = None) -> list[str]:
@@ -91,6 +196,7 @@ def linked_contracts(
 ) -> dict[Path, list[tuple[int, int, str]]]:
     """Follow explicit local links; return merged source spans in discovery order."""
     root = planning_dir.resolve()
+    sharing = _shared_paths(root)
     allowed = {path.resolve() for path in known_paths or ()}
     queue = deque((path, body, (seed_ranges or {}).get(path.resolve())) for path, body in seeds)
     seen: set[tuple[Path, str]] = set()
@@ -107,8 +213,16 @@ def linked_contracts(
                 continue
             if not name and not anchor:
                 continue
-            path = _session.observe_path(origin.parent / name if name else origin).resolve()
-            if not path.is_relative_to(root) and path not in allowed:
+            link_path = origin.parent / name if name else origin
+            if sharing and (origin.is_relative_to(root) or sharing.contains(origin)) and link_path.resolve() not in allowed:
+                expected = _shared_link(root, origin, name, sharing)
+                path = _session.observe_path(expected).resolve()
+                if path != expected and not path.is_relative_to(root):
+                    raise ValueError(f"Shared contract link crosses a symlink: {link}")
+            else:
+                path = _session.observe_path(link_path).resolve()
+            shared_file = sharing and sharing.contains(path)
+            if not path.is_relative_to(root) and path not in allowed and not shared_file:
                 raise ValueError(f"Contract link leaves the planning directory: {origin}: {link}")
             key = path, anchor
             if key in seen:
@@ -121,7 +235,15 @@ def linked_contracts(
                     raise ValueError(f"Missing linked contract: {origin}: {link}")
                 if path.stat().st_size > MAX_SOURCE_BYTES:
                     raise ValueError(f"Linked contract exceeds the {MAX_SOURCE_BYTES}-byte limit: {path}")
-                texts[path] = _storage.read_text(path)
+                if shared_file:
+                    from . import team_plans, team_state
+
+                    try:
+                        texts[path] = team_plans._read(path, MAX_SOURCE_BYTES).decode("utf-8")
+                    except team_state.TeamError as exc:
+                        raise ValueError(str(exc)) from exc
+                else:
+                    texts[path] = _storage.read_text(path)
             text = texts[path]
             try:
                 start, end = heading_contract(text, anchor) if anchor else (0, len(text.splitlines()))

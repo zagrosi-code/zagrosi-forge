@@ -417,3 +417,54 @@ def test_cache_named_symlinks_are_rejected_before_directory_exclusions(workspace
         pytest.skip(f"Host cannot create this link: {exc}")
     with pytest.raises(ValueError, match="symlink"):
         forge.mutable_inputs.regular_tree_observations(target, ["src"])
+
+
+def declare_move(workspace):
+    _, planning, target = workspace
+    old = target / "old.py"
+    old.write_bytes((target / "source.py").read_bytes())
+    # Callers keep importing a stable public facade across the implementation move.
+    (target / "source.py").write_text("from old import value\n")
+    section = planning / "sections" / f"{SECTION}.md"
+    section.write_text(section.read_text().replace(block(contract()), block(contract(
+        source_paths=["source.py", "old.py"], source_moves={"old.py": "new.py"}))))
+    return old, target / "new.py"
+
+
+def test_declared_move_preserves_original_and_checks(workspace):
+    forge, planning, target = workspace
+    old, new = declare_move(workspace)
+    baseline(workspace)
+    origin = activate(workspace)["origin"]
+    old.rename(new)
+    (target / "source.py").write_text("from new import value\n")
+    assert forge.compatibility.status(planning, target, SECTION)["stage"] == "candidate"
+    assert run(workspace, "candidate")["success"]
+    pair = forge.compatibility.completion_evidence(planning, target, SECTION)
+    assert pair["origin"] == origin and "old.py" in origin["source"]
+    assert set(pair["candidate"]["protected_source"]) == {"source.py", "new.py"}
+    (target / "checks.py").write_text("pass\n")
+    with pytest.raises(ValueError, match="unchanged baseline"):
+        run(workspace, "candidate")
+
+
+def test_declared_move_refuses_missing_destination_or_retained_origin(workspace):
+    _, _, target = workspace
+    old, new = declare_move(workspace)
+    new.write_text("already present\n")
+    with pytest.raises(ValueError, match="already exists"):
+        activate(workspace)
+    new.unlink()
+    baseline(workspace)
+    with pytest.raises(ValueError, match="must be absent"):
+        run(workspace, "candidate")
+    old.unlink()
+    with pytest.raises(ValueError, match="missing"):
+        run(workspace, "candidate")
+
+
+@pytest.mark.parametrize("moves", [{"absent.py": "new.py"}, {"source.py": "checks.py"},
+                                    {"source.py": "../x.py"}, {"source.py": "source.py"}])
+def test_invalid_source_move_declaration(workspace, moves):
+    with pytest.raises(ValueError, match="move"):
+        workspace[0].compatibility.parse_declaration(block(contract(source_moves=moves)))
