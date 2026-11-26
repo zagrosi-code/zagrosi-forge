@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from . import output, storage, team_state
+from . import group_evidence, output, storage, team_state
 from .team_git import _REPOSITORY_ENV
 
 
@@ -71,11 +71,9 @@ def _latest(events):
 def _provenance(args):
     if not args.source.strip() or not args.actor.strip():
         raise ValueError("Identify the evidence source and the actor who produced it.")
-    moment = datetime.fromisoformat(args.observed_at) if args.observed_at else datetime.now(timezone.utc)
-    if moment.utcoffset() is None:
-        raise ValueError("The observed timestamp needs a timezone.")
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     return {"source": args.source.strip(), "actor": args.actor.strip(),
-            "observed_at": moment.astimezone(timezone.utc).isoformat(timespec="microseconds")}
+            "observed_at": group_evidence.utc_time(args.observed_at) if args.observed_at else now}
 
 
 def _parents(prs, key):

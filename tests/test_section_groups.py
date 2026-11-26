@@ -172,7 +172,9 @@ def test_group_incomplete_execution_never_passes(forge, repositories, capsys, tm
     execute = forge.child_process.execute
     def incomplete(argv, *args, **kwargs):
         if argv == ['local-check']:
-            return {'returncode': 0, 'seconds': 1, flag: True}
+            if flag == 'timed_out':
+                return {'returncode': 124, 'timed_out': True, 'seconds': 1}
+            return {'returncode': 0, 'timed_out': False, 'seconds': 1, 'termination_error': 'Cleanup incomplete'}
         return execute(argv, *args, **kwargs)
     monkeypatch.setattr(forge.child_process, 'execute', incomplete)
     code, checked = call(forge, capsys, 'section-group', 'verify', '--target-dir', root,

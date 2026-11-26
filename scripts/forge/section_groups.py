@@ -35,51 +35,25 @@ def _fail(message):
 
 
 def _describe(repo, target, planning, selected, pull_request):
-    from . import markdown, ownership, policy, team_git, team_plans, team_state
+    from . import group_evidence, team_plans
 
-    if pull_request is not None and not team_state.is_plain_text(pull_request, 200):
-        _fail('Use a nonempty pull request identifier of at most 200 characters.')
     prepared = team_plans.validate(planning, target)
     canonical = repo.root / prepared['path'] if prepared else planning
-    relative = canonical.relative_to(repo.root).as_posix()
-    files, content = team_plans._bundle(repo, relative)
-    digest = team_plans._digest(files)
-    if prepared and prepared['digest'] != digest:
+    identity = group_evidence.describe(repo, canonical.relative_to(repo.root).as_posix(),
+                                       target.relative_to(repo.root).as_posix(), selected, pull_request,
+                                       check_checkout=True)
+    if prepared and prepared['digest'] != identity['plan_digest']:
         _fail('The prepared plan differs from the committed plan on this checkout.')
-    team_plans._contract(canonical)
-    known, errors = markdown.parse_numbered_manifest(content['sections/index.md'].decode('utf-8'),
-                                                    'SECTION_MANIFEST', policy.SECTION_RE, prefix='section-')
-    if errors or not set(selected).issubset(known):
-        _fail('Choose sections included in the committed plan manifest.')
-    prefix = target.relative_to(repo.root)
-    owned = set()
-    for name in selected:
-        declared = ownership.extract_section_owned_paths(content[f'sections/{name}.md'].decode('utf-8'))
-        if not declared:
-            _fail(f'Section {name} must declare its owned paths.')
-        owned.update((prefix / path).as_posix() for path in team_state.normalize_paths(declared))
-    owned = team_state.normalize_paths(sorted(owned))
-    tree = team_git._output(repo.root, 'rev-parse', '--verify', f'{repo.head}^{{tree}}')
-    return {'schema': 'forge-section-group-v1', 'commit_sha': repo.head, 'tree_sha': tree,
-            'plan_digest': digest, 'plan_path': relative, 'target_path': target.relative_to(repo.root).as_posix(),
-            'sections': selected, 'owned_paths': owned, 'pull_request': pull_request}
+    return identity
 
 
 def _read_handoff(path, repo, target):
-    from . import team_git, team_plans, team_workflow
+    from . import group_evidence
 
-    record = team_git.decode_json(team_plans._read(path))
-    identity = record.get('handoff') if isinstance(record, dict) else None
-    if not isinstance(identity, dict) or identity.get('schema') != 'forge-section-group-v1':
-        _fail('Expected a Forge section-group handoff.')
-    if identity.get('commit_sha') != repo.head:
-        _fail('The receiving checkout must be at the exact handoff commit.')
-    canonical = '.' if identity.get('plan_path') == '.' else team_plans._name(identity.get('plan_path'))
-    selected = team_workflow.group_selection(identity.get('sections'))
-    current = _describe(repo, target, repo.root / canonical, selected, identity.get('pull_request'))
-    if current != identity:
-        _fail('The handoff differs from the locally derived plan, scope, target or Git tree.')
-    return current, _received_history(record, selected)
+    report = group_evidence.read_report(path)
+    identity = group_evidence.validate_identity(repo, report['handoff'], checkout_target=target)
+    # Receiving a handoff uses its identity and history. A fresh verify runs only the local argv.
+    return identity, _received_history(report, identity['sections'])
 
 
 def _local_history(planning, selected, repo):
@@ -185,7 +159,7 @@ def verify(repo, identity, argv, timeout):
 
 
 def run(args):
-    from . import mutable_inputs, output, team_git, team_workflow
+    from . import group_evidence, output, team_git, team_workflow
 
     try:
         target = Path(args.target_dir).resolve()
@@ -201,13 +175,11 @@ def run(args):
         if args.group_action == 'verify':
             argv = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
             observed = verify(repo, identity, argv, args.timeout)
-            passed = observed['returncode'] == 0 and not any(observed.get(key) for key in
-                                                             ('timed_out', 'termination_error', 'snapshot_error'))
-            result.update(success=passed, verification=observed)
+            summary = group_evidence.run_summary(observed)
+            result.update(success=summary['passed'], verification=observed)
             if observed.get('snapshot_error'):
                 result['error'] = observed['snapshot_error']
-            history['group_check'] = {key: observed[key] for key in ('run_id', 'seconds', 'returncode')}
-            history['group_check'].update(passed=bool(passed), command_sha256=mutable_inputs.digest(argv))
+            history['group_check'] = summary
         return output.print_json(result, 0 if result['success'] else 1)
     except (OSError, ValueError, RuntimeError) as exc:
         return output.print_json({'success': False, 'error': str(exc)}, 1)

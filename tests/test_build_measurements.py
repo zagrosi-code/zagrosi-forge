@@ -1,4 +1,7 @@
 """Public measurement reports count executions rather than receipt copies."""
+from contextlib import redirect_stdout
+from io import StringIO
+import hashlib
 import json
 import sys
 
@@ -69,7 +72,7 @@ def test_state_first_retries_and_failed_attempts_remain_countable(workspace, cap
     assert result['summary']['check_wall_span_seconds'] > 0
 
 
-def committed_group_identity(workspace, root, pr):
+def committed_group_identity(workspace, root, pr, *, subproject=None):
     from test_team_git import git
 
     forge, planning, _ = workspace
@@ -82,20 +85,33 @@ def committed_group_identity(workspace, root, pr):
     (planning / 'codex-plan.md').write_text(marker + 'END_FORGE_META -->\n' + section.read_text())
     index.write_text(rest)
     git(root, 'add', str(index), str(section), str(planning / 'spec.md'), str(planning / 'codex-plan.md'))
+    if subproject:
+        subproject.mkdir()
+        marker = subproject / 'README.md'
+        marker.write_text('Test project')
+        git(root, 'add', str(marker))
     git(root, 'commit', '-m', 'Reviewed plan')
-    repo = forge.team_git.Repository.discover(root)
-    files, _ = forge.team_plans._bundle(repo, planning.name)
-    return {'schema': 'forge-section-group-v1', 'sections': [SECTION], 'pull_request': pr,
-            'plan_path': planning.name, 'plan_digest': forge.team_plans._digest(files),
-            'commit_sha': repo.head, 'tree_sha': forge.team_git._output(root, 'rev-parse', 'HEAD^{tree}')}
+    out = StringIO()
+    with redirect_stdout(out):
+        code = forge.entrypoint.main(["section-group", "create", "--target-dir", str(root),
+                                     "--planning-dir", str(planning), "--sections", SECTION, "--pr", pr])
+    created = json.loads(out.getvalue())
+    assert code == 0, created
+    return created["handoff"]
+
+
+def measured_group(identity, verification, *, passed=True):
+    command = json.dumps(verification["command"], sort_keys=True, separators=(",", ":")).encode()
+    summary = {key: verification[key] for key in ("run_id", "seconds", "returncode")}
+    summary.update(passed=passed, command_sha256=hashlib.sha256(command).hexdigest())
+    return {"success": passed, "handoff": identity, "verification": verification, "history": {"group_check": summary}}
 
 
 def test_group_verification_has_its_own_scope_and_replay_counts_once(workspace, capsys, tmp_path):
     identity = committed_group_identity(workspace, tmp_path, 'PR-2')
     group = tmp_path / 'group.json'
-    verification = {'command': ['pytest'], 'run_id': 'abcd', 'seconds': 4.2, 'returncode': 0}
-    group.write_text(json.dumps({'success': True, 'handoff': identity,
-                                 'verification': verification, 'history': {'group_check': verification}}))
+    verification = {'command': ['pytest'], 'run_id': 'abcd' * 8, 'seconds': 4.2, 'returncode': 0, 'timed_out': False}
+    group.write_text(json.dumps(measured_group(identity, verification)))
     result = report(workspace, capsys, '--group', str(group), '--group', str(group))
     assert result['sections'][SECTION]['checks'] is None
     assert result['groups'][0]['verification']['checks'] == 1 and len(result['groups']) == 1
@@ -148,10 +164,10 @@ def test_independent_compatibility_attempts_and_a_failed_group_remain_visible(wo
     assert local['checks'] == 3 and local['repeated_commands'][0]['executions'] == 3
     identity = committed_group_identity(workspace, tmp_path, '42')
     group = tmp_path / 'group.json'
-    group.write_text(json.dumps({'success': False, 'handoff': identity,
-        'verification': {'run_id': 'group-run', 'command': ['make', 'check'], 'returncode': 0,
-                         'snapshot_error': 'changed source', 'seconds': 2.0,
-                         'started_at': '2026-10-01T10:00:00+00:00', 'finished_at': '2026-10-01T10:00:02+00:00'}}))
+    group.write_text(json.dumps(measured_group(identity, {
+        'run_id': 'e' * 32, 'command': ['make', 'check'], 'returncode': 0, 'timed_out': False,
+        'snapshot_error': 'changed source', 'seconds': 2.0,
+        'started_at': '2026-10-01T10:00:00+00:00', 'finished_at': '2026-10-01T10:00:02+00:00'}, passed=False)))
     result = report(workspace, capsys, '--group', str(group))
     assert result['pull_requests']['42']['check_outcomes'] == {'failed': 1}
     assert result['pull_requests']['42']['section_history']['check_outcomes'] == {'passed': 3}
@@ -169,15 +185,16 @@ def test_shared_section_does_not_assign_local_work_to_two_prs_or_targets(workspa
 
     command = [sys.executable, '-c', 'pass']
     assert invoke(workspace, capsys, *verify_args(workspace, '--section', SECTION, '--', *command))[0] == 0
-    identity = committed_group_identity(workspace, tmp_path, '101')
+    identity = committed_group_identity(workspace, tmp_path, '101', subproject=tmp_path / 'service')
     args = []
     for value, (pr, target) in enumerate([('101', '.'), ('102', '.'), ('102', 'service')], start=1):
         group = tmp_path / f'group-{value}.json'
         verification = {'command': ['check', pr, target], 'run_id': uuid.uuid4().hex, 'seconds': value,
                         'returncode': 0, 'timed_out': False}
-        group.write_text(json.dumps({'success': True, 'handoff': {**identity, 'target_path': target,
-                'owned_paths': [f'{target}/src/labels.py'] if target != '.' else ['src/labels.py'], 'pull_request': pr},
-                'verification': verification, 'history': {'group_check': verification}}))
+        code, created = invoke(workspace, capsys, 'section-group', 'create', '--target-dir', str(tmp_path / target),
+                               '--planning-dir', str(workspace[1]), '--sections', SECTION, '--pr', pr)
+        assert code == 0 and created['handoff']['commit_sha'] == identity['commit_sha'], created
+        group.write_text(json.dumps(measured_group(created['handoff'], verification)))
         args.extend(['--group', str(group)])
     session = tmp_path / 'pr.json'
     session.write_text(json.dumps({'schema': 'forge-provider-review-v1', 'provider': 'codex', 'review_id': 'pr-check',

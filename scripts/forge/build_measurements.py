@@ -8,7 +8,6 @@ from pathlib import Path
 import hashlib
 import json
 import math
-import re
 
 from . import output, sections, state_first, storage, verification
 
@@ -289,7 +288,7 @@ def _read_checks(planning, names, observations):
 
 
 def _groups(files, planning, known, observations):
-    from . import team_git, team_plans, team_state
+    from . import group_evidence, team_git, team_plans, team_state
 
     if not files:
         return []
@@ -307,45 +306,18 @@ def _groups(files, planning, known, observations):
     except team_state.TeamError as exc:
         raise ValueError(f"Reading a group requires its committed plan: {exc}") from exc
     groups = []
-    trees = {}
     for file in files:
-        package = storage.load_json(Path(file))
-        identity = package.get("handoff") if isinstance(package, dict) else None
-        if not isinstance(identity, dict) or identity.get("schema") != "forge-section-group-v1":
-            raise ValueError("Expected a Forge section-group handoff or group verification result.")
-        if not all(isinstance(identity.get(name), str) and re.fullmatch(pattern, identity[name]) for name, pattern in
-                   (("commit_sha", r"[0-9a-f]{40}([0-9a-f]{24})?"), ("tree_sha", r"[0-9a-f]{40}([0-9a-f]{24})?"),
-                    ("plan_digest", r"[0-9a-f]{64}"))):
-            raise ValueError("The group is missing its commit, tree or plan identity.")
-        if identity.get("pull_request") is not None and not isinstance(identity["pull_request"], str):
-            raise ValueError("The group PR identifier must be text.")
-        members = identity.get("sections")
-        if (not isinstance(members, list) or not members or not all(isinstance(name, str) for name in members)
-                or set(members) - known):
-            raise ValueError("The group references sections outside this plan.")
-        if canonical != identity.get("plan_path") or digest != identity["plan_digest"]:
+        package = group_evidence.read_report(file)
+        identity = group_evidence.validate_identity(repo, package["handoff"])
+        if canonical != identity["plan_path"] or digest != identity["plan_digest"]:
             raise ValueError("The group belongs to a different canonical plan or plan revision.")
-        commit = identity["commit_sha"]
-        if commit not in trees:
-            try:
-                trees[commit] = team_git._output(repo.root, "rev-parse", "--verify", commit + "^{tree}")
-            except team_state.TeamError as exc:
-                raise ValueError("The group commit is unavailable in this checkout.") from exc
-        if trees[commit] != identity["tree_sha"]:
-            raise ValueError("The group tree differs from its recorded Git commit.")
-        key = ("group", identity["plan_digest"], identity["commit_sha"], identity["tree_sha"], tuple(sorted(members)),
-               identity.get("target_path"), identity.get("pull_request"))
-        if isinstance(package.get("verification"), dict):
-            verification_result = package["verification"]
-            failed = (verification_result.get("returncode") != 0 or verification_result.get("snapshot_error")
-                      or verification_result.get("termination_error"))
-            if verification_result.get("timed_out"):
-                outcome = "timed_out"
-            elif failed or package.get("success") is False:
-                outcome = "failed"
-            else:
-                outcome = "passed" if package.get("success") is True else None
-            observations.check(key, {**verification_result, "outcome": outcome})
+        members = identity["sections"]
+        if set(members) - known:
+            raise ValueError("The group references sections outside this plan.")
+        key = ("group", identity["plan_digest"], identity["commit_sha"], identity["tree_sha"], tuple(members),
+               identity["target_path"], identity["pull_request"])
+        if run := group_evidence.validated_run(package):
+            observations.check(key, run)
         groups.append((key, set(members), identity.get("pull_request")))
     return groups
 
