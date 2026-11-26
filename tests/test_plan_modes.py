@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from forge_test_helpers import (
     ROOT,
+    expanded_section_prompt,
     load_zagrosi_module,
     run_cmd,
     run_raw,
@@ -108,7 +109,7 @@ def test_migrated_section_prompt_resolves_actual_artifacts(tmp_path: Path) -> No
         "lean",
         "--all",
     )
-    prompt = Path(payload["prompt_files"][0]).read_text()
+    prompt = expanded_section_prompt(Path(payload["prompt_files"][0]))
 
     assert str(planning / "claude-plan.md") in prompt
     assert str(planning / "spec.md") in prompt

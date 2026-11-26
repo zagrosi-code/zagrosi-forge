@@ -46,24 +46,35 @@ def deep_plan_generate_section_prompts(args: argparse.Namespace) -> int:
     source_path = (canonical["source"] if canonical else None) or _artifacts.requirement_source_spec(planning_dir) or planning_dir / "spec.md"
     index_path = planning_dir / "sections" / "index.md"
     plugin_root = _storage.current_plugin_root()
+    references = {
+        "plan_path": str(plan_path),
+        "index_path": str(index_path),
+        "source_path": str(source_path),
+        "depth_path": str(plugin_root / "skills/zagrosi-plan/references/depth-standards.md"),
+        "engineering_path": str(plugin_root / "skills/zagrosi-implement/references/engineering.md"),
+        "format_path": str(plugin_root / "skills/zagrosi-plan/references/section-format.md"),
+    }
+    reference_file = None
     for section in batch:
         prompt_path = prompts_dir / f"{section}-prompt.md"
         section_path = planning_dir / "sections" / f"{section}.md"
-        prompt_path.write_text(
-            _policy.SECTION_PROMPT.format(
-                section=section,
-                plan_path=plan_path,
-                index_path=index_path,
-                source_path=source_path,
-                max_words=budgets["plan"] if section_path == canonical_path else budgets["section"],
-                depth=depth,
-                depth_path=plugin_root / "skills/zagrosi-plan/references/depth-standards.md",
-                engineering_path=plugin_root / "skills/zagrosi-implement/references/engineering.md",
-                dependency_evidence=_policy.SECTION_DEPENDENCY_EVIDENCE,
-                format_path=plugin_root / "skills/zagrosi-plan/references/section-format.md",
-            ),
-            encoding="utf-8",
-        )
+        instructions = {
+            "section": section,
+            "depth": depth,
+            "dependency_evidence": _policy.SECTION_DEPENDENCY_EVIDENCE,
+            "max_words": budgets["plan"] if section_path == canonical_path else budgets["section"],
+        }
+        text = _policy.SECTION_PROMPT.format(**instructions, **references)
+        if _markdown.word_count(text) > 300:
+            if reference_file is None:
+                from . import mutable_inputs
+
+                # A later partial batch may select different sources while earlier prompts still refer here.
+                reference_file = prompts_dir / f"section-inputs-{mutable_inputs.digest(references)}.json"
+                _storage.write_json(reference_file, references)
+            header = f"Resolve paths using `{reference_file.name}` beside this prompt."
+            text = header + "\n\n" + _policy.SECTION_PROMPT.format(**instructions, **{key: key for key in references})
+        prompt_path.write_text(text, encoding="utf-8")
         prompts.append(str(prompt_path))
 
     return _output.print_json(

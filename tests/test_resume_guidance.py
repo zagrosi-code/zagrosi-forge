@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from detached_test_support import make_detached_record_fixture, tree_bytes_metadata_snapshot
-from forge_test_helpers import ROOT, run_cmd, run_raw, write_non_topological_section_fixture
+from forge_test_helpers import ROOT, expanded_section_prompt, run_cmd, run_raw, write_non_topological_section_fixture
 from test_compact_plan import SECTION, make_plan
 
 
@@ -120,9 +120,10 @@ def test_detached_status_returns_authority_check_without_recovery(tmp_path):
 def test_section_prompts_keep_investigation_depth_and_short_guidance(tmp_path, depth):
     planning = make_plan(tmp_path / "plan", depth)
     payload = run_cmd("plan-generate-section-prompts", "--planning-dir", str(planning), "--all")
-    text = Path(payload["prompt_files"][0]).read_text()
+    prompt = Path(payload["prompt_files"][0])
+    text = prompt.read_text(encoding="utf-8")
     assert f"Apply `{depth}` investigation/review depth:" in text
-    assert str(ROOT / "skills/zagrosi-plan/references/depth-standards.md") in text
+    assert str(ROOT / "skills/zagrosi-plan/references/depth-standards.md") in expanded_section_prompt(prompt)
     assert len(text.split()) <= 300
 
 

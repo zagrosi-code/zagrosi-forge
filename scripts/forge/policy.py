@@ -711,24 +711,20 @@ INTERVIEW_PLACEHOLDER_RE = re.compile(
 
 SECTION_PROMPT = """Write ONLY `{section}.md` as raw Markdown.
 
-Read `{index_path}` and the section format: `{format_path}`.
+Read the index `{index_path}` and section format `{format_path}`.
 Apply `{depth}` investigation/review depth: `{depth_path}`.
-Apply the engineering standard: `{engineering_path}`.
-Use `{plan_path}` for shared contracts when it is another existing file.
-Clarify only from `{source_path}` when required.
+Follow `{engineering_path}`. Use shared contracts from `{plan_path}` if it is
+another existing file. Clarify only from `{source_path}`.
 {dependency_evidence}
 
-{max_words} words max. Do not copy plan context. Reference REQ/DEC/RISK IDs.
-For a canonical compact section use ## Contract, ## Owned files, ## Evidence,
-and ## Review. Contract maps each ### REQ-* to Source, Behavior, Expected, Command
-using the section format. Preserve source IDs; never edit the brief to add IDs.
-Keep inputs/outputs/errors, exact ownership, expected test failure, verification,
-and rollback explicit. Add ## Decisions or ## Risks only for material detail;
-otherwise keep those facts in evidence. Other sections link shared contracts and
-record local deltas; detached mode uses its physical format. Review needs literal
-`Verdict: pass` or `Verdict: fixed`, plus
-`Reviewed: <concrete scope and result>`.
-No production implementation. Every sentence must change an implementation decision.
+{max_words} words max. Do not copy context. Cite REQ/DEC/RISK IDs.
+Canonical compact sections require ## Contract, ## Owned files, ## Evidence and ## Review.
+Map each ### REQ-* to Source, Behavior, Expected, Command. Preserve source IDs; never add IDs to the brief.
+Specify inputs/outputs/errors, exact ownership, expected test failure, verification and rollback.
+Reserve ## Decisions and ## Risks for material details; put other facts in evidence.
+Other sections link shared contracts and record local changes. Detached sections use the physical format.
+Include literal `Verdict: pass` or `Verdict: fixed` and `Reviewed: <concrete scope and result>`.
+Write implementation decisions only. No production code.
 """
 
 
