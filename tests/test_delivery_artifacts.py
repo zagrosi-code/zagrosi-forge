@@ -106,6 +106,51 @@ def test_image_receipt_compares_the_qualified_reference(tracked, tmp_path):
         assert record(tracked, '--image', invalid, succeeds=False)['error']
 
 
+def markdown_status(repo, *options):
+    return subprocess.check_output(
+        [sys.executable, str(SCRIPT), 'delivery', 'status', '--pr', '42', '--environment', 'uat',
+         '--format', 'markdown', *options], cwd=repo, text=True, timeout=20)
+
+
+def test_markdown_identifies_each_image_repository_with_the_same_digest(tracked):
+    repo, _ = tracked
+    digest = 'sha256:' + 'a' * 64
+    images = [f'registry.example/{project}/runtime@{digest}' for project in ('billing', 'orders')]
+    for image in images:
+        record(tracked, '--image', image)
+
+    handoff = markdown_status(repo)
+    for image in images:
+        assert image in handoff
+
+
+def test_markdown_history_retains_original_outcomes_after_a_new_head(tracked):
+    repo, first_sha = tracked
+    forge(repo, 'require', '--pr', '42', '--stage', 'acceptance', '--environment', 'uat', '--name', 'finance')
+
+    def record_results(sha, date, test_outcome, decision):
+        evidence = ['--pr', '42', '--source', '/private/receipt.json', '--actor', 'reviewer', '--observed-at', date]
+        forge(repo, 'test', '--tested-sha', sha, '--check', 'migration', '--outcome', test_outcome, *evidence)
+        forge(repo, 'observe', '--sha', sha, '--stage', 'acceptance', '--environment', 'uat', '--name', 'finance',
+              '--outcome', decision, *evidence)
+
+    record_results(first_sha, '2026-03-01T12:00:00Z', 'failed', 'rejected')
+    git(repo, 'commit', '--allow-empty', '-m', 'fix migration')
+    new_sha = git(repo, 'rev-parse', 'HEAD')
+    record_results(new_sha, '2026-03-02T12:00:00Z', 'passed', 'accepted')
+
+    compact = markdown_status(repo)
+    assert first_sha not in compact and 'rejected' not in compact
+    report = markdown_status(repo, '--history')
+    assert '/private/' not in report
+    _, history = report.split('### Historical evidence')
+    for sha, day, name, outcome in (
+        (first_sha, '2026-03-01', 'migration', 'failed'), (first_sha, '2026-03-01', 'finance', 'rejected'),
+        (new_sha, '2026-03-02', 'migration', 'passed'), (new_sha, '2026-03-02', 'finance', 'accepted'),
+    ):
+        assert any(all(field in line for field in (sha, day, name, outcome)) for line in history.splitlines())
+
+
 def test_invalid_source_and_receipt_leave_ledger_unchanged(tracked, tmp_path):
     repo, _ = tracked
     ledger = repo / '.git' / 'forge-delivery.json'

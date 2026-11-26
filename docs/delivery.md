@@ -73,3 +73,7 @@ Use `--environment` in status to select deployment, live and customer observatio
 Sources and actors are supplied by the operator. Forge checks local commit identities, ancestry and evidence scope. It does not query or authenticate external systems. Refresh evidence after a restack, deployment, reviewer dismissal or customer decision.
 
 Use `delivery status --pr 42 --environment uat --format markdown` to generate a PR handoff for a reviewer. It lists the sections and exact commits tested, delivery stages, named requirements, artifact identities and next actions. The Markdown omits command arguments, process output and local evidence paths. The default JSON includes the structured evidence used for investigation and reruns.
+
+Add `--history` to the Markdown command to include a chronological record of tests and stage observations across all environments. Each entry gives the time, revision and original outcome. The delivery summary above it shows which evidence applies to the selected environment and current revision.
+
+See [required CI checks and sign-offs](required-checks.md), [artifact verification](delivery-artifacts.md) and the [runnable handoff](../examples/release-handoff/README.md).

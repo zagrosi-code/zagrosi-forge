@@ -145,19 +145,20 @@ def _report(repo, prs, selected, environment, history):
         head = snapshot["head_sha"]
         environments = {e["environment"] for e in row["observations"] if e["environment"]}
         environments.update(row.get("required_acceptance", {}))
+        artifacts = row.get("artifacts", ())
+        environments.update(receipt["environment"] for receipt in artifacts)
         result[key] = {
             **snapshot, "pr": key, "parent": row["parent"], "expected_base_sha": row["expected_base_sha"],
             "base_tip_sha": repo.ref(row["base_ref"]), "tree_sha": repo.tree(head) if head else None, "verification": _test_status(row, snapshot),
             "stages": stages.stage_report(row, snapshot, environment),
             "environments": sorted(environments),
         }
-        if artifacts := row.get("artifacts"):
+        if artifacts:
             release_sha = snapshot["merged_sha"] or head
             result[key]["artifacts"] = [
                 {**receipt, "status": "current" if receipt["sha"] == release_sha else "stale"}
                 for receipt in artifacts if environment is None or receipt["environment"] == environment
             ]
-            result[key]["environments"] = sorted(set(result[key]["environments"]) | {r["environment"] for r in artifacts})
         if history:
             result[key].update(tests=row["tests"], observations=row["observations"])
     return {"success": True, "version": 1, "environment": environment, "prs": result}
@@ -317,7 +318,7 @@ def run(args):
             if args.format == "markdown":
                 from . import delivery_summary
 
-                print(delivery_summary.markdown(result))
+                delivery_summary.print_markdown(result)
                 return 0
         else:
             with edit_ledger(repo.ledger) as prs:
