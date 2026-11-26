@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import math
 from pathlib import Path, PurePosixPath
 import re
@@ -65,4 +66,12 @@ def read_test(path, repo, pr):
         raise ValueError("The recorded group check disagrees with the reported command or outcome.")
     group = {k: identity[k] for k in ("plan_path", "plan_digest", "target_path", "sections", "owned_paths")}
     group.update(run_id=run["run_id"], command=command, seconds=seconds, returncode=code, timed_out=timeout, **failures)
+    if "started_at" in run or "finished_at" in run:
+        for name in ("started_at", "finished_at"):
+            moment = datetime.fromisoformat(run[name])
+            if moment.utcoffset() is None:
+                raise ValueError("Group run timestamps require a timezone.")
+            group[name] = moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
+        if group["finished_at"] < group["started_at"]:
+            raise ValueError("The group run finished before its recorded start time.")
     return tested, "timed_out" if timeout else ("passed" if passed else "failed"), group

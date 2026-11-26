@@ -276,3 +276,19 @@ def test_group_dirty_snapshot_downgrades_pass_and_works_with_qualified_pr_id(sta
     file.write_text(json.dumps(data))
     verify = call("test", *args)["prs"][pr]["verification"]
     assert verify["status"] == "failed" and verify["test"]["group"]["snapshot_error"]
+
+
+def test_late_group_import_uses_observed_finish_time(stack, tmp_path):
+    repo, call, base, parent, child, tip = stack
+    file = tmp_path / "report.json"
+    args = ("--pr", "2", "--group-report", str(file), "--source", "ci/archived", "--actor", "ci")
+    for run, day, code in [("a", "02", 0), ("b", "01", 1)]:
+        data = group_report(repo, child, "section-01-labels", run * 32)
+        data["verification"].update(started_at=f"2026-10-{day}T10:00:00Z", finished_at=f"2026-10-{day}T10:00:01Z", returncode=code)
+        data["success"] = code == 0
+        set_group_history(data)
+        file.write_text(json.dumps(data))
+        row = call("test", *args)["prs"]["2"]["verification"]
+    assert row["status"] == "current" and row["test"]["group"]["run_id"] == "a" * 32
+    assert row["test"]["observed_at"].startswith("2026-10-02T10:00:01")
+    assert call("test", *args, "--observed-at", "2026-11-01T01:02:03Z", ok=False)["error"]

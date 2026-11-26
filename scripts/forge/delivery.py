@@ -239,6 +239,10 @@ def _record_test(repo, row, snapshot, receipt, args):
         if args.outcome is not None or args.check is not None:
             raise ValueError("The group report supplies its own check and outcome.")
         tested, outcome, group = delivery_group.read_test(args.group_report, repo, args.pr)
+        if finished := group.get("finished_at"):
+            if args.observed_at and receipt["observed_at"] != finished:
+                raise ValueError("The supplied observation time differs from the recorded group finish time.")
+            receipt["observed_at"] = finished
         # A replay is the same observation even after a restack or after its sibling checks rerun.
         prior = next((r for r in row["tests"] if r.get("group", {}).get("run_id") == group["run_id"]), None)
         if prior:

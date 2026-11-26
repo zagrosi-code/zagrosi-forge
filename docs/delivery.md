@@ -37,7 +37,7 @@ python3 scripts/zagrosi_skills.py delivery test --pr 72 \
 python3 scripts/zagrosi_skills.py delivery status --pr 72
 ```
 
-Each entry under `verification.checks` identifies the sections, command, run, commit, tree, and upstream revisions it covered. The importer checks the report against the committed plan and preserves the outcome as reported evidence. Re-importing a run keeps its original evidence and freshness. After restacking, run the stale checks again and import their new reports. Use `--check NAME` on a manually recorded test to distinguish several checks on the same PR.
+Each entry under `verification.checks` identifies the sections, command, run, commit, tree, and upstream revisions it covered. The importer checks the report against the committed plan and preserves the outcome as reported evidence. Group results are ordered by the producer’s finish time. For older reports without execution timestamps, supply `--observed-at` or use the import time. Re-importing a run keeps its original evidence and freshness. After restacking, run the stale checks again and import their new reports. Use `--check NAME` on a manually recorded test to distinguish several checks on the same PR.
 
 ## Record what happened
 
