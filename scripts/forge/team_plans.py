@@ -195,13 +195,16 @@ def _blobs(repo, names, entries):
     return {name: found[entries[name]['oid']] for name in names}
 
 
-def _relative(base, value, *, origin=None, canonical=None, shared=()):
+def _relative(base, value):
     link = urlsplit(value)
     if link.scheme in {'https', 'http', 'mailto'} or not link.path and link.fragment:
         return None
     if link.scheme or link.netloc or not link.path or link.path.startswith(('/', '\\')):
         _fail('Shared contract file links must remain inside the canonical directory.')
-    decoded = unquote(link.path)
+    return _relative_path(base, unquote(link.path))
+
+
+def _relative_path(base, decoded, *, origin=None, canonical=None, shared=()):
     if decoded.startswith(('/', '\\')) or '\\' in decoded:
         _fail('Shared contract links must be relative paths.')
     if shared:
@@ -220,8 +223,13 @@ def _links(name, content, canonical, shared):
     # code retain the same meaning as normal contract-link discovery.
     text = re.sub(r'(?m)^([ \t]{0,3})\[([^\]\n]+)\]:[ \t]*(.+)$',
                   lambda match: f'{match[1]}[{match[2]}]({match[3]})', content.decode('utf-8'))
-    return {target for link in context_links.local_links(text)
-            if (target := _relative(posixpath.dirname(name), link, origin=name, canonical=canonical, shared=shared)) is not None}
+    paths = set()
+    for link in context_links.local_links(text):
+        reference = context_links.markdown_target(link)
+        if reference and reference[0]:
+            paths.add(_relative_path(posixpath.dirname(name), reference[0], origin=name,
+                                     canonical=canonical, shared=shared))
+    return paths
 
 
 def _bundle(repo, canonical, *, committed_only=False):

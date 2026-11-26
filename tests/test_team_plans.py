@@ -863,3 +863,39 @@ def test_linked_external_document_rejects_hardlinks_and_symlinks(forge, reposito
     assert not forge.context.build_context(planning, SECTION, 10000)['success']
     with pytest.raises(forge.team_state.TeamError):
         prepare(forge, root, planning)
+
+
+def test_shared_doc_code_links_and_anchored_markdown_chain(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    docs = root / 'guidance'
+    docs.mkdir()
+    (docs / 'terms.md').write_text(
+        '# Terms\nThe shared terms refer to [details](more%20terms.md#nested).\n'
+        '[Python validator](validator.py) and [rendered table](table.html) describe the check.\n'
+        '[Filtered view](dashboard.md?view=summary)\n'
+        '<!-- [Private notes](private.md) -->\n',
+        encoding='utf-8',
+    )
+    (docs / 'more terms.md').write_text(
+        '# Nested\nNested contract text.\n# Other\nOut-of-scope wording.\n', encoding='utf-8')
+    declare_shared_docs(root, planning, ['guidance/terms.md', 'guidance/more terms.md'],
+                        '[Terms](../../../../guidance/terms.md#terms)')
+    _, prepared = prepare(forge, root, planning)
+    for source in (planning, prepared):
+        packet = forge.context.build_context(source, SECTION, 10000)
+        assert packet['success'], packet
+        assert 'Nested contract text.' in packet['content']
+        assert 'Out-of-scope wording.' not in packet['content']
+    bundle = prepared / forge.context_links.SHARED_DIRECTORY / 'guidance'
+    assert {p.name for p in bundle.iterdir()} == {'terms.md', 'more terms.md'}
+
+
+@pytest.mark.parametrize('names', ['not-a-list', [None], [{'file': 'notes.md'}]])
+def test_malformed_shared_doc_metadata_stops_context_and_prepare(forge, repositories, names):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    declare_shared_docs(root, planning, names, '[Terms](../../../../notes.md)')
+    assert not forge.context.build_context(planning, SECTION, 10000)['success']
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)

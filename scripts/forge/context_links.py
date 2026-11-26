@@ -123,6 +123,17 @@ def _shared_link(root: Path, origin: Path, name: str, sharing: SharedDocuments) 
     return path
 
 
+def markdown_target(link: str) -> tuple[str, str] | None:
+    """Return the decoded document and heading for a local Markdown reference."""
+    target = urlsplit(link)
+    if target.scheme or target.netloc or target.query:
+        return None
+    name, anchor = unquote(target.path), unquote(target.fragment)
+    if name and Path(name).suffix.lower() != ".md":
+        return None
+    return (name, anchor) if name or anchor else None
+
+
 def local_links(text: str, *, line_spans: list[tuple[int, int]] | None = None) -> list[str]:
     """Lex the full source; optional line selection cannot activate comments/code."""
     text = _markdown.visible_markdown(text)
@@ -205,14 +216,10 @@ def linked_contracts(
     while queue:
         origin, body, line_spans = queue.popleft()
         for link in local_links(body, line_spans=line_spans):
-            target = urlsplit(link)
-            if target.scheme or target.netloc or target.query:
+            reference = markdown_target(link)
+            if reference is None:
                 continue
-            name, anchor = unquote(target.path), unquote(target.fragment)
-            if name and Path(name).suffix.lower() != ".md":
-                continue
-            if not name and not anchor:
-                continue
+            name, anchor = reference
             link_path = origin.parent / name if name else origin
             if sharing and (origin.is_relative_to(root) or sharing.contains(origin)) and link_path.resolve() not in allowed:
                 expected = _shared_link(root, origin, name, sharing)
