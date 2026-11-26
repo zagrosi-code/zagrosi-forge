@@ -1,6 +1,7 @@
 """PR stacks and source-attributed delivery observations shared by local worktrees."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import cache
 import os
@@ -150,6 +151,13 @@ def _report(repo, prs, selected, environment, history):
             "stages": stages.stage_report(row, snapshot, environment),
             "environments": sorted(environments),
         }
+        if artifacts := row.get("artifacts"):
+            release_sha = snapshot["merged_sha"] or head
+            result[key]["artifacts"] = [
+                {**receipt, "status": "current" if receipt["sha"] == release_sha else "stale"}
+                for receipt in artifacts if environment is None or receipt["environment"] == environment
+            ]
+            result[key]["environments"] = sorted(set(result[key]["environments"]) | {r["environment"] for r in artifacts})
         if history:
             result[key].update(tests=row["tests"], observations=row["observations"])
     return {"success": True, "version": 1, "environment": environment, "prs": result}
@@ -286,6 +294,18 @@ def _read(path):
     return state["prs"]
 
 
+@contextmanager
+def edit_ledger(path):
+    """Serialize changes across linked worktrees and publish only a successful operation."""
+    lock = path.with_suffix(".json.lock")
+    if lock.is_symlink() or (lock.exists() and (not lock.is_file() or lock.stat().st_nlink != 1)):
+        raise ValueError("The delivery lock must be a regular, single-link file.")
+    with storage.file_lock(path):
+        prs = _read(path)
+        yield prs
+        storage.write_json(path, {"version": 1, "prs": prs})
+
+
 def run(args):
     try:
         repo = Repository(args.target_dir)
@@ -300,14 +320,9 @@ def run(args):
                 print(delivery_summary.markdown(result))
                 return 0
         else:
-            lock = repo.ledger.with_suffix(".json.lock")
-            if lock.is_symlink() or (lock.exists() and (not lock.is_file() or lock.stat().st_nlink != 1)):
-                raise ValueError("The delivery lock must be a regular, single-link file.")
-            with storage.file_lock(repo.ledger):
-                prs = _read(repo.ledger)
+            with edit_ledger(repo.ledger) as prs:
                 _change(repo, prs, args)
                 result = _report(repo, prs, args.pr, env, False)
-                storage.write_json(repo.ledger, {"version": 1, "prs": prs})
     except KeyError as exc:
         result = {"success": False, "error": f"Unknown PR or missing ledger field: {exc}."}
     except (AttributeError, TypeError, OSError, ValueError) as exc:

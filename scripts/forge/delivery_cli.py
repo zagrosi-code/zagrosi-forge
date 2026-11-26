@@ -2,9 +2,35 @@
 from __future__ import annotations
 
 
+ARTIFACT_STAGES = ("build", "ci", "deploy", "live", "acceptance")
+
+
+def add_artifact_commands(actions, invoke_command):
+    parser = actions.add_parser("artifact", help="Record and verify exact release artifacts.")
+    commands = parser.add_subparsers(dest="artifact_action", required=True)
+    record = commands.add_parser("record", help="Record an artifact for a tracked PR revision.")
+    record.add_argument("--target-dir", default=".")
+    record.add_argument("--pr", required=True)
+    record.add_argument("--sha", required=True, help="Full PR head or recorded landing commit.")
+    record.add_argument("--name", required=True, help="Logical artifact name shown in the handoff.")
+    record.add_argument("--stage", choices=ARTIFACT_STAGES, required=True)
+    record.add_argument("--environment", required=True)
+    record.add_argument("--source", required=True, help="Location of the original build or release evidence.")
+    record.add_argument("--actor", required=True)
+    record.add_argument("--observed-at", help="ISO 8601 timestamp with timezone, default now.")
+    verify = commands.add_parser("verify", help="Compare local bytes or a supplied image reference with a receipt.")
+    verify.add_argument("--receipt", required=True, help="JSON emitted by delivery artifact record.")
+    for command in (record, verify):
+        command.set_defaults(func=invoke_command, handler=("delivery_artifacts", "run"))
+        subject = command.add_mutually_exclusive_group(required=True)
+        subject.add_argument("--file", help="Local artifact file to hash.")
+        subject.add_argument("--image", help="Published image digest or image name qualified by @sha256:….")
+
+
 def add_delivery_commands(sub, invoke_command):
     parser = sub.add_parser("delivery", help="Track PR stacks, tested commits and delivery evidence locally.")
     actions = parser.add_subparsers(dest="delivery_action", required=True)
+    add_artifact_commands(actions, invoke_command)
     for name, help_text in (
         ("track", "Register or retarget a PR and its expected base."),
         ("require", "Set the required CI checks or environment sign-offs."),
