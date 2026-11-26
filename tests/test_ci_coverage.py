@@ -125,11 +125,16 @@ def test_type_contract_compiler_is_installed_for_full_and_compatibility_tests():
 
 def test_latest_runtimes_run_the_full_suite():
     latest = job(WORKFLOW.read_text(), "latest-runtimes")
-    versions = re.findall(r'^ +(python|node)-version: "([^"]*)"$', latest, re.M)
-    assert versions == [("python", "3.14"), ("node", "26")], "latest-runtimes must pin Python 3.14 and Node 26"
+    steps = job_steps(latest)
+    python, = (step for step in steps if step.startswith("uses: actions/setup-python@"))
+    node, = (step for step in steps if step.startswith("uses: actions/setup-node@"))
+    for step, selectors in [(python, ['python-version: "3.x"', "allow-prereleases: false"]),
+                            (node, ['node-version: "*"'])]:
+        inputs = [line.strip() for line in step.splitlines()[1:]]
+        assert "check-latest: true" in inputs
+        assert all(selector in inputs for selector in selectors)
     assert "--durations" not in latest, "ci_guard_workflow strips duration reporting from its five steps only"
-    pytest_selectors(job_steps(latest), "Run tests on Python 3.14 and Node 26", "python -m pytest -q",
-                     full_suite=True)
+    pytest_selectors(steps, "Run full suite on latest stable runtimes", "python -m pytest -q", full_suite=True)
 
 
 _REPORT_PAIR = " --durations=20 --durations-min=1"

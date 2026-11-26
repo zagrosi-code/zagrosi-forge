@@ -30,7 +30,7 @@ TEST_MANIFEST = {
     "test_build_measurements.py": "cd0f59794123f81011180818d6752804aa5da73f5945326f33979f4d16609daf",
     "test_cache_publication.py": "218df403a40b42fe170ee816d0dd5de2df7f58106ac79e7d4dd55983f0698aff",
     "test_capabilities.py": "99d492d45aff4a8f118f8adb3287fbd8197645d7f2b614862f8b925fb04c05c6",
-    "test_ci_coverage.py": "6926a089962317ab693c9975bf66d321d542a4e6248e3e46e7876d85716a510e",
+    "test_ci_coverage.py": "63c5dc5637506756e1c0ba04d17b2e6703bec9e301a9e7dfb1428f6da628c146",
     "test_claude_plugin.py": "fb7a14be90602092f6cdf58b3739f09d5892b810f21fed924abd4d86e72fb751",
     "test_cli_helper_timeouts.py": "410b8559e77456c2c296cadd7074b905792199c3f5547c58dab7ce90520d2153",
     "test_coding_trials.py": "b4a88823bf51083f405eadb368a7e72033243d36b0f87d4b990348db607a3663",
