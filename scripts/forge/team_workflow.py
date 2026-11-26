@@ -156,6 +156,7 @@ def _declared_dependencies(contracts: dict[str, str], target: Path, repo_root: P
             complete = False
         else:
             paths.extend(declaration['source_paths'])
+            paths.extend(declaration.get('source_moves', {}).values())
             paths.extend(declaration['check_paths'])
     return {'paths': _repo_paths(target, repo_root, sorted(set(paths))), 'complete': complete} if paths else None
 
