@@ -13,7 +13,7 @@ from zipfile import ZipFile, ZipInfo
 HERE = Path(__file__).resolve().parent
 LAUNCHER = HERE.parents[1] / "scripts" / "zagrosi_skills.py"
 PR = "42"
-SECTION = "section-02-migration"
+CHECK_SECTIONS = {"schema": "section-01-schema", "migration": "section-02-migration"}
 
 
 def invoke(cwd, *command, expected=0):
@@ -70,7 +70,7 @@ def prepare_stack(directory):
 
 def verify_check(author, reviewer, directory, name, filename):
     identity = forge(author, "section-group", "create", "--planning-dir", author / "plan",
-                     "--sections", SECTION, "--pr", PR)
+                     "--sections", CHECK_SECTIONS[name], "--pr", PR)
     handoff = save(directory / "handoff.json", identity)
     report = forge(author, "section-group", "verify", "--handoff", handoff, "--omit-output",
                    "--", sys.executable, "check.py", name)

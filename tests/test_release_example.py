@@ -41,6 +41,10 @@ def test_walkthrough_reproduces_handoff_and_recovery(tmp_path):
 
     initial = json.loads((out / "initial-receipt.json").read_text(encoding="utf-8"))
     final = json.loads((out / "final-receipt.json").read_text(encoding="utf-8"))
+    for filename, section in [("initial-receipt", "section-01-schema"), ("rebased-schema-receipt", "section-01-schema"),
+                              ("migration-receipt", "section-02-migration"), ("final-receipt", "section-02-migration")]:
+        receipt = json.loads((out / f"{filename}.json").read_text(encoding="utf-8"))
+        assert receipt["handoff"]["sections"] == [section]
     initial_sha = initial["handoff"]["commit_sha"]
     final_sha = final["handoff"]["commit_sha"]
     assert initial_sha != final_sha

@@ -110,7 +110,7 @@ TEST_MANIFEST = {
     "test_quality_gates.py": "4b6bdb5dc9b982bc30a73c6e3354ae62b5e623bb196e4eff7b7513b97510a147",
     "test_release.py": "d16f0ad9b4997bf97bf5b7115fce6c69fc1e81644a5e3f99807fee4cec740d55",
     "test_release_bump.py": "2c45fabd1c2c52762b72e2f000e546d04fa830ad958ce333a6674401104ff930",
-    "test_release_example.py": "0fc736a49bc4c900656f620bb704f1fbae21b23f2896aad2d90206eba31ceb1f",
+    "test_release_example.py": "2c7a52ed83bb35766354378a5b8d236e10535eb26461b71796e5347a873c4244",
     "test_release_handoff.py": "55e94f2fba503e0b19313f5b78b40457a17293c64d236390675c0b96b468bb4b",
     "test_release_identity.py": "2a2bbbd03bc07e7ece8b6c5f1f4c6ae7d271b7bfa41a0f8fe218da14c2e232db",
     "test_repository_paths.py": "3d8e63aa6ab85c4a5b7db1c0de6c3409a81f3f5ab831122333ebceeb2deece68",
