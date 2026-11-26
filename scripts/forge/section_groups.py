@@ -170,8 +170,11 @@ def verify(repo, identity, argv, timeout):
         env = {key: value for key, value in os.environ.items() if key not in team_git._REPOSITORY_ENV}
         env['GIT_NO_REPLACE_OBJECTS'] = '1'
         started_at = datetime.now(timezone.utc).isoformat()
-        observed = child_process.execute(argv, clone / identity['target_path'], timeout=timeout,
-                                         inherit_env=False, env=env)
+        workspace = clone / identity['target_path']
+        command = argv
+        if os.path.dirname(argv[0]) and not os.path.isabs(argv[0]):
+            command = [str(workspace / argv[0]), *argv[1:]]
+        observed = child_process.execute(command, workspace, timeout=timeout, inherit_env=False, env=env)
         finished_at = datetime.now(timezone.utc).isoformat()
         try:
             _check_snapshot(clone, identity['commit_sha'])

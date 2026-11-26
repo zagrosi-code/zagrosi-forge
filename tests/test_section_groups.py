@@ -178,3 +178,42 @@ def test_group_incomplete_execution_never_passes(forge, repositories, capsys, tm
     code, checked = call(forge, capsys, 'section-group', 'verify', '--target-dir', root,
                          '--handoff', handoff, '--', 'local-check')
     assert code == 1 and not checked['history']['group_check']['passed']
+
+
+def test_relative_check_executable_runs_from_the_committed_group_checkout(
+        forge, repositories, capsys, tmp_path, monkeypatch):
+    import os
+    import shutil
+    import subprocess
+
+    root, _, _ = repositories
+    planning = group_plan(root)
+    executable = root / 'tools' / ('check.exe' if os.name == 'nt' else 'check')
+    executable.parent.mkdir()
+    if os.name == 'nt':
+        shutil.copyfile(shutil.which('cmd.exe'), executable)
+        args = ['/d', '/c', 'exit 0']
+    else:
+        executable.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
+        executable.chmod(0o755)
+        args = []
+    git(root, 'add', str(executable))
+    git(root, 'commit', '-m', 'Add repository check')
+    _, group = call(forge, capsys, 'section-group', 'create', '--target-dir', root,
+                    '--planning-dir', planning, '--sections', SECOND)
+    handoff = tmp_path / 'group.json'
+    handoff.write_text(json.dumps(group))
+    relative_command = str(executable.relative_to(root))
+    monkeypatch.chdir(tmp_path)
+    if os.name != 'nt':
+        # On Windows CreateProcess resolves the executable from the caller even with cwd set.
+        popen = subprocess.Popen
+        def windows_lookup(argv, *rest, **kwargs):
+            if argv[0] == relative_command:
+                argv = [str(Path.cwd() / argv[0]), *argv[1:]]
+            return popen(argv, *rest, **kwargs)
+        monkeypatch.setattr(subprocess, 'Popen', windows_lookup)
+    code, checked = call(forge, capsys, 'section-group', 'verify', '--target-dir', root,
+                         '--handoff', handoff, '--', relative_command, *args)
+    assert code == 0, checked
+    assert checked['verification']['command'] == [relative_command, *args]
