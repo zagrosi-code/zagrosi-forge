@@ -13,7 +13,7 @@ def declarations(text: str) -> dict[str, dict]:
         return {}
     headings = markdown.markdown_h2_sections(markdown.visible_markdown(text))
     bodies = [body for title, body in headings if title.casefold() == "acceptance journeys"]
-    if not bodies:
+    if not bodies or not any(markdown.split_markdown_fences_with_closure(body)[0] for body in bodies):
         return {}
     blocks, _ = markdown.split_markdown_fences_with_closure(bodies[0])
     if len(bodies) != 1 or len(blocks) != 1 or blocks[0][0] != "json" or not blocks[0][2]:

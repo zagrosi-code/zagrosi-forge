@@ -94,3 +94,12 @@ def test_failed_retry_replaces_a_previously_passing_journey(workspace, capsys):
     assert invoke(workspace, capsys, *record_args(workspace, "--verification-receipt", recovered["receipt_path"]))[0] == 0
     assert invoke(workspace, capsys, "postflight", "--phase", "implement", "--planning-dir",
                   str(workspace[1]), "--target-dir", str(workspace[2]), "--strict")[0] == 0
+
+
+def test_legacy_prose_heading_keeps_ordinary_section_verification(workspace, capsys):
+    path = workspace[1] / "sections" / f"{SECTION}.md"
+    with path.open("a", encoding="utf-8") as out:
+        out.write("\n## Acceptance journeys\n\nThe finance approver reviews the invoice.\n")
+    code, trace = invoke(workspace, capsys, "traceability", "--planning-dir", str(workspace[1]), "--strict")
+    assert code == 0, trace
+    assert not trace["coverage"]["REQ-001"].get("journeys")

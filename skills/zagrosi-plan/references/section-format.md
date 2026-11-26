@@ -88,7 +88,7 @@ the pinned detached protocol retains its own evidence format.
 When a decision depends on actor, starting state or an alternate action, add
 `## Acceptance journeys` to the section that implements it. Give each material
 case its own check. List the requirement in the section's visible prose.
-Use one JSON array in the heading, for example:
+A prose-only heading remains descriptive. To require captured evidence, use one fenced JSON array under the heading.
 
 ```json
 [
