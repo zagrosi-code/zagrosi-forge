@@ -528,8 +528,8 @@ def add_utility_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--section", action="append", default=[], help="Limit reporting to this section (repeatable).")
     p.add_argument("--group", action="append", default=[], metavar="HANDOFF", help="Select a section-group handoff or verification.")
-    p.add_argument("--usage", nargs=2, action="append", default=[], metavar=("SECTION", "FILE"))
-    p.add_argument("--review", nargs=2, action="append", default=[], metavar=("SECTION", "FILE"))
+    p.add_argument("--usage", nargs=2, action="append", default=[], metavar=("SCOPE", "FILE"))
+    p.add_argument("--review", nargs=2, action="append", default=[], metavar=("SCOPE", "FILE"))
     p.set_defaults(func=invoke_command, handler=('build_measurements', 'run'))
 
     p = sub.add_parser("report")

@@ -8,7 +8,7 @@ python3 scripts/zagrosi_skills.py build-report --planning-dir plans/import --sec
 python3 scripts/zagrosi_skills.py build-report --planning-dir plans/import --group pr-42-verified.json
 ```
 
-Pass `--group` again for more groups in the same plan. The committed plan digest must match and the checkout must contain the recorded commit and tree. The report adds a row for each named pull request. Section receipts describe work on those sections across the retained local plan history. The separate group verification row describes the recorded check against the handoff's commit and tree. Sections that belong to more than one PR appear under each PR. The summary counts each observed execution once. A group check covers the group as a whole and contributes to the PR total. Looking at one member of a larger group excludes that group-wide check. The report accepts group history as context and uses only the fresh verification object to count a group execution.
+Pass `--group` again for more groups in the same plan. The committed plan digest must match and the checkout must contain the recorded commit and tree. The report adds a row for each named pull request. A PR row counts the group checks explicitly bound to that PR and telemetry explicitly assigned to its `pr:<identifier>` scope. Its separate `section_history` field describes local work on member sections, which may also belong to other PRs. Each group row identifies its checks, commit, tree and target. The overall summary counts a unique execution once across all scopes. Selecting one member of a larger group excludes that group-wide check and whole-PR telemetry. Imported handoff history does not add executions.
 
 ## Checks and time
 
@@ -20,7 +20,7 @@ Ordinary capture history, compatibility pairs and their prior attempts, and stat
 
 ## Attribute reviews and context
 
-Pass the section name and file for each review or usage observation. Use `integration` for work spanning the plan. A dedicated review file contributes both review and usage observations. Only attribute a review session containing the review you intend to count.
+Pass the section name and file for each review or usage observation. Use `integration` for work spanning the plan. When a group names a PR, use `--review pr:42 pr-review.json` or `--usage pr:42 writer.jsonl` to attribute a whole session directly to PR 42. A dedicated review file contributes both review and usage observations. Only attribute a review session containing the review you intend to count.
 
 ```sh
 python3 scripts/zagrosi_skills.py build-report --planning-dir plans/import \

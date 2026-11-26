@@ -153,7 +153,8 @@ def test_independent_compatibility_attempts_and_a_failed_group_remain_visible(wo
                          'snapshot_error': 'changed source', 'seconds': 2.0,
                          'started_at': '2026-10-01T10:00:00+00:00', 'finished_at': '2026-10-01T10:00:02+00:00'}}))
     result = report(workspace, capsys, '--group', str(group))
-    assert result['pull_requests']['42']['check_outcomes'] == {'passed': 3, 'failed': 1}
+    assert result['pull_requests']['42']['check_outcomes'] == {'failed': 1}
+    assert result['pull_requests']['42']['section_history']['check_outcomes'] == {'passed': 3}
     assert result['groups'][0]['verification']['check_wall_span_seconds'] == 2.0
 
     changed = json.loads(group.read_text())
@@ -161,3 +162,34 @@ def test_independent_compatibility_attempts_and_a_failed_group_remain_visible(wo
     group.write_text(json.dumps(changed))
     code, result = invoke(workspace, capsys, 'build-report', '--planning-dir', str(planning), '--group', str(group))
     assert code == 1 and 'group tree' in result['error']
+
+
+def test_shared_section_does_not_assign_local_work_to_two_prs_or_targets(workspace, capsys, tmp_path):
+    import uuid
+
+    command = [sys.executable, '-c', 'pass']
+    assert invoke(workspace, capsys, *verify_args(workspace, '--section', SECTION, '--', *command))[0] == 0
+    identity = committed_group_identity(workspace, tmp_path, '101')
+    args = []
+    for value, (pr, target) in enumerate([('101', '.'), ('102', '.'), ('102', 'service')], start=1):
+        group = tmp_path / f'group-{value}.json'
+        verification = {'command': ['check', pr, target], 'run_id': uuid.uuid4().hex, 'seconds': value,
+                        'returncode': 0, 'timed_out': False}
+        group.write_text(json.dumps({'success': True, 'handoff': {**identity, 'target_path': target,
+                'owned_paths': [f'{target}/src/labels.py'] if target != '.' else ['src/labels.py'], 'pull_request': pr},
+                'verification': verification, 'history': {'group_check': verification}}))
+        args.extend(['--group', str(group)])
+    session = tmp_path / 'pr.json'
+    session.write_text(json.dumps({'schema': 'forge-provider-review-v1', 'provider': 'codex', 'review_id': 'pr-check',
+                                   'returncode': 0, 'success': True, 'usage':
+                                   {'input_tokens': 21, 'cached_input_tokens': 5, 'output_tokens': 2}}))
+    result = report(workspace, capsys, *args, *args, '--review', 'pr:102', str(session))
+    assert result['summary']['observed_checks'] == 4
+    assert [group['verification']['checks'] for group in result['groups']] == [1, 1, 1]
+    summaries = result['pull_requests']
+    assert summaries['101']['checks'] == 1 and summaries['101']['check_seconds'] == 1
+    assert summaries['102']['checks'] == 2 and summaries['102']['check_seconds'] == 5
+    assert summaries['102']['input_tokens'] == 21 and summaries['102']['review_rounds'] == 1
+    assert summaries['101']['input_tokens'] is None
+    for pr in summaries.values():
+        assert pr['section_history']['checks'] == 1 and pr['sections'] == [SECTION]

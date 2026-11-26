@@ -205,7 +205,7 @@ class Observations:
             incoming.identified = previous.identified or identified
         self.telemetry[key] = incoming
 
-    def summary(self, selected, observation_scopes):
+    def summary(self, selected, observation_scopes, *, telemetry_scopes=None):
         ids = set().union(*(self.scopes[scope] for scope in selected))
         runs = [self.runs[key] for key in ids]
         commands = Counter(run.command for run in runs)
@@ -218,8 +218,9 @@ class Observations:
             span = round(max(run.finish for run in runs) - min(run.start for run in runs), 6)
         sessions = [row for row in self.telemetry.values() if row.scope in selected]
         reviews = [row for row in sessions if row.review]
-        review_complete = bool(reviews) and observation_scopes <= {row.scope for row in reviews}
-        usage_complete = bool(sessions) and observation_scopes <= {row.scope for row in sessions}
+        expected = observation_scopes if telemetry_scopes is None else telemetry_scopes
+        review_complete = bool(reviews) and expected <= {row.scope for row in reviews}
+        usage_complete = bool(sessions) and expected <= {row.scope for row in sessions}
         outcomes = Counter(run.outcome or "unknown" for run in runs)
         result = {"observed_checks": len(runs), "check_outcomes": dict(sorted(outcomes.items())), "checks": len(runs) if measured else None,
                   "observed_repeated_checks": repeated, "repeated_checks": repeated if measured else None,
@@ -332,7 +333,8 @@ def _groups(files, planning, known, observations):
                 raise ValueError("The group commit is unavailable in this checkout.") from exc
         if trees[commit] != identity["tree_sha"]:
             raise ValueError("The group tree differs from its recorded Git commit.")
-        key = ("group", identity["plan_digest"], identity["commit_sha"], identity["tree_sha"], tuple(sorted(members)))
+        key = ("group", identity["plan_digest"], identity["commit_sha"], identity["tree_sha"], tuple(sorted(members)),
+               identity.get("target_path"), identity.get("pull_request"))
         if isinstance(package.get("verification"), dict):
             verification_result = package["verification"]
             failed = (verification_result.get("returncode") != 0 or verification_result.get("snapshot_error")
@@ -362,27 +364,41 @@ def run(args):
         selected = set(args.section) if args.section else group_members
         if not selected or selected - group_members:
             raise ValueError("Choose sections in the selected plan or section group.")
+        pr_members = defaultdict(set)
+        pr_groups = defaultdict(set)
+        for key, members, pr in groups:
+            if pr:
+                pr_members[pr].update(members)
+                if members <= selected:
+                    pr_groups[pr].add(key)
+        direct_scopes = {"pr:" + pr for pr in pr_members}
         for paths, review in ((args.usage, False), (args.review, True)):
             for scope, path in paths:
-                if scope not in known | {INTEGRATION}:
-                    raise ValueError("Telemetry attribution requires a known section or integration.")
+                if scope not in known | {INTEGRATION} | direct_scopes:
+                    raise ValueError("Attribute telemetry to a known section, integration or pr:<group PR>.")
                 observations.observe(scope, Path(path), review)
         scope_keys = selected | {key for key, members, _ in groups if members <= selected}
         if not groups and not args.section:
             scope_keys.add(INTEGRATION)
-        prs = defaultdict(set)
-        for key, members, pr in groups:
-            if pr and members & selected:
-                prs[pr].update(members & selected)
-                if members <= selected:
-                    prs[pr].add(key)
+        prs = {}
+        for pr, members in sorted(pr_members.items()):
+            selected_members = members & selected
+            if not selected_members:
+                continue
+            # A whole-PR session cannot be charged to a filtered subset of that PR.
+            telemetry = {"pr:" + pr} if members <= selected else set()
+            scope_keys.update(telemetry)
+            attributed = observations.summary(pr_groups[pr] | telemetry, pr_groups[pr], telemetry_scopes=telemetry)
+            prs[pr] = {**attributed, "scope": "direct_pr_observations", "sections": sorted(selected_members),
+                       "section_history": observations.summary(selected_members, selected_members)}
         unique_groups = {(key, pr): members for key, members, pr in groups if members <= selected}
         result = {"schema": "forge-build-report-v1", "success": True,
                   "summary": observations.summary(scope_keys, selected),
                   "sections": {name: observations.summary({name}, {name}) for name in sorted(selected)},
                   "integration": observations.summary({INTEGRATION}, {INTEGRATION}) if INTEGRATION in scope_keys else None,
-                  "pull_requests": {pr: observations.summary(keys, keys & known) for pr, keys in sorted(prs.items())},
-                  "groups": [{"commit_sha": key[2], "tree_sha": key[3], "plan_digest": key[1], "sections": sorted(members), "pull_request": pr,
+                  "pull_requests": prs,
+                  "groups": [{"commit_sha": key[2], "tree_sha": key[3], "plan_digest": key[1], "target_path": key[5],
+                              "sections": sorted(members), "pull_request": pr,
                               "verification": observations.summary({key}, {key})}
                              for (key, pr), members in unique_groups.items()]}
         return output.print_json(result)
