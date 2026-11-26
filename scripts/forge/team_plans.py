@@ -224,7 +224,7 @@ def _links(name, content, canonical, shared):
             if (target := _relative(posixpath.dirname(name), link, origin=name, canonical=canonical, shared=shared)) is not None}
 
 
-def _bundle(repo, canonical):
+def _bundle(repo, canonical, *, committed_only=False):
     entries = _tree(repo, canonical, repo.head)
     plan, pending = _seeds(entries)
     content, shared = {}, []
@@ -264,6 +264,8 @@ def _bundle(repo, canonical):
                     _fail('The shared plan section manifest is incomplete or invalid.')
                 pending.update(f'sections/{section}.md' for section in sections)
     files = {name: entries[name] for name in sorted(content)}
+    if committed_only:
+        return files, content
     index = {}
     output = team_git._run(repo.root, 'ls-files', '--stage', '-z', '--', canonical, *shared)['stdout']
     prefix = '' if canonical == '.' else canonical + '/'
