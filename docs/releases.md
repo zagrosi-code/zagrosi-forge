@@ -12,6 +12,8 @@
 - [Named requirements](required-checks.md) show each required CI job and environment sign-off independently. [Artifact receipts](delivery-artifacts.md) identify local packages by bytes and published images by digest.
 - The [runnable reviewer handoff](../examples/release-handoff/README.md) demonstrates Markdown summaries, importable receipts without command output, a modified ZIP and recovery after a parent PR changes.
 - Forge's [engineering guidance](../skills/zagrosi-implement/references/engineering.md) now follows a caller through code changes, checks behavior before sharing implementations and pairs performance claims with workload evidence. A [worked example](../skills/zagrosi-implement/references/lookup-example.md) demonstrates a measured reduction in reads.
+- When choosing a dependency, Forge checks the latest stable release and the version the project actually resolves. An older selection needs a specific compatibility reason. The latest-runtimes CI job exercises current stable Python and Node alongside the fixed compatibility jobs.
+- Native plugin installation and upgrade checks run with Codex CLI 0.172.0 and Claude Code 2.1.332.
 
 ## 0.5.5 — foreground delegated agents when Claude Code offers the choice
 
