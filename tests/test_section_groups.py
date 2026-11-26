@@ -196,6 +196,9 @@ def test_relative_check_executable_runs_from_the_committed_group_checkout(
         shutil.copyfile(shutil.which('cmd.exe'), executable)
         args = ['/d', '/c', 'exit 0']
     else:
+        attributes = executable.parent / '.gitattributes'
+        attributes.write_text('check text eol=lf\n', encoding='utf-8')
+        git(root, 'add', str(attributes))
         executable.write_text('#!/bin/sh\nexit 0\n', encoding='utf-8')
         executable.chmod(0o755)
         args = []
