@@ -243,12 +243,23 @@ QUALITY_PROFILES = {
 VAGUE_SECTION_NAMES = {"misc", "cleanup", "utils", "frontend", "backend", "api", "stuff", "polish"}
 
 
+SECTION_DEPENDENCY_EVIDENCE = (
+    "For dependencies the change uses, cite the plan's verified latest stable release and relevant "
+    "migration or compatibility constraints. Return missing registry or upstream evidence to the planner "
+    "before choosing a version."
+)
+
+
 PROMPT_TYPES = {
     "codebase-researcher": "Research the existing codebase for relevant files, patterns, tests, risks, and commands. Return concise findings only.",
     "spec-reviewer": "Review the normalized spec for missing requirements, ambiguous acceptance criteria, scope drift, and unverified assumptions.",
     "security-reviewer": "Review the plan or implementation for auth, privacy, data exposure, injection, secrets, and abuse cases. Return severity-ranked findings.",
     "test-strategist": "Review test strategy. Identify missing tests, brittle fixtures, untestable design, and the smallest useful red/green path.",
-    "section-writer": "Write one bounded implementation section: IDs, dependencies, exact owned paths, tests first, contracts, risks, rollback, and acceptance. Reference the plan; do not copy it.",
+    "section-writer": (
+        "Write one bounded implementation section: IDs, dependencies, exact owned paths, tests first, "
+        "contracts, risks, rollback, and acceptance. Reference the plan; do not copy it. "
+        + SECTION_DEPENDENCY_EVIDENCE
+    ),
     "release-reviewer": "Review final readiness for rollout, rollback, docs, observability, migration safety, and residual risks.",
     "implementation-reviewer": "Review changed code against the original source requirements and section file. Reject assumptions that narrow the source promise. Check caller-level regressions against the unchanged baseline, concrete cleanup gains and justified deferrals. Prioritize correctness, security, scope drift, and missing tests.",
 }
@@ -278,24 +289,44 @@ EVIDENCE_IGNORE_PARTS = {
 
 COMMAND_CATALOG = [
     {
+        "name": "section-group", "phase": "implement",
+        "summary": "Verify and hand off PR sections.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py section-group create --help"],
+    },
+    {
+        "name": "delivery", "phase": "implement",
+        "summary": "Track stacked PRs and delivery.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py delivery status --pr 2"],
+    },
+    {
+        "name": "journey-status", "phase": "implement",
+        "summary": "Show checks for each journey.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py journey-status --planning-dir planning/import --section section-01-import"],
+    },
+    {
+        "name": "build-report", "phase": "utility",
+        "summary": "Measure section and PR work.",
+        "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py build-report --help"],
+    },
+    {
         "name": "team", "phase": "utility",
-        "summary": "Coordinate tasks and shared plans across engineers and Git clones.",
+        "summary": "Reserve tasks and share plans.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py team status"],
     },
     {
         "name": "provider-status", "phase": "utility",
-        "summary": "Show reviewer availability and login.",
+        "summary": "Check reviewer login.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py provider-status --check-auth"],
     },
     {
         "name": "provider-review", "phase": "quality",
-        "summary": "Review a packet with a chosen model.",
+        "summary": "Review with a chosen model.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py provider-review --provider claude --input packet.md --output review.json"],
     },
     {
         "name": "project-setup",
         "phase": "project",
-        "summary": "Start or resume project decomposition.",
+        "summary": "Split a project into specs.",
         "aliases": ["project", "zagrosi-project-setup", "deep-project-setup"],
         "examples": [
             "python3 scripts/zagrosi_skills.py project-setup --file planning/requirements.md",
@@ -305,62 +336,62 @@ COMMAND_CATALOG = [
     {
         "name": "project-create-dirs",
         "phase": "project",
-        "summary": "Create directories from the manifest.",
+        "summary": "Create manifest directories.",
         "aliases": ["zagrosi-project-create-dirs", "deep-project-create-dirs"],
         "examples": ["python3 scripts/zagrosi_skills.py project-create-dirs --planning-dir planning/app"],
     },
     {
         "name": "plan-setup",
         "phase": "plan",
-        "summary": "Start or resume a spec's plan.",
+        "summary": "Start or resume a plan.",
         "aliases": ["plan", "zagrosi-plan-setup", "deep-plan-setup"],
         "examples": ["python3 scripts/zagrosi_skills.py plan-setup --file planning/01-auth/spec.md --plugin-root ."],
     },
     {
         "name": "plan-check-sections",
         "phase": "plan",
-        "summary": "Find missing sections and index errors.",
+        "summary": "Check section index and files.",
         "aliases": ["zagrosi-plan-check-sections", "deep-plan-check-sections"],
         "examples": ["python3 scripts/zagrosi_skills.py plan-check-sections --planning-dir planning/01-auth"],
     },
     {
         "name": "plan-generate-section-prompts",
         "phase": "plan",
-        "summary": "Generate bounded section prompts.",
+        "summary": "Build section prompts.",
         "aliases": ["zagrosi-plan-generate-section-prompts", "deep-plan-generate-section-prompts"],
         "examples": ["python3 scripts/zagrosi_skills.py plan-generate-section-prompts --planning-dir planning/01-auth"],
     },
     {
         "name": "implement-setup",
         "phase": "implement",
-        "summary": "Start or resume implementation.",
+        "summary": "Start or resume a build.",
         "aliases": ["implement", "zagrosi-implement-setup", "deep-implement-setup"],
         "examples": ["python3 scripts/zagrosi_skills.py implement-setup --sections-dir planning/01-auth/sections --target-dir ."],
     },
     {
         "name": "next-section", "phase": "implement",
-        "summary": "Resume with section context and actions.",
+        "summary": "Resume the next section.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py next-section --planning-dir planning/01-auth"],
     },
     {
         "name": "implement-progress", "phase": "implement",
-        "summary": "Save a checkpoint and its evidence.",
+        "summary": "Save checkpoint evidence.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py implement-progress --planning-dir planning/01-auth --section section-01-auth --stage red --command 'python3 -m pytest tests/test_auth.py' --result 'Observed regression failure'"],
     },
     {
         "name": "context-brief", "phase": "all",
-        "summary": "Read complete, bounded plan context.",
+        "summary": "Read bounded plan context.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py context-brief --planning-dir planning/01-auth --section section-01-auth"],
     },
     {
         "name": "implementation-packet", "phase": "implement",
-        "summary": "Save a bounded section packet.",
+        "summary": "Save a section packet.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py implementation-packet --planning-dir planning/01-auth --section section-01-auth"],
     },
     {
         "name": "parallel-plan", "phase": "implement",
-        "summary": "Group sections with disjoint ownership.",
+        "summary": "Find independent sections.",
         "aliases": [], "examples": ["python3 scripts/zagrosi_skills.py parallel-plan --planning-dir planning/01-auth"],
     },
     {
@@ -375,7 +406,7 @@ COMMAND_CATALOG = [
     {
         "name": "implement-record-section",
         "phase": "implement",
-        "summary": "Record a verified section.",
+        "summary": "Record verified work.",
         "aliases": ["zagrosi-implement-record-section", "deep-implement-record-section"],
         "examples": ["python3 scripts/zagrosi_skills.py implement-record-section --sections-dir planning/01-auth/sections --section section-01-auth --review-status pass --verification-receipt planning/01-auth/implementation/verification/section-01-auth.json"],
     },
@@ -396,7 +427,7 @@ COMMAND_CATALOG = [
     {
         "name": "implement-verify",
         "phase": "implement",
-        "summary": "Bind checks to current code/contracts.",
+        "summary": "Capture checks on current inputs.",
         "aliases": [],
         "examples": [
             "python3 scripts/zagrosi_skills.py implement-verify --planning-dir planning/01-auth --target-dir . --section section-01-auth -- python3 -m pytest tests/test_auth.py",
@@ -408,7 +439,7 @@ COMMAND_CATALOG = [
     {
         "name": "status",
         "phase": "all",
-        "summary": "Show workflow progress and next action.",
+        "summary": "Show progress and next action.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py status --path planning/01-auth"],
     },
@@ -425,7 +456,7 @@ COMMAND_CATALOG = [
     {
         "name": "workflow-options",
         "phase": "utility",
-        "summary": "Suggest workflow preferences.",
+        "summary": "Show workflow options.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py workflow-options --brief 'Improve this project'"],
     },
@@ -439,7 +470,7 @@ COMMAND_CATALOG = [
     {
         "name": "review-capabilities",
         "phase": "utility",
-        "summary": "List active and external reviewers.",
+        "summary": "List available reviewers.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py review-capabilities --planning-dir planning/01-auth"],
     },
@@ -460,14 +491,14 @@ COMMAND_CATALOG = [
     {
         "name": "install-codex",
         "phase": "release",
-        "summary": "Install Codex plugin config and cache.",
+        "summary": "Install the Codex plugin.",
         "aliases": ["install", "install-plugin"],
         "examples": ["python3 scripts/zagrosi_skills.py install --plugin-root . --dry-run"],
     },
     {
         "name": "update-check",
         "phase": "utility",
-        "summary": "Compare installed Codex and Claude plugins.",
+        "summary": "Compare installed plugins.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py update-check --plugin-root ."],
     },
@@ -481,7 +512,7 @@ COMMAND_CATALOG = [
     {
         "name": "codebase-evidence",
         "phase": "plan",
-        "summary": "Capture files, tests and check commands.",
+        "summary": "Capture files, tests and checks.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py codebase-evidence --target-dir . --planning-dir planning/01-auth --write"],
     },
@@ -495,14 +526,14 @@ COMMAND_CATALOG = [
     {
         "name": "lint-sections",
         "phase": "quality",
-        "summary": "Validate sections and their index.",
+        "summary": "Check sections and index.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py lint-sections --planning-dir planning/01-auth --depth standard --strict"],
     },
     {
         "name": "lint-evidence",
         "phase": "quality",
-        "summary": "Validate evidence and assumptions.",
+        "summary": "Check evidence and assumptions.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py lint-evidence --planning-dir planning/01-auth --strict"],
     },
@@ -516,7 +547,7 @@ COMMAND_CATALOG = [
     {
         "name": "lint-plan-artifacts",
         "phase": "quality",
-        "summary": "Check required planning artifacts.",
+        "summary": "Check required plan files.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py lint-plan-artifacts --planning-dir planning/01-auth --strict"],
     },
@@ -530,21 +561,21 @@ COMMAND_CATALOG = [
     {
         "name": "forge-score",
         "phase": "quality",
-        "summary": "Combine planning quality scores.",
+        "summary": "Score plan quality.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py forge-score --planning-dir planning/01-auth --depth standard"],
     },
     {
         "name": "eval-suite",
         "phase": "release",
-        "summary": "Score example planning fixtures.",
+        "summary": "Score example plans.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py eval-suite --examples-dir examples --check-snapshots"],
     },
     {
         "name": "release-check",
         "phase": "release",
-        "summary": "Run package, install and example checks.",
+        "summary": "Check the release package.",
         "aliases": [],
         "examples": ["python3 scripts/zagrosi_skills.py release-check --plugin-root ."],
     },
@@ -680,23 +711,20 @@ INTERVIEW_PLACEHOLDER_RE = re.compile(
 
 SECTION_PROMPT = """Write ONLY `{section}.md` as raw Markdown.
 
-Read `{index_path}` and the section format: `{format_path}`.
+Read the index `{index_path}` and section format `{format_path}`.
 Apply `{depth}` investigation/review depth: `{depth_path}`.
-Apply the engineering standard: `{engineering_path}`.
-Use `{plan_path}` for shared contracts when it is another existing file.
-Clarify only from `{source_path}` when required.
+Follow `{engineering_path}`. Use shared contracts from `{plan_path}` if it is
+another existing file. Clarify only from `{source_path}`.
+{dependency_evidence}
 
-{max_words} words max. Do not copy plan context. Reference REQ/DEC/RISK IDs.
-For a canonical compact section use ## Contract, ## Owned files, ## Evidence,
-and ## Review. Contract maps each ### REQ-* to Source, Behavior, Expected, Command
-using the section format. Preserve source IDs; never edit the brief to add IDs.
-Keep inputs/outputs/errors, exact ownership, expected test failure, verification,
-and rollback explicit. Add ## Decisions or ## Risks only for material detail;
-otherwise keep those facts in evidence. Other sections link shared contracts and
-record local deltas; detached mode uses its physical format. Review needs literal
-`Verdict: pass` or `Verdict: fixed`, plus
-`Reviewed: <concrete scope and result>`.
-No production implementation. Every sentence must change an implementation decision.
+{max_words} words max. Do not copy context. Cite REQ/DEC/RISK IDs.
+Canonical compact sections require ## Contract, ## Owned files, ## Evidence and ## Review.
+Map each ### REQ-* to Source, Behavior, Expected, Command. Preserve source IDs; never add IDs to the brief.
+Specify inputs/outputs/errors, exact ownership, expected test failure, verification and rollback.
+Reserve ## Decisions and ## Risks for material details; put other facts in evidence.
+Other sections link shared contracts and record local changes. Detached sections use the physical format.
+Include literal `Verdict: pass` or `Verdict: fixed` and `Reviewed: <concrete scope and result>`.
+Write implementation decisions only. No production code.
 """
 
 

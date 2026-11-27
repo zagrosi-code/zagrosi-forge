@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from . import actions, compatibility, hosts, ownership, sections, storage, team_state
+from . import actions, compatibility, hosts, ownership, policy, sections, storage, team_state
 
 
 def command_guard(args) -> None:
@@ -64,7 +64,7 @@ def _repo_paths(target: Path, root: Path, paths) -> list[str]:
     return team_state.normalize_paths([(prefix / name).as_posix() for name in names], root=root)
 
 
-def plan_scope(planning: Path, target: Path, repo_root: Path, section: str | None = None) -> tuple[str, list[str]]:
+def plan_scope(planning: Path, target: Path, repo_root: Path, section: str | list[str] | None = None) -> tuple[str, list[str]]:
     """Reserve declared source paths and any shared planning directory."""
     from . import team_plans
 
@@ -72,20 +72,41 @@ def plan_scope(planning: Path, target: Path, repo_root: Path, section: str | Non
     return _plan_scope(planning, target, repo_root, section, prepared=prepared)
 
 
-def _plan_key(planning: Path, target: Path, section: str | None) -> str:
+def group_selection(names) -> list[str]:
+    if (not isinstance(names, list) or not 0 < len(names) <= 99
+            or any(not isinstance(name, str) or not policy.SECTION_RE.fullmatch(name) for name in names)
+            or len(set(names)) != len(names)):
+        raise team_state.TeamError('team-invalid-plan', 'Choose distinct, valid section names for the group.')
+    return sorted(names)
+
+
+def selector_args(selected):
+    if isinstance(selected, list):
+        return ['--sections', *selected]
+    return ['--section', selected] if selected else []
+
+
+def board_section(selected):
+    # Existing board readers understand a canonical plan read and exact write paths.
+    return None if isinstance(selected, list) else selected
+
+
+def _plan_key(planning: Path, target: Path, section: str | list[str] | None) -> str:
     identity = json.dumps([str(planning), str(target), section], separators=(',', ':'))
     return hashlib.sha256(identity.encode()).hexdigest()
 
 
-def _plan_scope(planning: Path, target: Path, repo_root: Path, section: str | None, *, prepared,
+def _plan_scope(planning: Path, target: Path, repo_root: Path, section: str | list[str] | None, *, prepared,
                 contracts: dict[str, str] | None = None) -> tuple[str, list[str]]:
     """Derive scope using the contract validated in this same observation."""
     planning, target, repo_root = planning.resolve(), target.resolve(), repo_root.resolve()
     progress = sections.check_section_progress(planning)
     known = progress.get('sections', [])
-    if progress.get('state') != 'complete' or not known or section is not None and section not in known:
-        raise team_state.TeamError('team-invalid-plan', 'Choose a complete section manifest and a known section.')
     names = [section] if section else known
+    if isinstance(section, list):
+        names = group_selection(section)
+    if progress.get('state') != 'complete' or not known or not set(names).issubset(known):
+        raise team_state.TeamError('team-invalid-plan', 'Choose a complete section manifest and a known section.')
     contracts = {} if contracts is None else contracts
     paths = []
     for name in names:
@@ -101,10 +122,17 @@ def _plan_scope(planning: Path, target: Path, repo_root: Path, section: str | No
     return _plan_key(planning, target, section), team_state.normalize_paths(sorted(set(repo_paths)), root=repo_root)
 
 
-def _binding_scope(planning: Path, target: Path, section: str | None, bindings: dict, *, actor=None):
+def _binding_scope(planning: Path, target: Path, section: str | list[str] | None, bindings: dict, *, actor=None):
     """Prefer the selected section, then its whole-plan binding for the same actor."""
     planning, target = planning.resolve(), target.resolve()
-    for selected in ([section, None] if section is not None else [None]):
+    candidates = [section]
+    if isinstance(section, str):
+        candidates.extend(binding['sections'] for binding in bindings.values()
+                          if isinstance(binding, dict) and section in binding.get('sections', [])
+                          and _plan_key(planning, target, binding['sections']) in bindings)
+    if section is not None:
+        candidates.append(None)
+    for selected in candidates:
         binding = bindings.get(_plan_key(planning, target, selected))
         if binding is None:
             continue
@@ -128,6 +156,7 @@ def _declared_dependencies(contracts: dict[str, str], target: Path, repo_root: P
             complete = False
         else:
             paths.extend(declaration['source_paths'])
+            paths.extend(declaration.get('source_moves', {}).values())
             paths.extend(declaration['check_paths'])
     return {'paths': _repo_paths(target, repo_root, sorted(set(paths))), 'complete': complete} if paths else None
 
@@ -138,11 +167,11 @@ def _check_dependencies(row: dict, declared: dict | None) -> None:
                                    'Declared inputs changed; explicitly refresh this task\'s actual plan binding before continuing.')
 
 
-def guard(planning: Path, target: Path, section: str | None = None, *, required_paths=()) -> dict | None:
+def guard(planning: Path, target: Path, section: str | list[str] | None = None, *, required_paths=()) -> dict | None:
     """Return None for solo work; configured work needs a fresh matching claim."""
     from . import team, team_plans
 
-    scope_args = ['--planning-dir', str(planning)] + (['--section', section] if section else [])
+    scope_args = ['--planning-dir', str(planning)] + selector_args(section)
     def command(action, *args):
         return actions.command('team', action, '--target-dir', str(target), *args)
 
@@ -159,9 +188,9 @@ def guard(planning: Path, target: Path, section: str | None = None, *, required_
         extra_paths = _repo_paths(target, repo.root, required_paths)
         bindings = checkout.get('bindings', {})
         binding, bound_section = _binding_scope(planning, target, section, bindings)
-        if section is not None and (binding is None or bound_section is None):
-            _plan_scope(planning, target, repo.root, None, prepared=prepared, contracts=contracts)
-        binding_args = ['--planning-dir', str(planning)] + (['--section', bound_section] if bound_section else [])
+        if section is not None and (binding is None or section != bound_section):
+            _plan_scope(planning, target, repo.root, bound_section if binding else None, prepared=prepared, contracts=contracts)
+        binding_args = ['--planning-dir', str(planning)] + selector_args(bound_section)
         if binding is None:
             candidates = [{'id': identity, **row} for identity, row in snapshot.board['sessions'].items()
                           if (row['participant_id'], row['checkout_id'], row['generation']) == (
@@ -207,7 +236,7 @@ def guard(planning: Path, target: Path, section: str | None = None, *, required_
                                                       '--state', 'working')
                     raise team_state.TeamError(exc.code, 'This task is handed off. If you choose to resume it, run team_resume before working.') from exc
             raise
-        if prepared is not None and checked['session'].get('plan') != {**prepared, 'section': bound_section}:
+        if prepared is not None and checked['session'].get('plan') != {**prepared, 'section': board_section(bound_section)}:
             raise team_state.TeamError('team-plan-binding', 'Update the team session to bind this prepared contract and section before working.')
         if checked.get('protocol_version') == 2:
             _check_dependencies(checked['session'], _declared_dependencies(contracts, target, repo.root))

@@ -225,7 +225,8 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
     parts = [section_text.rstrip()] if section_path else [f"# Context: {planning_dir.name}"]
     locations = [(section_path, [1, len(section_text.splitlines())], "section")] if section_path else [(None, None, "packet_heading")]
     source_spans: list[tuple[int, int]] = []
-    if follow_links and (compact := _artifacts.compact_plan_descriptor(planning_dir)):
+    compact = _artifacts.compact_plan_descriptor(planning_dir) if follow_links else None
+    if compact:
         contract = _planning_contract.analyze_contract(compact["source"], _storage.read_text(compact["path"]), planning_dir)
         if contract and contract["errors"]:
             return {"success": False, "error": "Compact source mappings are invalid.", "errors": contract["errors"]}
@@ -262,7 +263,9 @@ def build_context(planning_dir: Path, section: str | None, max_words: int, line_
             seed_ranges[artifacts["spec"].resolve()] = source_spans
         seeds.extend((path, block) for _, path, blocks, *_ in sources for _, block in blocks)
         try:
-            linked = _context_links.linked_contracts(planning_dir, seeds, known_paths=seen_paths, seed_ranges=seed_ranges, _causes=causes)
+            linked = _context_links.linked_contracts(planning_dir, seeds, known_paths=seen_paths,
+                                                      seed_ranges=seed_ranges, _causes=causes,
+                                                      _plan_metadata=compact["metadata"] if compact else {})
         except (OSError, ValueError, RuntimeError) as exc:
             return {"success": False, "error": f"Cannot resolve linked contracts: {exc}"}
         if source_spans:

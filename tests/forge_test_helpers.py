@@ -3,11 +3,25 @@ from __future__ import annotations
 import json
 from functools import cache
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def expanded_section_prompt(prompt: Path) -> str:
+    """Follow the prompt's sibling input map when the absolute paths exceed its budget."""
+    text = prompt.read_text(encoding="utf-8")
+    first, _, body = text.partition("\n\n")
+    reference = re.search(r"`(section-inputs-[0-9a-f]+\.json)`", first)
+    if reference is None:
+        return text
+    paths = json.loads((prompt.parent / reference[1]).read_text(encoding="utf-8"))
+    for key, path in paths.items():
+        body = body.replace(f"`{key}`", f"`{path}`")
+    return body
 
 
 SCRIPT = ROOT / "scripts" / "zagrosi_skills.py"

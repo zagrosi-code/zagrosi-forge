@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from forge_test_helpers import expanded_section_prompt
 
 ROOT = Path(__file__).resolve().parents[1]
 SECTION = "section-01-normalize"
@@ -234,13 +235,67 @@ def test_canonical_section_prompts_include_budget_format_and_engineering(forge, 
     planning = make_plan(tmp_path / "planning", depth)
     code, payload = invoke(forge, capsys, "plan-generate-section-prompts", "--planning-dir", str(planning), "--all")
     assert code == 0, payload
-    text = Path(payload["prompt_files"][0]).read_text()
+    prompt = Path(payload["prompt_files"][0])
+    raw = prompt.read_text(encoding="utf-8")
+    text = expanded_section_prompt(prompt)
+    assert (raw == text) == (forge.markdown.word_count(text) <= 300)
     assert f'{forge.markdown.word_budgets(depth)["plan"]} words max' in text
+    assert str(planning / "spec.md") in text
+    assert str(planning / "sections/index.md") in text
+    assert str(planning / "sections" / f"{SECTION}.md") in text
+    assert str(ROOT / "skills/zagrosi-plan/references/depth-standards.md") in text
     assert str(ROOT / "skills/zagrosi-implement/references/engineering.md") in text
     assert str(ROOT / "skills/zagrosi-plan/references/section-format.md") in text
     assert all(f"## {heading}" in text for heading in ("Evidence", "Decisions", "Review"))
     assert "Reviewed:" in text
-    assert forge.markdown.word_count(text) <= 300
+    assert "latest stable" in text and "to the planner" in text
+    assert forge.markdown.word_count(raw) <= 300
+
+
+def test_long_prompt_paths_preserve_inputs_across_partial_batches(forge, tmp_path, capsys, monkeypatch):
+    from forge_test_helpers import write_lean_plan_fixture
+
+    planning = write_lean_plan_fixture(tmp_path / "plan")
+    # Rendering only needs the supplied install location. Keep every actual file under a short path.
+    plugin_root = Path(tmp_path.anchor) / ("a-" * 48 + "plugin")
+    guides = {
+        "depth_path": "skills/zagrosi-plan/references/depth-standards.md",
+        "format_path": "skills/zagrosi-plan/references/section-format.md",
+        "engineering_path": "skills/zagrosi-implement/references/engineering.md",
+    }
+    monkeypatch.setattr(forge.storage, "current_plugin_root", lambda: plugin_root)
+    index = planning / "sections/index.md"
+    index.write_text(index.read_text().replace("END_MANIFEST", "section-02-next\nEND_MANIFEST"))
+    config_path = planning / "zagrosi_plan_config.json"
+    config = json.loads(config_path.read_text())
+    original = tmp_path / "external brief.md"
+    updated = tmp_path / "revised brief.md"
+    for source in (original, updated):
+        source.write_text("REQ-001: Read this external brief.", encoding="utf-8")
+    config["initial_file"] = str(original)
+    config_path.write_text(json.dumps(config))
+    args = ("plan-generate-section-prompts", "--planning-dir", str(planning), "--all")
+    code, result = invoke(forge, capsys, *args)
+    assert code == 0, result
+    first, second = map(Path, result["prompt_files"])
+    inputs, = first.parent.glob("section-inputs-*.json")
+    for prompt in (first, second):
+        text = prompt.read_text(encoding="utf-8")
+        assert inputs.name in text and forge.markdown.word_count(text) <= 300
+    paths = {
+        "index_path": index, "plan_path": planning / "codex-plan.md", "source_path": original,
+        **{key: plugin_root / relative for key, relative in guides.items()},
+    }
+    assert json.loads(inputs.read_text()) == {key: str(path) for key, path in paths.items()}
+    assert all(f"`{key}`" in text for key in paths)
+
+    config["initial_file"] = str(updated)
+    config_path.write_text(json.dumps(config))
+    code, result = invoke(forge, capsys, *args, "--batch-size", "1")
+    assert code == 0 and result["prompt_files"] == [str(first)]
+    replacement, = set(first.parent.glob("section-inputs-*.json")) - {inputs}
+    assert replacement.name in first.read_text() and json.loads(replacement.read_text())["source_path"] == str(updated)
+    assert inputs.name in second.read_text() and json.loads(inputs.read_text())["source_path"] == str(original)
 
 
 def test_agent_prompts_link_the_engineering_standard(forge, tmp_path, capsys):
@@ -249,7 +304,19 @@ def test_agent_prompts_link_the_engineering_standard(forge, tmp_path, capsys):
     for path in payload["prompt_files"]:
         text = Path(path).read_text()
         assert str(ROOT / "skills/zagrosi-implement/references/engineering.md") in text
+        assert "Use only evidence from the repository and named planning artifacts" in text
+        if Path(path).stem == "section-writer":
+            assert "latest stable" in text and "to the planner" in text
         assert forge.markdown.word_count(text) <= 300
+
+
+def test_deep_review_board_shares_dependency_evidence_once(forge, tmp_path, capsys):
+    code, payload = invoke(forge, capsys, "review-board-prompts", "--planning-dir", str(tmp_path))
+    assert code == 0, payload
+    context = Path(payload["shared_prompt"]).read_text()
+    assert "supplied release evidence" in context and "latest stable" in context
+    assert all("Read `context.md`" in Path(path).read_text() for path in payload["prompt_files"])
+    assert forge.markdown.word_count(context) <= 300
 
 
 @pytest.mark.parametrize("source_name", ["spec.md", "custom-source.md"])
@@ -263,7 +330,7 @@ def test_first_canonical_section_prompt_uses_selected_path_before_file_exists(fo
     section.unlink()
     code, payload = invoke(forge, capsys, "plan-generate-section-prompts", "--planning-dir", str(planning))
     assert code == 0, payload
-    text = Path(payload["prompt_files"][0]).read_text()
+    text = expanded_section_prompt(Path(payload["prompt_files"][0]))
     assert "800 words max" in text
     assert str(section) in text
     assert str(planning / source_name) in text

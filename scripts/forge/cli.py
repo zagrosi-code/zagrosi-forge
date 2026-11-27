@@ -6,6 +6,7 @@ from typing import Any, NoReturn
 from importlib import import_module
 
 from . import exact_handoff_cli_shape
+from .delivery_cli import add_delivery_commands
 from .team_cli import add_team_commands
 import argparse
 import sys
@@ -159,6 +160,12 @@ def add_plan_commands(sub: argparse._SubParsersAction) -> None:
     add_quality_args(p)
     p.set_defaults(func=invoke_command, handler=('traceability', 'traceability'))
 
+    p = sub.add_parser("journey-status", help="Show the current evidence for each acceptance journey.")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--target-dir")
+    p.add_argument("--section", required=True)
+    p.set_defaults(func=invoke_command, handler=("journeys", "status"))
+
     p = sub.add_parser("section-estimates")
     p.add_argument("--planning-dir", required=True)
     p.set_defaults(func=invoke_command, handler=('scheduling', 'section_estimates'))
@@ -275,6 +282,7 @@ def add_implement_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--target-dir")
     p.add_argument("--section", help="Omit for the required final integration receipt.")
+    p.add_argument("--journey", help="Capture one declared acceptance journey with its explicit check argv.")
     p.add_argument("--stage", choices=["baseline", "candidate"], help="Capture the declared caller checks before or after source changes.")
     p.add_argument("--integration", action="store_true", help="With --section, also record final integration from this same full-suite run.")
     p.add_argument("--timeout", type=float, default=540, help="Seconds before the check stops; the default stays under 10-minute host command limits.")
@@ -516,6 +524,14 @@ def add_utility_commands(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--write", action="store_true")
     p.set_defaults(func=invoke_command, handler=('evidence', 'codebase_evidence'))
 
+    p = sub.add_parser("build-report", help="Summarize recorded checks, review rounds and model usage.")
+    p.add_argument("--planning-dir", required=True)
+    p.add_argument("--section", action="append", default=[], help="Limit reporting to this section (repeatable).")
+    p.add_argument("--group", action="append", default=[], metavar="HANDOFF", help="Select a section-group handoff or verification.")
+    p.add_argument("--usage", nargs=2, action="append", default=[], metavar=("SCOPE", "FILE"))
+    p.add_argument("--review", nargs=2, action="append", default=[], metavar=("SCOPE", "FILE"))
+    p.set_defaults(func=invoke_command, handler=('build_measurements', 'run'))
+
     p = sub.add_parser("report")
     p.add_argument("--planning-dir", required=True)
     p.add_argument("--depth", choices=sorted(_policy.DEPTH_MODES), default=_policy.DEFAULT_DEPTH)
@@ -573,7 +589,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_plan_commands(sub)
     add_implement_commands(sub)
     add_utility_commands(sub)
+    from .section_groups import add_commands as add_section_groups
+    add_delivery_commands(sub, invoke_command)
     add_team_commands(sub, invoke_command)
+    add_section_groups(sub, invoke_command)
     return parser
 
 

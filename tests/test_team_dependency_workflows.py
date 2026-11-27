@@ -597,3 +597,16 @@ def test_public_pretty_dependency_drift_keeps_copyable_refresh_command(forge, ca
     assert result['error'] in pretty
     assert forge.output.pretty_command(repair) in pretty
     assert 'Editing clearance: not established' in pretty
+
+
+def test_move_destination_warns_about_a_peer_writer_before_candidate_capture(
+        forge, capsys, repositories, tmp_path):
+    root, peer_root = join_second(forge, capsys, repositories)
+    writer = team(forge, capsys, peer_root, 'start', '--task', 'Edit API', '--path', 'lib/api.py')
+    planning = make_plan(tmp_path / 'move-plan')
+    declare(planning, value=contract(source_paths=['lib/old.py'], check_paths=['checks/api.py'],
+                                     source_moves={'lib/old.py': 'lib/api.py'}))
+    reader = start(forge, capsys, root, planning)
+    assert reader['session']['dependencies'] == {
+        'paths': ['checks/api.py', 'lib/api.py', 'lib/old.py'], 'complete': True}
+    assert_warning(reader, writer['session'], 'reads_peer_writes')

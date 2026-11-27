@@ -342,7 +342,7 @@ def final_error(status: dict[str, Any], current: dict[str, str]) -> str | None:
 
 def capture(planning_dir: Path, target: Path, argv: list[str], timeout: float,
             allowance_seconds: float | None, before: dict[str, str] | None = None,
-            ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+            *, section: str | None = None) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
     """Run one explicit check under the state lock; edits during the run fail it, as receipts do.
 
     Returns the record, output tails and the tree observed afterwards.
@@ -366,6 +366,22 @@ def capture(planning_dir: Path, target: Path, argv: list[str], timeout: float,
               "seconds": result.get("seconds"), "result": lines[-1].strip() if lines else "",
               "at": storage.now_iso(), "tree": mutable_inputs.digest(before),
               **({"error": result["error"]} if result.get("error") else {})}
+    if run_id := result.get("run_id"):
+        record.update({key: result[key] for key in ("run_id", "started_at", "finished_at") if key in result})
+        # Status replaces the previous check. Keep its small measurement separately.
+        folder = planning_dir / "implementation/verification/measurements"
+        saved = load_status(planning_dir)
+        entry = saved["sections"].get(section, {}) if section else {"final": saved.get("final")}
+        if any(isinstance(old, dict) and old.get("source") == "captured" and not old.get("run_id")
+               for old in entry.values()):
+            # Older status retained only its latest attempt. Its unknown history stays visible after a retry.
+            legacy = folder / f"legacy-{section or 'integration'}.json"
+            verification._check_managed_path(planning_dir, legacy, single_link=True)
+            storage.write_json(legacy, {"section": section, "source": "captured"})
+        measurement = folder / f"{run_id}.json"
+        verification._check_managed_path(planning_dir, measurement, single_link=True)
+        fields = ("source", "command", "outcome", "seconds", "run_id", "exit_code", "started_at", "finished_at")
+        storage.write_json(measurement, {"section": section, **{key: record[key] for key in fields if key in record}})
     return record, {"stdout_tail": result["stdout_tail"], "stderr_tail": result["stderr_tail"], **allowance.report()}, after
 
 
@@ -495,7 +511,7 @@ def _progress(args: argparse.Namespace, planning_dir: Path, argv: list[str]) -> 
     tails: dict[str, Any] = {}
     if argv:
         record, tails, tree = capture(planning_dir, target, argv, args.timeout, args.allowance_seconds,
-                                      before=tree)
+                                      before=tree, section=section)
         update["baseline" if stage == "baseline" else "check"] = record
         if baseline:
             update["candidate"] = record

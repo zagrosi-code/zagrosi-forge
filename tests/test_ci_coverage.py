@@ -90,6 +90,11 @@ def test_windows_partitions_cover_linux_and_macos_once():
     assert "tests/test_native_process.py" not in selected["all"], "Native process tests must run only in their dedicated step"
     assert all(count == 1 for count in selected["all"].values())
     assert {
+        "tests/test_required_delivery.py", "tests/test_delivery_artifacts.py",
+        "tests/test_engineering_guidance.py", "tests/test_release_handoff.py",
+        "tests/test_release_example.py",
+    } <= selected["shared"].keys(), "Release and engineering coverage must run in the shared group"
+    assert {
         "tests/test_compatibility_checks.py", "tests/test_compatibility_workflows.py",
         "tests/test_compatibility_admission.py", "tests/test_heldout_contracts.py",
         "tests/test_team_state.py", "tests/test_team_git.py", "tests/test_team_config.py",
@@ -97,7 +102,9 @@ def test_windows_partitions_cover_linux_and_macos_once():
         "tests/test_team_plan_claims.py", "tests/test_team_plans.py",
         "tests/test_team_plan_workflows.py", "tests/test_team_plan_integration.py",
         "tests/test_team_protocol_upgrade.py", "tests/test_team_dependencies.py",
-        "tests/test_team_dependency_workflows.py",
+        "tests/test_team_dependency_workflows.py", "tests/test_section_groups.py",
+        "tests/test_delivery.py", "tests/test_delivery_workflow.py", "tests/test_group_binding.py",
+        "tests/test_acceptance_journeys.py", "tests/test_build_measurements.py",
     } <= selected["all"].keys()
 
 
@@ -118,11 +125,16 @@ def test_type_contract_compiler_is_installed_for_full_and_compatibility_tests():
 
 def test_latest_runtimes_run_the_full_suite():
     latest = job(WORKFLOW.read_text(), "latest-runtimes")
-    versions = re.findall(r'^ +(python|node)-version: "([^"]*)"$', latest, re.M)
-    assert versions == [("python", "3.14"), ("node", "26")], "latest-runtimes must pin Python 3.14 and Node 26"
+    steps = job_steps(latest)
+    python, = (step for step in steps if step.startswith("uses: actions/setup-python@"))
+    node, = (step for step in steps if step.startswith("uses: actions/setup-node@"))
+    for step, selectors in [(python, ['python-version: "3.x"', "allow-prereleases: false"]),
+                            (node, ['node-version: "*"'])]:
+        inputs = [line.strip() for line in step.splitlines()[1:]]
+        assert "check-latest: true" in inputs
+        assert all(selector in inputs for selector in selectors)
     assert "--durations" not in latest, "ci_guard_workflow strips duration reporting from its five steps only"
-    pytest_selectors(job_steps(latest), "Run tests on Python 3.14 and Node 26", "python -m pytest -q",
-                     full_suite=True)
+    pytest_selectors(steps, "Run full suite on latest stable runtimes", "python -m pytest -q", full_suite=True)
 
 
 _REPORT_PAIR = " --durations=20 --durations-min=1"

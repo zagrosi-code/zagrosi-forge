@@ -497,10 +497,10 @@ def test_legacy_source_git_failure_is_not_missing_object_recovery(forge, reposit
     before = workspace_bytes(workspace)
     published = set(workspace.parent.iterdir())
     tree = forge.team_plans._tree
-    def unavailable(repo, canonical, commit):
+    def unavailable(repo, canonical, commit, shared=()):
         if commit == original['source']['commit']:
             raise forge.team_state.TeamError('team-unavailable', 'Injected Git read failure')
-        return tree(repo, canonical, commit)
+        return tree(repo, canonical, commit, shared)
     monkeypatch.setattr(forge.team_plans, '_tree', unavailable)
     with pytest.raises(forge.team_state.TeamError) as failed:
         forge.team_plans.prepare(planning, root)
@@ -790,3 +790,118 @@ def test_validation_preserves_source_object_error_order(forge, repositories, mon
         (repo.root, ('ls-tree', '-rlz', repo.head, '--', prepared['source']['path']), {}),
         (repo.root, ('cat-file', '--batch-check'), {'prompt': oid + '\n'}),
     ]
+
+
+def declare_shared_docs(root, planning, names, link):
+    plan = planning / 'codex-plan.md'
+    text = plan.read_text(encoding='utf-8')
+    start = text.index('{')
+    end = text.index('}', start) + 1
+    meta = json.loads(text[start:end])
+    meta['shared_documents'] = names
+    plan.write_text(text[:start] + json.dumps(meta) + text[end:], encoding='utf-8')
+    section = planning / 'sections' / f'{SECTION}.md'
+    section.write_text(section.read_text(encoding='utf-8') + '\n' + link + '\n', encoding='utf-8')
+    git(root, 'add', '.')
+    git(root, 'commit', '-m', 'Declare external requirements')
+
+
+def test_declared_repository_docs_are_bound_in_context_and_preparation(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    source = root / 'decisions.md'
+    source.write_text('# Terms\nFirst version.\n', encoding='utf-8')
+    declare_shared_docs(root, planning, ['decisions.md'], '[Terms](../../../../decisions.md#terms)')
+    local = forge.context.build_context(planning, SECTION, 10000)
+    assert local['success'] and 'First version.' in local['content']
+    original = forge.mutable_inputs.contract_inputs(planning, SECTION)[0]
+    _, prepared = prepare(forge, root, planning)
+    packet = forge.context.build_context(prepared, SECTION, 10000)
+    assert packet['success'] and 'First version.' in packet['content']
+    source.write_text('# Terms\nSecond version.\n', encoding='utf-8')
+    assert forge.mutable_inputs.contract_inputs(planning, SECTION)[0] != original
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.validate(prepared, root)
+
+
+def test_declared_repository_doc_cannot_authorize_its_neighbors(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    source = root / 'decisions.md'
+    source.write_text('[Private](private.md)\n', encoding='utf-8')
+    (root / 'private.md').write_text('private\n', encoding='utf-8')
+    declare_shared_docs(root, planning, ['decisions.md'], '[Terms](../../../../decisions.md)')
+    assert not forge.context.build_context(planning, SECTION, 10000)['success']
+    with pytest.raises(forge.team_state.TeamError):
+        prepare(forge, root, planning)
+
+
+@pytest.mark.parametrize('name', ['../outside.md', '.git/notes.md', 'dir/../notes.md', 'docs/*.md', 'README.txt'])
+def test_shared_document_declarations_reject_escapes_and_patterns(forge, name):
+    with pytest.raises(ValueError, match='shared_documents'):
+        forge.context_links.shared_documents({'shared_documents': [name]})
+
+
+def test_linked_external_document_rejects_hardlinks_and_symlinks(forge, repositories):
+    import os
+
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    source = root / 'decisions.md'
+    source.write_text('Initial contract.\n', encoding='utf-8')
+    declare_shared_docs(root, planning, ['decisions.md'], '[Terms](../../../../decisions.md)')
+    other = root / 'unlisted.md'
+    os.link(source, other)
+    assert not forge.context.build_context(planning, SECTION, 10000)['success']
+    with pytest.raises(forge.team_state.TeamError):
+        prepare(forge, root, planning)
+    source.unlink()
+    try:
+        source.symlink_to(other)
+    except OSError:
+        pytest.skip('filesystem does not support symlinks')
+    assert not forge.context.build_context(planning, SECTION, 10000)['success']
+    with pytest.raises(forge.team_state.TeamError):
+        prepare(forge, root, planning)
+
+
+def test_shared_doc_code_links_and_anchored_markdown_chain(forge, repositories):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    docs = root / 'guidance'
+    docs.mkdir()
+    (docs / 'terms.md').write_text(
+        '# Terms\nThe shared terms refer to [details](more%20terms.md#nested).\n'
+        '[Python validator](validator.py) and [rendered table](table.html) describe the check.\n'
+        '[Filtered view](dashboard.md?view=summary)\n'
+        '<!-- [Private notes](private.md) -->\n',
+        encoding='utf-8',
+    )
+    (docs / 'more terms.md').write_text(
+        '# Nested\nNested contract text.\n# Other\nOut-of-scope wording.\n', encoding='utf-8')
+    declare_shared_docs(root, planning, ['guidance/terms.md', 'guidance/more terms.md'],
+                        '[Terms](../../../../guidance/terms.md#terms)')
+    _, prepared = prepare(forge, root, planning)
+    for source in (planning, prepared):
+        packet = forge.context.build_context(source, SECTION, 10000)
+        assert packet['success'], packet
+        assert 'Nested contract text.' in packet['content']
+        assert 'Out-of-scope wording.' not in packet['content']
+    bundle = prepared / forge.context_links.SHARED_DIRECTORY / 'guidance'
+    assert {p.name for p in bundle.iterdir()} == {'terms.md', 'more terms.md'}
+
+
+@pytest.mark.parametrize('names', ['not-a-list', [None], [{'file': 'notes.md'}]])
+def test_malformed_shared_doc_metadata_stops_admission_context_and_prepare(forge, repositories, names, capsys):
+    _, (root, _) = repositories
+    planning = commit_plan(root)
+    declare_shared_docs(root, planning, names, '[Terms](../../../../notes.md)')
+    code = forge.entrypoint.main(['postflight', '--phase', 'plan', '--planning-dir', str(planning),
+                                  '--target-dir', str(root), '--depth', 'lean', '--strict'])
+    flight = json.loads(capsys.readouterr().out)
+    assert code == 1 and 'lint-plan-artifacts' in flight['blocking_gates']
+    assert any(finding['code'] == 'invalid-compact-plan' and 'shared_documents' in finding['message']
+               for finding in flight['diagnostics'])
+    assert not forge.context.build_context(planning, SECTION, 10000)['success']
+    with pytest.raises(forge.team_state.TeamError):
+        forge.team_plans.prepare(planning, root)

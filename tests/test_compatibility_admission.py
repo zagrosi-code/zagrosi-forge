@@ -103,6 +103,22 @@ def test_declared_policy_covers_every_listed_section(forge, capsys, tmp_path):
     assert code == 0, payload
 
 
+@pytest.mark.parametrize(("sources", "moves"), [
+    (["pkg", "pkg/legacy.py"], {"pkg": "archive"}),
+    (["pkg", "pkg/legacy.py"], {"pkg/legacy.py": "archive.py"}),
+    (["pkg", "Pkg"], {"pkg": "archive"}),
+    (["first.py", "second.py"], {"first.py": "archive", "second.py": "archive/part.py"}),
+    (["first.py", "second.py"], {"first.py": "archive/part.py", "second.py": "archive"}),
+], ids=["original-contains-source", "source-contains-original", "case-alias",
+        "destination-contains-next", "next-contains-destination"])
+def test_plan_rejects_overlapping_move_paths(forge, capsys, tmp_path, sources, moves):
+    planning = declared_plan(tmp_path / "plan")
+    append_decision(planning, {**REQUIRED, "source_paths": sources, "source_moves": moves})
+    code, payload = invoke(forge, capsys, "lint-sections", "--planning-dir", str(planning), "--strict")
+    assert code == 1, payload
+    assert "invalid-compatibility" in {finding["code"] for finding in payload["findings"]}
+
+
 @pytest.mark.parametrize("policy", [None, False, "legacy", [], {}])
 def test_present_unknown_policy_cannot_bypass_admission(forge, capsys, tmp_path, policy):
     planning = declared_plan(tmp_path / "plan")

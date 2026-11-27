@@ -1,5 +1,20 @@
 # Releases
 
+## 0.6.0 — PR handoffs and delivery evidence
+
+- [Section groups](section-groups.md) let a team reserve multiple sections of one plan, run a check in a clean checkout of a specific commit, and give another worktree the selection, Git identities and prior results.
+- [Delivery tracking](delivery.md) records PR dependencies, tested commits, approvals, merge revisions and outcomes for each environment. A parent change shows which checks need repeating. A group verification report can supply the tested revision and command.
+- A section can declare [acceptance journeys](../skills/zagrosi-plan/references/section-format.md#acceptance-journeys). Each names an actor, starting state, action, expected result and distinct check. Section recording requires current captured results for all declared journeys.
+- [Build measurements](build-measurements.md) report check attempts, repeated commands and elapsed time. Explicit session and review observations add usage and review counts where available.
+- [Planned source moves](../skills/zagrosi-implement/references/compatibility.md) bind the original file at baseline and its replacement at candidate verification. The same caller checks run on each side.
+- Compact plans can declare [shared Markdown documents](../skills/zagrosi-plan/references/plan-format.md) elsewhere in the repository. Referenced content enters verification, and shared-plan preparation captures its committed version.
+
+- [Named requirements](required-checks.md) show each required CI job and environment sign-off independently. [Artifact receipts](delivery-artifacts.md) identify local packages by bytes and published images by digest.
+- The [runnable reviewer handoff](../examples/release-handoff/README.md) demonstrates Markdown summaries, importable receipts without command output, a modified ZIP and recovery after a parent PR changes.
+- Forge's [engineering guidance](../skills/zagrosi-implement/references/engineering.md) now follows a caller through code changes, checks behavior before sharing implementations and pairs performance claims with workload evidence. A [worked example](../skills/zagrosi-implement/references/lookup-example.md) demonstrates a measured reduction in reads.
+- When choosing a dependency, Forge checks the latest stable release and the version the project actually resolves. An older selection needs a specific compatibility reason. The latest-runtimes CI job exercises current stable Python and Node alongside the fixed compatibility jobs.
+- Native plugin installation and upgrade checks run with Codex CLI 0.172.0 and Claude Code 2.1.332.
+
 ## 0.5.5 — foreground delegated agents when Claude Code offers the choice
 
 - Wherever Claude Code's `Agent` offers `run_in_background`, Forge now runs every delegated agent (same-host review, check derivation or research) in the foreground: it passes `false` and uses the result in the same turn. Headless `claude -p` offers the choice and by default stops background agents still running 10 minutes after the last turn. In the partial Claude session-break run, three Forge `lean` sessions ended their turn while a background agent was still deriving characterization tests, and each agent was stopped.

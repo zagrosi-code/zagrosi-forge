@@ -106,7 +106,9 @@ def codex_output(raw: str) -> dict:
                         raise ValueError("Invalid completed Codex review text")
                     text.append(item["text"])
     models = list(dict.fromkeys(event["model"] for event in events if isinstance(event.get("model"), str)))
-    return {"review": "\n\n".join(text), "observed_models": models, "usage": completed[0].get("usage")}
+    session = next((event.get("thread_id") for event in events if event.get("type") == "thread.started"), None)
+    return {"review": "\n\n".join(text), "observed_models": models, "usage": completed[0].get("usage"),
+            **({"native_session_id": session} if isinstance(session, str) and session else {})}
 
 
 def review_output(provider: str, raw: str) -> dict:
@@ -126,7 +128,9 @@ def review_output(provider: str, raw: str) -> dict:
             models = optional_object(data.get("modelUsage"), "Claude model usage")
             result = {"review": data.get("result"),
                       "observed_models": list(models),
-                      "usage": data.get("usage"), "cost_usd": data.get("total_cost_usd")}
+                      "usage": data.get("usage"), "cost_usd": data.get("total_cost_usd"),
+                      **({"native_session_id": data["session_id"]} if isinstance(data.get("session_id"), str) else {}),
+                      **({"modelUsage": models} if models else {})}
         elif provider == "gemini":
             stats = optional_object(data.get("stats"), "Gemini statistics")
             tool_stats = optional_object(stats.get("tools"), "Gemini tool statistics")

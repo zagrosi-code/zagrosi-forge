@@ -48,8 +48,21 @@ def traceability_analysis(planning_dir: Path) -> tuple[list[_models.Finding], di
             "covered": bool(req_id in plan_ids and in_tdd and sections),
         }
 
+    from . import journeys
+
+    journey_findings = []
+    for filename, section_text in section_text_by_file.items():
+        try:
+            for case in journeys.declarations(section_text).values():
+                requirement = case["requirement"]
+                if requirement not in coverage:
+                    raise ValueError(f"{case['id']}: unknown source requirement {requirement}.")
+                coverage[requirement].setdefault("journeys", []).append({**case, "section": Path(filename).stem})
+        except ValueError as exc:
+            journey_findings.append(_quality.finding("high", "invalid-acceptance-journey", str(exc), sections_dir / filename))
+
     uncovered = [req_id for req_id, item in coverage.items() if not item["covered"]]
-    findings = _artifacts.compact_plan_findings(planning_dir) + [
+    findings = journey_findings + _artifacts.compact_plan_findings(planning_dir) + [
         _quality.finding("high", "traceability-gap", f"{req_id} is not fully covered.", spec_path or planning_dir)
         for req_id in uncovered
     ]

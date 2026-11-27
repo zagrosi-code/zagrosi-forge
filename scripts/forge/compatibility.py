@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
 import re
 import subprocess
 
@@ -17,6 +17,10 @@ def _json_object(pairs) -> dict:
             raise ValueError(f"Compatibility JSON repeats {key!r}.")
         value[key] = item
     return value
+
+
+def _paths_overlap(first: PurePath, second: PurePath) -> bool:
+    return first.is_relative_to(second) or second.is_relative_to(first)
 
 
 def parse_declaration(text: str) -> dict | None:
@@ -42,7 +46,7 @@ def parse_declaration(text: str) -> dict | None:
         if set(value) != {"version", "mode", "reason"} or not _substantive(value.get("reason")):
             raise ValueError("Compatibility not_required needs a substantive reason.")
         return value
-    if value.get("mode") != "required" or set(value) != {
+    if value.get("mode") != "required" or set(value) - {"source_moves"} != {
         "version", "mode", "source_paths", "check_paths", "check_provenance",
     }:
         raise ValueError("Required Compatibility needs source_paths, check_paths, and check_provenance.")
@@ -60,9 +64,23 @@ def parse_declaration(text: str) -> dict | None:
         if len(set(normalized)) != len(paths) or any(Path(name).anchor or ".." in Path(name).parts or "\0" in name for name in paths):
             raise ValueError(f"Compatibility {field} must use distinct paths within the target directory.")
         value[field] = normalized
-    if any(Path(source).is_relative_to(Path(check)) or Path(check).is_relative_to(Path(source))
+    if any(_paths_overlap(Path(source), Path(check))
            for source in value["source_paths"] for check in value["check_paths"]):
         raise ValueError("Compatibility source and check paths must not overlap.")
+    if "source_moves" in value:
+        moves = value["source_moves"]
+        if not isinstance(moves, dict) or not moves or not set(moves).issubset(value["source_paths"]):
+            raise ValueError("Compatibility source moves must map declared originals to replacement files.")
+        inputs = {name: PureWindowsPath(name) for name in [*value["source_paths"], *value["check_paths"]]}
+        for old, new in moves.items():
+            if (not isinstance(new, str) or not new or Path(new).as_posix() != new or "\\" in new
+                    or PureWindowsPath(new).anchor or Path(new).anchor or ".." in Path(new).parts or "\0" in new):
+                raise ValueError("Compatibility source move destinations must be literal target-relative file paths.")
+            original, destination = inputs[old], PureWindowsPath(new)
+            for name, path in inputs.items():
+                if _paths_overlap(destination, path) or (name != old and _paths_overlap(original, path)):
+                    raise ValueError("Compatibility source moves must have disjoint originals, destinations and checks.")
+            inputs[new] = destination
     return value
 
 
@@ -88,8 +106,27 @@ def _identity(planning: Path, target: Path, section: str, declared: dict) -> dic
             "contract_digest": mutable_inputs.digest(mutable_inputs.contract_inputs(planning, section)[0])}
 
 
-def _observations(target: Path, declared: dict, *, allow_missing_checks: bool = False) -> tuple[dict, dict]:
-    source, source_inodes = mutable_inputs.regular_tree_observations(target, declared["source_paths"])
+def _source_paths(declared: dict, candidate: bool) -> list[str]:
+    moves = declared.get("source_moves", {}) if candidate else {}
+    return [moves.get(path, path) for path in declared["source_paths"]]
+
+
+def _observations(target: Path, declared: dict, *, candidate=False, allow_missing_checks=False) -> tuple[dict, dict]:
+    moves = declared.get("source_moves", {})
+    if moves:
+        absent = list(moves) if candidate else list(moves.values())
+        for path in absent:
+            # Check every component for symlinks, even for missing destinations.
+            location = target / path
+            if location.is_symlink() or any(part.is_symlink() for part in location.parents if part.is_relative_to(target)):
+                raise ValueError(f"Compatibility source move contains a symlink: {path}")
+            if location.exists():
+                reason = "original must be absent" if candidate else "destination already exists"
+                raise ValueError(f"Compatibility source move {reason}: {path}")
+        for path in (moves.values() if candidate else moves):
+            if not (target / path).is_file():
+                raise ValueError(f"Compatibility source move file is missing or not a regular file: {path}")
+    source, source_inodes = mutable_inputs.regular_tree_observations(target, _source_paths(declared, candidate))
     checks, check_inodes = mutable_inputs.regular_tree_observations(target, declared["check_paths"], allow_missing=allow_missing_checks)
     if source_inodes & check_inodes:
         raise ValueError("Compatibility source and check paths overlap through file aliases.")
@@ -198,7 +235,7 @@ def _stage_error(pair: dict, stage: str) -> str | None:
             or not all(isinstance(snapshot.get(key), str) and re.fullmatch(r"[0-9a-f]{64}", snapshot[key])
                        for key in ("source_digest", "contract_digest"))
             or type(snapshot.get("source_file_count")) is not int or snapshot["source_file_count"] < 0
-            or not _hashes(result.get("protected_source"), pair["declaration"]["source_paths"])
+            or not _hashes(result.get("protected_source"), _source_paths(pair["declaration"], stage == "candidate"))
             or not _hashes(result.get("checks"), pair["declaration"]["check_paths"])
             or result.get("origin_digest") != _origin_digest(pair)):
         return f"Compatibility {stage} has malformed or unbound inputs."
@@ -225,7 +262,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
     mutable_inputs.prepared_contract(planning, target)
     with _verification_lock(planning):
         pair = _load_pair(planning, target, section)
-        source, checks = _observations(target, pair["declaration"])
+        source, checks = _observations(target, pair["declaration"], candidate=stage == "candidate")
         if stage == "baseline":
             if source != pair["origin"]["source"]:
                 raise ValueError("Compatibility baseline requires unchanged original source; restore it explicitly before retrying.")
@@ -257,7 +294,7 @@ def capture(planning: Path, target: Path, section: str, stage: str, command: lis
             allowance.settle(result)
             error = result_error(result)
             if (snapshot != mutable_inputs.verification_snapshot(planning, target, section)
-                    or (source, checks) != _observations(target, pair["declaration"])):
+                    or (source, checks) != _observations(target, pair["declaration"], candidate=stage == "candidate")):
                 error = "Compatibility inputs changed during execution; the result cannot establish preservation."
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             result, error = {**result, "outcome": "failed", "completed_at": storage.now_iso()}, str(exc)
@@ -294,7 +331,7 @@ def completion_evidence(planning: Path, target: Path, section: str) -> dict | No
     pair = _load_pair(planning, target, section)
     if error := evidence_error(planning, target, section, pair):
         raise ValueError(error)
-    source, checks = _observations(target, declared)
+    source, checks = _observations(target, declared, candidate=True)
     result = pair["candidate"]
     if (result["snapshot"] != mutable_inputs.verification_snapshot(planning, target, section)
             or source != result["protected_source"] or checks != result["checks"]):
@@ -313,12 +350,16 @@ def status(planning: Path, target: Path, section: str) -> dict:
             _observations(target, declared, allow_missing_checks=True)
             return {"mode": "required", "stage": "activate", "error": None}
         pair = _load_pair(planning, target, section)
-        source, checks = _observations(target, declared, allow_missing_checks=True)
         error = _stage_error(pair, "baseline")
+        checks, _ = mutable_inputs.regular_tree_observations(target, declared["check_paths"], allow_missing=True)
         if not error and checks != pair["baseline"]["checks"]:
             error = "Compatibility checks changed after baseline capture."
         if error:
-            original = source == pair["origin"]["source"]
+            try:
+                source, _ = _observations(target, declared, allow_missing_checks=True)
+                original = source == pair["origin"]["source"]
+            except ValueError:
+                original = False
             return {"mode": "required", "stage": "baseline" if original else "blocked",
                     "error": error if original else error + " Original source must be restored explicitly before a new baseline."}
         try:

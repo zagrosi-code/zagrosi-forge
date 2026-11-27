@@ -13,6 +13,7 @@ import tempfile
 import time
 import uuid
 
+from . import policy
 from .team_git import TEAM_REF, decode_json
 from .team_state import MAX_SESSIONS, TeamError, validate_board
 
@@ -53,6 +54,14 @@ def _receipt(value):
             and "expected" in value and (value["expected"] is None or _oid(value["expected"])))
 
 
+def _valid_group(record):
+    names = record.get("sections")
+    return ("sections" not in record or
+            isinstance(names, list) and 0 < len(names) <= 99
+            and all(isinstance(name, str) and policy.SECTION_RE.fullmatch(name) for name in names)
+            and names == sorted(set(names)))
+
+
 def _checkout_valid(value):
     if (not isinstance(value, dict) or set(value) != {"checkout_id", "sessions", "bindings", "pending"}
             or not _hex(value["checkout_id"]) or not isinstance(value["sessions"], dict)
@@ -62,14 +71,15 @@ def _checkout_valid(value):
     if any(not _hex(key) or not _hex(generation) for key, generation in value["sessions"].items()):
         return False
     for key, binding in value["bindings"].items():
-        if (not _hex(key, 64) or not isinstance(binding, dict) or set(binding) != {"session_id", "generation"}
+        if (not _hex(key, 64) or not isinstance(binding, dict) or set(binding) - {"sections"} != {"session_id", "generation"}
+                or not _valid_group(binding)
                 or not _hex(binding["session_id"]) or not _hex(binding["generation"])):
             return False
     pending = value["pending"]
     if pending is not None and (not _receipt(pending) or not isinstance(pending.get("action"), str)
             or pending.get("action") not in {"start", "update", "finish", "recover"}
             or not _hex(pending.get("session_id")) or not _hex(pending.get("generation"))
-            or "binding" not in pending or (pending["binding"] is not None and not _hex(pending["binding"], 64))):
+            or not _valid_group(pending) or "binding" not in pending or (pending["binding"] is not None and not _hex(pending["binding"], 64))):
         return False
     return True
 
